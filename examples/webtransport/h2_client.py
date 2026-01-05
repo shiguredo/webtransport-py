@@ -1,0 +1,57 @@
+"""WebTransport over HTTP/2 クライアント例
+
+高レベル API を使用した WebTransport over HTTP/2 クライアント実装例。
+HTTP/2 は DATAGRAM をサポートしないため、ストリームのみ使用可能。
+"""
+
+import asyncio
+
+from webtransport import h2
+
+
+async def main() -> None:
+    """メイン関数"""
+    client = h2.Client(
+        url="https://localhost:8443/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_session_ready(session_id: int) -> None:
+        print(f"WebTransport セッション確立: session_id={session_id}")
+
+    async def on_session_closed(session_id: int) -> None:
+        print(f"WebTransport セッション終了: session_id={session_id}")
+
+    async def on_stream_data(stream_id: int, data: bytes) -> None:
+        print(f"ストリーム {stream_id} データ受信: {data}")
+
+    client.on_session_ready(on_session_ready)
+    client.on_session_closed(on_session_closed)
+    client.on_stream_data(on_stream_data)
+
+    connected = await client.connect()
+    if not connected:
+        print("接続失敗")
+        return
+
+    print(f"WebTransport over HTTP/2 クライアント接続: {client.url}")
+
+    # ストリームを開いてデータを送信
+    stream_id = await client.open_stream()
+    if stream_id >= 0:
+        print(f"ストリーム開始: stream_id={stream_id}")
+        await client.send_stream_data(stream_id, b"Hello, WebTransport over HTTP/2!")
+
+    try:
+        await asyncio.wait_for(client.run(), timeout=5.0)
+    except TimeoutError:
+        pass
+
+    await client.close()
+    print("クライアント終了")
+
+
+if __name__ == "__main__":
+    print("注意: HTTP/2 は DATAGRAM をサポートしません。")
+    print("ストリームのみ使用可能です。")
+    asyncio.run(main())

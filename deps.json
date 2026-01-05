@@ -1,0 +1,18 @@
+{
+  "ngtcp2": {
+    "tag": "v1.19.0",
+    "repository": "https://github.com/ngtcp2/ngtcp2"
+  },
+  "nghttp3": {
+    "ref": "788930d4d52abf33bca34bc6901bb87896b69dc9",
+    "repository": "https://github.com/ngtcp2/nghttp3"
+  },
+  "nghttp2": {
+    "tag": "v1.68.0",
+    "repository": "https://github.com/nghttp2/nghttp2"
+  },
+  "boringssl": {
+    "ref": "e575a84d5f051483793b14c07b60720d0ed318b3",
+    "repository": "https://boringssl.googlesource.com/boringssl"
+  }
+}

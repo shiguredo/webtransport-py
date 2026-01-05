@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+_build/
+_deps/
+
+# Virtual environments
+.venv/
+
+_build
+_deps
+.benchmarks
+worktrees/
+
+# Generated files
+*.pyi
+*.so
+py.typed
+
+.DS_Store
+
+# Agents
+.claude/

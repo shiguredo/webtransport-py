@@ -1,0 +1,85 @@
+[build-system]
+requires = ["scikit-build-core", "nanobind>=2.10.2"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "webtransport-py"
+authors = [{ name = "Shiguredo Inc.", email = "contact+pypi@shiguredo.jp" }]
+dynamic = ["version"]
+description = "webtransport-py is a Sans-IO WebTransport/HTTP3/HTTP2/QUIC library using ngtcp2, nghttp3 and nghttp2."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.urls]
+Source = "https://github.com/shiguredo/webtransport-py"
+Discord = "https://discord.gg/shiguredo"
+
+[dependency-groups]
+dev = [
+    { include-group = "test" },
+    { include-group = "example" },
+    { include-group = "lint" },
+]
+test = [
+    "pytest",
+    "pytest-timeout",
+    "pytest-asyncio",
+    "cryptography",
+    "hypothesis",
+]
+example = ["structlog"]
+lint = ["ruff", "ty"]
+
+[tool.scikit-build]
+minimum-version = "0.11.3"
+sdist.include = ["VERSION", "deps.json"]
+build-dir = "_build"
+
+[tool.scikit-build.cmake]
+version = ">=4.2"
+define = { "CMAKE_CXX_STANDARD" = "20" }
+
+[tool.scikit-build.build]
+verbose = false
+
+[tool.scikit-build.wheel]
+packages = ["src/webtransport"]
+expand-macos-universal-tags = true
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "VERSION"
+regex = "^(?P<value>.+)$"
+
+[tool.uv]
+package = false
+managed = true
+python-preference = "only-managed"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Property-Based Testing (PBT) は prop_ prefix を使用する
+python_files = ["test_*.py", "prop_*.py"]
+python_functions = ["test_*", "prop_*"]
+
+[tool.ty.rules]
+unresolved-import = "ignore"
