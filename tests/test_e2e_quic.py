@@ -358,6 +358,249 @@ async def test_server_initiated_stream(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_stream_with_fin_flag(test_certificates):
+    """FIN フラグ付きストリームが正しく処理されることを確認"""
+    from webtransport.quic import Client, Server
+
+    server_received = []
+    client_received = []
+    server_data_received = asyncio.Event()
+    client_data_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream_data(stream_id, data, fin, addr):
+        server_received.append((data, fin))
+        if fin:
+            server_data_received.set()
+            await server.send_stream_data(addr, stream_id, b"response", fin=True)
+
+    server.on_stream_data(on_server_stream_data)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_stream_data(stream_id, data, fin):
+        client_received.append((data, fin))
+        if fin:
+            client_data_received.set()
+
+    client.on_stream_data(on_client_stream_data)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.open_stream()
+    # FIN フラグ付きでデータ送信
+    await client.send_stream_data(stream_id, b"final-data", fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(server_data_received.wait(), timeout=5.0)
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+
+    # FIN フラグが正しく伝達されていることを確認
+    assert len(server_received) >= 1
+    assert server_received[-1] == (b"final-data", True)
+    assert len(client_received) >= 1
+    assert client_received[-1] == (b"response", True)
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_multiple_streams_with_more_flag(test_certificates):
+    """複数ストリーム送信で MORE フラグが正しく機能することを確認"""
+    from webtransport.quic import Client, Server
+
+    server_received = {}
+    all_streams_received = asyncio.Event()
+    expected_streams = 3
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream_data(stream_id, data, fin, addr):
+        if stream_id not in server_received:
+            server_received[stream_id] = []
+        server_received[stream_id].append((data, fin))
+        if len(server_received) >= expected_streams:
+            all_complete = all(
+                any(fin for _, fin in msgs) for msgs in server_received.values()
+            )
+            if all_complete:
+                all_streams_received.set()
+
+    server.on_stream_data(on_server_stream_data)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    # 複数のストリームを開いてデータを送信
+    # MORE フラグにより効率的にパケットが合体される
+    stream_ids = []
+    for i in range(expected_streams):
+        stream_id = await client.open_stream()
+        stream_ids.append(stream_id)
+
+    # 各ストリームにデータを送信
+    for i, stream_id in enumerate(stream_ids):
+        await client.send_stream_data(stream_id, f"stream-{i}-data".encode(), fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(all_streams_received.wait(), timeout=5.0)
+
+    # 全てのストリームデータが受信されたことを確認
+    assert len(server_received) == expected_streams
+    for i, stream_id in enumerate(stream_ids):
+        assert stream_id in server_received
+        messages = server_received[stream_id]
+        assert any(
+            data == f"stream-{i}-data".encode() and fin
+            for data, fin in messages
+        )
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_stream_and_datagram_combined(test_certificates):
+    """ストリームとデータグラムの同時送信が正しく機能することを確認"""
+    from webtransport.quic import Client, Server
+
+    server_stream_data = []
+    server_datagrams = []
+    stream_received = asyncio.Event()
+    datagram_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream_data(stream_id, data, fin, addr):
+        server_stream_data.append((stream_id, data, fin))
+        if fin:
+            stream_received.set()
+
+    async def on_server_datagram(data, addr):
+        server_datagrams.append(data)
+        datagram_received.set()
+
+    server.on_stream_data(on_server_stream_data)
+    server.on_datagram(on_server_datagram)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    # ストリームとデータグラムを同時に送信
+    # MORE フラグによりストリームとデータグラムが効率的に処理される
+    stream_id = await client.open_stream()
+    await client.send_stream_data(stream_id, b"stream-data", fin=True)
+    await client.send_datagram(b"datagram-data")
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(stream_received.wait(), timeout=5.0)
+    await asyncio.wait_for(datagram_received.wait(), timeout=5.0)
+
+    # 両方のデータが正しく受信されたことを確認
+    assert len(server_stream_data) >= 1
+    assert server_stream_data[-1][1] == b"stream-data"
+    assert server_stream_data[-1][2] is True
+    assert b"datagram-data" in server_datagrams
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_server_client_datagram_communication(test_certificates):
     """Server と Client 間でデータグラム通信ができることを確認"""
     from webtransport.quic import Client, Server

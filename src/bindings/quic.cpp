@@ -702,8 +702,14 @@ std::optional<std::vector<uint8_t>> QuicConnection::send() {
       vec.base = const_cast<uint8_t*>(buf.data.data());
       vec.len = buf.data.size();
 
-      uint32_t flags = buf.fin ? NGTCP2_WRITE_STREAM_FLAG_FIN
-                               : NGTCP2_WRITE_STREAM_FLAG_MORE;
+      uint32_t flags = 0;
+      if (buf.fin) {
+        flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
+      }
+      // 同じストリームに次のバッファがある、または datagram がある場合は MORE を設定
+      if (buffers.size() > 1 || !datagram_queue_.empty()) {
+        flags |= NGTCP2_WRITE_STREAM_FLAG_MORE;
+      }
       ngtcp2_ssize ndatalen = 0;
 
       nwrite = ngtcp2_conn_writev_stream(conn_, &path, &pi, send_buffer_.data(),
