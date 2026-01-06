@@ -77,6 +77,16 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
   other.conn_ = nullptr;
   other.ssl_ctx_ = nullptr;
   other.ssl_ = nullptr;
+
+  // conn_ref_ を新しいオブジェクトを指すように再設定
+  if (conn_ != nullptr && ssl_ != nullptr) {
+    conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
+      auto* conn = static_cast<QuicConnection*>(ref->user_data);
+      return conn->conn_;
+    };
+    conn_ref_.user_data = this;
+    SSL_set_app_data(ssl_, &conn_ref_);
+  }
 }
 
 QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
@@ -104,6 +114,16 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     other.conn_ = nullptr;
     other.ssl_ctx_ = nullptr;
     other.ssl_ = nullptr;
+
+    // conn_ref_ を新しいオブジェクトを指すように再設定
+    if (conn_ != nullptr && ssl_ != nullptr) {
+      conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
+        auto* conn = static_cast<QuicConnection*>(ref->user_data);
+        return conn->conn_;
+      };
+      conn_ref_.user_data = this;
+      SSL_set_app_data(ssl_, &conn_ref_);
+    }
   }
   return *this;
 }
@@ -603,8 +623,45 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data) {
   int rv = ngtcp2_conn_read_pkt(conn_, &path, &pi, data.data(), data.size(),
                                 timestamp_ns_);
   if (rv != 0) {
-    if (rv == NGTCP2_ERR_DRAINING) {
-      closed_ = true;
+    switch (rv) {
+      case NGTCP2_ERR_DRAINING:
+        closed_ = true;
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "connection draining"});
+        break;
+      case NGTCP2_ERR_CLOSING:
+        closed_ = true;
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "connection closing"});
+        break;
+      case NGTCP2_ERR_DROP_CONN:
+        closed_ = true;
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "connection dropped"});
+        break;
+      case NGTCP2_ERR_RETRY:
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "retry required"});
+        break;
+      case NGTCP2_ERR_CRYPTO:
+        closed_ = true;
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "crypto error"});
+        break;
+      case NGTCP2_ERR_DECRYPT:
+        // 復号エラーは無視（パケット破棄）
+        break;
+      case NGTCP2_ERR_DISCARD_PKT:
+        // パケット破棄は無視
+        break;
+      default:
+        // その他のエラーは接続を閉じる
+        if (rv < NGTCP2_ERR_FATAL) {
+          closed_ = true;
+          push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                      "fatal error: " + std::string(ngtcp2_strerror(rv))});
+        }
+        break;
     }
     return 0;
   }
@@ -653,14 +710,28 @@ std::optional<std::vector<uint8_t>> QuicConnection::send() {
                                          send_buffer_.size(), &ndatalen, flags,
                                          stream_id, &vec, 1, timestamp_ns_);
       if (nwrite < 0) {
-        if (nwrite == NGTCP2_ERR_WRITE_MORE) {
-          if (ndatalen > 0) {
-            buf.data.erase(buf.data.begin(), buf.data.begin() + ndatalen);
-            if (buf.data.empty()) {
-              buffers.pop_front();
+        switch (nwrite) {
+          case NGTCP2_ERR_WRITE_MORE:
+            if (ndatalen > 0) {
+              buf.data.erase(buf.data.begin(), buf.data.begin() + ndatalen);
+              if (buf.data.empty()) {
+                buffers.pop_front();
+              }
             }
-          }
-          continue;
+            continue;
+          case NGTCP2_ERR_STREAM_DATA_BLOCKED:
+            // フロー制御でブロックされた場合は次のストリームへ
+            break;
+          case NGTCP2_ERR_STREAM_SHUT_WR:
+            // ストリームがハーフクローズされた場合はバッファをクリア
+            buffers.clear();
+            break;
+          case NGTCP2_ERR_STREAM_NOT_FOUND:
+            // ストリームが存在しない場合はバッファをクリア
+            buffers.clear();
+            break;
+          default:
+            break;
         }
         break;
       }
@@ -748,10 +819,24 @@ void QuicConnection::handle_timeout() {
   timestamp_ns_ = get_timestamp_ns();
   int rv = ngtcp2_conn_handle_expiry(conn_, timestamp_ns_);
   if (rv != 0) {
-    if (rv == NGTCP2_ERR_IDLE_CLOSE) {
-      closed_ = true;
-      push_event(
-          {QuicEventType::ConnectionClosed, -1, {}, false, 0, "idle timeout"});
+    switch (rv) {
+      case NGTCP2_ERR_IDLE_CLOSE:
+        closed_ = true;
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "idle timeout"});
+        break;
+      case NGTCP2_ERR_HANDSHAKE_TIMEOUT:
+        closed_ = true;
+        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                    "handshake timeout"});
+        break;
+      default:
+        if (rv < NGTCP2_ERR_FATAL) {
+          closed_ = true;
+          push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                      "timeout error: " + std::string(ngtcp2_strerror(rv))});
+        }
+        break;
     }
   }
 }
@@ -793,7 +878,16 @@ void QuicConnection::close_stream(int64_t stream_id, uint64_t error_code) {
     return;
   }
 
-  ngtcp2_conn_shutdown_stream(conn_, 0, stream_id, error_code);
+  int rv = ngtcp2_conn_shutdown_stream(conn_, 0, stream_id, error_code);
+  if (rv != 0 && rv != NGTCP2_ERR_STREAM_NOT_FOUND) {
+    // STREAM_NOT_FOUND は無視（すでにクローズされている）
+    // 致命的エラーの場合のみ接続を閉じる
+    if (rv < NGTCP2_ERR_FATAL) {
+      closed_ = true;
+      push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                  "stream shutdown error: " + std::string(ngtcp2_strerror(rv))});
+    }
+  }
   stream_buffers_.erase(stream_id);
 }
 
