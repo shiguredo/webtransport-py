@@ -27,7 +27,7 @@ include(ExternalProject)
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/deps.json DEPS_JSON)
 
 # ngtcp2 の設定を解析
-string(JSON NGTCP2_GIT_REPOSITORY GET ${DEPS_JSON} ngtcp2 repository)
+string(JSON NGTCP2_GIT_REPOSITORY GET ${DEPS_JSON} ngtcp2 url)
 string(JSON NGTCP2_GIT_TAG ERROR_VARIABLE NGTCP2_TAG_ERROR GET ${DEPS_JSON} ngtcp2 tag)
 if(NGTCP2_TAG_ERROR)
   string(JSON NGTCP2_GIT_TAG GET ${DEPS_JSON} ngtcp2 ref)
@@ -38,7 +38,7 @@ endif()
 set(NGTCP2_VERSION "${NGTCP2_GIT_TAG}")
 
 # nghttp3 の設定を解析
-string(JSON NGHTTP3_GIT_REPOSITORY GET ${DEPS_JSON} nghttp3 repository)
+string(JSON NGHTTP3_GIT_REPOSITORY GET ${DEPS_JSON} nghttp3 url)
 string(JSON NGHTTP3_GIT_TAG ERROR_VARIABLE NGHTTP3_TAG_ERROR GET ${DEPS_JSON} nghttp3 tag)
 if(NGHTTP3_TAG_ERROR)
   string(JSON NGHTTP3_GIT_TAG GET ${DEPS_JSON} nghttp3 ref)
@@ -49,7 +49,7 @@ endif()
 set(NGHTTP3_VERSION "${NGHTTP3_GIT_TAG}")
 
 # nghttp2 の設定を解析
-string(JSON NGHTTP2_GIT_REPOSITORY GET ${DEPS_JSON} nghttp2 repository)
+string(JSON NGHTTP2_GIT_REPOSITORY GET ${DEPS_JSON} nghttp2 url)
 string(JSON NGHTTP2_GIT_TAG ERROR_VARIABLE NGHTTP2_TAG_ERROR GET ${DEPS_JSON} nghttp2 tag)
 if(NGHTTP2_TAG_ERROR)
   string(JSON NGHTTP2_GIT_TAG GET ${DEPS_JSON} nghttp2 ref)
@@ -72,7 +72,7 @@ else()
 endif()
 
 # BoringSSL の設定を解析
-string(JSON BORINGSSL_GIT_REPOSITORY GET ${DEPS_JSON} boringssl repository)
+string(JSON BORINGSSL_GIT_REPOSITORY GET ${DEPS_JSON} boringssl url)
 string(JSON BORINGSSL_GIT_REF GET ${DEPS_JSON} boringssl ref)
 set(BORINGSSL_VERSION "${BORINGSSL_GIT_REF}")
 
