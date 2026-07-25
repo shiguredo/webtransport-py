@@ -65,7 +65,6 @@ pass_filenames = false
 priority = 20
 
 # pytest: ユニットテスト
-# package = false のため、ローカルの src を PYTHONPATH に載せる
 [[repos.hooks]]
 id = "pytest"
 name = "pytest"
@@ -74,4 +73,3 @@ language = "system"
 types = ["python"]
 pass_filenames = false
 priority = 30
-env = { PYTHONPATH = "src" }

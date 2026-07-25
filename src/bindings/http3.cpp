@@ -99,6 +99,8 @@ bool Http3Connection::initialize() {
   callbacks.stop_sending = stop_sending_cb;
   callbacks.reset_stream = reset_stream_cb;
   callbacks.shutdown = shutdown_cb;
+  // deprecated の recv_settings ではなく recv_settings2 を使う
+  callbacks.recv_settings2 = recv_settings2_cb;
 
   nghttp3_settings settings;
   nghttp3_settings_default(&settings);
@@ -133,8 +135,8 @@ size_t Http3Connection::receive_stream_data(int64_t stream_id,
     return 0;
   }
 
-  nghttp3_ssize rv = nghttp3_conn_read_stream(conn_, stream_id, data.data(),
-                                              data.size(), fin ? 1 : 0);
+  nghttp3_ssize rv = nghttp3_conn_read_stream2(
+      conn_, stream_id, data.data(), data.size(), fin ? 1 : 0, 0);
   if (rv < 0) {
     return 0;
   }
@@ -325,11 +327,12 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
     return;
   }
 
+  // nghttp3 に読み取り停止を伝え、高レベル側で QUIC RESET_STREAM を送出する
   nghttp3_conn_shutdown_stream_read(conn_, stream_id);
   stream_buffers_.erase(stream_id);
 
   Http3Event event;
-  event.type = Http3EventType::Reset;
+  event.type = Http3EventType::ResetStream;
   event.stream_id = stream_id;
   event.error_code = error_code;
   push_event(std::move(event));
@@ -547,10 +550,13 @@ int Http3Connection::stop_sending_cb(nghttp3_conn* conn,
                                      uint64_t app_error_code,
                                      void* conn_user_data,
                                      void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
+  // nghttp3 が QUIC STOP_SENDING の送出を要求している
   Http3Event event;
-  event.type = Http3EventType::Reset;
+  event.type = Http3EventType::StopSending;
   event.stream_id = stream_id;
   event.error_code = app_error_code;
   self->push_event(std::move(event));
@@ -563,10 +569,13 @@ int Http3Connection::reset_stream_cb(nghttp3_conn* conn,
                                      uint64_t app_error_code,
                                      void* conn_user_data,
                                      void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
+  // nghttp3 が QUIC RESET_STREAM の送出を要求している
   Http3Event event;
-  event.type = Http3EventType::Reset;
+  event.type = Http3EventType::ResetStream;
   event.stream_id = stream_id;
   event.error_code = app_error_code;
   self->push_event(std::move(event));
@@ -585,6 +594,16 @@ int Http3Connection::shutdown_cb(nghttp3_conn* conn,
   event.push_id = id;
   self->push_event(std::move(event));
 
+  return 0;
+}
+
+int Http3Connection::recv_settings2_cb(nghttp3_conn* conn,
+                                       const nghttp3_proto_settings* settings,
+                                       void* conn_user_data) {
+  // 素の HTTP/3 では設定を受け取った時点で追加処理は不要
+  (void)conn;
+  (void)settings;
+  (void)conn_user_data;
   return 0;
 }
 
@@ -660,6 +679,8 @@ void bind_http3(nb::module_& m) {
       .value("PUSH_PROMISE", Http3EventType::PushPromise)
       .value("GO_AWAY", Http3EventType::GoAway)
       .value("RESET", Http3EventType::Reset)
+      .value("RESET_STREAM", Http3EventType::ResetStream)
+      .value("STOP_SENDING", Http3EventType::StopSending)
       .value("WEBTRANSPORT_SESSION_READY",
              Http3EventType::WebTransportSessionReady)
       .value("WEBTRANSPORT_STREAM_DATA", Http3EventType::WebTransportStreamData)

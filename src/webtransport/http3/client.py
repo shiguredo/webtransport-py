@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from webtransport.webtransport_ext import http3 as http3_low, quic as quic_low
+from webtransport.webtransport_ext import http3 as http3_low
+from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -63,6 +64,7 @@ class Client:
         self._on_headers: Callable[[int, list[tuple[str, str]]], Awaitable[None]] | None = None
         self._on_data: Callable[[int, bytes], Awaitable[None]] | None = None
         self._on_stream_end: Callable[[int], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -111,6 +113,17 @@ class Client:
             callback: async def callback(stream_id: int) -> None
         """
         self._on_stream_end = callback
+
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int], Awaitable[None]],
+    ) -> None:
+        """ストリームリセット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int) -> None
+        """
+        self._on_stream_reset = callback
 
     async def _send_pending(self) -> None:
         """送信待ちデータを送信する"""
@@ -254,6 +267,19 @@ class Client:
         self._http3_connection.send_data(stream_id, data, fin)
         await self._send_pending()
 
+    async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームをリセットする (QUIC RESET_STREAM + nghttp3 通知)
+
+        Args:
+            stream_id: ストリーム ID
+            error_code: エラーコード
+        """
+        if self._quic_connection is not None:
+            self._quic_connection.reset_stream(stream_id, error_code)
+        if self._http3_connection is not None:
+            self._http3_connection.reset_stream(stream_id, error_code)
+        await self._send_pending()
+
     async def run(self) -> None:
         """メインループを実行する
 
@@ -276,6 +302,12 @@ class Client:
                         quic_event.data,
                         quic_event.fin,
                     )
+                elif quic_event.type == quic_low.EventType.STREAM_RESET:
+                    if self._on_stream_reset is not None:
+                        await self._on_stream_reset(
+                            quic_event.stream_id,
+                            quic_event.error_code,
+                        )
                 elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
                     self._connected = False
@@ -296,6 +328,21 @@ class Client:
                 elif http3_event.type == http3_low.EventType.STREAM_END:
                     if self._on_stream_end is not None:
                         await self._on_stream_end(http3_event.stream_id)
+
+                elif http3_event.type in (
+                    http3_low.EventType.RESET_STREAM,
+                    http3_low.EventType.RESET,
+                ):
+                    self._quic_connection.reset_stream(
+                        http3_event.stream_id,
+                        http3_event.error_code,
+                    )
+
+                elif http3_event.type == http3_low.EventType.STOP_SENDING:
+                    self._quic_connection.stop_sending(
+                        http3_event.stream_id,
+                        http3_event.error_code,
+                    )
 
             await self._send_pending()
 
@@ -318,7 +365,7 @@ class Client:
             self._socket.close()
             self._socket = None
 
-    async def __aenter__(self) -> Client:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.connect()
         return self

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from webtransport import h3 as h3_low, quic
+from webtransport import h3 as h3_low
+from webtransport import quic
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -59,6 +60,7 @@ class Client:
         self._on_session_ready: Callable[[int], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
 
     @property
@@ -118,6 +120,17 @@ class Client:
             callback: async def callback(stream_id: int, data: bytes) -> None
         """
         self._on_stream_data = callback
+
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int], Awaitable[None]],
+    ) -> None:
+        """ストリームリセット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int) -> None
+        """
+        self._on_stream_reset = callback
 
     def on_datagram(
         self,
@@ -335,16 +348,25 @@ class Client:
         await self._send_pending()
 
     async def close_stream(self, stream_id: int, error_code: int = 0) -> None:
-        """ストリームを閉じる
+        """ストリームを閉じる (RESET_STREAM)
 
         Args:
             stream_id: ストリーム ID
             error_code: エラーコード
         """
-        if self._webtransport_session is None:
-            return
+        await self.reset_stream(stream_id, error_code)
 
-        self._webtransport_session.close_stream(stream_id, error_code)
+    async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームをリセットする (QUIC RESET_STREAM + nghttp3 通知)
+
+        Args:
+            stream_id: ストリーム ID
+            error_code: エラーコード
+        """
+        if self._quic_connection is not None:
+            self._quic_connection.reset_stream(stream_id, error_code)
+        if self._webtransport_session is not None:
+            self._webtransport_session.reset_stream(stream_id, error_code)
         await self._send_pending()
 
     async def _process_quic_events(self) -> bool:
@@ -369,6 +391,17 @@ class Client:
                 )
             elif quic_event.type == quic.EventType.DATAGRAM:
                 self._webtransport_session.receive_datagram(quic_event.data)
+            elif quic_event.type == quic.EventType.STREAM_RESET:
+                # 対向からの RESET_STREAM を nghttp3 に通知する
+                self._webtransport_session.close_stream(
+                    quic_event.stream_id,
+                    quic_event.error_code,
+                )
+                if self._on_stream_reset is not None:
+                    await self._on_stream_reset(
+                        quic_event.stream_id,
+                        quic_event.error_code,
+                    )
             elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                 return False
 
@@ -376,7 +409,7 @@ class Client:
 
     async def _process_webtransport_events(self) -> None:
         """WebTransport イベントを処理する"""
-        if self._webtransport_session is None:
+        if self._webtransport_session is None or self._quic_connection is None:
             return
 
         while True:
@@ -403,6 +436,20 @@ class Client:
             elif webtransport_event.type == h3_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
                     await self._on_datagram(webtransport_event.data)
+
+            elif webtransport_event.type == h3_low.EventType.RESET_STREAM:
+                # nghttp3 が QUIC RESET_STREAM の送出を要求している
+                self._quic_connection.reset_stream(
+                    webtransport_event.stream_id,
+                    webtransport_event.error_code,
+                )
+
+            elif webtransport_event.type == h3_low.EventType.STOP_SENDING:
+                # nghttp3 が QUIC STOP_SENDING の送出を要求している
+                self._quic_connection.stop_sending(
+                    webtransport_event.stream_id,
+                    webtransport_event.error_code,
+                )
 
     async def run(self) -> None:
         """メインループを実行する
@@ -435,7 +482,10 @@ class Client:
         self._connected = False
 
         if self._webtransport_session is not None and self._session_id >= 0:
+            # WT_CLOSE_SESSION カプセルを先に送出してから QUIC を閉じる
             self._webtransport_session.close_session(self._session_id)
+            await self._send_pending()
+            self._session_id = -1
 
         if self._quic_connection is not None:
             self._quic_connection.close()
@@ -445,7 +495,7 @@ class Client:
             self._socket.close()
             self._socket = None
 
-    async def __aenter__(self) -> Client:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.connect()
         return self

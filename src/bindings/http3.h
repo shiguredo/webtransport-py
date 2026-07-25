@@ -63,7 +63,11 @@ enum class Http3EventType {
   StreamEnd,
   PushPromise,
   GoAway,
+  // 後方互換: Reset は ResetStream と同義
   Reset,
+  // nghttp3 が QUIC 層への送出を要求する
+  ResetStream,
+  StopSending,
   // WebTransport 用
   WebTransportSessionReady,
   WebTransportStreamData,
@@ -299,6 +303,9 @@ class Http3Connection {
                              void* conn_user_data,
                              void* stream_user_data);
   static int shutdown_cb(nghttp3_conn* conn, int64_t id, void* conn_user_data);
+  static int recv_settings2_cb(nghttp3_conn* conn,
+                               const nghttp3_proto_settings* settings,
+                               void* conn_user_data);
 
   // ヘルパー
   void push_event(Http3Event event);

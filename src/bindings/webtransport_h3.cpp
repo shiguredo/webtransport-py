@@ -4,6 +4,7 @@
 
 #include "webtransport_h3.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <stdexcept>
@@ -96,6 +97,7 @@ bool H3Session::initialize() {
   callbacks.shutdown = shutdown_cb;
   callbacks.recv_settings2 = recv_settings2_cb;
   callbacks.recv_wt_data = recv_wt_data_cb;
+  callbacks.recv_wt_close_session = recv_wt_close_session_cb;
 
   nghttp3_settings settings;
   nghttp3_settings_default(&settings);
@@ -147,17 +149,26 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
 }
 
 void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
-  // WebTransport データグラムを処理
-  // quarter stream ID をデコードしてセッションを特定
-  if (data.size() < 1) {
+  // WebTransport データグラムは先頭に Quarter Stream ID (varint) が付く
+  // 仕様: draft-ietf-webtrans-http3 / RFC 9000 可変長整数
+  if (data.empty()) {
     return;
   }
 
-  // 簡易的なデータグラム処理
-  // 実際には quarter stream ID のデコードが必要
+  size_t varint_len = nghttp3_get_uvarintlen(data.data());
+  if (varint_len == 0 || varint_len > data.size()) {
+    return;
+  }
+
+  uint64_t quarter_stream_id = 0;
+  nghttp3_get_uvarint(&quarter_stream_id, data.data());
+
   H3Event event;
   event.type = H3EventType::Datagram;
-  event.data = data;
+  // Session ID = Quarter Stream ID * 4
+  event.session_id = static_cast<int64_t>(quarter_stream_id * 4);
+  event.data.assign(data.begin() + static_cast<std::ptrdiff_t>(varint_len),
+                    data.end());
   push_event(std::move(event));
 }
 
@@ -170,7 +181,9 @@ H3Session::get_streams_to_send() {
   }
 
   // nghttp3 からデータを読み出す
-  for (;;) {
+  // 無限ループ防止のため上限を設ける
+  constexpr int max_iterations = 1024;
+  for (int iteration = 0; iteration < max_iterations; ++iteration) {
     nghttp3_vec vec[8];
     int64_t stream_id = -1;
     int fin = 0;
@@ -201,12 +214,15 @@ H3Session::get_streams_to_send() {
     for (nghttp3_ssize i = 0; i < sveccnt; ++i) {
       total += vec[i].len;
     }
+    // 進捗がない場合は打ち切る (WOULDBLOCK 相当)
+    if (total == 0 && fin == 0) {
+      break;
+    }
     if (total > 0) {
       nghttp3_conn_add_write_offset(conn_, stream_id, total);
-    }
-
-    if (sveccnt == 0 && fin == 0) {
-      break;
+    } else if (fin) {
+      // FIN のみの場合も offset 0 を通知する
+      nghttp3_conn_add_write_offset(conn_, stream_id, 0);
     }
   }
 
@@ -609,24 +625,15 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
 
 void H3Session::send_datagram(int64_t session_id,
                               const std::vector<uint8_t>& data) {
-  // Quarter stream ID をエンコード
-  // session_id / 4 を可変長整数でエンコード
-  std::vector<uint8_t> datagram;
-
+  // Quarter Stream ID = Session ID / 4 を nghttp3 の varint でエンコードする
   uint64_t quarter_stream_id = static_cast<uint64_t>(session_id) / 4;
+  size_t varint_len = nghttp3_put_uvarintlen(quarter_stream_id);
 
-  // 簡易的な可変長整数エンコード
-  if (quarter_stream_id < 64) {
-    datagram.push_back(static_cast<uint8_t>(quarter_stream_id));
-  } else if (quarter_stream_id < 16384) {
-    datagram.push_back(static_cast<uint8_t>(0x40 | (quarter_stream_id >> 8)));
-    datagram.push_back(static_cast<uint8_t>(quarter_stream_id & 0xff));
-  } else {
-    // 4バイト以上は省略
-    return;
-  }
+  std::vector<uint8_t> datagram(varint_len + data.size());
+  nghttp3_put_uvarint(datagram.data(), quarter_stream_id);
+  std::copy(data.begin(), data.end(),
+            datagram.begin() + static_cast<std::ptrdiff_t>(varint_len));
 
-  datagram.insert(datagram.end(), data.begin(), data.end());
   pending_datagrams_.push_back(std::move(datagram));
 }
 
@@ -637,6 +644,11 @@ void H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
 
   nghttp3_conn_close_stream(conn_, stream_id, error_code);
   stream_info_.erase(stream_id);
+}
+
+void H3Session::reset_stream(int64_t stream_id, uint64_t error_code) {
+  // nghttp3 への通知は close_stream と同じ。QUIC RESET_STREAM は高レベル側で送る
+  close_stream(stream_id, error_code);
 }
 
 void H3Session::close_session(int64_t session_id,
@@ -935,10 +947,22 @@ int H3Session::stop_sending_cb(nghttp3_conn* conn,
                                void* conn_user_data,
                                void* stream_user_data) {
   (void)conn;
-  (void)stream_id;
-  (void)app_error_code;
-  (void)conn_user_data;
   (void)stream_user_data;
+
+  // nghttp3 が QUIC STOP_SENDING の送出を要求している
+  auto* session = static_cast<H3Session*>(conn_user_data);
+
+  H3Event event;
+  event.type = H3EventType::StopSending;
+  event.stream_id = stream_id;
+  event.error_code = app_error_code;
+
+  auto it = session->stream_info_.find(stream_id);
+  if (it != session->stream_info_.end()) {
+    event.session_id = it->second.session_id;
+  }
+
+  session->push_event(std::move(event));
   return 0;
 }
 
@@ -950,14 +974,20 @@ int H3Session::reset_stream_cb(nghttp3_conn* conn,
   (void)conn;
   (void)stream_user_data;
 
+  // nghttp3 が QUIC RESET_STREAM の送出を要求している
   auto* session = static_cast<H3Session*>(conn_user_data);
 
   H3Event event;
-  event.type = H3EventType::StreamClosed;
+  event.type = H3EventType::ResetStream;
   event.stream_id = stream_id;
   event.error_code = app_error_code;
-  session->push_event(std::move(event));
 
+  auto it = session->stream_info_.find(stream_id);
+  if (it != session->stream_info_.end()) {
+    event.session_id = it->second.session_id;
+  }
+
+  session->push_event(std::move(event));
   return 0;
 }
 
@@ -1015,6 +1045,42 @@ int H3Session::recv_wt_data_cb(nghttp3_conn* conn,
   return 0;
 }
 
+int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
+                                        int64_t session_id,
+                                        uint32_t wt_error_code,
+                                        const uint8_t* msg,
+                                        size_t msglen,
+                                        void* conn_user_data,
+                                        void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
+
+  auto* session = static_cast<H3Session*>(conn_user_data);
+
+  // 当該セッションに属するストリーム情報を削除する
+  std::vector<int64_t> streams_to_remove;
+  for (const auto& pair : session->stream_info_) {
+    if (pair.second.session_id == session_id) {
+      streams_to_remove.push_back(pair.first);
+    }
+  }
+  for (int64_t stream_id : streams_to_remove) {
+    session->stream_info_.erase(stream_id);
+  }
+  session->session_ids_.erase(session_id);
+
+  H3Event event;
+  event.type = H3EventType::SessionClosed;
+  event.session_id = session_id;
+  event.error_code = wt_error_code;
+  if (msg != nullptr && msglen > 0) {
+    event.error_message = std::string(reinterpret_cast<const char*>(msg), msglen);
+  }
+  session->push_event(std::move(event));
+
+  return 0;
+}
+
 // ========== Python バインディング ==========
 
 void bind_webtransport_h3(nb::module_& m) {
@@ -1037,6 +1103,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .value("STREAM_OPENED", H3EventType::StreamOpened)
       .value("STREAM_DATA", H3EventType::StreamData)
       .value("STREAM_CLOSED", H3EventType::StreamClosed)
+      .value("RESET_STREAM", H3EventType::ResetStream)
+      .value("STOP_SENDING", H3EventType::StopSending)
       .value("DATAGRAM", H3EventType::Datagram)
       .value("ERROR", H3EventType::Error);
 
@@ -1205,7 +1273,12 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
-           "WebTransport ストリームを閉じる")
+           "WebTransport ストリームを閉じる (nghttp3 に通知)")
+      .def("reset_stream", &H3Session::reset_stream, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
+                   "0) -> None"),
+           "WebTransport ストリームをリセットする (nghttp3 に通知)")
       .def("close_session", &H3Session::close_session, nb::arg("session_id"),
            nb::arg("error_code") = 0, nb::arg("error_message") = "",
            nb::sig("def close_session(self, session_id: int, error_code: int = "

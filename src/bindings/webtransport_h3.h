@@ -62,6 +62,10 @@ enum class H3EventType {
   StreamData,
   StreamClosed,
 
+  // nghttp3 が QUIC 層に RESET_STREAM / STOP_SENDING の送出を要求する
+  ResetStream,
+  StopSending,
+
   // データグラム
   Datagram,
 
@@ -230,11 +234,23 @@ class H3Session {
   void send_datagram(int64_t session_id, const std::vector<uint8_t>& data);
 
   /**
-   * WebTransport ストリームを閉じる
+   * WebTransport ストリームを閉じる (nghttp3 にクローズを通知)
+   *
+   * QUIC 側で RESET_STREAM を送った後、または対向から RESET_STREAM を
+   * 受信した後に呼び出す。
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
    */
   void close_stream(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
+   * WebTransport ストリームをリセットする
+   *
+   * close_stream と同じ。高レベル API では QUIC RESET_STREAM 送出と合わせて使う。
+   * @param stream_id ストリーム ID
+   * @param error_code エラーコード
+   */
+  void reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
    * WebTransport セッションを閉じる
@@ -354,6 +370,14 @@ class H3Session {
                              size_t datalen,
                              void* conn_user_data,
                              void* stream_user_data);
+  // 対向からの WT_CLOSE_SESSION カプセル受信
+  static int recv_wt_close_session_cb(nghttp3_conn* conn,
+                                      int64_t session_id,
+                                      uint32_t wt_error_code,
+                                      const uint8_t* msg,
+                                      size_t msglen,
+                                      void* conn_user_data,
+                                      void* stream_user_data);
 
   // ヘルパー
   void push_event(H3Event event);

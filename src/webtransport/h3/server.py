@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from webtransport import h3 as h3_low, quic
+from webtransport import h3 as h3_low
+from webtransport import quic
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -73,6 +74,9 @@ class Server:
         self._on_stream_data: (
             Callable[[int, int, bytes, tuple[str, int]], Awaitable[None]] | None
         ) = None
+        self._on_stream_reset: (
+            Callable[[int, int, int, tuple[str, int]], Awaitable[None]] | None
+        ) = None
         self._on_datagram: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
 
     @property
@@ -128,6 +132,17 @@ class Server:
         """
         self._on_stream_data = callback
 
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int, int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """ストリームリセット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(session_id: int, stream_id: int, error_code: int, addr: tuple[str, int]) -> None
+        """
+        self._on_stream_reset = callback
+
     def on_datagram(
         self,
         callback: Callable[[int, bytes, tuple[str, int]], Awaitable[None]],
@@ -158,7 +173,7 @@ class Server:
             self._socket.close()
             self._socket = None
 
-    async def __aenter__(self) -> Server:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.start()
         return self
@@ -265,6 +280,20 @@ class Server:
                 )
             elif quic_event.type == quic.EventType.DATAGRAM:
                 client.webtransport_session.receive_datagram(quic_event.data)
+            elif quic_event.type == quic.EventType.STREAM_RESET:
+                client.webtransport_session.close_stream(
+                    quic_event.stream_id,
+                    quic_event.error_code,
+                )
+                if self._on_stream_reset is not None:
+                    session_ids = client.webtransport_session.get_session_ids()
+                    session_id = session_ids[0] if session_ids else -1
+                    await self._on_stream_reset(
+                        session_id,
+                        quic_event.stream_id,
+                        quic_event.error_code,
+                        addr,
+                    )
             elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                 return False
 
@@ -304,12 +333,29 @@ class Server:
 
             elif webtransport_event.type == h3_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
-                    session_ids = client.webtransport_session.get_session_ids()
-                    session_id = session_ids[0] if session_ids else 0
+                    # receive_datagram が Quarter Stream ID から session_id を復元する
+                    session_id = webtransport_event.session_id
+                    if session_id < 0:
+                        session_ids = client.webtransport_session.get_session_ids()
+                        session_id = session_ids[0] if session_ids else 0
                     await self._on_datagram(
                         session_id,
                         webtransport_event.data,
                         addr,
+                    )
+
+            elif webtransport_event.type == h3_low.EventType.RESET_STREAM:
+                if client.quic_connection is not None:
+                    client.quic_connection.reset_stream(
+                        webtransport_event.stream_id,
+                        webtransport_event.error_code,
+                    )
+
+            elif webtransport_event.type == h3_low.EventType.STOP_SENDING:
+                if client.quic_connection is not None:
+                    client.quic_connection.stop_sending(
+                        webtransport_event.stream_id,
+                        webtransport_event.error_code,
                     )
 
     async def send_stream_data(
@@ -333,6 +379,44 @@ class Server:
 
         client.webtransport_session.send_stream_data(stream_id, data, fin)
         await self._send_to(addr, client)
+
+    async def reset_stream(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """ストリームをリセットする (QUIC RESET_STREAM + nghttp3 通知)
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: エラーコード
+        """
+        client = self._clients.get(addr)
+        if client is None:
+            return
+
+        if client.quic_connection is not None:
+            client.quic_connection.reset_stream(stream_id, error_code)
+        if client.webtransport_session is not None:
+            client.webtransport_session.reset_stream(stream_id, error_code)
+        await self._send_to(addr, client)
+
+    async def close_stream(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """ストリームを閉じる (RESET_STREAM)
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: エラーコード
+        """
+        await self.reset_stream(addr, stream_id, error_code)
 
     async def send_datagram(
         self,

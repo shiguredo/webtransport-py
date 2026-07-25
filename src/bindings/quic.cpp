@@ -884,6 +884,7 @@ void QuicConnection::close_stream(int64_t stream_id, uint64_t error_code) {
     return;
   }
 
+  // 読み取り側と書き込み側の両方をシャットダウンする
   int rv = ngtcp2_conn_shutdown_stream(conn_, 0, stream_id, error_code);
   if (rv != 0 && rv != NGTCP2_ERR_STREAM_NOT_FOUND) {
     // STREAM_NOT_FOUND は無視（すでにクローズされている）
@@ -892,6 +893,37 @@ void QuicConnection::close_stream(int64_t stream_id, uint64_t error_code) {
       closed_ = true;
       push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
                   "stream shutdown error: " + std::string(ngtcp2_strerror(rv))});
+    }
+  }
+  stream_buffers_.erase(stream_id);
+}
+
+void QuicConnection::stop_sending(int64_t stream_id, uint64_t error_code) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // STOP_SENDING フレームを送出する
+  int rv = ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, error_code);
+  if (rv != 0 && rv != NGTCP2_ERR_STREAM_NOT_FOUND && rv < NGTCP2_ERR_FATAL) {
+    closed_ = true;
+    push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                "stop sending error: " + std::string(ngtcp2_strerror(rv))});
+  }
+}
+
+void QuicConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // RESET_STREAM フレームを送出する
+  int rv = ngtcp2_conn_shutdown_stream_write(conn_, 0, stream_id, error_code);
+  if (rv != 0 && rv != NGTCP2_ERR_STREAM_NOT_FOUND) {
+    if (rv < NGTCP2_ERR_FATAL) {
+      closed_ = true;
+      push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                  "reset stream error: " + std::string(ngtcp2_strerror(rv))});
     }
   }
   stream_buffers_.erase(stream_id);
@@ -1347,7 +1379,17 @@ void bind_quic(nb::module_& m) {
            nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
-           "ストリームを閉じる")
+           "ストリームを閉じる (RESET_STREAM + STOP_SENDING)")
+      .def("stop_sending", &QuicConnection::stop_sending, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def stop_sending(self, stream_id: int, error_code: int = "
+                   "0) -> None"),
+           "STOP_SENDING を送出する")
+      .def("reset_stream", &QuicConnection::reset_stream, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
+                   "0) -> None"),
+           "RESET_STREAM を送出する")
       .def(
           "send_datagram",
           [](QuicConnection& self, nb::bytes data) {

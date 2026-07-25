@@ -183,11 +183,25 @@ class QuicConnection {
                         bool fin = false);
 
   /**
-   * ストリームを閉じる
+   * ストリームを閉じる (RESET_STREAM + STOP_SENDING)
    * @param stream_id ストリーム ID
    * @param error_code エラーコード (0 なら正常終了)
    */
   void close_stream(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
+   * ストリームの読み取り側を閉じる (STOP_SENDING を送出)
+   * @param stream_id ストリーム ID
+   * @param error_code アプリケーションエラーコード
+   */
+  void stop_sending(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
+   * ストリームの書き込み側をリセットする (RESET_STREAM を送出)
+   * @param stream_id ストリーム ID
+   * @param error_code アプリケーションエラーコード
+   */
+  void reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
    * Datagram を送信

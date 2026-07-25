@@ -32,6 +32,7 @@ dev = [
   { include-group = "test" },
   { include-group = "example" },
   { include-group = "lint" },
+  { include-group = "build" },
 ]
 test = [
   "pytest",
@@ -42,6 +43,11 @@ test = [
 ]
 example = ["structlog"]
 lint = ["ruff", "ty"]
+# make develop (--no-build-isolation) 用。build-system.requires と揃える
+build = [
+  "scikit-build-core>=1.0.3",
+  "nanobind>=2.13.0",
+]
 
 [tool.scikit-build]
 minimum-version = "1.0.3"
@@ -76,6 +82,8 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# package = false のため、ソースツリーを import パスに載せる
+pythonpath = ["src"]
 # Property-Based Testing (PBT) は prop_ prefix を使用する
 python_files = ["test_*.py", "prop_*.py"]
 python_functions = ["test_*", "prop_*"]

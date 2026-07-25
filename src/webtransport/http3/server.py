@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from webtransport.webtransport_ext import http3 as http3_low, quic as quic_low
+from webtransport.webtransport_ext import http3 as http3_low
+from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -98,6 +99,7 @@ class Server:
             Callable[[int, list[tuple[str, str]], tuple[str, int]], Awaitable[None]] | None
         ) = None
         self._on_data: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int, tuple[str, int]], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -141,6 +143,17 @@ class Server:
         """
         self._on_data = callback
 
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """ストリームリセット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int, addr: tuple[str, int]) -> None
+        """
+        self._on_stream_reset = callback
+
     async def start(self) -> None:
         """サーバーを開始する"""
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -160,7 +173,7 @@ class Server:
             self._socket.close()
             self._socket = None
 
-    async def __aenter__(self) -> Server:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.start()
         return self
@@ -252,6 +265,29 @@ class Server:
         client.http3_connection.send_data(stream_id, data, fin)
         await self._send_to(addr, client)
 
+    async def reset_stream(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """ストリームをリセットする (QUIC RESET_STREAM + nghttp3 通知)
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: エラーコード
+        """
+        client = self._clients.get(addr)
+        if client is None:
+            return
+
+        if client.quic_connection is not None:
+            client.quic_connection.reset_stream(stream_id, error_code)
+        if client.http3_connection is not None:
+            client.http3_connection.reset_stream(stream_id, error_code)
+        await self._send_to(addr, client)
+
     async def run(self) -> None:
         """メインループを実行する
 
@@ -290,6 +326,13 @@ class Server:
                             quic_event.data,
                             quic_event.fin,
                         )
+                    elif quic_event.type == quic_low.EventType.STREAM_RESET:
+                        if self._on_stream_reset is not None:
+                            await self._on_stream_reset(
+                                quic_event.stream_id,
+                                quic_event.error_code,
+                                addr,
+                            )
                     elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
                         if addr in self._clients:
                             del self._clients[addr]
@@ -318,6 +361,21 @@ class Server:
                                 http3_event.data,
                                 addr,
                             )
+
+                    elif http3_event.type in (
+                        http3_low.EventType.RESET_STREAM,
+                        http3_low.EventType.RESET,
+                    ):
+                        client.quic_connection.reset_stream(
+                            http3_event.stream_id,
+                            http3_event.error_code,
+                        )
+
+                    elif http3_event.type == http3_low.EventType.STOP_SENDING:
+                        client.quic_connection.stop_sending(
+                            http3_event.stream_id,
+                            http3_event.error_code,
+                        )
 
                 await self._send_to(addr, client)
 
