@@ -457,9 +457,7 @@ async def test_multiple_streams_with_more_flag(test_certificates):
             server_received[stream_id] = []
         server_received[stream_id].append((data, fin))
         if len(server_received) >= expected_streams:
-            all_complete = all(
-                any(fin for _, fin in msgs) for msgs in server_received.values()
-            )
+            all_complete = all(any(fin for _, fin in msgs) for msgs in server_received.values())
             if all_complete:
                 all_streams_received.set()
 
@@ -509,10 +507,7 @@ async def test_multiple_streams_with_more_flag(test_certificates):
     for i, stream_id in enumerate(stream_ids):
         assert stream_id in server_received
         messages = server_received[stream_id]
-        assert any(
-            data == f"stream-{i}-data".encode() and fin
-            for data, fin in messages
-        )
+        assert any(data == f"stream-{i}-data".encode() and fin for data, fin in messages)
 
     client_task.cancel()
     server_task.cancel()

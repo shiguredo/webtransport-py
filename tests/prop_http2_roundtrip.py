@@ -245,6 +245,7 @@ def prop_http2_goaway_no_crash(error_code: int):
 
     assert any(event.type == http2.EventType.GO_AWAY for event in events)
 
+
 @given(st.integers(min_value=16384, max_value=16777215))
 @settings(max_examples=20)
 def prop_http2_max_frame_size_setting(frame_size: int):

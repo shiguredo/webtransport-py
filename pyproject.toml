@@ -11,14 +11,14 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 classifiers = [
-    "Programming Language :: C++",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.14",
-    "Programming Language :: Python :: Free Threading :: 2 - Beta",
-    "Operating System :: MacOS :: MacOS X",
-    "Operating System :: POSIX :: Linux",
-    "Operating System :: Microsoft :: Windows",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Free Threading :: 2 - Beta",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
 ]
 requires-python = ">=3.14"
 dependencies = []
@@ -29,16 +29,16 @@ Discord = "https://discord.gg/shiguredo"
 
 [dependency-groups]
 dev = [
-    { include-group = "test" },
-    { include-group = "example" },
-    { include-group = "lint" },
+  { include-group = "test" },
+  { include-group = "example" },
+  { include-group = "lint" },
 ]
 test = [
-    "pytest",
-    "pytest-timeout",
-    "pytest-asyncio",
-    "cryptography",
-    "hypothesis",
+  "pytest",
+  "pytest-timeout",
+  "pytest-asyncio",
+  "cryptography",
+  "hypothesis",
 ]
 example = ["structlog"]
 lint = ["ruff", "ty"]
