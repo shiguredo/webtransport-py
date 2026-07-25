@@ -5,16 +5,16 @@
 QUIC                                                        R. Marx, Ed.
 Internet-Draft                                                    Akamai
 Intended status: Standards Track                       L. Niccolini, Ed.
-Expires: 23 April 2026                                              Meta
+Expires: 7 January 2027                                             Meta
                                                          M. Seemann, Ed.
                                                                         
                                                           L. Pardue, Ed.
                                                               Cloudflare
-                                                         20 October 2025
+                                                             6 July 2026
 
 
                     QUIC event definitions for qlog
-                  draft-ietf-quic-qlog-quic-events-12
+                  draft-ietf-quic-qlog-quic-events-13
 
 Abstract
 
@@ -46,21 +46,21 @@ Status of This Memo
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 23 April 2026.
+   This Internet-Draft will expire on 7 January 2027.
 
 
 
 
 
 
-Marx, et al.              Expires 23 April 2026                 [Page 1]
+Marx, et al.             Expires 7 January 2027                 [Page 1]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 Copyright Notice
 
-   Copyright (c) 2025 IETF Trust and the persons identified as the
+   Copyright (c) 2026 IETF Trust and the persons identified as the
    document authors.  All rights reserved.
 
    This document is subject to BCP 78 and the IETF Trust's Legal
@@ -105,101 +105,107 @@ Table of Contents
      5.11. udp_datagrams_received  . . . . . . . . . . . . . . . . .  27
      5.12. udp_datagram_dropped  . . . . . . . . . . . . . . . . . .  27
      5.13. stream_state_updated  . . . . . . . . . . . . . . . . . .  28
-     5.14. frames_processed  . . . . . . . . . . . . . . . . . . . .  30
+     5.14. Frame-related events  . . . . . . . . . . . . . . . . . .  30
 
 
 
-Marx, et al.              Expires 23 April 2026                 [Page 2]
+Marx, et al.             Expires 7 January 2027                 [Page 2]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
-     5.15. stream_data_moved . . . . . . . . . . . . . . . . . . . .  31
+       5.14.1.  frames_created . . . . . . . . . . . . . . . . . . .  31
+       5.14.2.  frames_parsed  . . . . . . . . . . . . . . . . . . .  31
+       5.14.3.  frames_processed . . . . . . . . . . . . . . . . . .  31
+     5.15. stream_data_moved . . . . . . . . . . . . . . . . . . . .  32
      5.16. datagram_data_moved . . . . . . . . . . . . . . . . . . .  33
-     5.17. connection_data_blocked_updated . . . . . . . . . . . . .  33
-     5.18. stream_data_blocked_updated . . . . . . . . . . . . . . .  34
-     5.19. datagram_data_blocked_updated . . . . . . . . . . . . . .  34
-     5.20. migration_state_updated . . . . . . . . . . . . . . . . .  35
-     5.21. timer_updated . . . . . . . . . . . . . . . . . . . . . .  36
-   6.  Security Events . . . . . . . . . . . . . . . . . . . . . . .  38
-     6.1.  key_updated . . . . . . . . . . . . . . . . . . . . . . .  38
-     6.2.  key_discarded . . . . . . . . . . . . . . . . . . . . . .  38
-   7.  Recovery events . . . . . . . . . . . . . . . . . . . . . . .  39
-     7.1.  recovery_parameters_set . . . . . . . . . . . . . . . . .  39
-     7.2.  recovery_metrics_updated  . . . . . . . . . . . . . . . .  40
-     7.3.  congestion_state_updated  . . . . . . . . . . . . . . . .  42
-     7.4.  packet_lost . . . . . . . . . . . . . . . . . . . . . . .  42
-     7.5.  marked_for_retransmit . . . . . . . . . . . . . . . . . .  43
-     7.6.  ecn_state_updated . . . . . . . . . . . . . . . . . . . .  44
-   8.  QUIC data type definitions  . . . . . . . . . . . . . . . . .  44
-     8.1.  QuicVersion . . . . . . . . . . . . . . . . . . . . . . .  44
-     8.2.  ConnectionID  . . . . . . . . . . . . . . . . . . . . . .  44
-     8.3.  Initiator . . . . . . . . . . . . . . . . . . . . . . . .  45
-     8.4.  IPAddress . . . . . . . . . . . . . . . . . . . . . . . .  45
-     8.5.  TupleEndpointInfo . . . . . . . . . . . . . . . . . . . .  45
-     8.6.  PacketType  . . . . . . . . . . . . . . . . . . . . . . .  46
-     8.7.  PacketNumberSpace . . . . . . . . . . . . . . . . . . . .  46
-     8.8.  PacketHeader  . . . . . . . . . . . . . . . . . . . . . .  46
-     8.9.  Token . . . . . . . . . . . . . . . . . . . . . . . . . .  47
-     8.10. Stateless Reset Token . . . . . . . . . . . . . . . . . .  48
-     8.11. KeyType . . . . . . . . . . . . . . . . . . . . . . . . .  48
-     8.12. ECN . . . . . . . . . . . . . . . . . . . . . . . . . . .  49
-     8.13. QUIC Frames . . . . . . . . . . . . . . . . . . . . . . .  49
-       8.13.1.  PaddingFrame . . . . . . . . . . . . . . . . . . . .  50
-       8.13.2.  PingFrame  . . . . . . . . . . . . . . . . . . . . .  50
-       8.13.3.  AckFrame . . . . . . . . . . . . . . . . . . . . . .  50
-       8.13.4.  ResetStreamFrame . . . . . . . . . . . . . . . . . .  51
-       8.13.5.  StopSendingFrame . . . . . . . . . . . . . . . . . .  52
-       8.13.6.  CryptoFrame  . . . . . . . . . . . . . . . . . . . .  52
-       8.13.7.  NewTokenFrame  . . . . . . . . . . . . . . . . . . .  53
-       8.13.8.  StreamFrame  . . . . . . . . . . . . . . . . . . . .  53
-       8.13.9.  MaxDataFrame . . . . . . . . . . . . . . . . . . . .  53
-       8.13.10. MaxStreamDataFrame . . . . . . . . . . . . . . . . .  53
-       8.13.11. MaxStreamsFrame  . . . . . . . . . . . . . . . . . .  54
-       8.13.12. DataBlockedFrame . . . . . . . . . . . . . . . . . .  54
-       8.13.13. StreamDataBlockedFrame . . . . . . . . . . . . . . .  54
-       8.13.14. StreamsBlockedFrame  . . . . . . . . . . . . . . . .  54
-       8.13.15. NewConnectionIDFrame . . . . . . . . . . . . . . . .  54
-       8.13.16. RetireConnectionIDFrame  . . . . . . . . . . . . . .  55
-       8.13.17. PathChallengeFrame . . . . . . . . . . . . . . . . .  55
+     5.17. connection_data_blocked_updated . . . . . . . . . . . . .  34
+     5.18. stream_data_blocked_updated . . . . . . . . . . . . . . .  35
+     5.19. datagram_data_blocked_updated . . . . . . . . . . . . . .  35
+     5.20. migration_state_updated . . . . . . . . . . . . . . . . .  36
+     5.21. timer_updated . . . . . . . . . . . . . . . . . . . . . .  37
+   6.  Security Events . . . . . . . . . . . . . . . . . . . . . . .  39
+     6.1.  key_updated . . . . . . . . . . . . . . . . . . . . . . .  39
+     6.2.  key_discarded . . . . . . . . . . . . . . . . . . . . . .  39
+   7.  Recovery events . . . . . . . . . . . . . . . . . . . . . . .  40
+     7.1.  recovery_parameters_set . . . . . . . . . . . . . . . . .  40
+     7.2.  recovery_metrics_updated  . . . . . . . . . . . . . . . .  41
+     7.3.  congestion_state_updated  . . . . . . . . . . . . . . . .  43
+     7.4.  packet_lost . . . . . . . . . . . . . . . . . . . . . . .  43
+     7.5.  marked_for_retransmit . . . . . . . . . . . . . . . . . .  44
+     7.6.  ecn_state_updated . . . . . . . . . . . . . . . . . . . .  45
+   8.  QUIC data type definitions  . . . . . . . . . . . . . . . . .  45
+     8.1.  QuicVersion . . . . . . . . . . . . . . . . . . . . . . .  45
+     8.2.  ConnectionID  . . . . . . . . . . . . . . . . . . . . . .  45
+     8.3.  Initiator . . . . . . . . . . . . . . . . . . . . . . . .  46
+     8.4.  IPAddress . . . . . . . . . . . . . . . . . . . . . . . .  46
+     8.5.  TupleEndpointInfo . . . . . . . . . . . . . . . . . . . .  46
+     8.6.  PacketType  . . . . . . . . . . . . . . . . . . . . . . .  47
+     8.7.  PacketNumberSpace . . . . . . . . . . . . . . . . . . . .  47
+     8.8.  PacketHeader  . . . . . . . . . . . . . . . . . . . . . .  47
+     8.9.  Token . . . . . . . . . . . . . . . . . . . . . . . . . .  48
+     8.10. Stateless Reset Token . . . . . . . . . . . . . . . . . .  49
+     8.11. KeyType . . . . . . . . . . . . . . . . . . . . . . . . .  49
+     8.12. ECN . . . . . . . . . . . . . . . . . . . . . . . . . . .  50
+     8.13. QUIC Frames . . . . . . . . . . . . . . . . . . . . . . .  50
+       8.13.1.  PaddingFrame . . . . . . . . . . . . . . . . . . . .  51
+       8.13.2.  PingFrame  . . . . . . . . . . . . . . . . . . . . .  51
+       8.13.3.  AckFrame . . . . . . . . . . . . . . . . . . . . . .  51
+       8.13.4.  ResetStreamFrame . . . . . . . . . . . . . . . . . .  52
+       8.13.5.  ResetStreamAtFrame . . . . . . . . . . . . . . . . .  53
+       8.13.6.  StopSendingFrame . . . . . . . . . . . . . . . . . .  53
+       8.13.7.  CryptoFrame  . . . . . . . . . . . . . . . . . . . .  54
+       8.13.8.  NewTokenFrame  . . . . . . . . . . . . . . . . . . .  54
+       8.13.9.  StreamFrame  . . . . . . . . . . . . . . . . . . . .  54
+       8.13.10. MaxDataFrame . . . . . . . . . . . . . . . . . . . .  55
+       8.13.11. MaxStreamDataFrame . . . . . . . . . . . . . . . . .  55
+       8.13.12. MaxStreamsFrame  . . . . . . . . . . . . . . . . . .  55
+       8.13.13. DataBlockedFrame . . . . . . . . . . . . . . . . . .  55
+       8.13.14. StreamDataBlockedFrame . . . . . . . . . . . . . . .  56
 
 
 
-Marx, et al.              Expires 23 April 2026                 [Page 3]
+Marx, et al.             Expires 7 January 2027                 [Page 3]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
-       8.13.18. PathResponseFrame  . . . . . . . . . . . . . . . . .  55
-       8.13.19. ConnectionCloseFrame . . . . . . . . . . . . . . . .  56
-       8.13.20. HandshakeDoneFrame . . . . . . . . . . . . . . . . .  56
-       8.13.21. UnknownFrame . . . . . . . . . . . . . . . . . . . .  57
-       8.13.22. DatagramFrame  . . . . . . . . . . . . . . . . . . .  57
-       8.13.23. TransportError . . . . . . . . . . . . . . . . . . .  57
-       8.13.24. ApplicationError . . . . . . . . . . . . . . . . . .  58
-       8.13.25. CryptoError  . . . . . . . . . . . . . . . . . . . .  59
-   9.  Security and Privacy Considerations . . . . . . . . . . . . .  59
-   10. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  59
-   11. References  . . . . . . . . . . . . . . . . . . . . . . . . .  60
-     11.1.  Normative References . . . . . . . . . . . . . . . . . .  60
-     11.2.  Informative References . . . . . . . . . . . . . . . . .  61
-   Acknowledgements  . . . . . . . . . . . . . . . . . . . . . . . .  61
-   Change Log  . . . . . . . . . . . . . . . . . . . . . . . . . . .  61
-     Since draft-ietf-qlog-quic-events-11: . . . . . . . . . . . . .  61
-     Since draft-ietf-qlog-quic-events-09: . . . . . . . . . . . . .  62
-     Since draft-ietf-qlog-quic-events-08: . . . . . . . . . . . . .  62
-     Since draft-ietf-qlog-quic-events-07: . . . . . . . . . . . . .  62
-     Since draft-ietf-qlog-quic-events-06: . . . . . . . . . . . . .  62
-     Since draft-ietf-qlog-quic-events-05: . . . . . . . . . . . . .  63
-     Since draft-ietf-qlog-quic-events-04: . . . . . . . . . . . . .  63
-     Since draft-ietf-qlog-quic-events-03: . . . . . . . . . . . . .  63
-     Since draft-ietf-qlog-quic-events-02: . . . . . . . . . . . . .  63
-     Since draft-ietf-qlog-quic-events-01: . . . . . . . . . . . . .  64
-     Since draft-ietf-qlog-quic-events-00: . . . . . . . . . . . . .  64
-     Since draft-marx-qlog-event-definitions-quic-h3-02: . . . . . .  64
-     Since draft-marx-qlog-event-definitions-quic-h3-01: . . . . . .  64
-     Since draft-marx-qlog-event-definitions-quic-h3-00: . . . . . .  66
-   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  66
+       8.13.15. StreamsBlockedFrame  . . . . . . . . . . . . . . . .  56
+       8.13.16. NewConnectionIDFrame . . . . . . . . . . . . . . . .  56
+       8.13.17. RetireConnectionIDFrame  . . . . . . . . . . . . . .  57
+       8.13.18. PathChallengeFrame . . . . . . . . . . . . . . . . .  57
+       8.13.19. PathResponseFrame  . . . . . . . . . . . . . . . . .  57
+       8.13.20. ConnectionCloseFrame . . . . . . . . . . . . . . . .  57
+       8.13.21. HandshakeDoneFrame . . . . . . . . . . . . . . . . .  58
+       8.13.22. UnknownFrame . . . . . . . . . . . . . . . . . . . .  58
+       8.13.23. DatagramFrame  . . . . . . . . . . . . . . . . . . .  59
+       8.13.24. TransportError . . . . . . . . . . . . . . . . . . .  59
+       8.13.25. ApplicationError . . . . . . . . . . . . . . . . . .  60
+       8.13.26. CryptoError  . . . . . . . . . . . . . . . . . . . .  61
+   9.  Handling Packet Coalescing  . . . . . . . . . . . . . . . . .  61
+   10. Security and Privacy Considerations . . . . . . . . . . . . .  61
+   11. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  61
+   12. References  . . . . . . . . . . . . . . . . . . . . . . . . .  62
+     12.1.  Normative References . . . . . . . . . . . . . . . . . .  62
+     12.2.  Informative References . . . . . . . . . . . . . . . . .  63
+   Acknowledgements  . . . . . . . . . . . . . . . . . . . . . . . .  63
+   Change Log  . . . . . . . . . . . . . . . . . . . . . . . . . . .  64
+     Since draft-ietf-qlog-quic-events-12: . . . . . . . . . . . . .  64
+     Since draft-ietf-qlog-quic-events-11: . . . . . . . . . . . . .  64
+     Since draft-ietf-qlog-quic-events-09: . . . . . . . . . . . . .  64
+     Since draft-ietf-qlog-quic-events-08: . . . . . . . . . . . . .  64
+     Since draft-ietf-qlog-quic-events-07: . . . . . . . . . . . . .  65
+     Since draft-ietf-qlog-quic-events-06: . . . . . . . . . . . . .  65
+     Since draft-ietf-qlog-quic-events-05: . . . . . . . . . . . . .  65
+     Since draft-ietf-qlog-quic-events-04: . . . . . . . . . . . . .  65
+     Since draft-ietf-qlog-quic-events-03: . . . . . . . . . . . . .  66
+     Since draft-ietf-qlog-quic-events-02: . . . . . . . . . . . . .  66
+     Since draft-ietf-qlog-quic-events-01: . . . . . . . . . . . . .  66
+     Since draft-ietf-qlog-quic-events-00: . . . . . . . . . . . . .  66
+     Since draft-marx-qlog-event-definitions-quic-h3-02: . . . . . .  67
+     Since draft-marx-qlog-event-definitions-quic-h3-01: . . . . . .  67
+     Since draft-marx-qlog-event-definitions-quic-h3-00: . . . . . .  68
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  69
 
 1.  Introduction
 
@@ -212,19 +218,17 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    In this namespace multiple events derive from the qlog abstract Event
    class (Section 7 of [QLOG-MAIN]), each extending the "data" field and
    defining their "name" field values and semantics.  Some event data
+
+
+
+Marx, et al.             Expires 7 January 2027                 [Page 4]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
    fields use complex data types.  These are represented as enums or re-
    usable definitions, which are grouped together on the bottom of this
    document for clarity.
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                 [Page 4]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
 
 1.1.  Use of group IDs
 
@@ -244,8 +248,8 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    In general, the length of the AEAD tag depends on the TLS cipher
    suite, although all cipher suites used in QUIC v1 use a 16 byte tag.
    For the purposes of calculating the lengths in fields of type RawInfo
-   (as defined in [QLOG-MAIN]) related to QUIC packets, the AEAD tag is
-   regarded as a trailer with a fixed size of 16 bytes.
+   (as defined in Section 10 of [QLOG-MAIN]) related to QUIC packets,
+   the AEAD tag is regarded as a trailer with a fixed size of 16 bytes.
 
 1.3.  Events not belonging to a single connection
 
@@ -273,13 +277,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-
-
-
-
-Marx, et al.              Expires 23 April 2026                 [Page 5]
+Marx, et al.             Expires 7 January 2027                 [Page 5]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 1.4.  Notational Conventions
@@ -290,9 +290,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
    capitals, as shown here.
 
-   The event and data structure definitions in ths document are
+   The event and data structure definitions in this document are
    expressed in the Concise Data Definition Language [CDDL] and its
-   extensions described in [QLOG-MAIN].
+   extensions described in Section 1.2 of [QLOG-MAIN].
 
    The following fields from [QLOG-MAIN] are imported and used: name,
    namespace, type, data, tuple, group_id, RawInfo, and time-related
@@ -333,9 +333,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                 [Page 6]
+Marx, et al.             Expires 7 January 2027                 [Page 6]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 3.  QUIC Event Overview
@@ -389,14 +389,21 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                 [Page 7]
+Marx, et al.             Expires 7 January 2027                 [Page 7]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    | quic:stream_state_updated            | Base       | Section 5.13 |
    +--------------------------------------+------------+--------------+
-   | quic:frames_processed                | Extra      | Section 5.14 |
+   | quic:frames_created                  | Extra      | Section      |
+   |                                      |            | 5.14.1       |
+   +--------------------------------------+------------+--------------+
+   | quic:frames_parsed                   | Extra      | Section      |
+   |                                      |            | 5.14.2       |
+   +--------------------------------------+------------+--------------+
+   | quic:frames_processed                | Extra      | Section      |
+   |                                      |            | 5.14.3       |
    +--------------------------------------+------------+--------------+
    | quic:stream_data_moved               | Base       | Section 5.15 |
    +--------------------------------------+------------+--------------+
@@ -431,10 +438,6 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
                            Table 1: QUIC Events
 
-   QUIC events extend the $ProtocolEventData extension point defined in
-   [QLOG-MAIN].  Additionally, they allow for direct extensibility by
-   their use of per-event extension points via the $$ CDDL "group
-   socket" syntax, as also described in [QLOG-MAIN].
 
 
 
@@ -442,13 +445,16 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-
-
-
-Marx, et al.              Expires 23 April 2026                 [Page 8]
+Marx, et al.             Expires 7 January 2027                 [Page 8]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
+
+   QUIC events extend the $ProtocolEventData extension point defined in
+   Section 8.2 of [QLOG-MAIN].  Additionally, they allow for direct
+   extensibility by their use of per-event extension points via the $$
+   CDDL "group socket" syntax, as also described in Section 8.2 of
+   [QLOG-MAIN].
 
    QuicEventData = QUICServerListening /
                    QUICConnectionStarted /
@@ -471,6 +477,8 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                    QUICUDPDatagramsReceived /
                    QUICUDPDatagramDropped /
                    QUICStreamStateUpdated /
+                   QUICFramesCreated /
+                   QUICFramesParsed /
                    QUICFramesProcessed /
                    QUICStreamDataMoved /
                    QUICDatagramDataMoved /
@@ -490,21 +498,20 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    $ProtocolEventData /= QuicEventData
 
+
+
+
+Marx, et al.             Expires 7 January 2027                 [Page 9]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
      Figure 1: QuicEventData definition and ProtocolEventData extension
 
    The concrete QUIC event types are further defined below, their type
    identifier is the heading name.  The subdivisions in sections on
    Connectivity, Security, Transport and Recovery are purely for
    readability.
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                 [Page 9]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
 
 4.  Connectivity events
 
@@ -536,8 +543,8 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    The connection_started event is used for both attempting (client-
    perspective) and accepting (server-perspective) new connections.
    Note that while there is overlap with the connection_state_updated
-   event, this event is separate event in order to capture additional
-   data that can be useful to log.  It has Base importance level.
+   event, this is a separate event in order to capture additional data
+   that can be useful to log.  It has Base importance level.
 
    QUICConnectionStarted = {
        local: TupleEndpointInfo
@@ -548,19 +555,15 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
                  Figure 3: QUICConnectionStarted definition
 
+
+
+Marx, et al.             Expires 7 January 2027                [Page 10]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
    Some QUIC stacks do not handle sockets directly and are thus unable
    to log IP and/or port information.
-
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 10]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
 
 4.3.  connection_closed
 
@@ -610,12 +613,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 11]
+Marx, et al.             Expires 7 January 2027                [Page 11]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICConnectionClosed = {
@@ -669,9 +669,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 12]
+Marx, et al.             Expires 7 January 2027                [Page 12]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICConnectionIDUpdated = {
@@ -725,9 +725,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 13]
+Marx, et al.             Expires 7 January 2027                [Page 13]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    BaseConnectionStates =
@@ -781,12 +781,12 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 14]
+Marx, et al.             Expires 7 January 2027                [Page 14]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
-   The connection_state_changed event has some overlap with the
+   The connection_state_updated event has some overlap with the
    connection_closed and connection_started events, and the handling of
    various frames (for example in a packet_received event).  Still, it
    can be useful to log these logical state transitions separately,
@@ -798,19 +798,18 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 4.7.  tuple_assigned
 
-   Importance: Base
-
    This event is used to associate a single TupleID's value with other
-   parameters that describe a unique network tuple.
+   parameters that describe a unique network tuple.  It has Base
+   importance level.
 
-   As described in [QLOG-MAIN], each qlog event can be linked to a
-   single network tuple by means of the top-level "tuple" field, whose
-   value is a TupleID.  However, since it can be cumbersome to encode
-   additional tuple metadata (such as IP addresses or Connection IDs)
-   directly into the TupleID, this event allows such an association to
-   happen separately.  As such, TupleIDs can be short and unique, and
-   can even be updated to be associated with new metadata as the
-   connection's state evolves.
+   As described in Section 7.2 of [QLOG-MAIN], each qlog event can be
+   linked to a single network tuple by means of the top-level "tuple"
+   field, whose value is a TupleID.  However, since it can be cumbersome
+   to encode additional tuple metadata (such as IP addresses or
+   Connection IDs) directly into the TupleID, this event allows such an
+   association to happen separately.  As such, TupleIDs can be short and
+   unique, and can even be updated to be associated with new metadata as
+   the connection's state evolves.
 
    Definition:
 
@@ -837,9 +836,10 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 15]
+
+Marx, et al.             Expires 7 January 2027                [Page 15]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    It is important to note that the empty string ("") is a valid TupleID
@@ -893,9 +893,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 16]
+Marx, et al.             Expires 7 January 2027                [Page 16]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    version_information event aggregates all this information in a single
@@ -938,7 +938,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    The alpn_information event supports Application-Layer Protocol
    Negotiation (ALPN) over the QUIC transport; see [RFC7301] and
-   Section 7.4 of [QUIC-TRANSPORT].  It has Core importance level.
+   Section 8.1 of [QUIC-TLS].  It has Core importance level.
 
    QUIC endpoints are configured with a list of supported ALPN
    identifiers.  Clients send the list in a TLS ClientHello, and servers
@@ -949,15 +949,14 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 17]
+Marx, et al.             Expires 7 January 2027                [Page 17]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
-   ALPN identifiers are byte sequences, that may be possible to present
-   as UTF-8.  The ALPNIdentifier` type supports either format.
-   Implementations SHOULD log at least one format, but MAY log both or
-   none.
+   ALPN identifiers are byte sequences that may be presentable as UTF-8.
+   The ALPNIdentifier type supports either format.  Implementations
+   SHOULD log at least one format, but MAY log both or none.
 
    QUICALPNInformation = {
        ? server_alpns: [* ALPNIdentifier]
@@ -999,26 +998,22 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    conceptual setting impacts from their underlying mechanism for easier
    high-level reasoning.  The event has Core importance level.
 
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 18]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    Most of these settings are typically set once and never change.
    However, they are usually set at different times during the
    connection, so there will regularly be several instances of this
    event with different fields set.
 
+
+
+Marx, et al.             Expires 7 January 2027                [Page 18]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
    Note that some settings have two variations (one set locally, one
    requested by the remote peer).  This is reflected in the initiator
    field.  As such, this field MUST be correct for all settings included
-   a single event instance.  If the settings from two sides are
+   in a single event instance.  If the settings from two sides are
    required, they MUST be logged as two separate event instances.  If
    the local peer decides to change its behavior based on remote peer's
    settings, a new event type can be used to reflect the outcome.
@@ -1058,19 +1053,19 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? tls_cipher: text
 
        ; RFC9000
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 19]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
        ? original_destination_connection_id: ConnectionID
        ? initial_source_connection_id: ConnectionID
        ? retry_source_connection_id: ConnectionID
        ? stateless_reset_token: StatelessResetToken
        ? disable_active_migration: bool
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 19]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
        ? max_idle_timeout: uint64
        ? max_udp_payload_size: uint64
        ? ack_delay_exponent: uint64
@@ -1091,6 +1086,10 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ; RFC9287
        ; true if present, absent or false if extension not negotiated
        ? grease_quic_bit: bool
+
+       ; draft-ietf-quic-reliable-stream-reset
+       ; true if present, absent or false if extension not negotiated
+       ? reset_stream_at: bool
 
        * $$quic-parametersset-extension
    }
@@ -1117,9 +1116,10 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 20]
+
+Marx, et al.             Expires 7 January 2027                [Page 20]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 5.4.  parameters_restored
@@ -1143,7 +1143,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? active_connection_id_limit: uint64
        ? initial_max_data: uint64
        ? initial_max_stream_data_bidi_local: uint64
-       ? initial_max_stream_data_bidi_remote: uint64,
+       ? initial_max_stream_data_bidi_remote: uint64
        ? initial_max_stream_data_uni: uint64
        ? initial_max_streams_bidi: uint64
        ? initial_max_streams_uni: uint64
@@ -1173,9 +1173,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 21]
+Marx, et al.             Expires 7 January 2027                [Page 21]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICPacketSent = {
@@ -1215,7 +1215,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    (assuming correct implementation)
 
    The datagram_id field is used to track packet coalescing, see
-   Section 5.10.
+   Section 9.
 
 5.6.  packet_received
 
@@ -1229,9 +1229,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 22]
+Marx, et al.             Expires 7 January 2027                [Page 22]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICPacketReceived = {
@@ -1262,7 +1262,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    (assuming correct implementation).
 
    The datagram_id field is used to track packet coalescing, see
-   Section 5.10.
+   Section 9.
 
 5.7.  packet_dropped
 
@@ -1285,15 +1285,15 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 23]
+Marx, et al.             Expires 7 January 2027                [Page 23]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICPacketDropped = {
 
        ; Primarily packet_type should be filled here,
-       ; as other fields might not be decrypteable or parseable
+       ; as other fields might not be decryptable or parsable
        ? header: PacketHeader
        ? raw: RawInfo
        ? datagram_id: uint32
@@ -1341,13 +1341,13 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 24]
+Marx, et al.             Expires 7 January 2027                [Page 24]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    The datagram_id field is used to track packet coalescing, see
-   Section 5.10.
+   Section 9.
 
 5.8.  packet_buffered
 
@@ -1378,7 +1378,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                   Figure 17: QUICPacketBuffered definition
 
    The datagram_id field is used to track packet coalescing, see
-   Section 5.10.
+   Section 9.
 
 5.9.  packets_acked
 
@@ -1397,9 +1397,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 25]
+Marx, et al.             Expires 7 January 2027                [Page 25]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICPacketsAcked = {
@@ -1417,7 +1417,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 5.10.  udp_datagrams_sent
 
-   The datagrams_sent event indicates when one or more UDP-level
+   The udp_datagrams_sent event indicates when one or more UDP-level
    datagrams are passed to the underlying network socket.  This is
    useful for determining how QUIC packet buffers are drained to the OS.
    The event has Extra importance level.
@@ -1433,7 +1433,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
        ; ECN bits in the IP header
        ; if not set, defaults to the value used on the last
-       ; QUICDatagramsSent event
+       ; QUICUDPDatagramsSent event
        ? ecn: [+ ECN]
 
        ? datagram_ids: [+ uint32]
@@ -1446,27 +1446,17 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    Since QUIC implementations rarely control UDP logic directly, the raw
    data excludes UDP-level headers in all RawInfo fields.
 
-   Multiple QUIC packets can be coalesced in a single UDP datagram,
-   especially during the handshake (see Section 12.2 of
-   [QUIC-TRANSPORT]).  However, neither QUIC nor UDP themselves provide
-   an explicit mechanism to track this behaviour.  To make it possible
+   The datagram_ids field is used to track packet coalescing, see
+   Section 9.
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 26]
+
+
+Marx, et al.             Expires 7 January 2027                [Page 26]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
-
-   for implementations to track coalescing across packet-level and
-   datagram-level qlog events, this document defines a qlog-specific
-   mechanism for tracking coalescing across packet-level and datagram-
-   level qlog events: a "datagram identifier" carried in datagram_id
-   fields. qlog implementations that want to track coalescing can use
-   this mechanism, where multiple events sharing the same datagram_id
-   indicate they were coalesced in the same UDP datagram.  The selection
-   of specific and locally-unique datagram_id values is an
-   implementation choice.
 
 5.11.  udp_datagrams_received
 
@@ -1485,7 +1475,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
        ; ECN bits in the IP header
        ; if not set, defaults to the value on the last
-       ; QUICDatagramsReceived event
+       ; QUICUDPDatagramsReceived event
        ? ecn: [+ ECN]
 
        ? datagram_ids: [+ uint32]
@@ -1496,7 +1486,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                Figure 20: QUICUDPDatagramsReceived definition
 
    The datagram_ids field is used to track packet coalescing, see
-   Section 5.10.
+   Section 9.
 
 5.12.  udp_datagram_dropped
 
@@ -1505,14 +1495,6 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    packet is dropped for other reasons, the packet_dropped event
    (Section 5.7) should be used instead.  The event has Extra importance
    level.
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 27]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
 
    QUICUDPDatagramDropped = {
 
@@ -1524,6 +1506,13 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    }
 
                 Figure 21: QUICUDPDatagramDropped definition
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 27]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
 5.13.  stream_state_updated
 
@@ -1565,9 +1554,20 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 28]
+
+
+
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 28]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    StreamType = "unidirectional" /
@@ -1621,9 +1621,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 29]
+Marx, et al.             Expires 7 January 2027                [Page 29]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUIC implementations SHOULD mainly log the simplified
@@ -1631,56 +1631,119 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    GranularStreamStates.  These latter ones are mainly for more in-depth
    debugging.  Tools SHOULD be able to deal with both types equally.
 
-5.14.  frames_processed
+5.14.  Frame-related events
 
-   The frame_processed event is intended to prevent a large
-   proliferation of specific purpose events (e.g., packets_acknowledged,
-   flow_control_updated, stream_data_received).  It has Extra importance
-   level.
+   While the packet_sent (Section 5.5) and packet_received (Section 5.6)
+   events can convey all frames contained in a single QUIC packet, some
+   implementations might not be able or willing to include frame
+   information at the moment either event is logged.
 
-   Implementations have the opportunity to (selectively) log this type
-   of signal without having to log packet-level details (e.g., in
-   packet_received).  Since for almost all cases, the effects of
-   applying a frame to the internal state of an implementation can be
-   inferred from that frame's contents, these events are aggregated into
-   this single frames_processed event.
+   In order to support logging frame-related operations independent of
+   packets, the frames_created, frames_parsed, and frames_processed
+   events are defined.
 
-   The frame_processed event can be used to signal internal state change
-   not resulting directly from the actual "parsing" of a frame (e.g.,
-   the frame could have been parsed, data put into a buffer, then later
-   processed, then logged with this event).
+   A qlog trace can contain both packet and frame-related events.
+   However, it is RECOMMENDED that implementations avoid generating
+   events with duplicate or redundant frame information, since doing so
+   inflates the size of logs.
 
-   The packet_received event can convey all constituent frames.  It is
-   not expected that the frames_processed event will also be used for a
-   redundant purpose.  Rather, implementations can use this event to
-   avoid having to log full packets or to convey extra information about
-   when frames are processed (for example, if frame processing is
-   deferred for any reason).
+   Where an implementation logs both packet and frame-related events,
+   the optional packet_numbers field in frame-related events can be used
+   to explicitly link frames to packets.  The field is an array, which
+   supports using a single event for multiple frames related to multiple
+   packets.  To map between the two, the position and order of entries
+   in the frames and packet_numbers is used.  If the packet_numbers
+   field is logged, each and every frame MUST have a corresponding
+   packet number at the same index.
 
-   Note that for some events, this approach will lose some information
-   (e.g., for which encryption level are packets being acknowledged?).
-   If this information is important, the packet_received event can be
-   used instead.
+   For example, an instance of the frames_processed event that
+   represents four STREAM frames received over two packets can be
+   serialized as:
 
-   In some implementations, it can be difficult to log frames directly,
-   even when using packet_sent and packet_received events.  For these
-   cases, the frames_processed event also contains the packet_numbers
-   field, which can be used to more explicitly link this event to the
-   packet_sent/received events.  The field is an array, which supports
-   using a single frames_processed event for multiple frames received
-   over multiple packets.  To map between frames and packets, the
-   position and order of entries in the frames and packet_numbers is
-   used.  If the optional packet_numbers field is used, each frame MUST
-   have a corresponding packet number at the same index.
-
-
+  "frames":[
+    {"frame_type":"stream","stream_id":0,"offset":0,"raw":{"length":5}},
+    {"frame_type":"stream","stream_id":0,"offset":5,"raw":{"length":5}},
+    {"frame_type":"stream","stream_id":1,"offset":0,"raw":{"length":9}},
+    {"frame_type":"stream","stream_id":1,"offset":9,"raw":{"length":9}}
+    ],
+  "packet_numbers":[
+    1,
+    1,
+    2,
+    2
+  ]
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 30]
+
+
+Marx, et al.             Expires 7 January 2027                [Page 30]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
+
+   Frame-related events omit information that is available in the
+   packet_received or packet_sent event.  For instance, the packet
+   encryption level.  For use cases that require such information, the
+   packet events are preferable.
+
+   Frame-related events make it possible to log, in extensions,
+   information that is otherwise not available at the moment a packet
+   event occurs.  For instance, if frame processing was deferred for any
+   reason.
+
+5.14.1.  frames_created
+
+   The frames_created event indicates when a set of QUIC frames have
+   been created.  It has Extra importance level.
+
+   QUICFramesCreated = {
+       frames: [* $QuicFrame]
+       ? packet_numbers: [* uint64]
+
+       * $$quic-framescreated-extension
+   }
+
+                  Figure 23: QUICFramesCreated definition
+
+5.14.2.  frames_parsed
+
+   The frames_parsed event indicates when a set of QUIC frames have been
+   parsed.  It has Extra importance level.
+
+   QUICFramesParsed = {
+       frames: [* $QuicFrame]
+       ? packet_numbers: [* uint64]
+
+       * $$quic-framesparsed-extension
+   }
+
+                   Figure 24: QUICFramesParsed definition
+
+5.14.3.  frames_processed
+
+   The frames_processed event indicates when a set of QUIC frames have
+   been processed at the receiver.  It has Extra importance level.
+
+   This event exists to eliminate the need to define specific-purpose
+   events, where the effect of processing a frame can be easily inferred
+   from its contents.  For example, there would be no need to define a
+   hypothetical packets_acknowledged event, when an ACK frame contains
+   all relevant information.
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 31]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
+   The frames_processed event can be used to signal internal state
+   change not resulting directly from the actual parsing of a frame
+   (e.g., the frame could have been parsed, data put into a buffer, then
+   later processed and logged).  Using frames_processed in additional to
+   packet_received and/or frames_parsed allows an implementation to log
+   its full sequence of events.
 
    QUICFramesProcessed = {
        frames: [* $QuicFrame]
@@ -1689,24 +1752,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-framesprocessed-extension
    }
 
-                 Figure 23: QUICFramesProcessed definition
-
-   For example, an instance of the frames_processed event that
-   represents four STREAM frames received over two packets would have
-   the fields serialized as:
-
-"frames":[
-  {"frame_type":"stream","stream_id":0,"offset":0,"raw":{"length":500}},
-  {"frame_type":"stream","stream_id":0,"offset":500,"raw":{"length":200}},
-  {"frame_type":"stream","stream_id":1,"offset":0,"raw":{"length":300}},
-  {"frame_type":"stream","stream_id":1,"offset":300,"raw":{"length":50}}
-  ],
-"packet_numbers":[
-  1,
-  1,
-  2,
-  2
-]
+                 Figure 25: QUICFramesProcessed definition
 
 5.15.  stream_data_moved
 
@@ -1724,20 +1770,6 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    application protocol (e.g., HTTP) to QUIC stream buffers and vice
    versa.
 
-
-
-
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 31]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    The stream_data_moved event can provide insight into whether received
    data on a QUIC stream is moved to the application protocol
    immediately (for example per received packet) or in larger batches
@@ -1751,8 +1783,16 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    moves data into transport and simultaneously ends the stream, can log
    fin_set.  As another example, a transport layer that has received an
    instruction to reset a stream can indicate this to the application
-   layer using reset_stream.  In both cases, the raw.length field can be
+   layer using stream_reset.  In both cases, the raw.length field can be
    omitted or have a zero value.
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 32]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    This event is only for data in QUIC streams.  For data in QUIC
    Datagram Frames, see the datagram_data_moved event defined in
@@ -1779,20 +1819,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    $DataMovedAdditionalInfo /= "fin_set" /
                                "stream_reset"
 
-                 Figure 24: QUICStreamDataMoved definition
-
-
-
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 32]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
+                 Figure 26: QUICStreamDataMoved definition
 
 5.16.  datagram_data_moved
 
@@ -1808,6 +1835,20 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    For example, passing from the application protocol (e.g.,
    WebTransport) to QUIC Datagram Frame buffers and vice versa.
+
+
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 33]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    The datagram_data_moved event can provide insight into whether
    received data in a QUIC Datagram Frame is moved to the application
@@ -1829,25 +1870,40 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-datagramdatamoved-extension
    }
 
-                Figure 25: QUICDatagramDataMoved definition
+                Figure 27: QUICDatagramDataMoved definition
 
 5.17.  connection_data_blocked_updated
 
-   The connection_blocked_updated event is used to indicate when the
-   QUIC connection becomes blocked or unblocked for sending data.  When
-   a connection is "blocked", data can't be sent in streams and/or
+   The connection_data_blocked_updated event is used to indicate when
+   the QUIC connection becomes blocked or unblocked for sending data.
+   When a connection is "blocked", data can't be sent in streams and/or
    datagrams until the blocking reason has been resolved.  The event has
    Extra importance level.
 
-   Use the stream_blocked_updated or datagram_blocked_updated event to
-   provide more fine-grained information for individual data types.
+   Use the stream_data_blocked_updated or datagram_data_blocked_updated
+   event to provide more fine-grained information for individual data
+   types.
 
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 33]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 34]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICConnectionDataBlockedUpdated = {
@@ -1869,7 +1925,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                      "stream_id" /
                      "application"
 
-           Figure 26: QUICConnectionDataBlockedUpdated definition
+           Figure 28: QUICConnectionDataBlockedUpdated definition
 
 5.18.  stream_data_blocked_updated
 
@@ -1886,12 +1942,12 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? reason: $BlockedReason
    }
 
-             Figure 27: QUICStreamDataBlockedUpdated definition
+             Figure 29: QUICStreamDataBlockedUpdated definition
 
 5.19.  datagram_data_blocked_updated
 
    The datagram_data_blocked_updated event is used to indicate when QUIC
-   datagrames becomes blocked or unblocked for sending.  The event has
+   datagrams become blocked or unblocked for sending.  The event has
    Extra importance level.
 
 
@@ -1901,9 +1957,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 34]
+Marx, et al.             Expires 7 January 2027                [Page 35]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICDatagramDataBlockedUpdated = {
@@ -1913,7 +1969,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? reason: $BlockedReason
    }
 
-            Figure 28: QUICDatagramDataBlockedUpdated definition
+            Figure 30: QUICDatagramDataBlockedUpdated definition
 
 5.20.  migration_state_updated
 
@@ -1957,9 +2013,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 35]
+Marx, et al.             Expires 7 January 2027                [Page 36]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICMigrationStateUpdated = {
@@ -1996,7 +2052,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ; new path is now fully used, old path is discarded
        "migration_complete"
 
-              Figure 29: QUICMigrationStateUpdated definition
+              Figure 31: QUICMigrationStateUpdated definition
 
 5.21.  timer_updated
 
@@ -2013,9 +2069,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 36]
+Marx, et al.             Expires 7 January 2027                [Page 37]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    *  cancelled: when a timer is cancelled
@@ -2023,12 +2079,13 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    In order to indicate an active timer's timeout update, a new set
    event is used.
 
-   QUICTimerUpdated events with the timer_type set to ackor pto indicate
-   changes to the individual timeouts defined by RFC 9002: the threshold
-   loss detection timeout (see Section 6.1.2 of [QUIC-RECOVERY]) and the
-   probe timeout (see Section 6.2 of [QUIC-RECOVERY]).  Those set to
-   loss_timeout represent changes to the multi-modal loss detection
-   timer (see Section 3 of [QUIC-RECOVERY]).
+   QUICTimerUpdated events with the timer_type set to ack or pto
+   indicate changes to the individual timeouts defined by RFC 9002: the
+   threshold loss detection timeout (see Section 6.1.2 of
+   [QUIC-RECOVERY]) and the probe timeout (see Section 6.2 of
+   [QUIC-RECOVERY]).  Those set to loss_timeout represent changes to the
+   multi-modal loss detection timer (see Appendix A.8 of
+   [QUIC-RECOVERY]).
 
    The QUIC protocol conceptually employs a variety of timers, but their
    usage can be implementation-dependent.  Implementers can add
@@ -2063,15 +2120,14 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-timerupdated-extension
    }
 
-                   Figure 30: QUICTimerUpdated definition
+                   Figure 32: QUICTimerUpdated definition
 
 
 
 
-
-Marx, et al.              Expires 23 April 2026                [Page 37]
+Marx, et al.             Expires 7 January 2027                [Page 38]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 6.  Security Events
@@ -2097,7 +2153,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-keyupdated-extension
    }
 
-                    Figure 31: QUICKeyUpdated definition
+                    Figure 33: QUICKeyUpdated definition
 
    Note that the key_phase is the full value of the key phase (as
    indicated by @M and @N in Figure 9 of [QUIC-TLS]).  The key phase bit
@@ -2125,9 +2181,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 38]
+Marx, et al.             Expires 7 January 2027                [Page 39]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICKeyDiscarded = {
@@ -2146,7 +2202,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-keydiscarded-extension
    }
 
-                   Figure 32: QUICKeyDiscarded definition
+                   Figure 34: QUICKeyDiscarded definition
 
 7.  Recovery events
 
@@ -2163,7 +2219,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    Base importance level.
 
    All these settings are typically set once and never change.
-   Implementation that do, for some reason, change these parameters
+   Implementations that do, for some reason, change these parameters
    during execution, MAY emit the recovery_parameters_set event more
    than once.
 
@@ -2181,9 +2237,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 39]
+Marx, et al.             Expires 7 January 2027                [Page 40]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICRecoveryParametersSet = {
@@ -2219,7 +2275,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-recoveryparametersset-extension
    }
 
-              Figure 33: QUICRecoveryParametersSet definition
+              Figure 35: QUICRecoveryParametersSet definition
 
    Additionally, this event can contain any number of unspecified fields
    to support different recovery approaches.
@@ -2237,9 +2293,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 40]
+Marx, et al.             Expires 7 January 2027                [Page 41]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    This event SHOULD group all possible metric updates that happen at or
@@ -2277,7 +2333,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-recoverymetricsupdated-extension
    }
 
-              Figure 34: QUICRecoveryMetricsUpdated definition
+              Figure 36: QUICRecoveryMetricsUpdated definition
 
    In order to make logging easier, implementations MAY log values even
    if they are the same as previously reported values (e.g., two
@@ -2293,9 +2349,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 41]
+Marx, et al.             Expires 7 January 2027                [Page 42]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 7.3.  congestion_state_updated
@@ -2322,7 +2378,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-congestionstateupdated-extension
    }
 
-              Figure 35: QUICCongestionStateUpdated definition
+              Figure 37: QUICCongestionStateUpdated definition
 
    The trigger field SHOULD be logged if there are multiple ways in
    which a state change can occur but MAY be omitted if a given state
@@ -2349,9 +2405,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 42]
+Marx, et al.             Expires 7 January 2027                [Page 43]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICPacketLost = {
@@ -2372,7 +2428,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-packetlost-extension
    }
 
-                    Figure 36: QUICPacketLost definition
+                    Figure 38: QUICPacketLost definition
 
 7.5.  marked_for_retransmit
 
@@ -2405,9 +2461,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 43]
+Marx, et al.             Expires 7 January 2027                [Page 44]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    QUICMarkedForRetransmit = {
@@ -2416,12 +2472,12 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-markedforretransmit-extension
    }
 
-               Figure 37: QUICMarkedForRetransmit definition
+               Figure 39: QUICMarkedForRetransmit definition
 
 7.6.  ecn_state_updated
 
    The ecn_state_updated event indicates a progression in the ECN state
-   machine as described in section A.4 of [QUIC-TRANSPORT].  It has
+   machine as described in Appendix A.4 of [QUIC-TRANSPORT].  It has
    Extra importance level.
 
    QUICECNStateUpdated = {
@@ -2442,7 +2498,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ; testing was successful
      "capable"
 
-                 Figure 38: QUICECNStateUpdated definition
+                 Figure 40: QUICECNStateUpdated definition
 
 8.  QUIC data type definitions
 
@@ -2450,20 +2506,20 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    QuicVersion = hexstring
 
-                     Figure 39: QuicVersion definition
+                     Figure 41: QuicVersion definition
 
 8.2.  ConnectionID
 
    ConnectionID = hexstring
 
-                     Figure 40: ConnectionID definition
+                     Figure 42: ConnectionID definition
 
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 44]
+Marx, et al.             Expires 7 January 2027                [Page 45]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 8.3.  Initiator
@@ -2471,7 +2527,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    Initiator = "local" /
                "remote"
 
-                      Figure 41: Initiator definition
+                      Figure 43: Initiator definition
 
 8.4.  IPAddress
 
@@ -2484,7 +2540,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    IPAddress = text /
                hexstring
 
-                      Figure 42: IPAddress definition
+                      Figure 44: IPAddress definition
 
 8.5.  TupleEndpointInfo
 
@@ -2513,13 +2569,13 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-tupleendpointinfo-extension
    }
 
-                  Figure 43: TupleEndpointInfo definition
+                  Figure 45: TupleEndpointInfo definition
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 45]
+Marx, et al.             Expires 7 January 2027                [Page 46]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 8.6.  PacketType
@@ -2533,7 +2589,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                    "stateless_reset" /
                    "unknown"
 
-                      Figure 44: PacketType definition
+                      Figure 46: PacketType definition
 
 8.7.  PacketNumberSpace
 
@@ -2541,7 +2597,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                          "handshake" /
                          "application_data"
 
-                  Figure 45: PacketNumberSpace definition
+                  Figure 47: PacketNumberSpace definition
 
 8.8.  PacketHeader
 
@@ -2573,9 +2629,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 46]
+Marx, et al.             Expires 7 January 2027                [Page 47]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    PacketHeader = {
@@ -2621,7 +2677,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * $$quic-packetheader-extension
    }
 
-                     Figure 46: PacketHeader definition
+                     Figure 48: PacketHeader definition
 
 8.9.  Token
 
@@ -2629,9 +2685,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 47]
+Marx, et al.             Expires 7 January 2027                [Page 48]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    Token = {
@@ -2650,7 +2706,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    $TokenType /= "retry" /
                  "resumption"
 
-                        Figure 47: Token definition
+                        Figure 49: Token definition
 
    The token carried in an Initial packet can either be a retry token
    from a Retry packet, or one originally provided by the server in a
@@ -2664,7 +2720,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    StatelessResetToken = hexstring .size 16
 
-                Figure 48: Stateless Reset Token definition
+                Figure 50: Stateless Reset Token definition
 
    The stateless reset token is carried in stateless reset packets, in
    transport parameters and in NEW_CONNECTION_ID frames.
@@ -2680,21 +2736,21 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                "server_1rtt_secret" /
                "client_1rtt_secret"
 
-                       Figure 49: KeyType definition
+                       Figure 51: KeyType definition
 
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 48]
+Marx, et al.             Expires 7 January 2027                [Page 49]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
 8.12.  ECN
 
    ECN = "Not-ECT" / "ECT(1)" / "ECT(0)" / "CE"
 
-                         Figure 50: ECN definition
+                         Figure 52: ECN definition
 
    The ECN bits carried in the IP header.
 
@@ -2709,7 +2765,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        * text => any
    }
 
-                Figure 51: QuicFrame type socket definition
+                Figure 53: QuicFrame type socket definition
 
    The QUIC frame types defined in this document are as follows:
 
@@ -2717,6 +2773,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                      PingFrame /
                      AckFrame /
                      ResetStreamFrame /
+                     ResetStreamAtFrame /
                      StopSendingFrame /
                      CryptoFrame /
                      NewTokenFrame /
@@ -2740,13 +2797,12 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-
-Marx, et al.              Expires 23 April 2026                [Page 49]
+Marx, et al.             Expires 7 January 2027                [Page 50]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
-                    Figure 52: QuicBaseFrames definition
+                    Figure 54: QuicBaseFrames definition
 
 8.13.1.  PaddingFrame
 
@@ -2764,7 +2820,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                     Figure 53: PaddingFrame definition
+                     Figure 55: PaddingFrame definition
 
 8.13.2.  PingFrame
 
@@ -2773,7 +2829,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                      Figure 54: PingFrame definition
+                      Figure 56: PingFrame definition
 
 8.13.3.  AckFrame
 
@@ -2797,9 +2853,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 50]
+Marx, et al.             Expires 7 January 2027                [Page 51]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    ; either a single number (e.g., [1]) or two numbers (e.g., [1,2]).
@@ -2826,7 +2882,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                       Figure 55: AckFrame definition
+                       Figure 57: AckFrame definition
 
    Note that the packet ranges in AckFrame.acked_ranges do not
    necessarily have to be ordered (e.g., [[5,9],[1,4]] is a valid
@@ -2853,9 +2909,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 51]
+Marx, et al.             Expires 7 January 2027                [Page 52]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    ResetStreamFrame = {
@@ -2863,7 +2919,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        stream_id: uint64
        error: $ApplicationError
 
-       ; if error_code === "unknown"
+       ; if error === "unknown"
        ? error_code: uint64
 
        ; in bytes
@@ -2871,29 +2927,63 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                   Figure 56: ResetStreamFrame definition
+                   Figure 58: ResetStreamFrame definition
 
-8.13.5.  StopSendingFrame
+8.13.5.  ResetStreamAtFrame
+
+   If the error_code numerical value does not map to a known
+   ApplicationError string, the error_code value of "unknown" can be
+   used and the raw value captured in the error_code_bytes field; a
+   numerical value without variable-length integer encoding.
+
+   ResetStreamAtFrame = {
+       frame_type: "reset_stream_at"
+       stream_id: uint64
+       error: $ApplicationError
+
+       ; if error === "unknown"
+       ? error_code: uint64
+
+       ; in bytes
+       final_size: uint64
+
+       ; in bytes
+       reliable_size: uint64
+
+       ? raw: RawInfo
+   }
+
+                  Figure 59: ResetStreamAtFrame definition
+
+8.13.6.  StopSendingFrame
 
    If the error numerical value does not map to a known ApplicationError
    string, the error value of "unknown" can be used and the raw value
    captured in the error_code field; a numerical value without variable-
    length integer encoding.
 
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 53]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
    StopSendingFrame = {
        frame_type: "stop_sending"
        stream_id: uint64
        error: $ApplicationError
 
-       ; if error_code === "unknown"
+       ; if error === "unknown"
        ? error_code: uint64
 
        ? raw: RawInfo
    }
 
-                   Figure 57: StopSendingFrame definition
+                   Figure 60: StopSendingFrame definition
 
-8.13.6.  CryptoFrame
+8.13.7.  CryptoFrame
 
    The length field of the Crypto frame MUST be logged in the qlog
    raw.length field.  The other sub-fields of the raw field are
@@ -2905,16 +2995,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        raw: RawInfo
    }
 
-                     Figure 58: CryptoFrame definition
+                     Figure 61: CryptoFrame definition
 
-
-
-Marx, et al.              Expires 23 April 2026                [Page 52]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
-8.13.7.  NewTokenFrame
+8.13.8.  NewTokenFrame
 
    NewTokenFrame = {
      frame_type: "new_token"
@@ -2922,14 +3005,26 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                    Figure 59: NewTokenFrame definition
+                    Figure 62: NewTokenFrame definition
 
-8.13.8.  StreamFrame
+8.13.9.  StreamFrame
 
    If the stream frame contains a length field, it MUST be logged in the
    qlog raw.length field.  If it does not, the implementation MAY
    calculate the actual frame byte length itself and log that in
    raw.length if necessary.
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 54]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    StreamFrame = {
        frame_type: "stream"
@@ -2939,9 +3034,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                     Figure 60: StreamFrame definition
+                     Figure 63: StreamFrame definition
 
-8.13.9.  MaxDataFrame
+8.13.10.  MaxDataFrame
 
    MaxDataFrame = {
      frame_type: "max_data"
@@ -2949,9 +3044,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                     Figure 61: MaxDataFrame definition
+                     Figure 64: MaxDataFrame definition
 
-8.13.10.  MaxStreamDataFrame
+8.13.11.  MaxStreamDataFrame
 
    MaxStreamDataFrame = {
      frame_type: "max_stream_data"
@@ -2960,17 +3055,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                  Figure 62: MaxStreamDataFrame definition
+                  Figure 65: MaxStreamDataFrame definition
 
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 53]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
-8.13.11.  MaxStreamsFrame
+8.13.12.  MaxStreamsFrame
 
    MaxStreamsFrame = {
      frame_type: "max_streams"
@@ -2979,9 +3066,21 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                   Figure 63: MaxStreamsFrame definition
+                   Figure 66: MaxStreamsFrame definition
 
-8.13.12.  DataBlockedFrame
+8.13.13.  DataBlockedFrame
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 55]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    DataBlockedFrame = {
      frame_type: "data_blocked"
@@ -2989,9 +3088,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                   Figure 64: DataBlockedFrame definition
+                   Figure 67: DataBlockedFrame definition
 
-8.13.13.  StreamDataBlockedFrame
+8.13.14.  StreamDataBlockedFrame
 
    StreamDataBlockedFrame = {
      frame_type: "stream_data_blocked"
@@ -3000,9 +3099,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                Figure 65: StreamDataBlockedFrame definition
+                Figure 68: StreamDataBlockedFrame definition
 
-8.13.14.  StreamsBlockedFrame
+8.13.15.  StreamsBlockedFrame
 
    StreamsBlockedFrame = {
      frame_type: "streams_blocked"
@@ -3011,20 +3110,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                 Figure 66: StreamsBlockedFrame definition
+                 Figure 69: StreamsBlockedFrame definition
 
-8.13.15.  NewConnectionIDFrame
-
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 54]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
+8.13.16.  NewConnectionIDFrame
 
    NewConnectionIDFrame = {
      frame_type: "new_connection_id"
@@ -3039,9 +3127,18 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                 Figure 67: NewConnectionIDFrame definition
+                 Figure 70: NewConnectionIDFrame definition
 
-8.13.16.  RetireConnectionIDFrame
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 56]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
+8.13.17.  RetireConnectionIDFrame
 
    RetireConnectionIDFrame = {
      frame_type: "retire_connection_id"
@@ -3049,9 +3146,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-               Figure 68: RetireConnectionIDFrame definition
+               Figure 71: RetireConnectionIDFrame definition
 
-8.13.17.  PathChallengeFrame
+8.13.18.  PathChallengeFrame
 
    PathChallengeFrame = {
      frame_type: "path_challenge"
@@ -3061,9 +3158,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                  Figure 69: PathChallengeFrame definition
+                  Figure 72: PathChallengeFrame definition
 
-8.13.18.  PathResponseFrame
+8.13.19.  PathResponseFrame
 
    PathResponseFrame = {
      frame_type: "path_response"
@@ -3073,16 +3170,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
      ? raw: RawInfo
    }
 
-                  Figure 70: PathResponseFrame definition
+                  Figure 73: PathResponseFrame definition
 
-
-
-Marx, et al.              Expires 23 April 2026                [Page 55]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
-8.13.19.  ConnectionCloseFrame
+8.13.20.  ConnectionCloseFrame
 
    An endpoint that receives unknown error codes can record it in the
    error_code field using the numerical value without variable-length
@@ -3095,7 +3185,16 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    has the value "unknown" and the numerical value without variable-
    length integer encoding can be logged in error_code.
 
-   The CONNECTION_CLOSE reason phrase is a byte sequences.  It is likely
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 57]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
+   The CONNECTION_CLOSE reason phrase is a byte sequence.  It is likely
    that this sequence is presentable as UTF-8, in which case it can be
    logged in the reason field.  The reason_bytes field supports logging
    the raw bytes, which can be useful when the value is not UTF-8 or
@@ -3111,7 +3210,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? error: $TransportError / CryptoError /
                 $ApplicationError
 
-       ; only if error_code === "unknown"
+       ; if error === "unknown"
        ? error_code: uint64
 
        ? reason: text
@@ -3123,32 +3222,33 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                 Figure 71: ConnectionCloseFrame definition
+                 Figure 74: ConnectionCloseFrame definition
 
-8.13.20.  HandshakeDoneFrame
-
-
-
-
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 56]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
+8.13.21.  HandshakeDoneFrame
 
    HandshakeDoneFrame = {
      frame_type: "handshake_done"
      ? raw: RawInfo
    }
 
-                  Figure 72: HandshakeDoneFrame definition
+                  Figure 75: HandshakeDoneFrame definition
 
-8.13.21.  UnknownFrame
+8.13.22.  UnknownFrame
 
    The frame_type_bytes field is the numerical value without variable-
    length integer encoding.
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 58]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    UnknownFrame = {
        frame_type: "unknown"
@@ -3156,9 +3256,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                     Figure 73: UnknownFrame definition
+                     Figure 76: UnknownFrame definition
 
-8.13.22.  DatagramFrame
+8.13.23.  DatagramFrame
 
    The QUIC DATAGRAM frame is defined in Section 4 of [RFC9221].
 
@@ -3172,9 +3272,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
        ? raw: RawInfo
    }
 
-                    Figure 74: DatagramFrame definition
+                    Figure 77: DatagramFrame definition
 
-8.13.23.  TransportError
+8.13.24.  TransportError
 
    The generic $TransportError is defined here as a CDDL "type socket"
    extension point.  It can be extended to support additional Transport
@@ -3189,9 +3289,21 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 57]
+
+
+
+
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 59]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
    $TransportError /= "no_error" /
@@ -3215,9 +3327,9 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
                     ; there is no value to reflect CRYPTO_ERROR
                     ; use the CryptoError type instead
 
-                    Figure 75: TransportError definition
+                    Figure 78: TransportError definition
 
-8.13.24.  ApplicationError
+8.13.25.  ApplicationError
 
    By definition, an application error is defined by the application-
    level protocol running on top of QUIC (e.g., HTTP/3).
@@ -3228,7 +3340,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    $ApplicationError /= "unknown"
 
-                   Figure 76: ApplicationError definition
+                   Figure 79: ApplicationError definition
 
    Application-level qlog definitions that wish to define new
    ApplicationError strings MUST do so by extending the
@@ -3245,12 +3357,12 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 58]
+Marx, et al.             Expires 7 January 2027                [Page 60]
 
-Internet-Draft       QUIC event definitions for qlog        October 2025
+Internet-Draft       QUIC event definitions for qlog           July 2026
 
 
-8.13.25.  CryptoError
+8.13.26.  CryptoError
 
    These errors are defined in the TLS document as "A TLS alert is
    turned into a QUIC connection error by converting the one-byte alert
@@ -3266,14 +3378,30 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    ; all strings from "crypto_error_0x100" to "crypto_error_0x1ff"
    CryptoError = text .regexp "crypto_error_0x1[0-9a-f][0-9a-f]"
 
-                     Figure 77: CryptoError definition
+                     Figure 80: CryptoError definition
 
-9.  Security and Privacy Considerations
+9.  Handling Packet Coalescing
 
-   The security and privacy considerations discussed in [QLOG-MAIN]
-   apply to this document as well.
+   Multiple QUIC packets can be coalesced in a single UDP datagram,
+   especially during the handshake (see Section 12.2 of
+   [QUIC-TRANSPORT]).  However, neither QUIC nor UDP themselves provide
+   an explicit mechanism to track this behaviour.  To make it possible
+   for implementations to track coalescing across packet-level and
+   datagram-level qlog events, this document defines a qlog-specific
+   mechanism for tracking coalescing across packet-level and datagram-
+   level qlog events: a "datagram identifier" carried in datagram_id
+   fields. qlog implementations that want to track coalescing can use
+   this mechanism, where multiple events sharing the same datagram_id
+   indicate they were coalesced in the same UDP datagram.  The selection
+   of specific and locally-unique datagram_id values is an
+   implementation choice.
 
-10.  IANA Considerations
+10.  Security and Privacy Considerations
+
+   The security and privacy considerations discussed in Section 14 of
+   [QLOG-MAIN] apply to this document as well.
+
+11.  IANA Considerations
 
    This document registers a new entry in the "qlog event schema URIs"
    registry (created in Section 15 of [QLOG-MAIN]):
@@ -3282,33 +3410,37 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    Namespace  quic
 
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 61]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
    Event Types  server_listening, connection_started, connection_closed,
       connection_id_updated, spin_bit_updated, connection_state_updated,
       tuple_assigned, mtu_updated, version_information,
       alpn_information, parameters_set, parameters_restored,
       packet_sent, packet_received, packet_dropped, packet_buffered,
       packets_acked, udp_datagrams_sent, udp_datagrams_received,
-      udp_datagram_dropped, stream_state_updated, frames_processed,
-      stream_data_moved, datagram_data_moved, migration_state_updated,
-      key_updated, key_discarded, recovery_parameters_set,
-      recovery_metrics_updated, congestion_state_updated, timer_updated,
-      packet_lost, marked_for_retransmit, ecn_state_updated
+      udp_datagram_dropped, stream_state_updated, frames_created,
+      frames_parsed, frames_processed, stream_data_moved,
+      datagram_data_moved, connection_data_blocked_updated,
+      stream_data_blocked_updated, datagram_data_blocked_updated,
+      migration_state_updated, key_updated, key_discarded,
+      recovery_parameters_set, recovery_metrics_updated,
+      congestion_state_updated, timer_updated, packet_lost,
+      marked_for_retransmit, ecn_state_updated
 
    Description:  Event definitions related to the QUIC transport
       protocol.
 
    Reference:  This Document
 
+12.  References
 
-
-Marx, et al.              Expires 23 April 2026                [Page 59]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
-11.  References
-
-11.1.  Normative References
+12.1.  Normative References
 
    [CDDL]     Birkholz, H., Vigano, C., and C. Bormann, "Concise Data
               Definition Language (CDDL): A Notational Convention to
@@ -3325,15 +3457,22 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
               Marx, R., Niccolini, L., Seemann, M., and L. Pardue,
               "qlog: Structured Logging for Network Protocols", Work in
               Progress, Internet-Draft, draft-ietf-quic-qlog-main-
-              schema-12, 7 July 2025,
+              schema-13, 20 October 2025,
               <https://datatracker.ietf.org/doc/html/draft-ietf-quic-
-              qlog-main-schema-12>.
+              qlog-main-schema-13>.
 
    [QUIC-DATAGRAM]
               Pauly, T., Kinnear, E., and D. Schinazi, "An Unreliable
               Datagram Extension to QUIC", RFC 9221,
               DOI 10.17487/RFC9221, March 2022,
               <https://www.rfc-editor.org/rfc/rfc9221>.
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 62]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    [QUIC-RECOVERY]
               Iyengar, J., Ed. and I. Swett, Ed., "QUIC Loss Detection
@@ -3355,13 +3494,6 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
               DOI 10.17487/RFC2119, March 1997,
               <https://www.rfc-editor.org/rfc/rfc2119>.
 
-
-
-Marx, et al.              Expires 23 April 2026                [Page 60]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
               2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
               May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
@@ -3371,7 +3503,7 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
               DOI 10.17487/RFC9221, March 2022,
               <https://www.rfc-editor.org/rfc/rfc9221>.
 
-11.2.  Informative References
+12.2.  Informative References
 
    [RFC7301]  Friedl, S., Popov, A., Langley, A., and E. Stephan,
               "Transport Layer Security (TLS) Application-Layer Protocol
@@ -3389,9 +3521,24 @@ Acknowledgements
    Landau, Will Hawkins, Mathis Engelbart, Kazuho Oku, and Jonathan
    Lennox for their feedback and suggestions.
 
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 63]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
+
 Change Log
 
    This section is to be removed before publishing as an RFC.
+
+Since draft-ietf-qlog-quic-events-12:
+
+   *  Split frames_processed into 3 events (#513)
+
+   *  Wide range of editorial changes
 
 Since draft-ietf-qlog-quic-events-11:
 
@@ -3410,13 +3557,6 @@ Since draft-ietf-qlog-quic-events-11:
    *  Reworked stream_state_updated (#497)
 
    *  Renamed owner to initiator (#498)
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 61]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
 
    *  Split up flags in PacketHeader (#478)
 
@@ -3437,6 +3577,14 @@ Since draft-ietf-qlog-quic-events-08:
       and recovery:parameters_set to quic:recovery_parameters_set (#439)
 
    *  Added unknown_parameters field to parameters_set (#438)
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 64]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    *  Added extra parameters to parameters_restored (#441)
 
@@ -3466,14 +3614,6 @@ Since draft-ietf-qlog-quic-events-06:
 
    *  ProtocolEventBody is now called ProtocolEventData (#352)
 
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 62]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    *  Editorial changes (#402, #404, #394, #393)
 
 Since draft-ietf-qlog-quic-events-05:
@@ -3493,6 +3633,14 @@ Since draft-ietf-qlog-quic-events-04:
       'quic:frames_processed' (#307)
 
    *  Added definitions for RFC9287 (QUIC GREASE Bit extension) (#311)
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 65]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    *  Added definitions for RFC9221 (QUIC Datagram Frame extension)
       (#310)
@@ -3522,14 +3670,6 @@ Since draft-ietf-qlog-quic-events-02:
 
    *  Renamed key_retired to key_discarded (#185)
 
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 63]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    *  Added fields and events for DPLPMTUD (#135)
 
    *  Made packet_number optional in PacketHeader (#244)
@@ -3549,6 +3689,14 @@ Since draft-ietf-qlog-quic-events-01:
 Since draft-ietf-qlog-quic-events-00:
 
    *  Change the data definition language from TypeScript to CDDL (#143)
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 66]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
 Since draft-marx-qlog-event-definitions-quic-h3-02:
 
@@ -3578,14 +3726,6 @@ Since draft-marx-qlog-event-definitions-quic-h3-01:
    *  Added support for logging retry, stateless reset and initial
       tokens (#94,#86,#117)
 
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 64]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    *  Moved separate general event categories into a single category
       "generic" (#47)
 
@@ -3605,6 +3745,14 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
 
    *  Renamed qpack instruction_received and instruction_sent to
       instruction_created and instruction_parsed (#114)
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 67]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    *  Updated qpack:dynamic_table_updated.update_type.  It now has the
       value "inserted" instead of "added" (#113)
@@ -3634,14 +3782,6 @@ Internet-Draft       QUIC event definitions for qlog        October 2025
    *  Added "simulation:scenario" event to help indicate simulation
       details
 
-
-
-
-Marx, et al.              Expires 23 April 2026                [Page 65]
-
-Internet-Draft       QUIC event definitions for qlog        October 2025
-
-
    *  Added "packets_acked" event (#107)
 
    *  Added "datagram_ids" to the datagram_X and packet_X events to
@@ -3661,6 +3801,14 @@ Since draft-marx-qlog-event-definitions-quic-h3-00:
       type)
 
    *  Events are given an importance indicator (issue #22)
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 68]
+
+Internet-Draft       QUIC event definitions for qlog           July 2026
+
 
    *  Event names are more consistent and use past tense (issue #21)
 
@@ -3693,4 +3841,24 @@ Authors' Addresses
 
 
 
-Marx, et al.              Expires 23 April 2026                [Page 66]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Marx, et al.             Expires 7 January 2027                [Page 69]
