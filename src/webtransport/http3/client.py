@@ -291,6 +291,9 @@ class Client:
         while self._running:
             await self._receive()
 
+            # 受信 FIN が立った双方向ストリーム (STREAM_END 通知用)
+            finished_streams: list[int] = []
+
             while True:
                 quic_event = self._quic_connection.next_event()
                 if quic_event is None:
@@ -302,6 +305,11 @@ class Client:
                         quic_event.data,
                         quic_event.fin,
                     )
+                    # nghttp3_conn_close_stream は大きな応答受信中に
+                    # 残りの DATA イベントを落とすことがあるため使わない。
+                    # QUIC の FIN をストリーム終端の合図として使う。
+                    if quic_event.fin and quic_event.stream_id % 4 in (0, 1):
+                        finished_streams.append(quic_event.stream_id)
                 elif quic_event.type == quic_low.EventType.STREAM_RESET:
                     if self._on_stream_reset is not None:
                         await self._on_stream_reset(
@@ -343,6 +351,11 @@ class Client:
                         http3_event.stream_id,
                         http3_event.error_code,
                     )
+
+            # HTTP/3 の DATA を処理したあとに STREAM_END を通知する
+            if self._on_stream_end is not None:
+                for stream_id in finished_streams:
+                    await self._on_stream_end(stream_id)
 
             await self._send_pending()
 

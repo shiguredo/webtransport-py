@@ -13,6 +13,8 @@
 
 - [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
   - @voluntas
+- [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
+  - @voluntas
 
 ### misc
 

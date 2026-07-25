@@ -208,6 +208,17 @@ class Http3Connection {
   void reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
+   * QUIC ストリーム終了を nghttp3 に通知する
+   *
+   * QUIC の STREAM_CLOSED を受けたときに呼ぶ。
+   * nghttp3 の stream_close コールバック経由で STREAM_END イベントが生成される。
+   *
+   * @param stream_id ストリーム ID
+   * @param error_code アプリケーションエラーコード
+   */
+  void close_stream(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
    * GOAWAY を送信
    * @param id GOAWAY ID
    */

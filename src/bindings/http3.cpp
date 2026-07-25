@@ -183,8 +183,15 @@ Http3Connection::get_streams_to_send() {
     for (nghttp3_ssize i = 0; i < sveccnt; ++i) {
       total_len += vec[i].len;
     }
+    // 進捗がない場合は打ち切る (WOULDBLOCK 相当)
+    if (total_len == 0 && fin == 0) {
+      break;
+    }
     if (total_len > 0) {
       nghttp3_conn_add_write_offset(conn_, stream_id, total_len);
+    } else if (fin) {
+      // FIN のみの場合も offset 0 を通知する
+      nghttp3_conn_add_write_offset(conn_, stream_id, 0);
     }
 
     if (sveccnt == 0) {
@@ -336,6 +343,17 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
   event.stream_id = stream_id;
   event.error_code = error_code;
   push_event(std::move(event));
+}
+
+void Http3Connection::close_stream(int64_t stream_id, uint64_t error_code) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // QUIC ストリームが閉じられたことを nghttp3 に伝える
+  // 成功すると stream_close_cb が呼ばれ STREAM_END が積まれる
+  // STREAM_NOT_FOUND は既に閉じ済みとして無視する
+  (void)nghttp3_conn_close_stream(conn_, stream_id, error_code);
 }
 
 void Http3Connection::goaway(int64_t id) {
@@ -614,6 +632,8 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
                                             uint32_t* pflags,
                                             void* conn_user_data,
                                             void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   auto it = self->stream_buffers_.find(stream_id);
@@ -622,32 +642,41 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
     return NGHTTP3_ERR_WOULDBLOCK;
   }
 
-  auto& buffer = it->second.front();
   if (veccnt == 0) {
     return 0;
   }
 
-  // 残りデータがない場合
-  size_t remaining = buffer.data.size() - buffer.offset;
-  if (remaining == 0) {
-    if (buffer.fin) {
+  auto& buffers = it->second;
+
+  // 送信済みで FIN なしのバッファは捨てて次へ進む
+  // (連続 send_data でキューが積まれたときに 0 返却で nghttp3 が abort するのを防ぐ)
+  while (!buffers.empty()) {
+    auto& buffer = buffers.front();
+    size_t remaining = buffer.data.size() - buffer.offset;
+    if (remaining == 0) {
+      if (buffer.fin) {
+        *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        return 0;
+      }
+      buffers.pop_front();
+      continue;
+    }
+
+    // データを返す（オフセットから開始）
+    vec[0].base = const_cast<uint8_t*>(buffer.data.data() + buffer.offset);
+    vec[0].len = remaining;
+
+    // オフセットを更新（データはまだ削除しない - acked_stream_data_cb で削除）
+    buffer.offset = buffer.data.size();
+
+    if (buffer.fin && buffers.size() == 1) {
       *pflags |= NGHTTP3_DATA_FLAG_EOF;
     }
-    return 0;
+
+    return 1;
   }
 
-  // データを返す（オフセットから開始）
-  vec[0].base = const_cast<uint8_t*>(buffer.data.data() + buffer.offset);
-  vec[0].len = remaining;
-
-  // オフセットを更新（データはまだ削除しない - acked_stream_data_cb で削除）
-  buffer.offset = buffer.data.size();
-
-  if (buffer.fin) {
-    *pflags |= NGHTTP3_DATA_FLAG_EOF;
-  }
-
-  return 1;
+  return NGHTTP3_ERR_WOULDBLOCK;
 }
 
 // ========== Python バインディング ==========
@@ -803,6 +832,11 @@ void bind_http3(nb::module_& m) {
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "ストリームをリセット")
+      .def("close_stream", &Http3Connection::close_stream, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def close_stream(self, stream_id: int, error_code: int = "
+                   "0) -> None"),
+           "QUIC ストリーム終了を nghttp3 に通知する")
       .def("goaway", &Http3Connection::goaway, nb::arg("id") = 0,
            nb::sig("def goaway(self, id: int = 0) -> None"), "GOAWAY を送信")
       .def("next_event", &Http3Connection::next_event,

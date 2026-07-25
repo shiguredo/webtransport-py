@@ -508,3 +508,489 @@ async def test_server_resets_http3_stream(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_resets_http3_stream(test_certificates):
+    """Client が HTTP/3 ストリームを reset すると Server に届くことを確認"""
+    from webtransport.http3 import Client, Server
+
+    server_reset_received = asyncio.Event()
+    request_received = asyncio.Event()
+    reset_info = {}
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        request_received.set()
+
+    async def on_stream_reset(stream_id, error_code, addr):
+        reset_info["stream_id"] = stream_id
+        reset_info["error_code"] = error_code
+        server_reset_received.set()
+
+    server.on_request(on_request)
+    server.on_stream_reset(on_stream_reset)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request("GET", "/will-reset")
+    assert stream_id >= 0
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(request_received.wait(), timeout=5.0)
+    await client.reset_stream(stream_id, error_code=0x0102)
+    await asyncio.wait_for(server_reset_received.wait(), timeout=5.0)
+
+    assert reset_info["stream_id"] == stream_id
+    assert reset_info["error_code"] == 0x0102
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_stream_end_callback(test_certificates):
+    """レスポンス完了時に Client の on_stream_end が呼ばれることを確認"""
+    from webtransport.http3 import Client, Server
+
+    ended_stream_ids = []
+    headers_received = asyncio.Event()
+    data_received = asyncio.Event()
+    stream_ended = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        await server.send_data(addr, stream_id, b"done", fin=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_headers(stream_id, headers):
+        headers_received.set()
+
+    async def on_data(stream_id, data):
+        data_received.set()
+
+    async def on_stream_end(stream_id):
+        ended_stream_ids.append(stream_id)
+        stream_ended.set()
+
+    client.on_headers(on_headers)
+    client.on_data(on_data)
+    client.on_stream_end(on_stream_end)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request("GET", "/end")
+    assert stream_id >= 0
+    await client.send_data(stream_id, b"", fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(headers_received.wait(), timeout=5.0)
+    await asyncio.wait_for(data_received.wait(), timeout=5.0)
+    await asyncio.wait_for(stream_ended.wait(), timeout=5.0)
+
+    assert ended_stream_ids == [stream_id]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_custom_request_headers(test_certificates):
+    """追加リクエストヘッダーがサーバーに届くことを確認"""
+    from webtransport.http3 import Client, Server
+
+    server_headers = []
+    headers_received = asyncio.Event()
+    client_data = []
+    client_data_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        server_headers.extend(headers)
+        headers_received.set()
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        await server.send_data(addr, stream_id, b"ok", fin=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_data(stream_id, data):
+        client_data.append(data)
+        client_data_received.set()
+
+    client.on_data(on_client_data)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request(
+        "GET",
+        "/headers",
+        headers=[("x-trace-id", "abc-123"), ("x-custom", "value")],
+    )
+    assert stream_id >= 0
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(headers_received.wait(), timeout=5.0)
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+
+    header_map = dict(server_headers)
+    assert header_map[":method"] == "GET"
+    assert header_map[":path"] == "/headers"
+    assert header_map["x-trace-id"] == "abc-123"
+    assert header_map["x-custom"] == "value"
+    assert client_data == [b"ok"]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_not_found_status(test_certificates):
+    """サーバーが 404 を返したとき Client が :status を受け取れることを確認"""
+    from webtransport.http3 import Client, Server
+
+    received_status = []
+    headers_received = asyncio.Event()
+    data_received = asyncio.Event()
+    body = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        await server.submit_response(
+            addr,
+            stream_id,
+            [(":status", "404"), ("content-type", "text/plain")],
+        )
+        await server.send_data(addr, stream_id, b"not found", fin=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_headers(stream_id, headers):
+        for name, value in headers:
+            if name == ":status":
+                received_status.append(value)
+        headers_received.set()
+
+    async def on_data(stream_id, data):
+        body.append(data)
+        data_received.set()
+
+    client.on_headers(on_headers)
+    client.on_data(on_data)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request("GET", "/missing")
+    assert stream_id >= 0
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(headers_received.wait(), timeout=5.0)
+    await asyncio.wait_for(data_received.wait(), timeout=5.0)
+
+    assert received_status == ["404"]
+    assert body == [b"not found"]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_chunked_response_body(test_certificates):
+    """サーバーがレスポンスボディを分割送信しても Client が結合できることを確認"""
+    from webtransport.http3 import Client, Server
+
+    client_chunks = []
+    stream_ended = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        await server.send_data(addr, stream_id, b"part-1-", fin=False)
+        await server.send_data(addr, stream_id, b"part-2-", fin=False)
+        await server.send_data(addr, stream_id, b"part-3", fin=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_data(stream_id, data):
+        client_chunks.append(data)
+
+    async def on_stream_end(stream_id):
+        stream_ended.set()
+
+    client.on_data(on_data)
+    client.on_stream_end(on_stream_end)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request("GET", "/chunked")
+    assert stream_id >= 0
+    await client.send_data(stream_id, b"", fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(stream_ended.wait(), timeout=5.0)
+
+    assert b"".join(client_chunks) == b"part-1-part-2-part-3"
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_large_post_body(test_certificates):
+    """大きな POST ボディがエコーされることを確認"""
+    from webtransport.http3 import Client, Server
+
+    payload = bytes((index % 256) for index in range(32 * 1024))
+    server_buffer = bytearray()
+    client_buffer = bytearray()
+    server_complete = asyncio.Event()
+    client_complete = asyncio.Event()
+    response_sent = False
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        pass
+
+    async def on_data(stream_id, data, addr):
+        nonlocal response_sent
+        server_buffer.extend(data)
+        if not response_sent and len(server_buffer) >= len(payload):
+            response_sent = True
+            server_complete.set()
+            await server.submit_response(
+                addr,
+                stream_id,
+                [(":status", "200"), ("content-type", "application/octet-stream")],
+            )
+            await server.send_data(addr, stream_id, bytes(server_buffer), fin=True)
+
+    server.on_request(on_request)
+    server.on_data(on_data)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_data(stream_id, data):
+        client_buffer.extend(data)
+        if len(client_buffer) >= len(payload):
+            client_complete.set()
+
+    client.on_data(on_client_data)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request("POST", "/large")
+    assert stream_id >= 0
+    await client.send_data(stream_id, payload, fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(server_complete.wait(), timeout=10.0)
+    await asyncio.wait_for(client_complete.wait(), timeout=10.0)
+
+    assert bytes(server_buffer) == payload
+    assert bytes(client_buffer) == payload
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()

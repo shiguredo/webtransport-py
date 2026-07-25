@@ -601,7 +601,9 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
                                             nghttp3_vec* vec,
                                             size_t veccnt,
                                             uint32_t* pflags) {
-  (void)veccnt;
+  if (veccnt == 0) {
+    return 0;
+  }
 
   auto it = stream_buffers_.find(stream_id);
   if (it == stream_buffers_.end() || it->second.empty()) {
@@ -609,18 +611,34 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
   }
 
   auto& buffers = it->second;
-  auto& front = buffers.front();
 
-  // 先頭のデータを返す
-  vec[0].base = const_cast<uint8_t*>(front.data.data());
-  vec[0].len = front.data.size();
+  // 送信済み (offset 済み) で FIN なしのバッファは捨てて次へ進む
+  while (!buffers.empty()) {
+    auto& front = buffers.front();
+    size_t remaining = front.data.size() - front.offset;
+    if (remaining == 0) {
+      if (front.fin) {
+        *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        return 0;
+      }
+      buffers.pop_front();
+      continue;
+    }
 
-  // FIN フラグの処理
-  if (front.fin && buffers.size() == 1) {
-    *pflags |= NGHTTP3_DATA_FLAG_EOF;
+    vec[0].base =
+        const_cast<uint8_t*>(front.data.data() + front.offset);
+    vec[0].len = remaining;
+    front.offset = front.data.size();
+
+    // 末尾バッファかつ FIN なら EOF を付ける
+    if (front.fin && buffers.size() == 1) {
+      *pflags |= NGHTTP3_DATA_FLAG_EOF;
+    }
+
+    return 1;
   }
 
-  return 1;
+  return NGHTTP3_ERR_WOULDBLOCK;
 }
 
 void H3Session::send_datagram(int64_t session_id,

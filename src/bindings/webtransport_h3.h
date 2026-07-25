@@ -392,6 +392,8 @@ class H3Session {
   // ストリームデータ (送信待ち)
   struct StreamBuffer {
     std::vector<uint8_t> data;
+    // nghttp3 に渡済みのオフセット。未 ACK でも再送しないために進める
+    size_t offset = 0;
     bool fin = false;
   };
   std::map<int64_t, std::deque<StreamBuffer>> stream_buffers_;
