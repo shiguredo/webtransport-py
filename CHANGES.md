@@ -20,5 +20,11 @@
 
 ### misc
 
+- [FIX] Windows 11 ARM64 でネイティブ aarch64 Python と ClangCL を使い AWS-LC をビルドできるようにする
+  - @voluntas
+- [FIX] CI の wheel テストで `pythonpath=["src"]` が拡張モジュール付き wheel を隠さないようにする
+  - @voluntas
+- [FIX] auditwheel が manylinux タグを付けられない場合は linux タグのまま wheel を出す
+  - @voluntas
 - [UPDATE] refs/ 配下の IETF draft を最新版に更新する
   - @voluntas

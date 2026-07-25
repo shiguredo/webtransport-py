@@ -93,7 +93,14 @@ jobs:
       - name: Repair wheel with auditwheel
         shell: bash
         run: |
-          uvx auditwheel repair dist/*.whl --strip --only-plat
+          # Ubuntu 26.04 + free-threaded など、auditwheel の manylinux 上限
+          # (現状 2_41) を超える記号を含む場合は linux_* タグのまま出す
+          mkdir -p wheelhouse
+          if ! uvx auditwheel repair dist/*.whl --strip --only-plat -w wheelhouse; then
+            echo "auditwheel manylinux repair failed; keeping linux platform tag"
+            uvx auditwheel show dist/*.whl || true
+            cp dist/*.whl wheelhouse/
+          fi
       - name: Upload Repaired Wheels
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -104,39 +111,51 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
+        include:
           - name: windows-2025_x86_64
             runs_on: windows-2025-vs2026
+            python_version: "3.14"
+            # x86_64 はそのまま
+            uv_python: "3.14"
           - name: windows-11_arm64
             runs_on: windows-11-vs2026-arm
-        python_version:
-          - "3.14"
+            python_version: "3.14"
+            # uv は Windows ARM64 で x86_64 Python を優先するため、
+            # ネイティブ aarch64 を明示する (AWS-LC も ARM64 + ClangCL が必要)
+            uv_python: "3.14-aarch64"
           # Windows の Python 3.14t (free-threaded) は nanobind のビルドで
           # Py_GIL_DISABLED マクロが正しく検出されないため、現時点では非対応
-          # - "3.14t"
-    runs-on: ${{ matrix.platform.runs_on }}
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: false
-          python-version: ${{ matrix.python_version }}
+          python-version: ${{ matrix.uv_python }}
 
       - name: Cache dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: _deps
-          key: ${{ runner.os }}-deps-${{ matrix.platform.name }}-${{ hashFiles('deps.json', 'CMakeLists.txt', 'pyproject.toml', 'uv.lock') }}
+          key: ${{ runner.os }}-deps-${{ matrix.name }}-${{ hashFiles('deps.json', 'CMakeLists.txt', 'pyproject.toml', 'uv.lock') }}
           restore-keys: |
-            ${{ runner.os }}-deps-${{ matrix.platform.name }}-
+            ${{ runner.os }}-deps-${{ matrix.name }}-
+
+      - name: Verify native ARM64 Python
+        if: matrix.name == 'windows-11_arm64'
+        shell: bash
+        run: |
+          arch=$(uv run python -c "import platform; print(platform.machine())")
+          echo "Python machine=${arch}"
+          test "${arch}" = "ARM64"
 
       - name: Build wheel
         run: uv build --wheel --out-dir wheelhouse
       - name: Upload Wheels
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.platform.name }}_python-${{ matrix.python_version }}
+          name: ${{ matrix.name }}_python-${{ matrix.python_version }}
           path: wheelhouse/*.whl
 
   test:

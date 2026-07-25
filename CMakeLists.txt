@@ -112,6 +112,14 @@ else()
     )
   endif()
 
+  # Windows ARM64 の AWS-LC アセンブリは ClangCL ツールセット必須
+  # (MSVC の v14x では aarch64 アセンブリを扱えない)
+  set(AWS_LC_EP_EXTRA_ARGS)
+  if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64|arm64")
+    message(STATUS "AWS-LC: using ClangCL toolset for Windows ARM64")
+    list(APPEND AWS_LC_EP_EXTRA_ARGS CMAKE_GENERATOR_TOOLSET ClangCL)
+  endif()
+
   ExternalProject_Add(
     aws_lc_build
     GIT_REPOSITORY ${AWS_LC_GIT_REPOSITORY}
@@ -124,6 +132,7 @@ else()
     UPDATE_COMMAND ""
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     CMAKE_ARGS ${AWS_LC_CMAKE_ARGS}
+    ${AWS_LC_EP_EXTRA_ARGS}
     BUILD_COMMAND ${CMAKE_COMMAND} --build ${AWS_LC_BUILD_DIR} --config Release --parallel ${PARALLEL_JOBS}
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${AWS_LC_SSL_LIB} ${AWS_LC_CRYPTO_LIB}
