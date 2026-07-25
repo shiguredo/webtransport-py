@@ -1,10 +1,9 @@
 import argparse
 import subprocess
-from typing import Optional
 
 
 # ファイルを読み込み、バージョンを更新
-def update_version(file_path: str, dry_run: bool) -> Optional[str]:
+def update_version(file_path: str, dry_run: bool) -> str | None:
     with open(file_path, "r", encoding="utf-8") as f:
         current_version: str = f.read().strip()
 
@@ -18,7 +17,7 @@ def update_version(file_path: str, dry_run: bool) -> Optional[str]:
         parts = current_version.split(".")
         if len(parts) != 3:
             raise ValueError("Version format in VERSION file is not X.Y.Z")
-        major, minor, patch = map(int, parts)
+        major, minor, _patch = map(int, parts)
         new_version = f"{major}.{minor + 1}.0.dev0"
 
     print(f"Current version: {current_version}")
@@ -34,8 +33,9 @@ def update_version(file_path: str, dry_run: bool) -> Optional[str]:
         print("Dry-run: Version would be updated to:")
         print(new_version)
     else:
+        # 末尾改行を付けないと end-of-file-fixer がコミットを止める
         with open(file_path, "w", encoding="utf-8") as f:
-            f.write(new_version)
+            f.write(new_version + "\n")
         print(f"Version updated in {file_path} to {new_version}")
 
     return new_version
@@ -86,7 +86,7 @@ def main() -> None:
     version_file_path: str = "VERSION"
 
     # バージョン更新
-    new_version: Optional[str] = update_version(version_file_path, args.dry_run)
+    new_version: str | None = update_version(version_file_path, args.dry_run)
 
     if not new_version:
         return  # ユーザーが確認をキャンセルした場合、処理を中断
