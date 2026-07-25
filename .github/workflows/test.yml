@@ -10,12 +10,15 @@ on:
         type: string
 
 jobs:
-  test_macos:
+  test_ubuntu:
     strategy:
+      fail-fast: false
       matrix:
         platform:
-          - name: macos-26_arm64
-            runs_on: macos-26
+          - name: ubuntu-24.04_x86_64
+            runs_on: ubuntu-24.04
+          - name: ubuntu-24.04_arm64
+            runs_on: ubuntu-24.04-arm
         python_version:
           - "3.14"
           - "3.14t"
@@ -63,15 +66,12 @@ jobs:
         env:
           UV_NO_SYNC: 1
 
-  test_ubuntu:
+  test_macos:
     strategy:
-      fail-fast: false
       matrix:
         platform:
-          - name: ubuntu-24.04_x86_64
-            runs_on: ubuntu-24.04
-          - name: ubuntu-24.04_arm64
-            runs_on: ubuntu-24.04-arm
+          - name: macos-26_arm64
+            runs_on: macos-26
         python_version:
           - "3.14"
           - "3.14t"

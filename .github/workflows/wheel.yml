@@ -12,43 +12,6 @@ permissions:
   actions: read
 
 jobs:
-  build_macos:
-    strategy:
-      matrix:
-        platform:
-          - name: macos-26_arm64
-            runs_on: macos-26
-        python_version:
-          - "3.14"
-          - "3.14t"
-    runs-on: ${{ matrix.platform.runs_on }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          enable-cache: false
-          python-version: ${{ matrix.python_version }}
-
-      - name: Cache dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: _deps
-          key: ${{ runner.os }}-deps-${{ matrix.platform.name }}-${{ hashFiles('deps.json', 'CMakeLists.txt', 'pyproject.toml', 'uv.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-deps-${{ matrix.platform.name }}-
-
-      - name: Install build dependencies
-        run: |
-          brew install nasm go
-
-      - run: uv build --wheel --out-dir wheelhouse
-      - name: Upload Artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ matrix.platform.name }}_python-${{ matrix.python_version }}
-          path: wheelhouse/*.whl
-
   build_ubuntu:
     strategy:
       fail-fast: false
@@ -100,10 +63,47 @@ jobs:
           name: ${{ matrix.platform.name }}_python-${{ matrix.python_version }}
           path: wheelhouse/*.whl
 
+  build_macos:
+    strategy:
+      matrix:
+        platform:
+          - name: macos-26_arm64
+            runs_on: macos-26
+        python_version:
+          - "3.14"
+          - "3.14t"
+    runs-on: ${{ matrix.platform.runs_on }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python_version }}
+
+      - name: Cache dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _deps
+          key: ${{ runner.os }}-deps-${{ matrix.platform.name }}-${{ hashFiles('deps.json', 'CMakeLists.txt', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ matrix.platform.name }}-
+
+      - name: Install build dependencies
+        run: |
+          brew install nasm go
+
+      - run: uv build --wheel --out-dir wheelhouse
+      - name: Upload Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.platform.name }}_python-${{ matrix.python_version }}
+          path: wheelhouse/*.whl
+
   test:
     needs:
-      - build_macos
       - build_ubuntu
+      - build_macos
     uses: ./.github/workflows/test.yml
 
   publish_wheel:

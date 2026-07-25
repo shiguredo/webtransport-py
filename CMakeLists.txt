@@ -3,7 +3,7 @@ project(webtransport_py LANGUAGES C CXX)
 
 # プラットフォームチェック
 if(NOT APPLE AND NOT UNIX)
-  message(FATAL_ERROR "This package supports macOS and Linux (Ubuntu) only.")
+  message(FATAL_ERROR "This package supports Linux (Ubuntu) and macOS only.")
 endif()
 
 # ExternalProject の依存関係は _deps 配下で管理

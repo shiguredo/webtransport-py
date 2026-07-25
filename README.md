@@ -51,8 +51,8 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
   - [PEP 703 – Making the Global Interpreter Lock Optional in CPython \| peps\.python\.org](https://peps.python.org/pep-0703/)
   - [Python Free\-Threading Guide](https://py-free-threading.github.io/)
 - クロスプラットフォーム対応
-  - macOS arm64
   - Ubuntu x86_64 / arm64
+  - macOS arm64
 
 ## インストール
 
@@ -247,9 +247,9 @@ if __name__ == "__main__":
 
 ## プラットフォーム
 
-- macOS 26 arm64
 - Ubuntu 24.04 LTS x86_64
 - Ubuntu 24.04 LTS arm64
+- macOS 26 arm64
 
 ## リリースビルド
 
