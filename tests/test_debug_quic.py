@@ -1,7 +1,5 @@
 """QUIC デバッグテスト"""
 
-import pytest
-
 
 def test_quic_client_create():
     """QUIC Client の作成のみをテスト"""

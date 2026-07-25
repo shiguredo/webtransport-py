@@ -3,7 +3,7 @@
 クライアント-サーバー間の通信をシミュレートするテスト
 """
 
-from hypothesis import given, settings, assume
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from webtransport import http2
@@ -243,11 +243,7 @@ def prop_http2_goaway_no_crash(error_code: int):
 
     events = exchange_data_after_request(client, server)
 
-    found_goaway = False
-    for event in events:
-        if event.type == http2.EventType.GO_AWAY:
-            found_goaway = True
-
+    assert any(event.type == http2.EventType.GO_AWAY for event in events)
 
 @given(st.integers(min_value=16384, max_value=16777215))
 @settings(max_examples=20)

@@ -2,7 +2,6 @@
 
 import tempfile
 import datetime
-import ipaddress
 from pathlib import Path
 
 from cryptography import x509
@@ -155,7 +154,7 @@ def test_quic_lowlevel_handshake():
             break
 
     # 最終状態確認
-    print(f"\nFinal state:")
+    print("\nFinal state:")
     print(
         f"  Client: is_established={client.is_established()}, is_handshake_completed={client.is_handshake_completed()}"
     )

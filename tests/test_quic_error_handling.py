@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from webtransport.quic import Config, Connection, EventType
+from webtransport.quic import Config, Connection
 
 
 def create_test_certificates():
@@ -128,7 +128,7 @@ def test_send_data_to_closed_stream():
     client.send_stream_data(stream_id, b"test data", False)
 
     # send() を呼んでもクラッシュしない
-    packet = client.send()
+    client.send()
 
     # 接続は閉じられていないこと
     assert not client.is_closed()
@@ -212,7 +212,7 @@ def test_stream_data_after_fin():
     client.send_stream_data(stream_id, b"more data", False)
 
     # send() を呼んでもクラッシュしない
-    packet = client.send()
+    client.send()
 
     # 接続は閉じられていないこと
     assert not client.is_closed()

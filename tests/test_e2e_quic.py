@@ -178,7 +178,7 @@ async def test_server_multiple_start_stop():
     server = Server(host="127.0.0.1", port=0)
 
     await server.start()
-    port1 = server.actual_port
+    assert server.actual_port > 0
     assert server.is_running is True
     await server.stop()
     assert server.is_running is False
