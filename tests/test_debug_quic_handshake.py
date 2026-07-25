@@ -1,7 +1,12 @@
 """QUIC ハンドシェイクのデバッグテスト"""
 
-import tempfile
+# Sans-IO テスト用の固定パスアドレス
+CLIENT_ADDR = ("127.0.0.1", 50000)
+SERVER_ADDR = ("127.0.0.1", 4433)
+
+
 import datetime
+import tempfile
 from pathlib import Path
 
 from cryptography import x509
@@ -31,8 +36,8 @@ def create_test_certificates():
         .issuer_name(issuer)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
         .sign(private_key, hashes.SHA256())
     )
 
@@ -71,7 +76,7 @@ def test_quic_lowlevel_handshake():
 
     # クライアント接続を作成
     print("Creating client connection...")
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     assert client is not None
     print(
         f"Client created. is_established: {client.is_established()}, is_handshake_completed: {client.is_handshake_completed()}"
@@ -81,12 +86,12 @@ def test_quic_lowlevel_handshake():
     print("\nClient send()...")
     initial_packet = client.send()
     assert initial_packet is not None
-    print(f"Client initial packet: {len(initial_packet)} bytes")
-    print(f"Initial packet hex (first 64 bytes): {initial_packet[:64].hex()}")
+    print(f"Client initial packet: {len(initial_packet.data)} bytes")
+    print(f"Initial packet hex (first 64 bytes): {initial_packet.data[:64].hex()}")
 
     # サーバー接続を作成 (accept)
     print("\nCreating server connection from initial packet...")
-    server = Connection.accept(server_config, initial_packet)
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     assert server is not None
     print(
         f"Server created. is_established: {server.is_established()}, is_handshake_completed: {server.is_handshake_completed()}"
@@ -94,7 +99,7 @@ def test_quic_lowlevel_handshake():
 
     # サーバーで初期パケットを処理
     print("\nServer receive()...")
-    result = server.receive(initial_packet)
+    result = server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     print(f"Server receive result: {result}")
     print(
         f"Server is_established: {server.is_established()}, is_handshake_completed: {server.is_handshake_completed()}"
@@ -108,12 +113,12 @@ def test_quic_lowlevel_handshake():
         # サーバーからデータを取得
         server_packet = server.send()
         if server_packet:
-            print(f"Server sends {len(server_packet)} bytes")
-            print(f"Packet hex (first 32 bytes): {server_packet[:32].hex()}")
+            print(f"Server sends {len(server_packet.data)} bytes")
+            print(f"Packet hex (first 32 bytes): {server_packet.data[:32].hex()}")
 
             # クライアントで受信
             print("Client receive()...")
-            result = client.receive(server_packet)
+            result = client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
             print(f"Client received result: {result}")
             print(
                 f"Client is_established: {client.is_established()}, is_handshake_completed: {client.is_handshake_completed()}"
@@ -133,11 +138,11 @@ def test_quic_lowlevel_handshake():
         # クライアントからデータを取得
         client_packet = client.send()
         if client_packet:
-            print(f"Client sends {len(client_packet)} bytes")
+            print(f"Client sends {len(client_packet.data)} bytes")
 
             # サーバーで受信
             print("Server receive()...")
-            result = server.receive(client_packet)
+            result = server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
             print(f"Server received result: {result}")
             print(
                 f"Server is_established: {server.is_established()}, is_handshake_completed: {server.is_handshake_completed()}"

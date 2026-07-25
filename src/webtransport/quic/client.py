@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from webtransport.webtransport_ext import quic as quic_low
 
@@ -40,6 +40,11 @@ class Client:
         alpn_protocols: list[str] | None = None,
         idle_timeout_ns: int = 30_000_000_000,
         verify_peer: bool = True,
+        ca_file: str | None = None,
+        verify_callback: Callable[[list[bytes]], bool] | None = None,
+        session_ticket: bytes | None = None,
+        early_transport_params: bytes | None = None,
+        enable_early_data: bool = True,
     ) -> None:
         """クライアントを初期化する
 
@@ -49,22 +54,37 @@ class Client:
             alpn_protocols: ALPN プロトコルリスト
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
             verify_peer: ピア検証を行うか
+            ca_file: CA 証明書ファイルパス
+            verify_callback: ピア証明書検証コールバック
+            session_ticket: 0-RTT 用セッションチケット (DER)
+            early_transport_params: 0-RTT トランスポートパラメータ
+            enable_early_data: 0-RTT early data を有効にするか
         """
         self._host = host
         self._port = port
         self._alpn_protocols = alpn_protocols or ["h3"]
         self._idle_timeout_ns = idle_timeout_ns
         self._verify_peer = verify_peer
+        self._ca_file = ca_file
+        self._verify_callback = verify_callback
+        self._session_ticket = session_ticket
+        self._early_transport_params = early_transport_params
+        self._enable_early_data = enable_early_data
 
         self._connection: quic_low.Connection | None = None
         self._socket: socket.socket | None = None
+        # bind 後のローカルアドレス (host, port)
+        self._local_addr: tuple[str, int] | None = None
         self._running = False
         self._connected = False
+        # SESSION_TICKET イベントで受け取った最新チケット
+        self._latest_session_ticket: bytes | None = None
 
         self._on_handshake_completed: Callable[[], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, bool], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
         self._on_connection_closed: Callable[[], Awaitable[None]] | None = None
+        self._on_session_ticket: Callable[[bytes], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -125,30 +145,80 @@ class Client:
         """
         self._on_connection_closed = callback
 
+    def on_session_ticket(
+        self,
+        callback: Callable[[bytes], Awaitable[None]],
+    ) -> None:
+        """セッションチケット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(ticket: bytes) -> None
+        """
+        self._on_session_ticket = callback
+
+    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
+        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
+        host = addr[0]
+        port = addr[1]
+        if not isinstance(port, int):
+            raise TypeError(f"expected port int, got {type(port).__name__}")
+        return (str(host), port)
+
+    def _destination_for_packet(
+        self,
+        packet: quic_low.Packet,
+    ) -> tuple[str, int]:
+        """パケットの送信先アドレスを決める
+
+        パス情報が埋まっている場合はそれを使い、未設定なら接続先にフォールバックする。
+        """
+        if packet.remote_host and packet.remote_port:
+            return (packet.remote_host, packet.remote_port)
+        return (self._host, self._port)
+
     async def _send_pending(self) -> None:
-        """送信待ちデータを送信する"""
+        """送信待ちパケットを 1 つ送出する
+
+        send() を ACK なしで連続 drain すると、ストリームデータ滞留時に
+        戻ってこなくなるため、1 呼び出しあたり 1 パケットに留める。
+        """
         if self._connection is None or self._socket is None:
             return
 
-        data = self._connection.send()
-        if data:
-            loop = asyncio.get_running_loop()
-            await loop.sock_sendto(self._socket, data, (self._host, self._port))
+        packet = self._connection.send()
+        if packet is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(
+            self._socket,
+            packet.data,
+            self._destination_for_packet(packet),
+        )
 
     async def _receive(self) -> None:
         """データを受信する"""
         if self._connection is None or self._socket is None:
             return
+        if self._local_addr is None:
+            return
 
         loop = asyncio.get_running_loop()
         try:
-            data, _ = await asyncio.wait_for(
+            data, raw_remote = await asyncio.wait_for(
                 loop.sock_recvfrom(self._socket, 65535),
                 timeout=0.1,
             )
-            self._connection.receive(data)
+            remote = self._normalize_addr(raw_remote)
+            self._connection.receive(data, self._local_addr, remote)
         except TimeoutError:
             pass
+
+    async def _handle_session_ticket_event(self, event: quic_low.Event) -> None:
+        """SESSION_TICKET イベントを処理する"""
+        self._latest_session_ticket = event.data
+        if self._on_session_ticket is not None:
+            await self._on_session_ticket(event.data)
 
     async def connect(self) -> bool:
         """サーバーに接続する
@@ -161,12 +231,26 @@ class Client:
         config.idle_timeout_ns = self._idle_timeout_ns
         config.verify_peer = self._verify_peer
         config.server_name = self._host
+        config.enable_early_data = self._enable_early_data
+        if self._ca_file is not None:
+            config.ca_file = self._ca_file
+        if self._verify_callback is not None:
+            config.verify_callback = self._verify_callback
+        if self._session_ticket is not None:
+            config.session_ticket = self._session_ticket
+        if self._early_transport_params is not None:
+            config.early_transport_params = self._early_transport_params
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._socket.bind(("0.0.0.0", 0))
+        self._local_addr = self._normalize_addr(self._socket.getsockname())
 
-        self._connection = quic_low.Connection.create_client(config)
+        self._connection = quic_low.Connection.create_client(
+            config,
+            self._local_addr,
+            (self._host, self._port),
+        )
         await self._send_pending()
         self._running = True
 
@@ -184,6 +268,9 @@ class Client:
                         await self._on_handshake_completed()
                     await self._send_pending()
                     return True
+
+                elif event.type == quic_low.EventType.SESSION_TICKET:
+                    await self._handle_session_ticket_event(event)
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
@@ -239,6 +326,72 @@ class Client:
         self._connection.send_datagram(data)
         await self._send_pending()
 
+    def export_session_ticket(self) -> bytes:
+        """セッションチケット (DER) を取得する
+
+        Returns:
+            セッションチケット。未取得の場合は空 bytes
+        """
+        if self._connection is None:
+            return self._latest_session_ticket or b""
+        ticket = self._connection.export_session_ticket()
+        if ticket:
+            self._latest_session_ticket = ticket
+        return ticket or self._latest_session_ticket or b""
+
+    def export_0rtt_transport_params(self) -> bytes:
+        """0-RTT トランスポートパラメータを取得する
+
+        Returns:
+            トランスポートパラメータ。未取得の場合は空 bytes
+        """
+        if self._connection is None:
+            return b""
+        return self._connection.export_0rtt_transport_params()
+
+    def is_early_data_accepted(self) -> bool:
+        """0-RTT early data が受理されたか"""
+        if self._connection is None:
+            return False
+        return self._connection.is_early_data_accepted()
+
+    def was_early_data_attempted(self) -> bool:
+        """0-RTT early data を試みたか"""
+        if self._connection is None:
+            return False
+        return self._connection.was_early_data_attempted()
+
+    async def migrate(self) -> bool:
+        """ローカル UDP ソケットを差し替えてコネクションマイグレーションを開始する
+
+        Returns:
+            マイグレーション開始に成功した場合は True
+        """
+        if self._connection is None:
+            return False
+
+        new_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        new_socket.setblocking(False)
+        new_socket.bind(("0.0.0.0", 0))
+        new_local = self._normalize_addr(new_socket.getsockname())
+
+        if not self._connection.initiate_migration(
+            new_local,
+            (self._host, self._port),
+        ):
+            new_socket.close()
+            return False
+
+        old_socket = self._socket
+        self._socket = new_socket
+        self._local_addr = new_local
+
+        if old_socket is not None:
+            old_socket.close()
+
+        await self._send_pending()
+        return True
+
     async def run(self) -> None:
         """メインループを実行する
 
@@ -267,6 +420,9 @@ class Client:
                     if self._on_datagram is not None:
                         await self._on_datagram(event.data)
 
+                elif event.type == quic_low.EventType.SESSION_TICKET:
+                    await self._handle_session_ticket_event(event)
+
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
                     self._connected = False
@@ -294,7 +450,7 @@ class Client:
             self._socket.close()
             self._socket = None
 
-    async def __aenter__(self) -> Client:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.connect()
         return self

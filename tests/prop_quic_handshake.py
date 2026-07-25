@@ -3,19 +3,22 @@
 QUIC ハンドシェイクと通信のテスト
 """
 
-import tempfile
 import datetime
+import tempfile
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
-from hypothesis import given, settings, assume
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from webtransport.quic import Config, Connection, EventType
+
+# Sans-IO テスト用の固定パスアドレス
+CLIENT_ADDR: tuple[str, int] = ("127.0.0.1", 50000)
+SERVER_ADDR: tuple[str, int] = ("127.0.0.1", 4433)
 
 
 def create_test_certificates():
@@ -38,8 +41,8 @@ def create_test_certificates():
         .issuer_name(issuer)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
         .sign(private_key, hashes.SHA256())
     )
 
@@ -71,26 +74,32 @@ def create_client_server_pair():
     server_config.key_file = KEYFILE
     server_config.alpn_protocols = ["h3"]
 
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
 
     initial_packet = client.send()
-    server = Connection.accept(server_config, initial_packet)
+    assert initial_packet is not None
+    server = Connection.accept(
+        server_config,
+        initial_packet.data,
+        SERVER_ADDR,
+        CLIENT_ADDR,
+    )
 
-    return client, server, initial_packet
+    return client, server, initial_packet.data
 
 
 def perform_handshake(client: Connection, server: Connection, initial_packet: bytes) -> bool:
     """ハンドシェイクを完了させる"""
-    server.receive(initial_packet)
+    server.receive(initial_packet, SERVER_ADDR, CLIENT_ADDR)
 
     for _ in range(20):
         server_packet = server.send()
         if server_packet:
-            client.receive(server_packet)
+            client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
         client_packet = client.send()
         if client_packet:
-            server.receive(client_packet)
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
         if client.is_handshake_completed() and server.is_handshake_completed():
             return True
@@ -115,17 +124,17 @@ def prop_quic_handshake_with_server_name(server_name: str):
     server_config.key_file = KEYFILE
     server_config.alpn_protocols = ["h3"]
 
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     initial_packet = client.send()
 
     if initial_packet is None:
         return
 
-    server = Connection.accept(server_config, initial_packet)
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     if server is None:
         return
 
-    success = perform_handshake(client, server, initial_packet)
+    success = perform_handshake(client, server, initial_packet.data)
     assert success, "Handshake should complete"
 
 
@@ -149,17 +158,17 @@ def prop_quic_handshake_with_alpn(protocols: list[str]):
     server_config.key_file = KEYFILE
     server_config.alpn_protocols = protocols
 
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     initial_packet = client.send()
 
     if initial_packet is None:
         return
 
-    server = Connection.accept(server_config, initial_packet)
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     if server is None:
         return
 
-    perform_handshake(client, server, initial_packet)
+    perform_handshake(client, server, initial_packet.data)
 
 
 @given(st.binary(min_size=1, max_size=16384))
@@ -178,7 +187,7 @@ def prop_quic_stream_data_after_handshake(data: bytes):
 
     client_packet = client.send()
     if client_packet:
-        server.receive(client_packet)
+        server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
     received_data = b""
     while True:
@@ -204,7 +213,7 @@ def prop_quic_datagram_after_handshake(data: bytes):
 
     client_packet = client.send()
     if client_packet:
-        server.receive(client_packet)
+        server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
 
 @given(st.integers(min_value=1, max_value=10))
@@ -253,11 +262,11 @@ def prop_quic_interleaved_stream_data(stream_data_list: list[tuple[bytes, bool]]
     for _ in range(5):
         client_packet = client.send()
         if client_packet:
-            server.receive(client_packet)
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
         server_packet = server.send()
         if server_packet:
-            client.receive(server_packet)
+            client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
         if not client_packet and not server_packet:
             break
@@ -275,7 +284,7 @@ def prop_quic_close_after_handshake(error_code: int, reason: str):
 
     client_packet = client.send()
     if client_packet:
-        server.receive(client_packet)
+        server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
 
 @given(st.integers(min_value=0, max_value=2**62 - 1))
@@ -288,7 +297,7 @@ def prop_quic_idle_timeout_config(timeout_ns: int):
     client_config.server_name = "localhost"
     client_config.idle_timeout_ns = timeout_ns
 
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     assert client is not None
 
 
@@ -302,5 +311,5 @@ def prop_quic_max_datagram_frame_size_config(size: int):
     client_config.server_name = "localhost"
     client_config.max_datagram_frame_size = size
 
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     assert client is not None

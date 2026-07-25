@@ -3,8 +3,8 @@
 ngtcp2 API のエラー処理が正しく動作することを確認するテスト
 """
 
-import tempfile
 import datetime
+import tempfile
 from pathlib import Path
 
 from cryptography import x509
@@ -13,6 +13,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from webtransport.quic import Config, Connection
+
+# Sans-IO テスト用の固定パスアドレス
+CLIENT_ADDR = ("127.0.0.1", 50000)
+SERVER_ADDR = ("127.0.0.1", 4433)
 
 
 def create_test_certificates():
@@ -35,8 +39,8 @@ def create_test_certificates():
         .issuer_name(issuer)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
         .sign(private_key, hashes.SHA256())
     )
 
@@ -68,26 +72,26 @@ def create_client_server_pair():
     server_config.key_file = KEYFILE
     server_config.alpn_protocols = ["h3"]
 
-    client = Connection.create_client(client_config)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
 
     initial_packet = client.send()
-    server = Connection.accept(server_config, initial_packet)
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
-    return client, server, initial_packet
+    return client, server, initial_packet.data
 
 
 def perform_handshake(client: Connection, server: Connection, initial_packet: bytes):
     """ハンドシェイクを完了させる"""
-    server.receive(initial_packet)
+    server.receive(initial_packet, SERVER_ADDR, CLIENT_ADDR)
 
     for _ in range(20):
         server_packet = server.send()
         if server_packet:
-            client.receive(server_packet)
+            client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
         client_packet = client.send()
         if client_packet:
-            server.receive(client_packet)
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
         if client.is_handshake_completed() and server.is_handshake_completed():
             return True
@@ -164,7 +168,7 @@ def test_receive_after_close():
 
     # クローズ後にパケットを受信
     if server_packet:
-        result = client.receive(server_packet)
+        result = client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
         # クラッシュしないことを確認
         assert result == 0  # クローズ後は 0 バイト処理
 
@@ -204,7 +208,7 @@ def test_stream_data_after_fin():
     # パケットを送信
     packet = client.send()
     if packet:
-        server.receive(packet)
+        server.receive(packet.data, SERVER_ADDR, CLIENT_ADDR)
 
     # FIN 後にさらにデータを送信しようとする
     client.send_stream_data(stream_id, b"more data", False)

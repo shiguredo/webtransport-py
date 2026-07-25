@@ -1,5 +1,9 @@
 """QUIC テスト"""
 
+# Sans-IO テスト用の固定パスアドレス
+CLIENT_ADDR = ("127.0.0.1", 50000)
+SERVER_ADDR = ("127.0.0.1", 4433)
+
 
 def test_quic_import():
     """QUIC モジュールがインポートできることを確認"""
@@ -61,7 +65,7 @@ def test_quic_connection_client():
     config.alpn_protocols = ["h3"]
     config.server_name = "localhost"
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
     assert conn is not None
 
     # 初期状態の確認

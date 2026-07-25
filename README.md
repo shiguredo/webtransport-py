@@ -36,6 +36,7 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
   - QUIC DATAGRAM
   - 0-RTT / Session Resumption
   - 証明書のカスタム検証
+  - Connection Migration
   - [ngtcp2](https://github.com/ngtcp2/ngtcp2) を採用
 - HTTP/3
   - Sans I/O API と asyncio API の両方を提供

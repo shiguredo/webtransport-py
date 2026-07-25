@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <sys/socket.h>
 #include <vector>
 
 namespace nb = nanobind;
@@ -60,12 +61,25 @@ struct QuicConfig {
   std::string cert_file;
   std::string key_file;
 
-  // クライアント認証を要求するか
+  // クライアントのピア証明書検証を行うか
   bool verify_peer = false;
+
+  // CA 証明書ファイル (verify_peer 時、空ならシステム既定パス)
+  std::string ca_file;
+
+  // ピア証明書 DER のリストを受け取り、許可なら true
+  std::function<bool(const std::vector<std::vector<uint8_t>>&)> verify_callback;
 
   // Datagram サポート
   bool enable_datagram = true;
   uint64_t max_datagram_frame_size = 65536;
+
+  // 0-RTT / セッションチケット
+  bool enable_early_data = true;
+  // create 時に import するセッションチケット (DER)
+  std::vector<uint8_t> session_ticket;
+  // create 時に import する 0-RTT トランスポートパラメータ
+  std::vector<uint8_t> early_transport_params;
 };
 
 /**
@@ -80,6 +94,10 @@ enum class QuicEventType {
   StreamReset,
   DatagramReceived,
   ConnectionIdRetired,
+  SessionTicket,
+  EarlyDataRejected,
+  PathValidated,
+  PathValidationFailed,
 };
 
 /**
@@ -92,6 +110,17 @@ struct QuicEvent {
   bool fin = false;
   uint64_t error_code = 0;
   std::string reason;
+};
+
+/**
+ * 送受信 UDP パケット (パス情報付き)
+ */
+struct QuicPacket {
+  std::vector<uint8_t> data;
+  std::string local_host;
+  uint16_t local_port = 0;
+  std::string remote_host;
+  uint16_t remote_port = 0;
 };
 
 /**
@@ -111,9 +140,17 @@ class QuicConnection {
  public:
   /**
    * クライアントとして接続を作成
+   *
+   * ngtcp2_conn_client_new に渡す path は、以降の receive と同じ
+   * アドレスである必要がある。ゼロ path で生成したあと実アドレスで
+   * receive するとハンドシェイクが進まない。
    */
   static std::unique_ptr<QuicConnection> create_client(
-      const QuicConfig& config);
+      const QuicConfig& config,
+      const std::string& local_host,
+      uint16_t local_port,
+      const std::string& remote_host,
+      uint16_t remote_port);
 
   /**
    * サーバーとして接続を作成 (直接作成用)
@@ -125,11 +162,23 @@ class QuicConnection {
    * 初期パケットからサーバー接続を作成
    * @param config 設定
    * @param initial_packet クライアントからの初期パケット
+   * @param local_host ローカルアドレス
+   * @param local_port ローカルポート
+   * @param remote_host リモートアドレス
+   * @param remote_port リモートポート
    * @return 接続 (失敗時は nullptr)
+   *
+   * ngtcp2_conn_server_new に渡す path は、直後の receive と同じ
+   * アドレスである必要がある。ゼロ初期化 path のまま実アドレスで
+   * receive すると NGTCP2_ERR_DROP_CONN になる。
    */
   static std::unique_ptr<QuicConnection> accept(
       const QuicConfig& config,
-      const std::vector<uint8_t>& initial_packet);
+      const std::vector<uint8_t>& initial_packet,
+      const std::string& local_host,
+      uint16_t local_port,
+      const std::string& remote_host,
+      uint16_t remote_port);
 
   ~QuicConnection();
 
@@ -144,15 +193,52 @@ class QuicConnection {
   /**
    * 受信したデータを処理
    * @param data 受信した UDP パケット
+   * @param local_host ローカルアドレス
+   * @param local_port ローカルポート
+   * @param remote_host リモートアドレス
+   * @param remote_port リモートポート
    * @return 処理されたバイト数
    */
-  size_t receive(const std::vector<uint8_t>& data);
+  size_t receive(const std::vector<uint8_t>& data,
+                 const std::string& local_host,
+                 uint16_t local_port,
+                 const std::string& remote_host,
+                 uint16_t remote_port);
 
   /**
    * 送信すべきデータを取得
-   * @return 送信すべき UDP パケット (なければ空)
+   * @return 送信すべき UDP パケット (なければ nullopt)
    */
-  std::optional<std::vector<uint8_t>> send();
+  std::optional<QuicPacket> send();
+
+  /**
+   * コネクションマイグレーションを開始する (クライアントのみ)
+   * @return 成功したら true
+   */
+  bool initiate_migration(const std::string& local_host,
+                          uint16_t local_port,
+                          const std::string& remote_host,
+                          uint16_t remote_port);
+
+  /**
+   * 最後に受信したセッションチケット (DER) を返す
+   */
+  std::vector<uint8_t> export_session_ticket() const;
+
+  /**
+   * ハンドシェイク後の 0-RTT トランスポートパラメータを符号化する
+   */
+  std::vector<uint8_t> export_0rtt_transport_params() const;
+
+  /**
+   * 0-RTT early data が受理されたか
+   */
+  bool is_early_data_accepted() const;
+
+  /**
+   * 0-RTT early data を試みたか
+   */
+  bool was_early_data_attempted() const;
 
   /**
    * 次のタイムアウトまでの時間を取得
@@ -245,10 +331,36 @@ class QuicConnection {
  private:
   QuicConnection(bool is_server, const QuicConfig& config);
 
-  bool initialize_client();
+  bool initialize_client(const std::string& local_host,
+                         uint16_t local_port,
+                         const std::string& remote_host,
+                         uint16_t remote_port);
   bool initialize_server();
   bool initialize_server_from_packet(
-      const std::vector<uint8_t>& initial_packet);
+      const std::vector<uint8_t>& initial_packet,
+      const std::string& local_host,
+      uint16_t local_port,
+      const std::string& remote_host,
+      uint16_t remote_port);
+
+  // サーバー側 0-RTT early data コンテキストを設定する
+  bool setup_server_early_data();
+
+  // クライアント側セッションチケット / 0-RTT を SSL に適用する
+  bool setup_client_session();
+
+  // 現在パスを ngtcp2_path に書き込む
+  void fill_ngtcp2_path(ngtcp2_path* path) const;
+
+  // パスアドレスを更新する
+  bool update_path_addresses(const std::string& local_host,
+                             uint16_t local_port,
+                             const std::string& remote_host,
+                             uint16_t remote_port);
+
+  // パスから QuicPacket を組み立てる
+  QuicPacket make_packet(const uint8_t* data, size_t len,
+                         const ngtcp2_path& path) const;
 
   // ngtcp2 コールバック
   static int client_initial_cb(ngtcp2_conn* conn, void* user_data);
@@ -350,12 +462,26 @@ class QuicConnection {
                                     uint32_t version,
                                     const ngtcp2_cid* client_dcid,
                                     void* user_data);
+  static int path_validation_cb(ngtcp2_conn* conn,
+                                uint32_t flags,
+                                const ngtcp2_path* path,
+                                const ngtcp2_path* fallback_path,
+                                ngtcp2_path_validation_result res,
+                                void* user_data);
+  static int tls_early_data_rejected_cb(ngtcp2_conn* conn, void* user_data);
+
+  // BoringSSL セッションチケット受信コールバック
+  static int new_session_cb(SSL* ssl, SSL_SESSION* session);
+
+  // BoringSSL カスタム証明書検証コールバック
+  static ssl_verify_result_t custom_verify_cb(SSL* ssl, uint8_t* out_alert);
 
   // ヘルパー
   void push_event(QuicEvent event);
   int write_streams();
   SSL_CTX* create_ssl_ctx();
   int setup_initial_crypto();
+  void rebind_conn_ref();
 
   bool is_server_;
   QuicConfig config_;
@@ -376,6 +502,19 @@ class QuicConnection {
   // 接続状態
   bool handshake_completed_ = false;
   bool closed_ = false;
+
+  // 0-RTT 状態
+  bool early_data_attempted_ = false;
+  bool early_data_rejected_event_pushed_ = false;
+
+  // 最後に受信したセッションチケット (DER)
+  std::vector<uint8_t> last_session_ticket_;
+
+  // 現在のパス (receive で更新、send/close で使用)
+  sockaddr_storage local_addr_{};
+  socklen_t local_addrlen_ = sizeof(sockaddr_in);
+  sockaddr_storage remote_addr_{};
+  socklen_t remote_addrlen_ = sizeof(sockaddr_in);
 
   // 現在時刻 (ナノ秒)
   uint64_t timestamp_ns_ = 0;

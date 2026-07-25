@@ -13,7 +13,15 @@
 
 - [CHANGE] Windows 対応を終了する
   - @voluntas
+- [CHANGE] QUIC の `receive` / `send` / `create_client` / `accept` に実アドレスを必須化する
+  - @voluntas
 - [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
+  - @voluntas
+- [ADD] QUIC クライアントの証明書検証 (`ca_file` / カスタムコールバック) を実装する
+  - @voluntas
+- [ADD] QUIC の Session ticket と 0-RTT を実装する
+  - @voluntas
+- [ADD] QUIC の Connection Migration を実装する
   - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas

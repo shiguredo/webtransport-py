@@ -7,13 +7,23 @@
 #include "quic.h"
 
 #include <openssl/err.h>
+#include <openssl/pool.h>
 #include <openssl/rand.h>
+#include <openssl/x509.h>
 
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <array>
 #include <chrono>
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 
 namespace webtransport {
 namespace quic {
@@ -38,6 +48,78 @@ std::vector<uint8_t> build_alpn(const std::vector<std::string>& protocols) {
   return alpn;
 }
 
+// host+port から sockaddr_storage を埋める (IPv4 / IPv6 / ホスト名)
+bool fill_sockaddr(sockaddr_storage* storage,
+                   socklen_t* addrlen,
+                   const std::string& host,
+                   uint16_t port) {
+  std::memset(storage, 0, sizeof(*storage));
+
+  // IPv4 リテラル
+  auto* in4 = reinterpret_cast<sockaddr_in*>(storage);
+  if (inet_pton(AF_INET, host.c_str(), &in4->sin_addr) == 1) {
+    in4->sin_family = AF_INET;
+    in4->sin_port = htons(port);
+    *addrlen = sizeof(sockaddr_in);
+    return true;
+  }
+
+  // IPv6 リテラル
+  auto* in6 = reinterpret_cast<sockaddr_in6*>(storage);
+  if (inet_pton(AF_INET6, host.c_str(), &in6->sin6_addr) == 1) {
+    in6->sin6_family = AF_INET6;
+    in6->sin6_port = htons(port);
+    *addrlen = sizeof(sockaddr_in6);
+    return true;
+  }
+
+  // ホスト名解決
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  addrinfo* result = nullptr;
+  std::string port_str = std::to_string(port);
+  if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result) != 0 ||
+      result == nullptr) {
+    return false;
+  }
+
+  std::memcpy(storage, result->ai_addr, result->ai_addrlen);
+  *addrlen = static_cast<socklen_t>(result->ai_addrlen);
+  freeaddrinfo(result);
+  return true;
+}
+
+// sockaddr から host+port 文字列を抽出する
+bool sockaddr_to_host_port(const sockaddr* addr,
+                           socklen_t addrlen,
+                           std::string* host,
+                           uint16_t* port) {
+  char host_buf[NI_MAXHOST];
+  char port_buf[NI_MAXSERV];
+  if (getnameinfo(addr, addrlen, host_buf, sizeof(host_buf), port_buf,
+                  sizeof(port_buf), NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+    return false;
+  }
+  *host = host_buf;
+  *port = static_cast<uint16_t>(std::stoi(port_buf));
+  return true;
+}
+
+// パスを "local -> remote" 形式の文字列にする
+std::string format_path_reason(const ngtcp2_path* path) {
+  std::string local_host;
+  std::string remote_host;
+  uint16_t local_port = 0;
+  uint16_t remote_port = 0;
+  sockaddr_to_host_port(path->local.addr, path->local.addrlen, &local_host,
+                        &local_port);
+  sockaddr_to_host_port(path->remote.addr, path->remote.addrlen, &remote_host,
+                        &remote_port);
+  return local_host + ":" + std::to_string(local_port) + " -> " + remote_host +
+         ":" + std::to_string(remote_port);
+}
+
 }  // namespace
 
 // ========== QuicConnection 実装 ==========
@@ -46,6 +128,14 @@ QuicConnection::QuicConnection(bool is_server, const QuicConfig& config)
     : is_server_(is_server), config_(config) {
   timestamp_ns_ = get_timestamp_ns();
   send_buffer_.resize(65536);  // 64KB バッファ
+
+  // 初期パスは空の IPv4 アドレス
+  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr_);
+  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr_);
+  local_in->sin_family = AF_INET;
+  remote_in->sin_family = AF_INET;
+  local_addrlen_ = sizeof(sockaddr_in);
+  remote_addrlen_ = sizeof(sockaddr_in);
 }
 
 QuicConnection::~QuicConnection() {
@@ -61,6 +151,17 @@ QuicConnection::~QuicConnection() {
   }
 }
 
+void QuicConnection::rebind_conn_ref() {
+  if (conn_ != nullptr && ssl_ != nullptr) {
+    conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
+      auto* conn = static_cast<QuicConnection*>(ref->user_data);
+      return conn->conn_;
+    };
+    conn_ref_.user_data = this;
+    SSL_set_app_data(ssl_, &conn_ref_);
+  }
+}
+
 QuicConnection::QuicConnection(QuicConnection&& other) noexcept
     : is_server_(other.is_server_),
       config_(std::move(other.config_)),
@@ -72,21 +173,20 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
       datagram_queue_(std::move(other.datagram_queue_)),
       handshake_completed_(other.handshake_completed_),
       closed_(other.closed_),
+      early_data_attempted_(other.early_data_attempted_),
+      early_data_rejected_event_pushed_(
+          other.early_data_rejected_event_pushed_),
+      last_session_ticket_(std::move(other.last_session_ticket_)),
+      local_addr_(other.local_addr_),
+      local_addrlen_(other.local_addrlen_),
+      remote_addr_(other.remote_addr_),
+      remote_addrlen_(other.remote_addrlen_),
       timestamp_ns_(other.timestamp_ns_),
       send_buffer_(std::move(other.send_buffer_)) {
   other.conn_ = nullptr;
   other.ssl_ctx_ = nullptr;
   other.ssl_ = nullptr;
-
-  // conn_ref_ を新しいオブジェクトを指すように再設定
-  if (conn_ != nullptr && ssl_ != nullptr) {
-    conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
-      auto* conn = static_cast<QuicConnection*>(ref->user_data);
-      return conn->conn_;
-    };
-    conn_ref_.user_data = this;
-    SSL_set_app_data(ssl_, &conn_ref_);
-  }
+  rebind_conn_ref();
 }
 
 QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
@@ -108,6 +208,14 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     datagram_queue_ = std::move(other.datagram_queue_);
     handshake_completed_ = other.handshake_completed_;
     closed_ = other.closed_;
+    early_data_attempted_ = other.early_data_attempted_;
+    early_data_rejected_event_pushed_ =
+        other.early_data_rejected_event_pushed_;
+    last_session_ticket_ = std::move(other.last_session_ticket_);
+    local_addr_ = other.local_addr_;
+    local_addrlen_ = other.local_addrlen_;
+    remote_addr_ = other.remote_addr_;
+    remote_addrlen_ = other.remote_addrlen_;
     timestamp_ns_ = other.timestamp_ns_;
     send_buffer_ = std::move(other.send_buffer_);
 
@@ -115,24 +223,21 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     other.ssl_ctx_ = nullptr;
     other.ssl_ = nullptr;
 
-    // conn_ref_ を新しいオブジェクトを指すように再設定
-    if (conn_ != nullptr && ssl_ != nullptr) {
-      conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
-        auto* conn = static_cast<QuicConnection*>(ref->user_data);
-        return conn->conn_;
-      };
-      conn_ref_.user_data = this;
-      SSL_set_app_data(ssl_, &conn_ref_);
-    }
+    rebind_conn_ref();
   }
   return *this;
 }
 
 std::unique_ptr<QuicConnection> QuicConnection::create_client(
-    const QuicConfig& config) {
+    const QuicConfig& config,
+    const std::string& local_host,
+    uint16_t local_port,
+    const std::string& remote_host,
+    uint16_t remote_port) {
   auto conn =
       std::unique_ptr<QuicConnection>(new QuicConnection(false, config));
-  if (!conn->initialize_client()) {
+  if (!conn->initialize_client(local_host, local_port, remote_host,
+                               remote_port)) {
     return nullptr;
   }
   return conn;
@@ -149,9 +254,15 @@ std::unique_ptr<QuicConnection> QuicConnection::create_server(
 
 std::unique_ptr<QuicConnection> QuicConnection::accept(
     const QuicConfig& config,
-    const std::vector<uint8_t>& initial_packet) {
+    const std::vector<uint8_t>& initial_packet,
+    const std::string& local_host,
+    uint16_t local_port,
+    const std::string& remote_host,
+    uint16_t remote_port) {
   auto conn = std::unique_ptr<QuicConnection>(new QuicConnection(true, config));
-  if (!conn->initialize_server_from_packet(initial_packet)) {
+  if (!conn->initialize_server_from_packet(initial_packet, local_host,
+                                           local_port, remote_host,
+                                           remote_port)) {
     return nullptr;
   }
   return conn;
@@ -175,12 +286,48 @@ SSL_CTX* QuicConnection::create_ssl_ctx() {
   SSL_CTX_set_options(ctx, ssl_opts);
   SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS);
 
-  // 証明書検証の設定
-  if (!is_server_ && !config_.verify_peer) {
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+  if (!is_server_) {
+    // クライアント: セッションチケット受信用キャッシュ設定
+    SSL_CTX_set_session_cache_mode(
+        ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
+    SSL_CTX_sess_set_new_cb(ctx, new_session_cb);
+
+    // 証明書検証の設定 (カスタムコールバックは SSL 単位で後から設定)
+    if (!config_.verify_callback) {
+      if (!config_.verify_peer) {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+      } else {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+        if (!config_.ca_file.empty()) {
+          if (SSL_CTX_load_verify_locations(ctx, config_.ca_file.c_str(),
+                                            nullptr) != 1) {
+            SSL_CTX_free(ctx);
+            return nullptr;
+          }
+        } else {
+          if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+            SSL_CTX_free(ctx);
+            return nullptr;
+          }
+        }
+      }
+    }
   }
 
   if (is_server_) {
+    // 接続ごとに SSL_CTX を作るため、セッションチケット鍵をプロセス内で共有する。
+    // 共有しないと再接続時にチケットを復号できず Resumption / 0-RTT が失敗する。
+    static std::array<uint8_t, 48> ticket_keys{};
+    static std::once_flag ticket_keys_once;
+    std::call_once(ticket_keys_once, []() {
+      RAND_bytes(ticket_keys.data(), ticket_keys.size());
+    });
+    if (SSL_CTX_set_tlsext_ticket_keys(ctx, ticket_keys.data(),
+                                       ticket_keys.size()) != 1) {
+      SSL_CTX_free(ctx);
+      return nullptr;
+    }
+
     // サーバー証明書の読み込み
     if (!config_.cert_file.empty()) {
       if (SSL_CTX_use_certificate_chain_file(ctx, config_.cert_file.c_str()) !=
@@ -247,7 +394,109 @@ SSL_CTX* QuicConnection::create_ssl_ctx() {
   return ctx;
 }
 
-bool QuicConnection::initialize_client() {
+bool QuicConnection::setup_server_early_data() {
+  if (!config_.enable_early_data) {
+    return true;
+  }
+
+  SSL_set_early_data_enabled(ssl_, 1);
+
+  // 設定のフロー制御上限を early data context に符号化する
+  std::array<uint8_t, 256> quic_early_data_ctx{};
+  ngtcp2_transport_params params;
+  ngtcp2_transport_params_default(&params);
+  params.initial_max_streams_bidi = config_.max_streams_bidi;
+  params.initial_max_streams_uni = config_.max_streams_uni;
+  params.initial_max_stream_data_bidi_local =
+      config_.max_stream_data_bidi_local;
+  params.initial_max_stream_data_bidi_remote =
+      config_.max_stream_data_bidi_remote;
+  params.initial_max_stream_data_uni = config_.max_stream_data_uni;
+  params.initial_max_data = config_.max_data;
+
+  ngtcp2_ssize quic_early_data_ctxlen = ngtcp2_transport_params_encode(
+      quic_early_data_ctx.data(), quic_early_data_ctx.size(), &params);
+  if (quic_early_data_ctxlen < 0) {
+    return false;
+  }
+
+  if (SSL_set_quic_early_data_context(
+          ssl_, quic_early_data_ctx.data(),
+          static_cast<size_t>(quic_early_data_ctxlen)) != 1) {
+    return false;
+  }
+
+  return true;
+}
+
+bool QuicConnection::setup_client_session() {
+  // カスタム証明書検証
+  if (config_.verify_callback) {
+    SSL_set_custom_verify(ssl_, SSL_VERIFY_PEER, custom_verify_cb);
+  }
+
+  // SNI の設定
+  if (!config_.server_name.empty()) {
+    SSL_set_tlsext_host_name(ssl_, config_.server_name.c_str());
+  }
+
+  // ピア名検証 (verify_peer かつ server_name がある場合)
+  // IP リテラルは DNS 名検証 (SSL_set1_host) では SAN の IPAddress と
+  // 一致しないため、X509_VERIFY_PARAM_set1_ip_asc を使う。
+  if (config_.verify_peer && !config_.server_name.empty() &&
+      !config_.verify_callback) {
+    in_addr ipv4{};
+    in6_addr ipv6{};
+    const bool is_ip = inet_pton(AF_INET, config_.server_name.c_str(), &ipv4) ==
+                           1 ||
+                       inet_pton(AF_INET6, config_.server_name.c_str(), &ipv6) ==
+                           1;
+    if (is_ip) {
+      X509_VERIFY_PARAM* param = SSL_get0_param(ssl_);
+      if (param == nullptr ||
+          X509_VERIFY_PARAM_set1_ip_asc(param, config_.server_name.c_str()) !=
+              1) {
+        return false;
+      }
+    } else if (SSL_set1_host(ssl_, config_.server_name.c_str()) != 1) {
+      return false;
+    }
+  }
+
+  // セッションチケット import
+  if (!config_.session_ticket.empty()) {
+    const uint8_t* pointer = config_.session_ticket.data();
+    SSL_SESSION* session = d2i_SSL_SESSION(
+        nullptr, &pointer,
+        static_cast<long>(config_.session_ticket.size()));
+    if (session == nullptr) {
+      return false;
+    }
+    if (!SSL_set_session(ssl_, session)) {
+      SSL_SESSION_free(session);
+      return false;
+    }
+    if (config_.enable_early_data &&
+        SSL_SESSION_early_data_capable(session)) {
+      SSL_set_early_data_enabled(ssl_, 1);
+      early_data_attempted_ = true;
+    }
+    SSL_SESSION_free(session);
+  }
+
+  return true;
+}
+
+bool QuicConnection::initialize_client(const std::string& local_host,
+                                       uint16_t local_port,
+                                       const std::string& remote_host,
+                                       uint16_t remote_port) {
+  // ngtcp2_conn_client_new より先に path を実アドレスで埋める
+  if (!update_path_addresses(local_host, local_port, remote_host,
+                             remote_port)) {
+    return false;
+  }
+
   ssl_ctx_ = create_ssl_ctx();
   if (!ssl_ctx_) {
     return false;
@@ -285,6 +534,8 @@ bool QuicConnection::initialize_client() {
   callbacks.delete_crypto_cipher_ctx = delete_crypto_cipher_ctx_cb;
   callbacks.get_path_challenge_data = get_path_challenge_data_cb;
   callbacks.version_negotiation = version_negotiation_cb;
+  callbacks.path_validation = path_validation_cb;
+  callbacks.tls_early_data_rejected = tls_early_data_rejected_cb;
 
   // トランスポートパラメータの設定
   ngtcp2_settings settings;
@@ -315,17 +566,9 @@ bool QuicConnection::initialize_client() {
   dcid.datalen = NGTCP2_MIN_INITIAL_DCIDLEN;
   RAND_bytes(dcid.data, dcid.datalen);
 
-  // パスの設定 (ダミー - 実際は Python 側で設定)
-  ngtcp2_path path;
-  sockaddr_storage local_addr{}, remote_addr{};
-  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr);
-  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr);
-  local_in->sin_family = AF_INET;
-  remote_in->sin_family = AF_INET;
-  path.local.addr = reinterpret_cast<sockaddr*>(&local_addr);
-  path.local.addrlen = sizeof(sockaddr_in);
-  path.remote.addr = reinterpret_cast<sockaddr*>(&remote_addr);
-  path.remote.addrlen = sizeof(sockaddr_in);
+  // パスの設定
+  ngtcp2_path path{};
+  fill_ngtcp2_path(&path);
 
   int rv =
       ngtcp2_conn_client_new(&conn_, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
@@ -354,13 +597,22 @@ bool QuicConnection::initialize_client() {
                         static_cast<unsigned int>(alpn_data.size()));
   }
 
-  // SNI の設定
-  if (!config_.server_name.empty()) {
-    SSL_set_tlsext_host_name(ssl_, config_.server_name.c_str());
+  if (!setup_client_session()) {
+    return false;
   }
 
   // TLS native handle を設定 (BoringSSL は SSL* を直接渡す)
   ngtcp2_conn_set_tls_native_handle(conn_, ssl_);
+
+  // 0-RTT トランスポートパラメータを import
+  if (early_data_attempted_ && !config_.early_transport_params.empty()) {
+    int tp_rv = ngtcp2_conn_decode_and_set_0rtt_transport_params(
+        conn_, config_.early_transport_params.data(),
+        config_.early_transport_params.size());
+    if (tp_rv != 0) {
+      early_data_attempted_ = false;
+    }
+  }
 
   return true;
 }
@@ -402,6 +654,8 @@ bool QuicConnection::initialize_server() {
   callbacks.delete_crypto_cipher_ctx = delete_crypto_cipher_ctx_cb;
   callbacks.get_path_challenge_data = get_path_challenge_data_cb;
   callbacks.version_negotiation = version_negotiation_cb;
+  callbacks.path_validation = path_validation_cb;
+  callbacks.tls_early_data_rejected = tls_early_data_rejected_cb;
 
   // トランスポートパラメータの設定
   ngtcp2_settings settings;
@@ -436,17 +690,9 @@ bool QuicConnection::initialize_server() {
   // original_dcid を設定
   params.original_dcid = dcid;
 
-  // パスの設定 (ダミー - 実際は Python 側で設定)
-  ngtcp2_path path;
-  sockaddr_storage local_addr{}, remote_addr{};
-  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr);
-  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr);
-  local_in->sin_family = AF_INET;
-  remote_in->sin_family = AF_INET;
-  path.local.addr = reinterpret_cast<sockaddr*>(&local_addr);
-  path.local.addrlen = sizeof(sockaddr_in);
-  path.remote.addr = reinterpret_cast<sockaddr*>(&remote_addr);
-  path.remote.addrlen = sizeof(sockaddr_in);
+  // パスの設定
+  ngtcp2_path path{};
+  fill_ngtcp2_path(&path);
 
   int rv =
       ngtcp2_conn_server_new(&conn_, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
@@ -468,6 +714,10 @@ bool QuicConnection::initialize_server() {
   // SSL 接続状態を設定
   SSL_set_accept_state(ssl_);
 
+  if (!setup_server_early_data()) {
+    return false;
+  }
+
   // TLS native handle を設定 (BoringSSL は SSL* を直接渡す)
   ngtcp2_conn_set_tls_native_handle(conn_, ssl_);
 
@@ -475,7 +725,18 @@ bool QuicConnection::initialize_server() {
 }
 
 bool QuicConnection::initialize_server_from_packet(
-    const std::vector<uint8_t>& initial_packet) {
+    const std::vector<uint8_t>& initial_packet,
+    const std::string& local_host,
+    uint16_t local_port,
+    const std::string& remote_host,
+    uint16_t remote_port) {
+  // ngtcp2_conn_server_new より先に path を実アドレスで埋める。
+  // ゼロ path で生成したあと別アドレスで read_pkt すると DROP_CONN になる。
+  if (!update_path_addresses(local_host, local_port, remote_host,
+                             remote_port)) {
+    return false;
+  }
+
   // 初期パケットのヘッダーをデコード
   ngtcp2_pkt_hd hd;
   ngtcp2_ssize pktlen = ngtcp2_pkt_decode_hd_long(&hd, initial_packet.data(),
@@ -525,6 +786,8 @@ bool QuicConnection::initialize_server_from_packet(
   callbacks.delete_crypto_cipher_ctx = delete_crypto_cipher_ctx_cb;
   callbacks.get_path_challenge_data = get_path_challenge_data_cb;
   callbacks.version_negotiation = version_negotiation_cb;
+  callbacks.path_validation = path_validation_cb;
+  callbacks.tls_early_data_rejected = tls_early_data_rejected_cb;
 
   // トランスポートパラメータの設定
   ngtcp2_settings settings;
@@ -559,17 +822,9 @@ bool QuicConnection::initialize_server_from_packet(
   // original_dcid をクライアントの DCID に設定
   params.original_dcid = hd.dcid;
 
-  // パスの設定 (ダミー - 実際は Python 側で設定)
-  ngtcp2_path path;
-  sockaddr_storage local_addr{}, remote_addr{};
-  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr);
-  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr);
-  local_in->sin_family = AF_INET;
-  remote_in->sin_family = AF_INET;
-  path.local.addr = reinterpret_cast<sockaddr*>(&local_addr);
-  path.local.addrlen = sizeof(sockaddr_in);
-  path.remote.addr = reinterpret_cast<sockaddr*>(&remote_addr);
-  path.remote.addrlen = sizeof(sockaddr_in);
+  // パスの設定
+  ngtcp2_path path{};
+  fill_ngtcp2_path(&path);
 
   int rv =
       ngtcp2_conn_server_new(&conn_, &dcid, &scid, &path, hd.version,
@@ -591,14 +846,70 @@ bool QuicConnection::initialize_server_from_packet(
   // SSL 接続状態を設定
   SSL_set_accept_state(ssl_);
 
+  if (!setup_server_early_data()) {
+    return false;
+  }
+
   // TLS native handle を設定 (BoringSSL は SSL* を直接渡す)
   ngtcp2_conn_set_tls_native_handle(conn_, ssl_);
 
   return true;
 }
 
-size_t QuicConnection::receive(const std::vector<uint8_t>& data) {
+void QuicConnection::fill_ngtcp2_path(ngtcp2_path* path) const {
+  path->local.addr =
+      const_cast<sockaddr*>(reinterpret_cast<const sockaddr*>(&local_addr_));
+  path->local.addrlen = local_addrlen_;
+  path->remote.addr =
+      const_cast<sockaddr*>(reinterpret_cast<const sockaddr*>(&remote_addr_));
+  path->remote.addrlen = remote_addrlen_;
+  path->user_data = nullptr;
+}
+
+bool QuicConnection::update_path_addresses(const std::string& local_host,
+                                           uint16_t local_port,
+                                           const std::string& remote_host,
+                                           uint16_t remote_port) {
+  sockaddr_storage local{};
+  sockaddr_storage remote{};
+  socklen_t local_len = 0;
+  socklen_t remote_len = 0;
+  if (!fill_sockaddr(&local, &local_len, local_host, local_port)) {
+    return false;
+  }
+  if (!fill_sockaddr(&remote, &remote_len, remote_host, remote_port)) {
+    return false;
+  }
+  local_addr_ = local;
+  local_addrlen_ = local_len;
+  remote_addr_ = remote;
+  remote_addrlen_ = remote_len;
+  return true;
+}
+
+QuicPacket QuicConnection::make_packet(const uint8_t* data,
+                                       size_t len,
+                                       const ngtcp2_path& path) const {
+  QuicPacket packet;
+  packet.data.assign(data, data + len);
+  sockaddr_to_host_port(path.local.addr, path.local.addrlen, &packet.local_host,
+                        &packet.local_port);
+  sockaddr_to_host_port(path.remote.addr, path.remote.addrlen,
+                        &packet.remote_host, &packet.remote_port);
+  return packet;
+}
+
+size_t QuicConnection::receive(const std::vector<uint8_t>& data,
+                               const std::string& local_host,
+                               uint16_t local_port,
+                               const std::string& remote_host,
+                               uint16_t remote_port) {
   if (!conn_ || closed_) {
+    return 0;
+  }
+
+  if (!update_path_addresses(local_host, local_port, remote_host,
+                             remote_port)) {
     return 0;
   }
 
@@ -607,17 +918,8 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data) {
 
   timestamp_ns_ = get_timestamp_ns();
 
-  // パスの設定 (ダミー)
-  ngtcp2_path path;
-  sockaddr_storage local_addr{}, remote_addr{};
-  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr);
-  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr);
-  local_in->sin_family = AF_INET;
-  remote_in->sin_family = AF_INET;
-  path.local.addr = reinterpret_cast<sockaddr*>(&local_addr);
-  path.local.addrlen = sizeof(sockaddr_in);
-  path.remote.addr = reinterpret_cast<sockaddr*>(&remote_addr);
-  path.remote.addrlen = sizeof(sockaddr_in);
+  ngtcp2_path path{};
+  fill_ngtcp2_path(&path);
 
   ngtcp2_pkt_info pi{};
   int rv = ngtcp2_conn_read_pkt(conn_, &path, &pi, data.data(), data.size(),
@@ -669,7 +971,7 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data) {
   return data.size();
 }
 
-std::optional<std::vector<uint8_t>> QuicConnection::send() {
+std::optional<QuicPacket> QuicConnection::send() {
   if (!conn_ || closed_) {
     return std::nullopt;
   }
@@ -679,17 +981,8 @@ std::optional<std::vector<uint8_t>> QuicConnection::send() {
 
   timestamp_ns_ = get_timestamp_ns();
 
-  // パスの設定 (ダミー)
-  ngtcp2_path path;
-  sockaddr_storage local_addr{}, remote_addr{};
-  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr);
-  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr);
-  local_in->sin_family = AF_INET;
-  remote_in->sin_family = AF_INET;
-  path.local.addr = reinterpret_cast<sockaddr*>(&local_addr);
-  path.local.addrlen = sizeof(sockaddr_in);
-  path.remote.addr = reinterpret_cast<sockaddr*>(&remote_addr);
-  path.remote.addrlen = sizeof(sockaddr_in);
+  ngtcp2_path path{};
+  fill_ngtcp2_path(&path);
 
   ngtcp2_pkt_info pi{};
   ngtcp2_ssize nwrite = 0;
@@ -750,8 +1043,8 @@ std::optional<std::vector<uint8_t>> QuicConnection::send() {
       }
 
       if (nwrite > 0) {
-        return std::vector<uint8_t>(send_buffer_.begin(),
-                                    send_buffer_.begin() + nwrite);
+        return make_packet(send_buffer_.data(),
+                           static_cast<size_t>(nwrite), path);
       }
     }
   }
@@ -783,8 +1076,8 @@ std::optional<std::vector<uint8_t>> QuicConnection::send() {
     }
 
     if (nwrite > 0) {
-      return std::vector<uint8_t>(send_buffer_.begin(),
-                                  send_buffer_.begin() + nwrite);
+      return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
+                         path);
     }
   }
 
@@ -792,11 +1085,73 @@ std::optional<std::vector<uint8_t>> QuicConnection::send() {
   nwrite = ngtcp2_conn_write_pkt(conn_, &path, &pi, send_buffer_.data(),
                                  send_buffer_.size(), timestamp_ns_);
   if (nwrite > 0) {
-    return std::vector<uint8_t>(send_buffer_.begin(),
-                                send_buffer_.begin() + nwrite);
+    return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite), path);
   }
 
   return std::nullopt;
+}
+
+bool QuicConnection::initiate_migration(const std::string& local_host,
+                                        uint16_t local_port,
+                                        const std::string& remote_host,
+                                        uint16_t remote_port) {
+  if (!conn_ || closed_ || is_server_) {
+    return false;
+  }
+
+  sockaddr_storage local{};
+  sockaddr_storage remote{};
+  socklen_t local_len = 0;
+  socklen_t remote_len = 0;
+  if (!fill_sockaddr(&local, &local_len, local_host, local_port)) {
+    return false;
+  }
+  if (!fill_sockaddr(&remote, &remote_len, remote_host, remote_port)) {
+    return false;
+  }
+
+  ngtcp2_path path{};
+  path.local.addr = reinterpret_cast<sockaddr*>(&local);
+  path.local.addrlen = local_len;
+  path.remote.addr = reinterpret_cast<sockaddr*>(&remote);
+  path.remote.addrlen = remote_len;
+  path.user_data = nullptr;
+
+  timestamp_ns_ = get_timestamp_ns();
+  int rv = ngtcp2_conn_initiate_migration(conn_, &path, timestamp_ns_);
+  return rv == 0;
+}
+
+std::vector<uint8_t> QuicConnection::export_session_ticket() const {
+  return last_session_ticket_;
+}
+
+std::vector<uint8_t> QuicConnection::export_0rtt_transport_params() const {
+  if (!conn_ || !handshake_completed_) {
+    return {};
+  }
+
+  std::vector<uint8_t> buffer(256);
+  ngtcp2_ssize nwrite = ngtcp2_conn_encode_0rtt_transport_params2(
+      conn_, buffer.data(), buffer.size());
+  if (nwrite < 0) {
+    buffer.resize(4096);
+    nwrite = ngtcp2_conn_encode_0rtt_transport_params2(conn_, buffer.data(),
+                                                       buffer.size());
+  }
+  if (nwrite < 0) {
+    return {};
+  }
+  buffer.resize(static_cast<size_t>(nwrite));
+  return buffer;
+}
+
+bool QuicConnection::is_early_data_accepted() const {
+  return ssl_ != nullptr && SSL_early_data_accepted(ssl_) != 0;
+}
+
+bool QuicConnection::was_early_data_attempted() const {
+  return early_data_attempted_;
 }
 
 std::optional<uint64_t> QuicConnection::get_timeout_ns() const {
@@ -944,16 +1299,8 @@ void QuicConnection::close(uint64_t error_code, const std::string& reason) {
 
   timestamp_ns_ = get_timestamp_ns();
 
-  ngtcp2_path path;
-  sockaddr_storage local_addr{}, remote_addr{};
-  auto* local_in = reinterpret_cast<sockaddr_in*>(&local_addr);
-  auto* remote_in = reinterpret_cast<sockaddr_in*>(&remote_addr);
-  local_in->sin_family = AF_INET;
-  remote_in->sin_family = AF_INET;
-  path.local.addr = reinterpret_cast<sockaddr*>(&local_addr);
-  path.local.addrlen = sizeof(sockaddr_in);
-  path.remote.addr = reinterpret_cast<sockaddr*>(&remote_addr);
-  path.remote.addrlen = sizeof(sockaddr_in);
+  ngtcp2_path path{};
+  fill_ngtcp2_path(&path);
 
   ngtcp2_pkt_info pi{};
   ngtcp2_ccerr ccerr;
@@ -1003,10 +1350,78 @@ void QuicConnection::push_event(QuicEvent event) {
   events_.push_back(std::move(event));
 }
 
-// ========== ngtcp2 コールバック ==========
+// ========== ngtcp2 / BoringSSL コールバック ==========
+
+int QuicConnection::new_session_cb(SSL* ssl, SSL_SESSION* session) {
+  auto* conn_ref =
+      static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
+  if (conn_ref == nullptr) {
+    return 0;
+  }
+  auto* self = static_cast<QuicConnection*>(conn_ref->user_data);
+  if (self == nullptr) {
+    return 0;
+  }
+
+  // セッションを DER にシリアライズ
+  int length = i2d_SSL_SESSION(session, nullptr);
+  if (length <= 0) {
+    return 0;
+  }
+
+  std::vector<uint8_t> der(static_cast<size_t>(length));
+  uint8_t* pointer = der.data();
+  if (i2d_SSL_SESSION(session, &pointer) <= 0) {
+    return 0;
+  }
+
+  self->last_session_ticket_ = der;
+
+  QuicEvent event;
+  event.type = QuicEventType::SessionTicket;
+  event.data = std::move(der);
+  self->push_event(std::move(event));
+
+  return 0;
+}
+
+ssl_verify_result_t QuicConnection::custom_verify_cb(SSL* ssl,
+                                                     uint8_t* out_alert) {
+  (void)out_alert;
+  auto* conn_ref =
+      static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
+  if (conn_ref == nullptr) {
+    return ssl_verify_invalid;
+  }
+  auto* self = static_cast<QuicConnection*>(conn_ref->user_data);
+  if (self == nullptr || !self->config_.verify_callback) {
+    return ssl_verify_invalid;
+  }
+
+  const STACK_OF(CRYPTO_BUFFER)* chain = SSL_get0_peer_certificates(ssl);
+  if (chain == nullptr) {
+    return ssl_verify_invalid;
+  }
+
+  std::vector<std::vector<uint8_t>> certificates;
+  const size_t count = sk_CRYPTO_BUFFER_num(chain);
+  certificates.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    const CRYPTO_BUFFER* buffer = sk_CRYPTO_BUFFER_value(chain, i);
+    const uint8_t* data = CRYPTO_BUFFER_data(buffer);
+    size_t length = CRYPTO_BUFFER_len(buffer);
+    certificates.emplace_back(data, data + length);
+  }
+
+  if (self->config_.verify_callback(certificates)) {
+    return ssl_verify_ok;
+  }
+  return ssl_verify_invalid;
+}
 
 int QuicConnection::client_initial_cb(ngtcp2_conn* conn, void* user_data) {
   auto* self = static_cast<QuicConnection*>(user_data);
+  (void)self;
   return ngtcp2_crypto_client_initial_cb(conn, user_data);
 }
 
@@ -1153,10 +1568,59 @@ int QuicConnection::handshake_completed_cb(ngtcp2_conn* conn, void* user_data) {
   auto* self = static_cast<QuicConnection*>(user_data);
   self->handshake_completed_ = true;
 
+  // BoringSSL 以外のバックエンド向け: ハンドシェイク完了後に early data 拒否を検出
+  if (self->early_data_attempted_ && self->ssl_ != nullptr &&
+      !SSL_early_data_accepted(self->ssl_)) {
+    ngtcp2_conn_tls_early_data_rejected(conn);
+  }
+
   QuicEvent event;
   event.type = QuicEventType::HandshakeCompleted;
   self->push_event(std::move(event));
 
+  return 0;
+}
+
+int QuicConnection::path_validation_cb(ngtcp2_conn* conn,
+                                       uint32_t flags,
+                                       const ngtcp2_path* path,
+                                       const ngtcp2_path* fallback_path,
+                                       ngtcp2_path_validation_result res,
+                                       void* user_data) {
+  (void)conn;
+  (void)flags;
+  (void)fallback_path;
+  auto* self = static_cast<QuicConnection*>(user_data);
+
+  QuicEvent event;
+  event.reason = format_path_reason(path);
+  if (res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS) {
+    event.type = QuicEventType::PathValidated;
+    // 検証成功パスを現在パスとして保持する
+    if (path->local.addrlen <= sizeof(self->local_addr_) &&
+        path->remote.addrlen <= sizeof(self->remote_addr_)) {
+      std::memcpy(&self->local_addr_, path->local.addr, path->local.addrlen);
+      self->local_addrlen_ = path->local.addrlen;
+      std::memcpy(&self->remote_addr_, path->remote.addr, path->remote.addrlen);
+      self->remote_addrlen_ = path->remote.addrlen;
+    }
+  } else {
+    event.type = QuicEventType::PathValidationFailed;
+  }
+  self->push_event(std::move(event));
+  return 0;
+}
+
+int QuicConnection::tls_early_data_rejected_cb(ngtcp2_conn* conn,
+                                               void* user_data) {
+  (void)conn;
+  auto* self = static_cast<QuicConnection*>(user_data);
+  if (!self->early_data_rejected_event_pushed_) {
+    self->early_data_rejected_event_pushed_ = true;
+    QuicEvent event;
+    event.type = QuicEventType::EarlyDataRejected;
+    self->push_event(std::move(event));
+  }
   return 0;
 }
 
@@ -1254,11 +1718,56 @@ void bind_quic(nb::module_& m) {
       .def_rw("server_name", &QuicConfig::server_name, "サーバー名 (SNI)")
       .def_rw("cert_file", &QuicConfig::cert_file, "証明書ファイルパス")
       .def_rw("key_file", &QuicConfig::key_file, "秘密鍵ファイルパス")
-      .def_rw("verify_peer", &QuicConfig::verify_peer, "ピア検証を行うか")
+      .def_rw("verify_peer", &QuicConfig::verify_peer,
+              "クライアントのピア証明書検証を行うか")
+      .def_rw("ca_file", &QuicConfig::ca_file, "CA 証明書ファイルパス")
+      .def_prop_rw(
+          "verify_callback",
+          [](QuicConfig& config) -> nb::object {
+            if (!config.verify_callback) {
+              return nb::none();
+            }
+            return nb::cpp_function(config.verify_callback);
+          },
+          [](QuicConfig& config, nb::object obj) {
+            if (obj.is_none()) {
+              config.verify_callback = nullptr;
+            } else {
+              config.verify_callback = nb::cast<std::function<bool(
+                  const std::vector<std::vector<uint8_t>>&)>>(obj);
+            }
+          },
+          "ピア証明書検証コールバック (list[bytes] -> bool) または None")
       .def_rw("enable_datagram", &QuicConfig::enable_datagram,
               "Datagram を有効にするか")
       .def_rw("max_datagram_frame_size", &QuicConfig::max_datagram_frame_size,
-              "最大 Datagram フレームサイズ");
+              "最大 Datagram フレームサイズ")
+      .def_rw("enable_early_data", &QuicConfig::enable_early_data,
+              "0-RTT early data を有効にするか")
+      .def_prop_rw(
+          "session_ticket",
+          [](const QuicConfig& config) {
+            return nb::bytes(
+                reinterpret_cast<const char*>(config.session_ticket.data()),
+                config.session_ticket.size());
+          },
+          [](QuicConfig& config, nb::bytes value) {
+            config.session_ticket.assign(
+                value.c_str(), value.c_str() + value.size());
+          },
+          "セッションチケット (DER bytes)")
+      .def_prop_rw(
+          "early_transport_params",
+          [](const QuicConfig& config) {
+            return nb::bytes(reinterpret_cast<const char*>(
+                                 config.early_transport_params.data()),
+                             config.early_transport_params.size());
+          },
+          [](QuicConfig& config, nb::bytes value) {
+            config.early_transport_params.assign(
+                value.c_str(), value.c_str() + value.size());
+          },
+          "0-RTT トランスポートパラメータ (bytes)");
 
   // QuicEventType
   nb::enum_<QuicEventType>(quic_m, "EventType", "QUIC イベント種別")
@@ -1269,7 +1778,11 @@ void bind_quic(nb::module_& m) {
       .value("STREAM_CLOSED", QuicEventType::StreamClosed)
       .value("STREAM_RESET", QuicEventType::StreamReset)
       .value("DATAGRAM", QuicEventType::DatagramReceived)
-      .value("CONNECTION_ID_RETIRED", QuicEventType::ConnectionIdRetired);
+      .value("CONNECTION_ID_RETIRED", QuicEventType::ConnectionIdRetired)
+      .value("SESSION_TICKET", QuicEventType::SessionTicket)
+      .value("EARLY_DATA_REJECTED", QuicEventType::EarlyDataRejected)
+      .value("PATH_VALIDATED", QuicEventType::PathValidated)
+      .value("PATH_VALIDATION_FAILED", QuicEventType::PathValidationFailed);
 
   // QuicEvent
   nb::class_<QuicEvent>(quic_m, "Event", "QUIC イベント")
@@ -1287,21 +1800,44 @@ void bind_quic(nb::module_& m) {
       .def_ro("error_code", &QuicEvent::error_code, "エラーコード")
       .def_ro("reason", &QuicEvent::reason, "理由");
 
+  // QuicPacket
+  nb::class_<QuicPacket>(quic_m, "Packet", "QUIC UDP パケット (パス情報付き)")
+      .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
+      .def_prop_ro(
+          "data",
+          [](const QuicPacket& packet) {
+            return nb::bytes(
+                reinterpret_cast<const char*>(packet.data.data()),
+                packet.data.size());
+          },
+          "パケットデータ")
+      .def_ro("local_host", &QuicPacket::local_host, "ローカルホスト")
+      .def_ro("local_port", &QuicPacket::local_port, "ローカルポート")
+      .def_ro("remote_host", &QuicPacket::remote_host, "リモートホスト")
+      .def_ro("remote_port", &QuicPacket::remote_port, "リモートポート");
+
   // QuicConnection
   nb::class_<QuicConnection>(quic_m, "Connection",
                              "QUIC コネクション (Sans-IO)")
       .def_static(
           "create_client",
-          [](const QuicConfig& config) {
-            auto conn = QuicConnection::create_client(config);
+          [](const QuicConfig& config,
+             std::pair<std::string, uint16_t> local_addr,
+             std::pair<std::string, uint16_t> remote_addr) {
+            auto conn = QuicConnection::create_client(
+                config, local_addr.first, local_addr.second, remote_addr.first,
+                remote_addr.second);
             if (!conn) {
               throw std::runtime_error(
                   "Failed to create QUIC client connection");
             }
             return conn.release();
           },
-          nb::arg("config"), nb::rv_policy::take_ownership,
-          nb::sig("def create_client(config: Config) -> Connection"),
+          nb::arg("config"), nb::arg("local_addr"), nb::arg("remote_addr"),
+          nb::rv_policy::take_ownership,
+          nb::sig("def create_client(config: Config, "
+                  "local_addr: tuple[str, int], "
+                  "remote_addr: tuple[str, int]) -> Connection"),
           "クライアントとして接続を作成")
       .def_static(
           "create_server",
@@ -1318,41 +1854,91 @@ void bind_quic(nb::module_& m) {
           "サーバーとして接続を作成")
       .def_static(
           "accept",
-          [](const QuicConfig& config, nb::bytes initial_packet) {
+          [](const QuicConfig& config, nb::bytes initial_packet,
+             std::pair<std::string, uint16_t> local_addr,
+             std::pair<std::string, uint16_t> remote_addr) {
             auto conn = QuicConnection::accept(
-                config, std::vector<uint8_t>(
-                            initial_packet.c_str(),
-                            initial_packet.c_str() + initial_packet.size()));
+                config,
+                std::vector<uint8_t>(
+                    initial_packet.c_str(),
+                    initial_packet.c_str() + initial_packet.size()),
+                local_addr.first, local_addr.second, remote_addr.first,
+                remote_addr.second);
             if (!conn) {
               throw std::runtime_error(
                   "Failed to accept QUIC connection from initial packet");
             }
             return conn.release();
           },
-          nb::arg("config"), nb::arg("initial_packet"),
-          nb::rv_policy::take_ownership,
-          nb::sig("def accept(config: Config, initial_packet: bytes) -> "
-                  "Connection"),
+          nb::arg("config"), nb::arg("initial_packet"), nb::arg("local_addr"),
+          nb::arg("remote_addr"), nb::rv_policy::take_ownership,
+          nb::sig("def accept(config: Config, initial_packet: bytes, "
+                  "local_addr: tuple[str, int], "
+                  "remote_addr: tuple[str, int]) -> Connection"),
           "初期パケットからサーバー接続を作成")
       .def(
           "receive",
-          [](QuicConnection& self, nb::bytes data) {
+          [](QuicConnection& self, nb::bytes data,
+             std::pair<std::string, uint16_t> local_addr,
+             std::pair<std::string, uint16_t> remote_addr) {
             return self.receive(
-                std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
+                std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
+                local_addr.first, local_addr.second, remote_addr.first,
+                remote_addr.second);
           },
-          nb::arg("data"), nb::sig("def receive(self, data: bytes) -> int"),
+          nb::arg("data"), nb::arg("local_addr"), nb::arg("remote_addr"),
+          nb::sig("def receive(self, data: bytes, local_addr: tuple[str, int], "
+                  "remote_addr: tuple[str, int]) -> int"),
           "受信したデータを処理")
       .def(
           "send",
           [](QuicConnection& self) -> nb::object {
             auto result = self.send();
             if (result) {
-              return nb::bytes(reinterpret_cast<const char*>(result->data()),
-                               result->size());
+              return nb::cast(std::move(*result));
             }
             return nb::none();
           },
-          nb::sig("def send(self) -> bytes | None"), "送信すべきデータを取得")
+          nb::sig("def send(self) -> Packet | None"),
+          "送信すべきデータを取得")
+      .def(
+          "initiate_migration",
+          [](QuicConnection& self,
+             std::pair<std::string, uint16_t> local_addr,
+             std::pair<std::string, uint16_t> remote_addr) {
+            return self.initiate_migration(local_addr.first, local_addr.second,
+                                           remote_addr.first,
+                                           remote_addr.second);
+          },
+          nb::arg("local_addr"), nb::arg("remote_addr"),
+          nb::sig("def initiate_migration(self, local_addr: tuple[str, int], "
+                  "remote_addr: tuple[str, int]) -> bool"),
+          "コネクションマイグレーションを開始する")
+      .def(
+          "export_session_ticket",
+          [](const QuicConnection& self) {
+            auto ticket = self.export_session_ticket();
+            return nb::bytes(reinterpret_cast<const char*>(ticket.data()),
+                             ticket.size());
+          },
+          nb::sig("def export_session_ticket(self) -> bytes"),
+          "セッションチケット (DER) を取得")
+      .def(
+          "export_0rtt_transport_params",
+          [](const QuicConnection& self) {
+            auto params = self.export_0rtt_transport_params();
+            return nb::bytes(reinterpret_cast<const char*>(params.data()),
+                             params.size());
+          },
+          nb::sig("def export_0rtt_transport_params(self) -> bytes"),
+          "0-RTT トランスポートパラメータを取得")
+      .def("is_early_data_accepted", &QuicConnection::is_early_data_accepted,
+           nb::sig("def is_early_data_accepted(self) -> bool"),
+           "0-RTT early data が受理されたか")
+      .def("was_early_data_attempted",
+           &QuicConnection::was_early_data_attempted,
+           nb::sig("def was_early_data_attempted(self) -> bool"),
+           "0-RTT early data を試みたか")
       .def("get_timeout", &QuicConnection::get_timeout_ns,
            nb::sig("def get_timeout(self) -> int | None"),
            "次のタイムアウトまでの時間を取得 (ナノ秒)")

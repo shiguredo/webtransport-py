@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from webtransport.webtransport_ext import quic as quic_low
 
@@ -58,6 +58,8 @@ class Server:
         self._idle_timeout_ns = idle_timeout_ns
 
         self._socket: socket.socket | None = None
+        # bind 後のローカルアドレス (host, port)
+        self._local_addr: tuple[str, int] | None = None
         self._connections: dict[tuple[str, int], quic_low.Connection] = {}
         self._running = False
         self._actual_port = 0
@@ -133,12 +135,21 @@ class Server:
         """
         self._on_connection_closed = callback
 
+    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
+        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
+        host = addr[0]
+        port = addr[1]
+        if not isinstance(port, int):
+            raise TypeError(f"expected port int, got {type(port).__name__}")
+        return (str(host), port)
+
     async def start(self) -> None:
         """サーバーを開始する"""
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._socket.bind((self._host, self._port))
-        self._actual_port = self._socket.getsockname()[1]
+        self._local_addr = self._normalize_addr(self._socket.getsockname())
+        self._actual_port = self._local_addr[1]
         self._running = True
 
     async def stop(self) -> None:
@@ -151,7 +162,7 @@ class Server:
             self._socket.close()
             self._socket = None
 
-    async def __aenter__(self) -> Server:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.start()
         return self
@@ -177,21 +188,41 @@ class Server:
         initial_packet: bytes,
     ) -> quic_low.Connection:
         """初期パケットから接続を作成する"""
+        if self._local_addr is None:
+            raise RuntimeError("サーバーが開始されていません")
+
         config = self._create_config()
-        connection = quic_low.Connection.accept(config, initial_packet)
-        connection.receive(initial_packet)
+        connection = quic_low.Connection.accept(
+            config,
+            initial_packet,
+            self._local_addr,
+            addr,
+        )
+        connection.receive(initial_packet, self._local_addr, addr)
         self._connections[addr] = connection
         return connection
 
     async def _send_to(self, addr: tuple[str, int], connection: quic_low.Connection) -> None:
-        """データを送信する"""
+        """接続の送信待ちパケットを 1 つ送出する
+
+        パケットにリモートアドレスが埋まっていればそれを使い、
+        未設定ならマップ上のクライアントアドレスにフォールバックする。
+        send() の連続 drain は ACK 待ちが必要なケースでハングするため行わない。
+        """
         if self._socket is None:
             return
 
-        data = connection.send()
-        if data:
-            loop = asyncio.get_running_loop()
-            await loop.sock_sendto(self._socket, data, addr)
+        packet = connection.send()
+        if packet is None:
+            return
+
+        if packet.remote_host and packet.remote_port:
+            dest: tuple[str, int] = (packet.remote_host, packet.remote_port)
+        else:
+            dest = addr
+
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(self._socket, packet.data, dest)
 
     async def open_stream(
         self,
@@ -254,23 +285,47 @@ class Server:
 
         サーバーが停止されるまでブロックする。
         """
-        if self._socket is None:
+        if self._socket is None or self._local_addr is None:
             raise RuntimeError("サーバーが開始されていません")
 
         loop = asyncio.get_running_loop()
 
         while self._running:
             try:
-                data, addr = await asyncio.wait_for(
+                data, raw_addr = await asyncio.wait_for(
                     loop.sock_recvfrom(self._socket, 65535),
                     timeout=0.1,
                 )
+                addr = self._normalize_addr(raw_addr)
 
-                if addr not in self._connections:
-                    connection = self._accept_connection(addr, data)
+                connection = self._connections.get(addr)
+                if connection is None:
+                    # Connection Migration 後は送信元ポートが変わる。
+                    # Short header のみ既存接続へ試し、Long header (Initial 等) は
+                    # 新規 accept する。
+                    is_long_header = bool(data) and (data[0] & 0x80) != 0
+                    if not is_long_header:
+                        for old_addr, existing in list(self._connections.items()):
+                            processed = existing.receive(
+                                data,
+                                self._local_addr,
+                                addr,
+                            )
+                            if processed > 0:
+                                if old_addr != addr:
+                                    del self._connections[old_addr]
+                                    self._connections[addr] = existing
+                                connection = existing
+                                break
+                    if connection is None:
+                        try:
+                            connection = self._accept_connection(addr, data)
+                        except RuntimeError:
+                            # Initial 以外の未知パケットは破棄する
+                            continue
+
                 else:
-                    connection = self._connections[addr]
-                    connection.receive(data)
+                    connection.receive(data, self._local_addr, addr)
 
                 while True:
                     event = connection.next_event()

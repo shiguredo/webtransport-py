@@ -1,8 +1,15 @@
 """WebTransport H3 デバッグテスト"""
 
+from __future__ import annotations
+
 import asyncio
 
 import pytest
+
+
+def _normalize_addr(addr: tuple[object, ...]) -> tuple[str, int]:
+    """ソケットアドレスを (str, int) に正規化する"""
+    return (str(addr[0]), int(addr[1]))
 
 
 @pytest.mark.asyncio
@@ -10,7 +17,8 @@ async def test_debug_h3_low_level(test_certificates):
     """H3 低レベル API でセッション確立をテスト"""
     import socket
 
-    from webtransport import h3 as h3_low, quic
+    from webtransport import h3 as h3_low
+    from webtransport import quic
 
     print("\n--- H3 Low Level Debug ---")
 
@@ -35,44 +43,33 @@ async def test_debug_h3_low_level(test_certificates):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.setblocking(False)
     server_socket.bind(("127.0.0.1", 0))
-    server_port = server_socket.getsockname()[1]
+    server_local = _normalize_addr(server_socket.getsockname())
+    server_port = server_local[1]
     print(f"Server listening on port {server_port}")
 
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.setblocking(False)
     client_socket.bind(("0.0.0.0", 0))
+    client_local = _normalize_addr(client_socket.getsockname())
+    server_remote = ("127.0.0.1", server_port)
 
-    client_quic = quic.Connection.create_client(client_quic_config)
+    client_quic = quic.Connection.create_client(
+        client_quic_config,
+        client_local,
+        server_remote,
+    )
     client_h3 = h3_low.Session.create_client(client_h3_config)
 
     server_quic = None
     server_h3 = None
-    server_streams_setup = False
-    client_addr = None
+    client_addr: tuple[str, int] | None = None
 
     loop = asyncio.get_running_loop()
 
-    async def exchange_data():
-        nonlocal server_quic, server_h3, server_streams_setup
-
-        server_data = server_quic.send() if server_quic else None
-        if server_data:
-            for stream_id, stream_data, fin in server_h3.get_streams_to_send() if server_h3 else []:
-                server_quic.send_stream_data(stream_id, stream_data, fin)
-            server_data = server_quic.send()
-            if server_data:
-                await loop.sock_sendto(
-                    server_socket, server_data, ("127.0.0.1", client_socket.getsockname()[1])
-                )
-
-        client_data = client_quic.send()
-        if client_data:
-            await loop.sock_sendto(client_socket, client_data, ("127.0.0.1", server_port))
-
-    initial_data = client_quic.send()
-    if initial_data:
-        print(f"Client sending initial ({len(initial_data)} bytes)")
-        await loop.sock_sendto(client_socket, initial_data, ("127.0.0.1", server_port))
+    initial_packet = client_quic.send()
+    if initial_packet:
+        print(f"Client sending initial ({len(initial_packet.data)} bytes)")
+        await loop.sock_sendto(client_socket, initial_packet.data, server_remote)
 
     handshake_complete = False
     session_ready = False
@@ -80,20 +77,26 @@ async def test_debug_h3_low_level(test_certificates):
     connect_sent = False
     server_settings_received = False
 
-    for i in range(200):
+    for _ in range(200):
         try:
             data, addr = await asyncio.wait_for(
                 loop.sock_recvfrom(server_socket, 65535),
                 timeout=0.05,
             )
+            remote = _normalize_addr(addr)
             if server_quic is None:
-                server_quic = quic.Connection.accept(server_quic_config, data)
-                server_quic.receive(data)
+                server_quic = quic.Connection.accept(
+                    server_quic_config,
+                    data,
+                    server_local,
+                    remote,
+                )
+                server_quic.receive(data, server_local, remote)
                 server_h3 = h3_low.Session.create_server(server_h3_config)
-                client_addr = addr
+                client_addr = remote
             else:
-                server_quic.receive(data)
-                client_addr = addr
+                server_quic.receive(data, server_local, remote)
+                client_addr = remote
 
             while True:
                 event = server_quic.next_event()
@@ -110,22 +113,27 @@ async def test_debug_h3_low_level(test_certificates):
                     decoder_stream_id = server_quic.open_stream(False)
                     print(f"Server: decoder_stream_id={decoder_stream_id}")
                     server_h3.bind_qpack_decoder_stream(decoder_stream_id)
-                    # クライアントからの双方向ストリームを受け入れる
                     server_h3.set_max_client_streams_bidi(100)
                     streams_to_send = server_h3.get_streams_to_send()
                     print(
-                        f"Server: streams_to_send after control setup = {[(s[0], len(s[1]), s[2]) for s in streams_to_send]}"
+                        f"Server: streams_to_send after control setup = "
+                        f"{[(s[0], len(s[1]), s[2]) for s in streams_to_send]}"
                     )
                     for stream_id_send, stream_data, fin in streams_to_send:
                         server_quic.send_stream_data(stream_id_send, stream_data, fin)
-                    server_data = server_quic.send()
-                    if server_data:
-                        print(f"Server: sending control streams ({len(server_data)} bytes)")
-                        await loop.sock_sendto(server_socket, server_data, client_addr)
-                    server_streams_setup = True
+                    server_packet = server_quic.send()
+                    if server_packet:
+                        print(f"Server: sending control streams ({len(server_packet.data)} bytes)")
+                        dest = (
+                            (server_packet.remote_host, server_packet.remote_port)
+                            if server_packet.remote_host and server_packet.remote_port
+                            else client_addr
+                        )
+                        await loop.sock_sendto(server_socket, server_packet.data, dest)
                 elif event.type == quic.EventType.STREAM_DATA:
                     print(
-                        f"Server: QUIC STREAM_DATA stream_id={event.stream_id} len={len(event.data)}"
+                        f"Server: QUIC STREAM_DATA stream_id={event.stream_id} "
+                        f"len={len(event.data)}"
                     )
                     server_h3.receive_stream_data(event.stream_id, event.data, event.fin)
 
@@ -140,23 +148,29 @@ async def test_debug_h3_low_level(test_certificates):
                     session_ready = True
                 elif h3_event.type == h3_low.EventType.ERROR:
                     print(
-                        f"Server: ERROR error_code={h3_event.error_code} error_message={h3_event.error_message}"
+                        f"Server: ERROR error_code={h3_event.error_code} "
+                        f"error_message={h3_event.error_message}"
                     )
 
             for stream_id, stream_data, fin in server_h3.get_streams_to_send() if server_h3 else []:
                 server_quic.send_stream_data(stream_id, stream_data, fin)
-            server_data = server_quic.send() if server_quic else None
-            if server_data:
-                await loop.sock_sendto(server_socket, server_data, addr)
+            server_packet = server_quic.send() if server_quic else None
+            if server_packet:
+                dest = (
+                    (server_packet.remote_host, server_packet.remote_port)
+                    if server_packet.remote_host and server_packet.remote_port
+                    else remote
+                )
+                await loop.sock_sendto(server_socket, server_packet.data, dest)
         except TimeoutError:
             pass
 
         try:
-            data, _ = await asyncio.wait_for(
+            data, remote_raw = await asyncio.wait_for(
                 loop.sock_recvfrom(client_socket, 65535),
                 timeout=0.05,
             )
-            client_quic.receive(data)
+            client_quic.receive(data, client_local, _normalize_addr(remote_raw))
 
             while True:
                 event = client_quic.next_event()
@@ -177,20 +191,27 @@ async def test_debug_h3_low_level(test_certificates):
                         client_h3.bind_qpack_decoder_stream(decoder_stream_id)
                         streams_to_send = client_h3.get_streams_to_send()
                         print(
-                            f"Client: streams_to_send after control setup = {[(s[0], len(s[1]), s[2]) for s in streams_to_send]}"
+                            f"Client: streams_to_send after control setup = "
+                            f"{[(s[0], len(s[1]), s[2]) for s in streams_to_send]}"
                         )
                         for stream_id_send, stream_data, fin in streams_to_send:
                             client_quic.send_stream_data(stream_id_send, stream_data, fin)
-                        client_data = client_quic.send()
-                        if client_data:
-                            print(f"Client: sending control streams ({len(client_data)} bytes)")
-                            await loop.sock_sendto(
-                                client_socket, client_data, ("127.0.0.1", server_port)
+                        client_packet = client_quic.send()
+                        if client_packet:
+                            print(
+                                f"Client: sending control streams ({len(client_packet.data)} bytes)"
                             )
+                            dest = (
+                                (client_packet.remote_host, client_packet.remote_port)
+                                if client_packet.remote_host and client_packet.remote_port
+                                else server_remote
+                            )
+                            await loop.sock_sendto(client_socket, client_packet.data, dest)
                         client_control_setup = True
                 elif event.type == quic.EventType.STREAM_DATA:
                     print(
-                        f"Client: QUIC STREAM_DATA stream_id={event.stream_id} len={len(event.data)}"
+                        f"Client: QUIC STREAM_DATA stream_id={event.stream_id} "
+                        f"len={len(event.data)}"
                     )
                     client_h3.receive_stream_data(event.stream_id, event.data, event.fin)
                     if event.stream_id == 3:
@@ -219,9 +240,14 @@ async def test_debug_h3_low_level(test_certificates):
 
             for stream_id, stream_data, fin in client_h3.get_streams_to_send():
                 client_quic.send_stream_data(stream_id, stream_data, fin)
-            client_data = client_quic.send()
-            if client_data:
-                await loop.sock_sendto(client_socket, client_data, ("127.0.0.1", server_port))
+            client_packet = client_quic.send()
+            if client_packet:
+                dest = (
+                    (client_packet.remote_host, client_packet.remote_port)
+                    if client_packet.remote_host and client_packet.remote_port
+                    else server_remote
+                )
+                await loop.sock_sendto(client_socket, client_packet.data, dest)
         except TimeoutError:
             pass
 

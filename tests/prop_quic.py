@@ -5,6 +5,10 @@ from hypothesis import strategies as st
 
 from webtransport import quic
 
+# Sans-IO テスト用の固定パスアドレス
+CLIENT_ADDR = ("127.0.0.1", 50000)
+SERVER_ADDR = ("127.0.0.1", 4433)
+
 
 # uint64 の範囲
 UINT64_MAX = 2**64 - 1
@@ -87,10 +91,10 @@ def prop_client_receive_arbitrary_data(data: bytes):
     config.alpn_protocols = ["h3"]
     config.server_name = "localhost"
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
 
     # 任意のデータを受信してもクラッシュしない
-    processed = conn.receive(data)
+    processed = conn.receive(data, CLIENT_ADDR, SERVER_ADDR)
 
     # 処理バイト数は入力長以下
     assert processed <= len(data)
@@ -109,7 +113,7 @@ def prop_send_stream_data_arbitrary(data: bytes):
     config.alpn_protocols = ["h3"]
     config.server_name = "localhost"
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
 
     # ストリームを開く
     stream_id = conn.open_stream(True)
@@ -132,7 +136,7 @@ def prop_send_datagram_arbitrary(data: bytes):
     config.server_name = "localhost"
     config.enable_datagram = True
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
 
     # ハンドシェイク前でもクラッシュしない
     conn.send_datagram(data)
@@ -151,7 +155,7 @@ def prop_close_arbitrary_error_code(error_code: int):
     config.alpn_protocols = ["h3"]
     config.server_name = "localhost"
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
     conn.close(error_code)
 
     assert conn.is_closed() is True
@@ -165,7 +169,7 @@ def prop_close_arbitrary_reason(reason: str):
     config.alpn_protocols = ["h3"]
     config.server_name = "localhost"
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
     conn.close(0, reason)
 
     assert conn.is_closed() is True

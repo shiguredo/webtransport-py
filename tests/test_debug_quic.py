@@ -1,5 +1,9 @@
 """QUIC デバッグテスト"""
 
+# Sans-IO テスト用の固定パスアドレス
+CLIENT_ADDR = ("127.0.0.1", 50000)
+SERVER_ADDR = ("127.0.0.1", 4433)
+
 
 def test_quic_client_create():
     """QUIC Client の作成のみをテスト"""
@@ -10,7 +14,7 @@ def test_quic_client_create():
     config.server_name = "localhost"
     config.verify_peer = False
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
     assert conn is not None
 
     assert conn.is_closed() is False
@@ -27,14 +31,14 @@ def test_quic_client_send():
     config.server_name = "localhost"
     config.verify_peer = False
 
-    conn = quic.Connection.create_client(config)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
     assert conn is not None
     print("Calling send()...")
 
     result = conn.send()
     print(f"send result: {result}")
     if result is not None:
-        print(f"send result length: {len(result)}")
+        print(f"send result length: {len(result.data)}")
 
 
 def test_quic_server_create(test_certificates):
@@ -63,25 +67,25 @@ def test_quic_accept(test_certificates):
     client_config.server_name = "localhost"
     client_config.verify_peer = False
 
-    client = quic.Connection.create_client(client_config)
+    client = quic.Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     assert client is not None
     print("Client created")
 
     initial_packet = client.send()
     assert initial_packet is not None
-    print(f"Initial packet: {len(initial_packet)} bytes")
-    print(f"Initial packet header (first 30 bytes): {initial_packet[:30].hex()}")
+    print(f"Initial packet: {len(initial_packet.data)} bytes")
+    print(f"Initial packet header (first 30 bytes): {initial_packet.data[:30].hex()}")
 
     server_config = quic.Config()
     server_config.alpn_protocols = ["h3"]
     server_config.cert_file = test_certificates["certfile"]
     server_config.key_file = test_certificates["keyfile"]
 
-    server = quic.Connection.accept(server_config, initial_packet)
+    server = quic.Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     assert server is not None
     print("Server accepted connection")
 
-    recv_result = server.receive(initial_packet)
+    recv_result = server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     print(f"Server receive initial result: {recv_result}")
 
     print(f"Client connection ID: {client.get_connection_id().hex()}")
@@ -100,17 +104,17 @@ def test_quic_accept(test_certificates):
     for i in range(20):
         server_data = server.send()
         if server_data:
-            print(f"[{i}] Server -> Client: {len(server_data)} bytes")
-            if len(server_data) < 100:
-                print(f"    Data (hex): {server_data.hex()}")
-            recv_result = client.receive(server_data)
+            print(f"[{i}] Server -> Client: {len(server_data.data)} bytes")
+            if len(server_data.data) < 100:
+                print(f"    Data (hex): {server_data.data.hex()}")
+            recv_result = client.receive(server_data.data, CLIENT_ADDR, SERVER_ADDR)
             print(f"    Client receive result: {recv_result}")
             process_events("Client", client)
 
         client_data = client.send()
         if client_data:
-            print(f"[{i}] Client -> Server: {len(client_data)} bytes")
-            server.receive(client_data)
+            print(f"[{i}] Client -> Server: {len(client_data.data)} bytes")
+            server.receive(client_data.data, SERVER_ADDR, CLIENT_ADDR)
             process_events("Server", server)
 
         if client.is_handshake_completed() and server.is_handshake_completed():

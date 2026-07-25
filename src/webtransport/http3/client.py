@@ -40,6 +40,8 @@ class Client:
         port: int = 443,
         idle_timeout_ns: int = 30_000_000_000,
         verify_peer: bool = True,
+        ca_file: str | None = None,
+        verify_callback: Callable[[list[bytes]], bool] | None = None,
     ) -> None:
         """クライアントを初期化する
 
@@ -48,15 +50,21 @@ class Client:
             port: 接続先ポート
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
             verify_peer: サーバー証明書を検証するかどうか
+            ca_file: CA 証明書ファイルパス
+            verify_callback: ピア証明書検証コールバック
         """
         self._host = host
         self._port = port
         self._idle_timeout_ns = idle_timeout_ns
         self._verify_peer = verify_peer
+        self._ca_file = ca_file
+        self._verify_callback = verify_callback
 
         self._quic_connection: quic_low.Connection | None = None
         self._http3_connection: http3_low.Connection | None = None
         self._socket: socket.socket | None = None
+        # bind 後のローカルアドレス (host, port)
+        self._local_addr: tuple[str, int] | None = None
         self._running = False
         self._connected = False
         self._control_stream_id = -1
@@ -125,6 +133,23 @@ class Client:
         """
         self._on_stream_reset = callback
 
+    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
+        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
+        host = addr[0]
+        port = addr[1]
+        if not isinstance(port, int):
+            raise TypeError(f"expected port int, got {type(port).__name__}")
+        return (str(host), port)
+
+    def _destination_for_packet(
+        self,
+        packet: quic_low.Packet,
+    ) -> tuple[str, int]:
+        """パケットの送信先アドレスを決める"""
+        if packet.remote_host and packet.remote_port:
+            return (packet.remote_host, packet.remote_port)
+        return (self._host, self._port)
+
     async def _send_pending(self) -> None:
         """送信待ちデータを送信する"""
         if self._quic_connection is None or self._http3_connection is None:
@@ -135,23 +160,33 @@ class Client:
         for stream_id, stream_data, fin in self._http3_connection.get_streams_to_send():
             self._quic_connection.send_stream_data(stream_id, stream_data, fin)
 
-        send_data = self._quic_connection.send()
-        if send_data:
-            loop = asyncio.get_running_loop()
-            await loop.sock_sendto(self._socket, send_data, (self._host, self._port))
+        # send() の連続 drain は ACK 待ちが必要なケースでハングするため 1 パケットに留める
+        packet = self._quic_connection.send()
+        if packet is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(
+            self._socket,
+            packet.data,
+            self._destination_for_packet(packet),
+        )
 
     async def _receive(self) -> None:
         """データを受信する"""
         if self._quic_connection is None or self._socket is None:
             return
+        if self._local_addr is None:
+            return
 
         loop = asyncio.get_running_loop()
         try:
-            data, _ = await asyncio.wait_for(
+            data, raw_remote = await asyncio.wait_for(
                 loop.sock_recvfrom(self._socket, 65535),
                 timeout=0.1,
             )
-            self._quic_connection.receive(data)
+            remote = self._normalize_addr(raw_remote)
+            self._quic_connection.receive(data, self._local_addr, remote)
         except TimeoutError:
             pass
 
@@ -180,6 +215,11 @@ class Client:
         quic_config.alpn_protocols = ["h3"]
         quic_config.idle_timeout_ns = self._idle_timeout_ns
         quic_config.verify_peer = self._verify_peer
+        quic_config.server_name = self._host
+        if self._ca_file is not None:
+            quic_config.ca_file = self._ca_file
+        if self._verify_callback is not None:
+            quic_config.verify_callback = self._verify_callback
 
         http3_config = http3_low.Config()
         http3_config.is_server = False
@@ -187,8 +227,13 @@ class Client:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._socket.bind(("0.0.0.0", 0))
+        self._local_addr = self._normalize_addr(self._socket.getsockname())
 
-        self._quic_connection = quic_low.Connection.create_client(quic_config)
+        self._quic_connection = quic_low.Connection.create_client(
+            quic_config,
+            self._local_addr,
+            (self._host, self._port),
+        )
         self._http3_connection = http3_low.Connection.create_client(http3_config)
 
         await self._send_pending()

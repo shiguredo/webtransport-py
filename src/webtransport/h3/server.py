@@ -65,6 +65,8 @@ class Server:
         self._idle_timeout_ns = idle_timeout_ns
 
         self._socket: socket.socket | None = None
+        # bind 後のローカルアドレス (host, port)
+        self._local_addr: tuple[str, int] | None = None
         self._clients: dict[tuple[str, int], ClientConnection] = {}
         self._running = False
         self._actual_port = 0
@@ -154,12 +156,21 @@ class Server:
         """
         self._on_datagram = callback
 
+    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
+        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
+        host = addr[0]
+        port = addr[1]
+        if not isinstance(port, int):
+            raise TypeError(f"expected port int, got {type(port).__name__}")
+        return (str(host), port)
+
     async def start(self) -> None:
         """サーバーを開始する"""
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._socket.bind((self._host, self._port))
-        self._actual_port = self._socket.getsockname()[1]
+        self._local_addr = self._normalize_addr(self._socket.getsockname())
+        self._actual_port = self._local_addr[1]
         self._running = True
 
     async def stop(self) -> None:
@@ -206,15 +217,27 @@ class Server:
         webtransport_config = h3_low.Config()
         webtransport_config.is_server = True
 
-        client.quic_connection = quic.Connection.accept(quic_config, initial_packet)
-        client.quic_connection.receive(initial_packet)
+        if self._local_addr is None:
+            raise RuntimeError("サーバーが開始されていません")
+
+        client.quic_connection = quic.Connection.accept(
+            quic_config,
+            initial_packet,
+            self._local_addr,
+            addr,
+        )
+        client.quic_connection.receive(initial_packet, self._local_addr, addr)
         client.webtransport_session = h3_low.Session.create_server(webtransport_config)
 
         self._clients[addr] = client
         return client
 
     async def _send_to(self, addr: tuple[str, int], client: ClientConnection) -> None:
-        """クライアントにデータを送信する"""
+        """クライアントにデータを送信する
+
+        パケットにリモートアドレスが埋まっていればそれを使い、
+        未設定ならマップ上のクライアントアドレスにフォールバックする。
+        """
         if self._socket is None:
             return
         if client.quic_connection is None or client.webtransport_session is None:
@@ -226,10 +249,18 @@ class Server:
         for datagram in client.webtransport_session.get_datagrams_to_send():
             client.quic_connection.send_datagram(datagram)
 
-        send_data = client.quic_connection.send()
-        if send_data:
-            loop = asyncio.get_running_loop()
-            await loop.sock_sendto(self._socket, send_data, addr)
+        # send() の連続 drain は ACK 待ちが必要なケースでハングするため 1 パケットに留める
+        packet = client.quic_connection.send()
+        if packet is None:
+            return
+
+        if packet.remote_host and packet.remote_port:
+            dest: tuple[str, int] = (packet.remote_host, packet.remote_port)
+        else:
+            dest = addr
+
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(self._socket, packet.data, dest)
 
     def _setup_streams(self, client: ClientConnection) -> None:
         """HTTP/3 制御ストリームを設定する"""
@@ -443,24 +474,25 @@ class Server:
 
         サーバーが停止されるまでブロックする。
         """
-        if self._socket is None:
+        if self._socket is None or self._local_addr is None:
             raise RuntimeError("サーバーが開始されていません")
 
         loop = asyncio.get_running_loop()
 
         while self._running:
             try:
-                data, addr = await asyncio.wait_for(
+                data, raw_addr = await asyncio.wait_for(
                     loop.sock_recvfrom(self._socket, 65535),
                     timeout=0.1,
                 )
+                addr = self._normalize_addr(raw_addr)
 
                 if addr not in self._clients:
                     client = self._create_connection(addr, data)
                 else:
                     client = self._clients[addr]
                     if client.quic_connection is not None:
-                        client.quic_connection.receive(data)
+                        client.quic_connection.receive(data, self._local_addr, addr)
 
                 connection_alive = await self._process_quic_events(addr, client)
                 if not connection_alive:
