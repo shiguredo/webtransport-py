@@ -15,6 +15,8 @@
   - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
+- [UPDATE] CI の対応プラットフォームを macOS 26 / Ubuntu 26.04・24.04 / Windows 2025・11 に揃える
+  - @voluntas
 
 ### misc
 

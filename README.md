@@ -53,7 +53,7 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
 - クロスプラットフォーム対応
   - macOS arm64
   - Ubuntu x86_64 / arm64
-  - Windows x86_64
+  - Windows x86_64 / arm64
 
 ## インストール
 
@@ -249,13 +249,12 @@ if __name__ == "__main__":
 ## プラットフォーム
 
 - macOS 26 arm64
-- macOS 15 arm64
+- Ubuntu 26.04 x86_64
+- Ubuntu 26.04 arm64
 - Ubuntu 24.04 LTS x86_64
 - Ubuntu 24.04 LTS arm64
-- Ubuntu 22.04 LTS x86_64
-- Ubuntu 22.04 LTS arm64
 - Windows 2025 x86_64
-- Windows 11 x86_64
+- Windows 11 arm64
 
 ## リリースビルド
 

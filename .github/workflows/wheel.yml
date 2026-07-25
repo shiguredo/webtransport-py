@@ -18,8 +18,6 @@ jobs:
         platform:
           - name: macos-26_arm64
             runs_on: macos-26
-          - name: macos-15_arm64
-            runs_on: macos-15
         python_version:
           - "3.14"
           - "3.14t"
@@ -56,14 +54,14 @@ jobs:
       fail-fast: false
       matrix:
         platform:
+          - name: ubuntu-26.04_x86_64
+            runs_on: ubuntu-26.04
+          - name: ubuntu-26.04_arm64
+            runs_on: ubuntu-26.04-arm
           - name: ubuntu-24.04_x86_64
             runs_on: ubuntu-24.04
           - name: ubuntu-24.04_arm64
             runs_on: ubuntu-24.04-arm
-          - name: ubuntu-22.04_x86_64
-            runs_on: ubuntu-22.04
-          - name: ubuntu-22.04_arm64
-            runs_on: ubuntu-22.04-arm
         python_version:
           - "3.14"
           - "3.14t"
@@ -108,7 +106,9 @@ jobs:
       matrix:
         platform:
           - name: windows-2025_x86_64
-            runs_on: windows-2025
+            runs_on: windows-2025-vs2026
+          - name: windows-11_arm64
+            runs_on: windows-11-vs2026-arm
         python_version:
           - "3.14"
           # Windows の Python 3.14t (free-threaded) は nanobind のビルドで
@@ -154,13 +154,13 @@ jobs:
       fail-fast: false
       matrix:
         platform:
+          - name: ubuntu-26.04_x86_64
+          - name: ubuntu-26.04_arm64
           - name: ubuntu-24.04_x86_64
           - name: ubuntu-24.04_arm64
-          - name: ubuntu-22.04_x86_64
-          - name: ubuntu-22.04_arm64
-          # - name: macos-26_arm64
-          - name: macos-15_arm64
+          - name: macos-26_arm64
           - name: windows-2025_x86_64
+          - name: windows-11_arm64
         python_version:
           - "3.14"
           - "3.14t"
@@ -168,6 +168,9 @@ jobs:
           # Windows の Python 3.14t は非対応
           - platform:
               name: windows-2025_x86_64
+            python_version: "3.14t"
+          - platform:
+              name: windows-11_arm64
             python_version: "3.14t"
     runs-on: ubuntu-24.04
     timeout-minutes: 15
