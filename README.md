@@ -287,7 +287,7 @@ make test
 - [ngtcp2](https://github.com/ngtcp2/ngtcp2)
 - [nghttp3](https://github.com/ngtcp2/nghttp3)
 - [nghttp2](https://github.com/nghttp2/nghttp2)
-- [BoringSSL](https://boringssl.googlesource.com/boringssl/)
+- [AWS-LC](https://github.com/aws/aws-lc)
 
 ## ライセンス
 

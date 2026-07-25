@@ -106,7 +106,7 @@ bool H3Session::initialize() {
   // WebTransport を有効化
   settings.enable_connect_protocol = 1;
   settings.h3_datagram = 1;
-  settings.wt_max_sessions = 1;
+  settings.wt_enabled = 1;
 
   int rv;
   if (is_server_) {
@@ -343,7 +343,7 @@ bool H3Session::connect(int64_t stream_id, const std::string& url) {
 
   std::string method = "CONNECT";
   std::string scheme = "https";
-  std::string protocol = "webtransport";
+  std::string protocol = "webtransport-h3";
 
   std::vector<nghttp3_nv> nva = {
       {reinterpret_cast<uint8_t*>(const_cast<char*>(header_method)),
@@ -897,7 +897,9 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     if (header.first == ":method" && header.second == "CONNECT") {
       is_connect = true;
     }
-    if (header.first == ":protocol" && header.second == "webtransport") {
+    if (header.first == ":protocol" &&
+        (header.second == "webtransport-h3" ||
+         header.second == "webtransport")) {
       is_webtransport = true;
     }
     if (header.first == ":status") {

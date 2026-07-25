@@ -26,38 +26,36 @@ include(ExternalProject)
 # JSON から依存関係のバージョンを読み込み
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/deps.json DEPS_JSON)
 
+# deps.json の tag / branch / ref を解析する
+# tag または branch の場合は shallow clone、ref (コミットハッシュ) の場合はフル clone
+function(parse_deps_git_ref DEPS_JSON_CONTENT DEP_NAME OUT_REPOSITORY OUT_GIT_TAG OUT_USE_SHALLOW OUT_VERSION)
+  string(JSON REPOSITORY GET ${DEPS_JSON_CONTENT} ${DEP_NAME} url)
+  string(JSON GIT_TAG ERROR_VARIABLE TAG_ERROR GET ${DEPS_JSON_CONTENT} ${DEP_NAME} tag)
+  if(TAG_ERROR)
+    string(JSON GIT_TAG ERROR_VARIABLE BRANCH_ERROR GET ${DEPS_JSON_CONTENT} ${DEP_NAME} branch)
+    if(BRANCH_ERROR)
+      string(JSON GIT_TAG GET ${DEPS_JSON_CONTENT} ${DEP_NAME} ref)
+      set(USE_SHALLOW FALSE)
+    else()
+      set(USE_SHALLOW TRUE)
+    endif()
+  else()
+    set(USE_SHALLOW TRUE)
+  endif()
+  set(${OUT_REPOSITORY} "${REPOSITORY}" PARENT_SCOPE)
+  set(${OUT_GIT_TAG} "${GIT_TAG}" PARENT_SCOPE)
+  set(${OUT_USE_SHALLOW} "${USE_SHALLOW}" PARENT_SCOPE)
+  set(${OUT_VERSION} "${GIT_TAG}" PARENT_SCOPE)
+endfunction()
+
 # ngtcp2 の設定を解析
-string(JSON NGTCP2_GIT_REPOSITORY GET ${DEPS_JSON} ngtcp2 url)
-string(JSON NGTCP2_GIT_TAG ERROR_VARIABLE NGTCP2_TAG_ERROR GET ${DEPS_JSON} ngtcp2 tag)
-if(NGTCP2_TAG_ERROR)
-  string(JSON NGTCP2_GIT_TAG GET ${DEPS_JSON} ngtcp2 ref)
-  set(NGTCP2_USE_SHALLOW FALSE)
-else()
-  set(NGTCP2_USE_SHALLOW TRUE)
-endif()
-set(NGTCP2_VERSION "${NGTCP2_GIT_TAG}")
+parse_deps_git_ref("${DEPS_JSON}" ngtcp2 NGTCP2_GIT_REPOSITORY NGTCP2_GIT_TAG NGTCP2_USE_SHALLOW NGTCP2_VERSION)
 
 # nghttp3 の設定を解析
-string(JSON NGHTTP3_GIT_REPOSITORY GET ${DEPS_JSON} nghttp3 url)
-string(JSON NGHTTP3_GIT_TAG ERROR_VARIABLE NGHTTP3_TAG_ERROR GET ${DEPS_JSON} nghttp3 tag)
-if(NGHTTP3_TAG_ERROR)
-  string(JSON NGHTTP3_GIT_TAG GET ${DEPS_JSON} nghttp3 ref)
-  set(NGHTTP3_USE_SHALLOW FALSE)
-else()
-  set(NGHTTP3_USE_SHALLOW TRUE)
-endif()
-set(NGHTTP3_VERSION "${NGHTTP3_GIT_TAG}")
+parse_deps_git_ref("${DEPS_JSON}" nghttp3 NGHTTP3_GIT_REPOSITORY NGHTTP3_GIT_TAG NGHTTP3_USE_SHALLOW NGHTTP3_VERSION)
 
 # nghttp2 の設定を解析
-string(JSON NGHTTP2_GIT_REPOSITORY GET ${DEPS_JSON} nghttp2 url)
-string(JSON NGHTTP2_GIT_TAG ERROR_VARIABLE NGHTTP2_TAG_ERROR GET ${DEPS_JSON} nghttp2 tag)
-if(NGHTTP2_TAG_ERROR)
-  string(JSON NGHTTP2_GIT_TAG GET ${DEPS_JSON} nghttp2 ref)
-  set(NGHTTP2_USE_SHALLOW FALSE)
-else()
-  set(NGHTTP2_USE_SHALLOW TRUE)
-endif()
-set(NGHTTP2_VERSION "${NGHTTP2_GIT_TAG}")
+parse_deps_git_ref("${DEPS_JSON}" nghttp2 NGHTTP2_GIT_REPOSITORY NGHTTP2_GIT_TAG NGHTTP2_USE_SHALLOW NGHTTP2_VERSION)
 
 # ExternalProject ビルド用の並列ビルドジョブ数を決定
 if(DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
@@ -71,66 +69,70 @@ else()
   set(PARALLEL_JOBS "${NCORES}")
 endif()
 
-# BoringSSL の設定を解析
-string(JSON BORINGSSL_GIT_REPOSITORY GET ${DEPS_JSON} boringssl url)
-string(JSON BORINGSSL_GIT_REF GET ${DEPS_JSON} boringssl ref)
-set(BORINGSSL_VERSION "${BORINGSSL_GIT_REF}")
+# AWS-LC の設定を解析
+parse_deps_git_ref("${DEPS_JSON}" aws-lc AWS_LC_GIT_REPOSITORY AWS_LC_GIT_TAG AWS_LC_USE_SHALLOW AWS_LC_VERSION)
 
-# ========== BoringSSL ==========
-message(STATUS "Setting up BoringSSL...")
-set(BORINGSSL_SOURCE_DIR "${DEPS_DIR}/boringssl/${BORINGSSL_VERSION}/source")
-set(BORINGSSL_BUILD_DIR "${DEPS_DIR}/boringssl/${BORINGSSL_VERSION}/build")
+# ========== AWS-LC ==========
+# ngtcp2 の BoringSSL crypto ヘルパーは AWS-LC でも利用する
+message(STATUS "Setting up AWS-LC...")
+set(AWS_LC_SOURCE_DIR "${DEPS_DIR}/aws-lc/${AWS_LC_VERSION}/source")
+set(AWS_LC_BUILD_DIR "${DEPS_DIR}/aws-lc/${AWS_LC_VERSION}/build")
 
-# BoringSSL の静的ライブラリパス
+# AWS-LC の静的ライブラリパス
+# ssl / crypto はサブディレクトリに出力される
 # Windows の MSVC マルチ構成ジェネレータでは Release/<target>.lib に出力される
 if(WIN32)
-  set(BORINGSSL_SSL_LIB ${BORINGSSL_BUILD_DIR}/Release/ssl.lib)
-  set(BORINGSSL_CRYPTO_LIB ${BORINGSSL_BUILD_DIR}/Release/crypto.lib)
+  set(AWS_LC_SSL_LIB ${AWS_LC_BUILD_DIR}/ssl/Release/ssl.lib)
+  set(AWS_LC_CRYPTO_LIB ${AWS_LC_BUILD_DIR}/crypto/Release/crypto.lib)
 else()
-  set(BORINGSSL_SSL_LIB ${BORINGSSL_BUILD_DIR}/libssl.a)
-  set(BORINGSSL_CRYPTO_LIB ${BORINGSSL_BUILD_DIR}/libcrypto.a)
+  set(AWS_LC_SSL_LIB ${AWS_LC_BUILD_DIR}/ssl/libssl.a)
+  set(AWS_LC_CRYPTO_LIB ${AWS_LC_BUILD_DIR}/crypto/libcrypto.a)
 endif()
 
 # ビルド済みかチェック
-if(EXISTS ${BORINGSSL_SSL_LIB} AND EXISTS ${BORINGSSL_CRYPTO_LIB})
-  message(STATUS "BoringSSL already built: ${BORINGSSL_SSL_LIB}")
-  add_custom_target(boringssl_build)
+if(EXISTS ${AWS_LC_SSL_LIB} AND EXISTS ${AWS_LC_CRYPTO_LIB})
+  message(STATUS "AWS-LC already built: ${AWS_LC_SSL_LIB}")
+  add_custom_target(aws_lc_build)
 else()
-  message(STATUS "Building BoringSSL...")
+  message(STATUS "Building AWS-LC...")
 
-  set(BORINGSSL_CMAKE_ARGS
+  set(AWS_LC_CMAKE_ARGS
     -DCMAKE_BUILD_TYPE=Release
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    -DBUILD_SHARED_LIBS=OFF
+    -DBUILD_TESTING=OFF
+    -DDISABLE_GO=ON
+    -DDISABLE_PERL=ON
   )
 
   # Windows の場合は静的 CRT を使用する
   if(WIN32)
-    list(APPEND BORINGSSL_CMAKE_ARGS
+    list(APPEND AWS_LC_CMAKE_ARGS
       -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
     )
   endif()
 
   ExternalProject_Add(
-    boringssl_build
-    GIT_REPOSITORY ${BORINGSSL_GIT_REPOSITORY}
-    GIT_TAG ${BORINGSSL_GIT_REF}
-    GIT_SHALLOW FALSE
-    SOURCE_DIR ${BORINGSSL_SOURCE_DIR}
-    BINARY_DIR ${BORINGSSL_BUILD_DIR}
-    STAMP_DIR ${BORINGSSL_BUILD_DIR}/stamp
-    TMP_DIR ${BORINGSSL_BUILD_DIR}/tmp
+    aws_lc_build
+    GIT_REPOSITORY ${AWS_LC_GIT_REPOSITORY}
+    GIT_TAG ${AWS_LC_GIT_TAG}
+    GIT_SHALLOW ${AWS_LC_USE_SHALLOW}
+    SOURCE_DIR ${AWS_LC_SOURCE_DIR}
+    BINARY_DIR ${AWS_LC_BUILD_DIR}
+    STAMP_DIR ${AWS_LC_BUILD_DIR}/stamp
+    TMP_DIR ${AWS_LC_BUILD_DIR}/tmp
     UPDATE_COMMAND ""
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    CMAKE_ARGS ${BORINGSSL_CMAKE_ARGS}
-    BUILD_COMMAND ${CMAKE_COMMAND} --build ${BORINGSSL_BUILD_DIR} --config Release --parallel ${PARALLEL_JOBS}
+    CMAKE_ARGS ${AWS_LC_CMAKE_ARGS}
+    BUILD_COMMAND ${CMAKE_COMMAND} --build ${AWS_LC_BUILD_DIR} --config Release --parallel ${PARALLEL_JOBS}
     INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${BORINGSSL_SSL_LIB} ${BORINGSSL_CRYPTO_LIB}
+    BUILD_BYPRODUCTS ${AWS_LC_SSL_LIB} ${AWS_LC_CRYPTO_LIB}
   )
 endif()
 
-message(STATUS "BoringSSL include dir: ${BORINGSSL_SOURCE_DIR}/include")
-message(STATUS "BoringSSL SSL library: ${BORINGSSL_SSL_LIB}")
-message(STATUS "BoringSSL Crypto library: ${BORINGSSL_CRYPTO_LIB}")
+message(STATUS "AWS-LC include dir: ${AWS_LC_SOURCE_DIR}/include")
+message(STATUS "AWS-LC SSL library: ${AWS_LC_SSL_LIB}")
+message(STATUS "AWS-LC Crypto library: ${AWS_LC_CRYPTO_LIB}")
 
 # ========== ngtcp2 ==========
 message(STATUS "Setting up ngtcp2...")
@@ -152,13 +154,14 @@ if(EXISTS ${NGTCP2_LIB} AND EXISTS ${NGTCP2_CRYPTO_LIB})
   message(STATUS "ngtcp2 already built: ${NGTCP2_LIB}")
   add_custom_target(ngtcp2_build)
 else()
-  message(STATUS "Building ngtcp2 with BoringSSL...")
+  message(STATUS "Building ngtcp2 with AWS-LC...")
 
-  # Windows の場合は BoringSSL が ws2_32 と advapi32 を必要とする
+  # Windows の場合は AWS-LC が ws2_32 と advapi32 を必要とする
+  # ngtcp2 は AWS-LC を BoringSSL 互換バックエンドとして扱う
   if(WIN32)
-    set(BORINGSSL_LIBS_FOR_NGTCP2 "${BORINGSSL_SSL_LIB}$<SEMICOLON>${BORINGSSL_CRYPTO_LIB}$<SEMICOLON>ws2_32$<SEMICOLON>advapi32")
+    set(AWS_LC_LIBS_FOR_NGTCP2 "${AWS_LC_SSL_LIB}$<SEMICOLON>${AWS_LC_CRYPTO_LIB}$<SEMICOLON>ws2_32$<SEMICOLON>advapi32")
   else()
-    set(BORINGSSL_LIBS_FOR_NGTCP2 "${BORINGSSL_SSL_LIB}$<SEMICOLON>${BORINGSSL_CRYPTO_LIB}")
+    set(AWS_LC_LIBS_FOR_NGTCP2 "${AWS_LC_SSL_LIB}$<SEMICOLON>${AWS_LC_CRYPTO_LIB}")
   endif()
 
   set(NGTCP2_CMAKE_ARGS
@@ -171,16 +174,16 @@ else()
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     -DENABLE_OPENSSL=OFF
     -DENABLE_BORINGSSL=ON
-    -DBORINGSSL_INCLUDE_DIR=${BORINGSSL_SOURCE_DIR}/include
-    -DBORINGSSL_LIBRARIES=${BORINGSSL_LIBS_FOR_NGTCP2}
+    -DBORINGSSL_INCLUDE_DIR=${AWS_LC_SOURCE_DIR}/include
+    -DBORINGSSL_LIBRARIES=${AWS_LC_LIBS_FOR_NGTCP2}
   )
 
-  # Windows の場合は静的 CRT を使用し、BoringSSL 検出をスキップ
-  # check_symbol_exists は値なしマクロ (#define OPENSSL_IS_BORINGSSL) を検出できないため
+  # Windows の場合は静的 CRT を使用し、AWS-LC 検出をスキップ
+  # check_symbol_exists は値なしマクロ (#define OPENSSL_IS_AWSLC) を検出できないため
   if(WIN32)
     list(APPEND NGTCP2_CMAKE_ARGS
       -DENABLE_STATIC_CRT=ON
-      -DHAVE_BORINGSSL:BOOL=ON
+      -DHAVE_AWSLC:BOOL=ON
     )
   endif()
 
@@ -200,7 +203,7 @@ else()
     BUILD_COMMAND ${CMAKE_COMMAND} --build ${NGTCP2_BUILD_DIR} --config Release --parallel ${PARALLEL_JOBS}
     INSTALL_COMMAND ${CMAKE_COMMAND} --build ${NGTCP2_BUILD_DIR} --config Release --target install
     BUILD_BYPRODUCTS ${NGTCP2_LIB} ${NGTCP2_CRYPTO_LIB}
-    DEPENDS boringssl_build
+    DEPENDS aws_lc_build
   )
 endif()
 
@@ -325,7 +328,7 @@ nanobind_add_module(webtransport_ext
 )
 
 # ビルド順序を保証するため依存関係を追加
-add_dependencies(webtransport_ext boringssl_build ngtcp2_build nghttp3_build nghttp2_build)
+add_dependencies(webtransport_ext aws_lc_build ngtcp2_build nghttp3_build nghttp2_build)
 
 # インクルードディレクトリ
 target_include_directories(webtransport_ext PRIVATE
@@ -333,7 +336,7 @@ target_include_directories(webtransport_ext PRIVATE
   ${NGTCP2_INSTALL_DIR}/include
   ${NGHTTP3_INSTALL_DIR}/include
   ${NGHTTP2_INSTALL_DIR}/include
-  ${BORINGSSL_SOURCE_DIR}/include
+  ${AWS_LC_SOURCE_DIR}/include
 )
 
 # ライブラリをリンク
@@ -342,8 +345,8 @@ target_link_libraries(webtransport_ext PRIVATE
   ${NGTCP2_LIB}
   ${NGHTTP3_LIB}
   ${NGHTTP2_LIB}
-  ${BORINGSSL_SSL_LIB}
-  ${BORINGSSL_CRYPTO_LIB}
+  ${AWS_LC_SSL_LIB}
+  ${AWS_LC_CRYPTO_LIB}
 )
 
 # プラットフォーム固有の設定
