@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 サーバー例
 
 高レベル API を使用した WebTransport over HTTP/2 サーバー実装例。
-HTTP/2 は DATAGRAM をサポートしないため、ストリームのみ処理可能。
+ストリームと DATAGRAM (Capsule Protocol / RFC 9297) を扱う。
 """
 
 import asyncio
@@ -33,13 +33,17 @@ async def main() -> None:
         # エコーバック
         await session_writer.send_stream_data(stream_id, data)
 
+    async def on_datagram(data: bytes, session_writer: h2.SessionWriter) -> None:
+        print(f"DATAGRAM 受信: {data}")
+        await session_writer.send_datagram(data)
+
     server.on_session_ready(on_session_ready)
     server.on_session_closed(on_session_closed)
     server.on_stream_data(on_stream_data)
+    server.on_datagram(on_datagram)
 
     async with server:
         print(f"WebTransport over HTTP/2 サーバー開始: {server.host}:{server.actual_port}")
-        print("注意: HTTP/2 は DATAGRAM をサポートしません。")
         print("Ctrl+C で終了")
         try:
             await server.run()

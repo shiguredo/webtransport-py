@@ -1,5 +1,5 @@
 /**
- * WebTransport over HTTP/2 バインディング (draft-ietf-webtrans-http2-13)
+ * WebTransport over HTTP/2 バインディング (draft-ietf-webtrans-http2-15)
  *
  * Sans-IO スタイルの WebTransport over HTTP/2 実装
  * Capsule Protocol (RFC 9297) を使用
@@ -39,18 +39,23 @@ namespace webtransport {
 namespace h2 {
 
 /**
- * Capsule Type (draft-ietf-webtrans-http2-13 Section 6)
+ * Capsule Type (draft-ietf-webtrans-http2-15 Section 6)
+ *
+ * WT_STREAM の Type は 0x190B4D3B..0x190B4D3C で、最下位ビットが FIN
+ * (Section 6.4)。非終端は 0x190B4D3C、終端は 0x190B4D3B。
  */
 enum class CapsuleType : uint64_t {
-  // DATAGRAM (RFC 9297)
+  // DATAGRAM (RFC 9297 Section 3.5 / draft Section 6.11)
   Datagram = 0x00,
 
-  // WebTransport Capsules (draft-ietf-webtrans-http2-13)
+  // WebTransport Capsules (draft-ietf-webtrans-http2-15)
   Padding = 0x190B4D38,
   WtResetStream = 0x190B4D39,
   WtStopSending = 0x190B4D3A,
-  WtStream = 0x190B4D3B,
-  WtStreamFin = 0x190B4D3C,
+  // FIN ビット付き終端 (LSB=1)
+  WtStreamFin = 0x190B4D3B,
+  // FIN なし (LSB=0)
+  WtStream = 0x190B4D3C,
   WtMaxData = 0x190B4D3D,
   WtMaxStreamData = 0x190B4D3E,
   WtMaxStreamsBidi = 0x190B4D3F,
@@ -60,10 +65,22 @@ enum class CapsuleType : uint64_t {
   WtStreamsBlockedBidi = 0x190B4D43,
   WtStreamsBlockedUni = 0x190B4D44,
 
-  // Session Capsules (draft-ietf-webtrans-http3)
+  // Session Capsules (draft-ietf-webtrans-http3 参照)
   WtCloseSession = 0x2843,
   WtDrainSession = 0x78ae,
 };
+
+/**
+ * WebTransport over HTTP/2 用 SETTINGS (draft-15 Section 11.2)
+ * 将来コードポイントが変わる可能性がある。
+ */
+constexpr uint16_t SETTINGS_WT_ENABLED = 0x2b60;
+constexpr uint16_t SETTINGS_WT_INITIAL_MAX_DATA = 0x2b61;
+constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI = 0x2b62;
+constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL = 0x2b63;
+constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAMS_UNI = 0x2b64;
+constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI = 0x2b65;
+constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE = 0x2b66;
 
 /**
  * WebTransport over HTTP/2 設定
@@ -201,6 +218,14 @@ struct WtSessionInfo {
 
   // Capsule バッファ (受信中)
   std::vector<uint8_t> capsule_buffer;
+
+  // 対向の初期ストリームデータ上限 (送信側クレジット)
+  // draft-15 Section 4.3.1 / 4.3.2
+  uint64_t peer_max_stream_data_uni = 0;
+  // 自側が開いた双方向ストリーム向け (対向の BIDI_REMOTE)
+  uint64_t peer_max_stream_data_bidi_local = 0;
+  // 対向が開いた双方向ストリーム向け (対向の BIDI_LOCAL)
+  uint64_t peer_max_stream_data_bidi_remote = 0;
 };
 
 /**
@@ -250,9 +275,21 @@ class H2Session {
    * WebTransport セッションを開始 (クライアント用)
    * Extended CONNECT リクエストを送信
    * @param url 接続先 URL (例: "https://example.com/path")
+   * @param origin Origin ヘッダー値 (空なら付与しない)
    * @return セッション ID (失敗時は -1)
+   *
+   * draft-15 Section 3.1: SETTINGS_WT_ENABLED と
+   * SETTINGS_ENABLE_CONNECT_PROTOCOL を受信するまで呼んではならない。
    */
-  int32_t connect(const std::string& url);
+  int32_t connect(const std::string& url, const std::string& origin = "");
+
+  /**
+   * 対向の SETTINGS で WebTransport over HTTP/2 が有効か
+   * (ENABLE_CONNECT_PROTOCOL=1 かつ WT_ENABLED=1)
+   *
+   * draft-15 Section 3.1
+   */
+  bool is_webtransport_ready() const;
 
   /**
    * WebTransport セッションを受理 (サーバー用)
@@ -464,6 +501,24 @@ class H2Session {
   void push_event(H2Event event);
   WtSessionInfo* get_wt_session(int32_t session_id);
 
+  // draft-15 Section 4.3: 対向 SETTINGS / WebTransport-Init から初期 FC を設定
+  void apply_peer_initial_flow_control(WtSessionInfo& wt_session) const;
+
+  // draft-15 Section 4.3.2: WebTransport-Init Structured Field Dictionary
+  std::string encode_webtransport_init() const;
+  bool parse_webtransport_init(const std::string& value,
+                               uint64_t& out_u,
+                               uint64_t& out_bl,
+                               uint64_t& out_br,
+                               bool& has_u,
+                               bool& has_bl,
+                               bool& has_br) const;
+
+  // 自側が開くストリームの送信クレジット
+  uint64_t peer_send_credit_for_stream(const WtSessionInfo& wt_session,
+                                       bool is_unidirectional,
+                                       bool is_local) const;
+
   bool is_server_;
   H2SessionConfig config_;
   nghttp2_session* session_ = nullptr;
@@ -483,6 +538,20 @@ class H2Session {
 
   // WebTransport セッション管理
   std::map<int32_t, WtSessionInfo> wt_sessions_;
+
+  // close_session 後に END_STREAM を送るストリーム
+  // draft-15 Section 6.12
+  std::set<int32_t> end_stream_pending_;
+
+  // 対向 SETTINGS (draft-15 Section 3.1 / 4.3.1)
+  bool peer_enable_connect_protocol_ = false;
+  bool peer_wt_enabled_ = false;
+  uint64_t peer_wt_initial_max_data_ = 0;
+  uint64_t peer_wt_initial_max_stream_data_uni_ = 0;
+  uint64_t peer_wt_initial_max_stream_data_bidi_local_ = 0;
+  uint64_t peer_wt_initial_max_stream_data_bidi_remote_ = 0;
+  uint64_t peer_wt_initial_max_streams_uni_ = 0;
+  uint64_t peer_wt_initial_max_streams_bidi_ = 0;
 
   // 接続状態
   bool closed_ = false;

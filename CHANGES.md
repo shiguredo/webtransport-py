@@ -11,4 +11,10 @@
 
 ## develop
 
+- [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
+  - @voluntas
+
 ### misc
+
+- [UPDATE] refs/ 配下の IETF draft を最新版に更新する
+  - @voluntas

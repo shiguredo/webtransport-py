@@ -1,13 +1,16 @@
 /**
- * WebTransport over HTTP/2 バインディング実装 (draft-ietf-webtrans-http2-13)
+ * WebTransport over HTTP/2 バインディング実装 (draft-ietf-webtrans-http2-15)
  *
  * Capsule Protocol (RFC 9297) を使用した実装
  */
 
 #include "webtransport_h2.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace webtransport {
 namespace h2 {
@@ -94,7 +97,12 @@ void H2Session::process_capsules(int32_t session_id,
                                     data + length);
 
   // Capsule をパース
-  while (!wt_session->capsule_buffer.empty()) {
+  while (true) {
+    wt_session = get_wt_session(session_id);
+    if (!wt_session || wt_session->capsule_buffer.empty()) {
+      break;
+    }
+
     const uint8_t* buf = wt_session->capsule_buffer.data();
     size_t buf_len = wt_session->capsule_buffer.size();
 
@@ -121,17 +129,19 @@ void H2Session::process_capsules(int32_t session_id,
       break;
     }
 
-    // Capsule を処理
+    // ペイロードをコピーしてから処理する
+    // (ハンドラがセッションを削除しても安全にするため)
+    std::vector<uint8_t> payload_copy(buf + header_len,
+                                      buf + header_len + payload_len);
     CapsuleType capsule_type = static_cast<CapsuleType>(type_value);
-    const uint8_t* payload = buf + header_len;
-    process_capsule(session_id, capsule_type, payload,
-                    static_cast<size_t>(payload_len));
 
-    // 処理済みデータを削除
     wt_session->capsule_buffer.erase(
         wt_session->capsule_buffer.begin(),
         wt_session->capsule_buffer.begin() +
             static_cast<std::ptrdiff_t>(header_len + payload_len));
+
+    process_capsule(session_id, capsule_type, payload_copy.data(),
+                    payload_copy.size());
   }
 }
 
@@ -141,11 +151,12 @@ void H2Session::process_capsule(int32_t session_id,
                                 size_t length) {
   switch (type) {
     case CapsuleType::WtStream:
-      handle_wt_stream(session_id, false, payload, length);
+    case CapsuleType::WtStreamFin: {
+      // draft-15 Section 6.4: Type の最下位ビットが FIN
+      bool fin = (static_cast<uint64_t>(type) & 0x01ULL) != 0;
+      handle_wt_stream(session_id, fin, payload, length);
       break;
-    case CapsuleType::WtStreamFin:
-      handle_wt_stream(session_id, true, payload, length);
-      break;
+    }
     case CapsuleType::WtResetStream:
       handle_wt_reset_stream(session_id, payload, length);
       break;
@@ -178,7 +189,7 @@ void H2Session::process_capsule(int32_t session_id,
     case CapsuleType::WtStreamDataBlocked:
     case CapsuleType::WtStreamsBlockedBidi:
     case CapsuleType::WtStreamsBlockedUni:
-      // これらは無視
+      // フロー制御通知・PADDING は現時点では状態更新のみ不要
       break;
   }
 }
@@ -211,7 +222,8 @@ void H2Session::handle_wt_stream(int32_t session_id,
     info.stream_id = stream_id;
     info.is_local = false;
     info.is_unidirectional = (stream_id & 0x02) != 0;
-    info.max_stream_data_local = config_.wt_initial_max_stream_data;
+    info.max_stream_data_local =
+        peer_send_credit_for_stream(*wt_session, info.is_unidirectional, false);
     info.max_stream_data_remote = config_.wt_initial_max_stream_data;
     wt_session->streams[stream_id] = info;
   }
@@ -219,6 +231,22 @@ void H2Session::handle_wt_stream(int32_t session_id,
   // データ部分
   const uint8_t* stream_data = payload + stream_id_len;
   size_t data_len = length - stream_id_len;
+
+  // draft-15 Section 6.5 / 6.6: 受信超過はセッション閉鎖
+  // mem_recv コールバック中に nghttp2_session_send 相当を走らせないよう、
+  // 閉鎖処理はイベント化して外側で close_session する。
+  auto& stream_info = wt_session->streams[stream_id];
+  if (wt_session->bytes_received + data_len > wt_session->max_data_remote ||
+      stream_info.bytes_received + data_len >
+          stream_info.max_stream_data_remote) {
+    H2Event event;
+    event.type = H2EventType::Error;
+    event.session_id = session_id;
+    event.error_code = 0x50;
+    event.error_message = "peer exceeded flow control limit";
+    push_event(std::move(event));
+    return;
+  }
 
   // データがある場合、または FIN フラグがある場合のみイベントを発行
   // ストリーム開始のみの capsule (データなし、FIN なし) はイベントを発行しない
@@ -233,7 +261,6 @@ void H2Session::handle_wt_stream(int32_t session_id,
   }
 
   // フロー制御更新
-  auto& stream_info = wt_session->streams[stream_id];
   stream_info.bytes_received += data_len;
   wt_session->bytes_received += data_len;
 }
@@ -400,7 +427,12 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   event.error_message = error_message;
   push_event(std::move(event));
 
-  wt_sessions_.erase(session_id);
+  // セッション本体の削除は HTTP/2 ストリーム close 時に行う
+  // (process_capsules がまだバッファを参照している可能性がある)
+  auto* wt_session = get_wt_session(session_id);
+  if (wt_session) {
+    wt_session->is_established = false;
+  }
 }
 
 void H2Session::handle_wt_drain_session(int32_t session_id) {
@@ -450,6 +482,167 @@ uint64_t H2Session::allocate_stream_id(int32_t session_id,
   return stream_id;
 }
 
+void H2Session::push_event(H2Event event) {
+  events_.push_back(std::move(event));
+}
+
+WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
+  auto it = wt_sessions_.find(session_id);
+  if (it == wt_sessions_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const {
+  // 対向 SETTINGS が我々の送信上限 (local)、自側 config が受信上限 (remote)
+  // draft-15 Section 4.3.1
+  // 対向が 0 のままの場合は capsule 到着まで送れないため、自側 config を下限にする
+  // (SETTINGS 未受信や default 0 へのフォールバック)
+  wt_session.max_data_local =
+      peer_wt_initial_max_data_ > 0 ? peer_wt_initial_max_data_
+                                    : config_.wt_initial_max_data;
+  wt_session.max_data_remote = config_.wt_initial_max_data;
+  wt_session.max_streams_bidi_local =
+      peer_wt_initial_max_streams_bidi_ > 0
+          ? peer_wt_initial_max_streams_bidi_
+          : config_.wt_initial_max_streams_bidi;
+  wt_session.max_streams_uni_local =
+      peer_wt_initial_max_streams_uni_ > 0
+          ? peer_wt_initial_max_streams_uni_
+          : config_.wt_initial_max_streams_uni;
+  wt_session.max_streams_bidi_remote = config_.wt_initial_max_streams_bidi;
+  wt_session.max_streams_uni_remote = config_.wt_initial_max_streams_uni;
+
+  wt_session.peer_max_stream_data_uni =
+      peer_wt_initial_max_stream_data_uni_ > 0
+          ? peer_wt_initial_max_stream_data_uni_
+          : config_.wt_initial_max_stream_data;
+  // 自側開始 bidi: 対向の BIDI_REMOTE
+  wt_session.peer_max_stream_data_bidi_local =
+      peer_wt_initial_max_stream_data_bidi_remote_ > 0
+          ? peer_wt_initial_max_stream_data_bidi_remote_
+          : config_.wt_initial_max_stream_data;
+  // 対向開始 bidi: 対向の BIDI_LOCAL
+  wt_session.peer_max_stream_data_bidi_remote =
+      peer_wt_initial_max_stream_data_bidi_local_ > 0
+          ? peer_wt_initial_max_stream_data_bidi_local_
+          : config_.wt_initial_max_stream_data;
+}
+
+std::string H2Session::encode_webtransport_init() const {
+  // draft-15 Section 4.3.2: Dictionary Structured Field (RFC 8941)
+  // 将来キーやセマンティクスが変わる可能性がある
+  return "u=" + std::to_string(config_.wt_initial_max_stream_data) +
+         ", bl=" + std::to_string(config_.wt_initial_max_stream_data) +
+         ", br=" + std::to_string(config_.wt_initial_max_stream_data);
+}
+
+bool H2Session::parse_webtransport_init(const std::string& value,
+                                        uint64_t& out_u,
+                                        uint64_t& out_bl,
+                                        uint64_t& out_br,
+                                        bool& has_u,
+                                        bool& has_bl,
+                                        bool& has_br) const {
+  has_u = false;
+  has_bl = false;
+  has_br = false;
+  out_u = 0;
+  out_bl = 0;
+  out_br = 0;
+
+  size_t pos = 0;
+  while (pos < value.size()) {
+    while (pos < value.size() &&
+           (value[pos] == ' ' || value[pos] == '\t' || value[pos] == ',')) {
+      ++pos;
+    }
+    if (pos >= value.size()) {
+      break;
+    }
+
+    size_t key_start = pos;
+    while (pos < value.size() && value[pos] != '=' && value[pos] != ',' &&
+           value[pos] != ' ' && value[pos] != '\t') {
+      ++pos;
+    }
+    std::string key = value.substr(key_start, pos - key_start);
+    while (pos < value.size() && (value[pos] == ' ' || value[pos] == '\t')) {
+      ++pos;
+    }
+    if (pos >= value.size() || value[pos] != '=') {
+      // 未知キーやパラメータなしは無視できるが、形式不正は拒否
+      if (!key.empty()) {
+        return false;
+      }
+      continue;
+    }
+    ++pos;
+    while (pos < value.size() && (value[pos] == ' ' || value[pos] == '\t')) {
+      ++pos;
+    }
+
+    size_t val_start = pos;
+    while (pos < value.size() && value[pos] != ',' && value[pos] != ';' &&
+           value[pos] != ' ' && value[pos] != '\t') {
+      if (!std::isdigit(static_cast<unsigned char>(value[pos]))) {
+        return false;
+      }
+      ++pos;
+    }
+    if (val_start == pos) {
+      return false;
+    }
+    uint64_t parsed = 0;
+    try {
+      parsed = std::stoull(value.substr(val_start, pos - val_start));
+    } catch (const std::exception&) {
+      return false;
+    }
+
+    // パラメータ (;...) があればスキップ
+    while (pos < value.size() && value[pos] != ',') {
+      ++pos;
+    }
+
+    if (key == "u") {
+      if (has_u) {
+        return false;
+      }
+      has_u = true;
+      out_u = parsed;
+    } else if (key == "bl") {
+      if (has_bl) {
+        return false;
+      }
+      has_bl = true;
+      out_bl = parsed;
+    } else if (key == "br") {
+      if (has_br) {
+        return false;
+      }
+      has_br = true;
+      out_br = parsed;
+    }
+    // 未知キーは MUST ignore (draft-15 Section 4.3.2)
+  }
+
+  return true;
+}
+
+uint64_t H2Session::peer_send_credit_for_stream(const WtSessionInfo& wt_session,
+                                                bool is_unidirectional,
+                                                bool is_local) const {
+  if (is_unidirectional) {
+    return wt_session.peer_max_stream_data_uni;
+  }
+  if (is_local) {
+    return wt_session.peer_max_stream_data_bidi_local;
+  }
+  return wt_session.peer_max_stream_data_bidi_remote;
+}
+
 // ========== H2Session 実装 ==========
 
 H2Session::H2Session(bool is_server, const H2SessionConfig& config)
@@ -470,6 +663,19 @@ H2Session::H2Session(H2Session&& other) noexcept
       http2_stream_buffers_(std::move(other.http2_stream_buffers_)),
       pending_headers_(std::move(other.pending_headers_)),
       wt_sessions_(std::move(other.wt_sessions_)),
+      end_stream_pending_(std::move(other.end_stream_pending_)),
+      peer_enable_connect_protocol_(other.peer_enable_connect_protocol_),
+      peer_wt_enabled_(other.peer_wt_enabled_),
+      peer_wt_initial_max_data_(other.peer_wt_initial_max_data_),
+      peer_wt_initial_max_stream_data_uni_(
+          other.peer_wt_initial_max_stream_data_uni_),
+      peer_wt_initial_max_stream_data_bidi_local_(
+          other.peer_wt_initial_max_stream_data_bidi_local_),
+      peer_wt_initial_max_stream_data_bidi_remote_(
+          other.peer_wt_initial_max_stream_data_bidi_remote_),
+      peer_wt_initial_max_streams_uni_(other.peer_wt_initial_max_streams_uni_),
+      peer_wt_initial_max_streams_bidi_(
+          other.peer_wt_initial_max_streams_bidi_),
       closed_(other.closed_),
       goaway_sent_(other.goaway_sent_) {
   other.session_ = nullptr;
@@ -488,6 +694,18 @@ H2Session& H2Session::operator=(H2Session&& other) noexcept {
     http2_stream_buffers_ = std::move(other.http2_stream_buffers_);
     pending_headers_ = std::move(other.pending_headers_);
     wt_sessions_ = std::move(other.wt_sessions_);
+    end_stream_pending_ = std::move(other.end_stream_pending_);
+    peer_enable_connect_protocol_ = other.peer_enable_connect_protocol_;
+    peer_wt_enabled_ = other.peer_wt_enabled_;
+    peer_wt_initial_max_data_ = other.peer_wt_initial_max_data_;
+    peer_wt_initial_max_stream_data_uni_ =
+        other.peer_wt_initial_max_stream_data_uni_;
+    peer_wt_initial_max_stream_data_bidi_local_ =
+        other.peer_wt_initial_max_stream_data_bidi_local_;
+    peer_wt_initial_max_stream_data_bidi_remote_ =
+        other.peer_wt_initial_max_stream_data_bidi_remote_;
+    peer_wt_initial_max_streams_uni_ = other.peer_wt_initial_max_streams_uni_;
+    peer_wt_initial_max_streams_bidi_ = other.peer_wt_initial_max_streams_bidi_;
     closed_ = other.closed_;
     goaway_sent_ = other.goaway_sent_;
     other.session_ = nullptr;
@@ -545,12 +763,26 @@ bool H2Session::initialize() {
   }
 
   // SETTINGS を送信
+  // draft-15 Section 3.1 / 4.3.1 / 11.2
   nghttp2_settings_entry settings[] = {
       {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, config_.max_concurrent_streams},
       {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, config_.initial_window_size},
       {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, config_.max_frame_size},
       {NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, config_.max_header_list_size},
       {NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL, 1},
+      {SETTINGS_WT_ENABLED, 1},
+      {SETTINGS_WT_INITIAL_MAX_DATA,
+       static_cast<uint32_t>(config_.wt_initial_max_data)},
+      {SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI,
+       static_cast<uint32_t>(config_.wt_initial_max_stream_data)},
+      {SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+       static_cast<uint32_t>(config_.wt_initial_max_stream_data)},
+      {SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+       static_cast<uint32_t>(config_.wt_initial_max_stream_data)},
+      {SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
+       static_cast<uint32_t>(config_.wt_initial_max_streams_uni)},
+      {SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI,
+       static_cast<uint32_t>(config_.wt_initial_max_streams_bidi)},
   };
 
   rv = nghttp2_submit_settings(session_, NGHTTP2_FLAG_NONE, settings,
@@ -605,8 +837,14 @@ std::optional<std::vector<uint8_t>> H2Session::send() {
   return result;
 }
 
-int32_t H2Session::connect(const std::string& url) {
+int32_t H2Session::connect(const std::string& url,
+                           const std::string& origin) {
   if (!session_ || is_server_) {
+    return -1;
+  }
+
+  // draft-15 Section 3.1: SETTINGS 受信前に CONNECT してはならない
+  if (!is_webtransport_ready()) {
     return -1;
   }
 
@@ -630,28 +868,49 @@ int32_t H2Session::connect(const std::string& url) {
   }
 
   // Extended CONNECT リクエストヘッダー
+  // draft-15 Section 3.2
   std::string method = "CONNECT";
   std::string scheme = "https";
   std::string protocol = "webtransport";
+  std::string wt_init = encode_webtransport_init();
 
-  nghttp2_nv nva[] = {
+  std::vector<nghttp2_nv> nva;
+  nva.push_back(
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":method")),
        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(method.c_str())),
-       7, method.size(), NGHTTP2_NV_FLAG_NONE},
+       7, method.size(), NGHTTP2_NV_FLAG_NONE});
+  nva.push_back(
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":scheme")),
        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(scheme.c_str())),
-       7, scheme.size(), NGHTTP2_NV_FLAG_NONE},
+       7, scheme.size(), NGHTTP2_NV_FLAG_NONE});
+  nva.push_back(
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":authority")),
        const_cast<uint8_t*>(
            reinterpret_cast<const uint8_t*>(authority.c_str())),
-       10, authority.size(), NGHTTP2_NV_FLAG_NONE},
+       10, authority.size(), NGHTTP2_NV_FLAG_NONE});
+  nva.push_back(
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":path")),
        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(path.c_str())), 5,
-       path.size(), NGHTTP2_NV_FLAG_NONE},
+       path.size(), NGHTTP2_NV_FLAG_NONE});
+  nva.push_back(
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":protocol")),
        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(protocol.c_str())),
-       9, protocol.size(), NGHTTP2_NV_FLAG_NONE},
-  };
+       9, protocol.size(), NGHTTP2_NV_FLAG_NONE});
+
+  // draft-15 Section 3.2: Web 文脈では Origin 必須
+  if (!origin.empty()) {
+    nva.push_back(
+        {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>("origin")),
+         const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(origin.c_str())),
+         6, origin.size(), NGHTTP2_NV_FLAG_NONE});
+  }
+
+  // draft-15 Section 4.3.2: 初期フロー制御をヘッダーでも伝える
+  nva.push_back(
+      {const_cast<uint8_t*>(
+           reinterpret_cast<const uint8_t*>("webtransport-init")),
+       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(wt_init.c_str())),
+       17, wt_init.size(), NGHTTP2_NV_FLAG_NONE});
 
   // Capsule データ送信用のデータプロバイダー
   nghttp2_data_provider data_prd;
@@ -659,7 +918,7 @@ int32_t H2Session::connect(const std::string& url) {
   data_prd.read_callback = data_source_read_callback;
 
   int32_t stream_id = nghttp2_submit_request(
-      session_, nullptr, nva, sizeof(nva) / sizeof(nva[0]), &data_prd, this);
+      session_, nullptr, nva.data(), nva.size(), &data_prd, this);
 
   if (stream_id < 0) {
     return -1;
@@ -668,12 +927,7 @@ int32_t H2Session::connect(const std::string& url) {
   // WebTransport セッションを作成
   WtSessionInfo wt_session;
   wt_session.http2_stream_id = stream_id;
-  wt_session.max_data_local = config_.wt_initial_max_data;
-  wt_session.max_data_remote = config_.wt_initial_max_data;
-  wt_session.max_streams_bidi_local = config_.wt_initial_max_streams_bidi;
-  wt_session.max_streams_uni_local = config_.wt_initial_max_streams_uni;
-  wt_session.max_streams_bidi_remote = config_.wt_initial_max_streams_bidi;
-  wt_session.max_streams_uni_remote = config_.wt_initial_max_streams_uni;
+  apply_peer_initial_flow_control(wt_session);
   wt_sessions_[stream_id] = wt_session;
 
   nghttp2_session_send(session_);
@@ -687,12 +941,18 @@ bool H2Session::accept_session(int32_t session_id) {
   }
 
   // 200 OK レスポンス
+  // draft-15 Section 4.3.2: 応答でも WebTransport-Init を送れる
   std::string status = "200";
+  std::string wt_init = encode_webtransport_init();
 
   nghttp2_nv nva[] = {
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":status")),
        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(status.c_str())),
        7, status.size(), NGHTTP2_NV_FLAG_NONE},
+      {const_cast<uint8_t*>(
+           reinterpret_cast<const uint8_t*>("webtransport-init")),
+       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(wt_init.c_str())),
+       17, wt_init.size(), NGHTTP2_NV_FLAG_NONE},
   };
 
   // Capsule データ送信用のデータプロバイダー
@@ -748,7 +1008,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   nghttp2_submit_response(session_, session_id, nva,
                           sizeof(nva) / sizeof(nva[0]), nullptr);
   wt_sessions_.erase(session_id);
-  nghttp2_session_send(session_);
+  // mem_recv コールバック中でも安全なよう、ここでは session_send しない
 }
 
 int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
@@ -779,7 +1039,8 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   info.stream_id = stream_id;
   info.is_local = true;
   info.is_unidirectional = is_unidirectional;
-  info.max_stream_data_local = config_.wt_initial_max_stream_data;
+  info.max_stream_data_local =
+      peer_send_credit_for_stream(*wt_session, is_unidirectional, true);
   info.max_stream_data_remote = config_.wt_initial_max_stream_data;
   wt_session->streams[stream_id] = info;
 
@@ -800,7 +1061,18 @@ void H2Session::send_stream_data(int32_t session_id,
   }
 
   // ストリームが存在しない場合はエラー
-  if (wt_session->streams.find(stream_id) == wt_session->streams.end()) {
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it == wt_session->streams.end()) {
+    return;
+  }
+
+  auto& stream_info = stream_it->second;
+
+  // draft-15 Section 6.5 / 6.6: フロー制御超過はセッション閉鎖
+  if (wt_session->bytes_sent + data.size() > wt_session->max_data_local ||
+      stream_info.bytes_sent + data.size() > stream_info.max_stream_data_local) {
+    close_session(session_id, 0x50 /* FLOW_CONTROL_ERROR */,
+                  "flow control limit exceeded");
     return;
   }
 
@@ -812,7 +1084,6 @@ void H2Session::send_stream_data(int32_t session_id,
   send_capsule(session_id, type, payload);
 
   // フロー制御更新
-  auto& stream_info = wt_session->streams[stream_id];
   stream_info.bytes_sent += data.size();
   wt_session->bytes_sent += data.size();
 }
@@ -824,6 +1095,12 @@ void H2Session::reset_stream(int32_t session_id,
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
     return;
+  }
+
+  // draft-15 Section 6.2: Reliable Size は送信済みバイト数以下
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it != wt_session->streams.end() && reliable_size == 0) {
+    reliable_size = stream_it->second.bytes_sent;
   }
 
   // WT_RESET_STREAM capsule: Stream ID + Error Code + Reliable Size
@@ -872,6 +1149,7 @@ void H2Session::close_session(int32_t session_id,
   }
 
   // WT_CLOSE_SESSION capsule: Error Code (32bit) + Message
+  // draft-15 Section 6.12: Application Error Message は最大 1024 バイト
   std::vector<uint8_t> payload;
   payload.push_back(static_cast<uint8_t>((error_code >> 24) & 0xFF));
   payload.push_back(static_cast<uint8_t>((error_code >> 16) & 0xFF));
@@ -879,16 +1157,26 @@ void H2Session::close_session(int32_t session_id,
   payload.push_back(static_cast<uint8_t>(error_code & 0xFF));
 
   if (!error_message.empty()) {
-    payload.insert(payload.end(), error_message.begin(), error_message.end());
+    size_t message_len = std::min(error_message.size(), static_cast<size_t>(1024));
+    payload.insert(payload.end(), error_message.begin(),
+                   error_message.begin() +
+                       static_cast<std::ptrdiff_t>(message_len));
   }
 
   send_capsule(session_id, CapsuleType::WtCloseSession, payload);
 
-  // HTTP/2 ストリームを終了
-  nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE, session_id,
-                            NGHTTP2_NO_ERROR);
-  wt_sessions_.erase(session_id);
-  nghttp2_session_send(session_);
+  // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
+  // RST_STREAM ではアプリケーション終了を正しく伝えられない
+  //
+  // nghttp2_session_send は mem_recv コールバック中に呼んではならない。
+  // 送信は呼び出し側の send() / receive() 後段に任せる。
+  end_stream_pending_.insert(session_id);
+  nghttp2_session_resume_data(session_, session_id);
+}
+
+bool H2Session::is_webtransport_ready() const {
+  // draft-15 Section 3.1
+  return peer_enable_connect_protocol_ && peer_wt_enabled_;
 }
 
 void H2Session::drain_session(int32_t session_id) {
@@ -937,18 +1225,6 @@ std::vector<uint64_t> H2Session::get_stream_ids(int32_t session_id) const {
   return result;
 }
 
-void H2Session::push_event(H2Event event) {
-  events_.push_back(std::move(event));
-}
-
-WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
-  auto it = wt_sessions_.find(session_id);
-  if (it != wt_sessions_.end()) {
-    return &it->second;
-  }
-  return nullptr;
-}
-
 // ========== nghttp2 コールバック実装 ==========
 
 ssize_t H2Session::send_callback(nghttp2_session* session,
@@ -974,6 +1250,56 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
   int32_t stream_id = frame->hd.stream_id;
 
   switch (frame->hd.type) {
+    case NGHTTP2_SETTINGS:
+      // draft-15 Section 3.1 / 4.3.1
+      if ((frame->hd.flags & NGHTTP2_FLAG_ACK) == 0) {
+        for (size_t i = 0; i < frame->settings.niv; ++i) {
+          const nghttp2_settings_entry& entry = frame->settings.iv[i];
+          switch (entry.settings_id) {
+            case NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL:
+              h2_session->peer_enable_connect_protocol_ = (entry.value == 1);
+              break;
+            case SETTINGS_WT_ENABLED:
+              // draft-15 Section 3.1: 1 超は PROTOCOL_ERROR
+              if (entry.value > 1) {
+                H2Event event;
+                event.type = H2EventType::Error;
+                event.error_code = NGHTTP2_PROTOCOL_ERROR;
+                event.error_message =
+                    "SETTINGS_WT_ENABLED value greater than 1";
+                h2_session->push_event(std::move(event));
+                h2_session->closed_ = true;
+              } else {
+                h2_session->peer_wt_enabled_ = (entry.value == 1);
+              }
+              break;
+            case SETTINGS_WT_INITIAL_MAX_DATA:
+              h2_session->peer_wt_initial_max_data_ = entry.value;
+              break;
+            case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI:
+              h2_session->peer_wt_initial_max_stream_data_uni_ = entry.value;
+              break;
+            case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL:
+              h2_session->peer_wt_initial_max_stream_data_bidi_local_ =
+                  entry.value;
+              break;
+            case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE:
+              h2_session->peer_wt_initial_max_stream_data_bidi_remote_ =
+                  entry.value;
+              break;
+            case SETTINGS_WT_INITIAL_MAX_STREAMS_UNI:
+              h2_session->peer_wt_initial_max_streams_uni_ = entry.value;
+              break;
+            case SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI:
+              h2_session->peer_wt_initial_max_streams_bidi_ = entry.value;
+              break;
+            default:
+              break;
+          }
+        }
+      }
+      break;
+
     case NGHTTP2_HEADERS:
       if (frame->headers.cat == NGHTTP2_HCAT_REQUEST &&
           h2_session->is_server_) {
@@ -983,6 +1309,8 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
           // WebTransport CONNECT リクエストかチェック
           bool is_connect = false;
           bool is_webtransport = false;
+          std::string wt_init_value;
+          bool has_wt_init = false;
           for (const auto& [name, value] : it->second) {
             if (name == ":method" && value == "CONNECT") {
               is_connect = true;
@@ -990,22 +1318,51 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             if (name == ":protocol" && value == "webtransport") {
               is_webtransport = true;
             }
+            if (name == "webtransport-init") {
+              has_wt_init = true;
+              wt_init_value = value;
+            }
           }
           if (is_connect && is_webtransport) {
             // WebTransport セッション情報を作成
             WtSessionInfo wt_session;
             wt_session.http2_stream_id = stream_id;
-            wt_session.max_data_local = h2_session->config_.wt_initial_max_data;
-            wt_session.max_data_remote =
-                h2_session->config_.wt_initial_max_data;
-            wt_session.max_streams_bidi_local =
-                h2_session->config_.wt_initial_max_streams_bidi;
-            wt_session.max_streams_uni_local =
-                h2_session->config_.wt_initial_max_streams_uni;
-            wt_session.max_streams_bidi_remote =
-                h2_session->config_.wt_initial_max_streams_bidi;
-            wt_session.max_streams_uni_remote =
-                h2_session->config_.wt_initial_max_streams_uni;
+            h2_session->apply_peer_initial_flow_control(wt_session);
+
+            // draft-15 Section 4.3: SETTINGS とヘッダーの大きい方を採用
+            if (has_wt_init) {
+              uint64_t init_u = 0;
+              uint64_t init_bl = 0;
+              uint64_t init_br = 0;
+              bool has_u = false;
+              bool has_bl = false;
+              bool has_br = false;
+              if (!h2_session->parse_webtransport_init(
+                      wt_init_value, init_u, init_bl, init_br, has_u, has_bl,
+                      has_br)) {
+                h2_session->pending_headers_.erase(it);
+                h2_session->reject_session(stream_id, 400);
+                break;
+              }
+              // クライアント送信ヘッダー: 受信側 (server) 向けクレジット
+              // u = サーバー開始 uni, bl = クライアント開始 bidi,
+              // br = サーバー開始 bidi
+              if (has_u) {
+                wt_session.peer_max_stream_data_uni =
+                    std::max(wt_session.peer_max_stream_data_uni, init_u);
+              }
+              if (has_bl) {
+                wt_session.peer_max_stream_data_bidi_remote =
+                    std::max(wt_session.peer_max_stream_data_bidi_remote,
+                             init_bl);
+              }
+              if (has_br) {
+                wt_session.peer_max_stream_data_bidi_local =
+                    std::max(wt_session.peer_max_stream_data_bidi_local,
+                             init_br);
+              }
+            }
+
             h2_session->wt_sessions_[stream_id] = wt_session;
 
             // WebTransport セッションリクエスト
@@ -1023,14 +1380,46 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
         if (it != h2_session->pending_headers_.end()) {
           // 200 レスポンスかチェック
           bool is_success = false;
+          std::string wt_init_value;
+          bool has_wt_init = false;
           for (const auto& [name, value] : it->second) {
             if (name == ":status" && value == "200") {
               is_success = true;
-              break;
+            }
+            if (name == "webtransport-init") {
+              has_wt_init = true;
+              wt_init_value = value;
             }
           }
           auto* wt_session = h2_session->get_wt_session(stream_id);
           if (is_success && wt_session) {
+            // draft-15 Section 4.3: 応答の WebTransport-Init も反映
+            if (has_wt_init) {
+              uint64_t init_u = 0;
+              uint64_t init_bl = 0;
+              uint64_t init_br = 0;
+              bool has_u = false;
+              bool has_bl = false;
+              bool has_br = false;
+              if (h2_session->parse_webtransport_init(wt_init_value, init_u,
+                                                      init_bl, init_br, has_u,
+                                                      has_bl, has_br)) {
+                // サーバー送信ヘッダー: 受信側 (client) 向けクレジット
+                if (has_u) {
+                  wt_session->peer_max_stream_data_uni =
+                      std::max(wt_session->peer_max_stream_data_uni, init_u);
+                }
+                if (has_bl) {
+                  wt_session->peer_max_stream_data_bidi_remote = std::max(
+                      wt_session->peer_max_stream_data_bidi_remote, init_bl);
+                }
+                if (has_br) {
+                  wt_session->peer_max_stream_data_bidi_local = std::max(
+                      wt_session->peer_max_stream_data_bidi_local, init_br);
+                }
+              }
+            }
+
             wt_session->is_established = true;
 
             // WebTransport セッション確立
@@ -1161,9 +1550,18 @@ ssize_t H2Session::data_source_read_callback(nghttp2_session* session,
   (void)source;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
+  bool end_pending =
+      h2_session->end_stream_pending_.find(stream_id) !=
+      h2_session->end_stream_pending_.end();
 
   auto it = h2_session->http2_stream_buffers_.find(stream_id);
   if (it == h2_session->http2_stream_buffers_.end() || it->second.empty()) {
+    // draft-15 Section 6.12: CLOSE 後は END_STREAM で half-close
+    if (end_pending) {
+      *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+      h2_session->end_stream_pending_.erase(stream_id);
+      return 0;
+    }
     return NGHTTP2_ERR_DEFERRED;
   }
 
@@ -1180,10 +1578,11 @@ ssize_t H2Session::data_source_read_callback(nghttp2_session* session,
     it->second.pop_front();
   }
 
-  // バッファが空になっても EOF フラグは設定しない
-  // WebTransport セッションは開いたままなので、次のデータまで待機する
-  // 次回コールバックが呼ばれたときに DEFERRED を返す
-  (void)data_flags;
+  // 送信キューが空で close_session 後なら EOF
+  if (it->second.empty() && end_pending) {
+    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    h2_session->end_stream_pending_.erase(stream_id);
+  }
 
   return static_cast<ssize_t>(to_read);
 }
@@ -1307,8 +1706,12 @@ void bind_webtransport_h2(nb::module_& m) {
           },
           nb::sig("def send(self) -> bytes | None"), "送信すべきデータを取得")
       .def("connect", &H2Session::connect, nb::arg("url"),
-           nb::sig("def connect(self, url: str) -> int"),
+           nb::arg("origin") = "",
+           nb::sig("def connect(self, url: str, origin: str = '') -> int"),
            "WebTransport セッションを開始 (クライアント用)")
+      .def("is_webtransport_ready", &H2Session::is_webtransport_ready,
+           nb::sig("def is_webtransport_ready(self) -> bool"),
+           "対向 SETTINGS で WebTransport over HTTP/2 が有効か")
       .def("accept_session", &H2Session::accept_session, nb::arg("session_id"),
            nb::sig("def accept_session(self, session_id: int) -> bool"),
            "WebTransport セッションを受理 (サーバー用)")

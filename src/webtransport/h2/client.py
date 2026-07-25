@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from webtransport.webtransport_ext import h2 as h2_low
 
@@ -26,6 +26,7 @@ class Client:
         await client.connect()
         stream_id = await client.open_stream()
         await client.send_stream_data(stream_id, b"Hello")
+        await client.send_datagram(b"Hello DG")
         await client.run()
         await client.close()
 
@@ -36,16 +37,23 @@ class Client:
             await client.run()
     """
 
-    def __init__(self, url: str, verify_peer: bool = True) -> None:
+    def __init__(
+        self,
+        url: str,
+        verify_peer: bool = True,
+        origin: str = "",
+    ) -> None:
         """クライアントを初期化する
 
         Args:
             url: WebTransport エンドポイント URL
             verify_peer: サーバー証明書を検証するかどうか
+            origin: Origin ヘッダー値 (空なら付与しない)
         """
         self._url = url
         self._host, self._port, self._path = self._parse_url(url)
         self._verify_peer = verify_peer
+        self._origin = origin
 
         self._session: h2_low.Session | None = None
         self._reader: asyncio.StreamReader | None = None
@@ -57,6 +65,8 @@ class Client:
         self._on_session_ready: Callable[[int], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
+        self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
 
     @property
     def url(self) -> str:
@@ -116,6 +126,28 @@ class Client:
         """
         self._on_stream_data = callback
 
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int], Awaitable[None]],
+    ) -> None:
+        """ストリームリセット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int) -> None
+        """
+        self._on_stream_reset = callback
+
+    def on_datagram(
+        self,
+        callback: Callable[[bytes], Awaitable[None]],
+    ) -> None:
+        """データグラム受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(data: bytes) -> None
+        """
+        self._on_datagram = callback
+
     def _parse_url(self, url: str) -> tuple[str, int, str]:
         """URL をパースする"""
         url = url.replace("https://", "")
@@ -159,6 +191,24 @@ class Client:
         except TimeoutError:
             pass
 
+    async def _wait_webtransport_ready(self, timeout_seconds: float = 5.0) -> bool:
+        """対向の SETTINGS を待ち WebTransport が利用可能になるまで待機する
+
+        draft-15 Section 3.1: ENABLE_CONNECT_PROTOCOL と WT_ENABLED を
+        受信するまで CONNECT してはならない。
+        """
+        if self._session is None:
+            return False
+
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if self._session.is_webtransport_ready():
+                return True
+            await self._receive()
+            await self._send_pending()
+            await asyncio.sleep(0.001)
+        return False
+
     async def connect(self) -> bool:
         """WebTransport セッションを確立する
 
@@ -187,7 +237,11 @@ class Client:
 
         self._running = True
 
-        self._session_id = self._session.connect(self._url)
+        # draft-15 Section 3.1: SETTINGS 受信後に Extended CONNECT を送る
+        if not await self._wait_webtransport_ready():
+            return False
+
+        self._session_id = self._session.connect(self._url, self._origin)
         if self._session_id < 0:
             return False
 
@@ -203,15 +257,19 @@ class Client:
                 if event is None:
                     break
 
-                if event.type == h2_low.EventType.SESSION_READY:
-                    if event.session_id == self._session_id:
-                        self._connected = True
-                        return True
+                if (
+                    event.type == h2_low.EventType.SESSION_READY
+                    and event.session_id == self._session_id
+                ):
+                    self._connected = True
+                    return True
 
-                elif event.type == h2_low.EventType.SESSION_CLOSED:
-                    if event.session_id == self._session_id:
-                        self._connected = False
-                        return False
+                if (
+                    event.type == h2_low.EventType.SESSION_CLOSED
+                    and event.session_id == self._session_id
+                ):
+                    self._connected = False
+                    return False
 
             await asyncio.sleep(0.001)
 
@@ -252,6 +310,21 @@ class Client:
         self._session.send_stream_data(self._session_id, stream_id, data, fin)
         await self._send_pending()
 
+    async def send_datagram(self, data: bytes) -> None:
+        """データグラムを送信する
+
+        Capsule Protocol の DATAGRAM capsule (RFC 9297) を使う。
+        draft-15 Section 6.11
+
+        Args:
+            data: 送信データ
+        """
+        if self._session is None or self._session_id < 0:
+            return
+
+        self._session.send_datagram(self._session_id, data)
+        await self._send_pending()
+
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームをリセットする
 
@@ -282,18 +355,30 @@ class Client:
                 if event is None:
                     break
 
-                if event.type == h2_low.EventType.SESSION_READY:
-                    if self._on_session_ready is not None:
-                        await self._on_session_ready(event.session_id)
+                if (
+                    event.type == h2_low.EventType.SESSION_READY
+                    and self._on_session_ready is not None
+                ):
+                    await self._on_session_ready(event.session_id)
 
                 elif event.type == h2_low.EventType.SESSION_CLOSED:
                     self._connected = False
                     if self._on_session_closed is not None:
                         await self._on_session_closed(event.session_id)
 
-                elif event.type == h2_low.EventType.STREAM_DATA:
-                    if self._on_stream_data is not None:
-                        await self._on_stream_data(event.stream_id, event.data)
+                elif (
+                    event.type == h2_low.EventType.STREAM_DATA and self._on_stream_data is not None
+                ):
+                    await self._on_stream_data(event.stream_id, event.data)
+
+                elif (
+                    event.type == h2_low.EventType.STREAM_RESET
+                    and self._on_stream_reset is not None
+                ):
+                    await self._on_stream_reset(event.stream_id, event.error_code)
+
+                elif event.type == h2_low.EventType.DATAGRAM and self._on_datagram is not None:
+                    await self._on_datagram(event.data)
 
             if self._session.is_closed():
                 self._running = False
@@ -301,23 +386,37 @@ class Client:
             await asyncio.sleep(0.01)
 
     async def close(self) -> None:
-        """接続を閉じる"""
+        """接続を閉じる
+
+        draft-15 Section 6.12: WT_CLOSE_SESSION 後に CONNECT ストリームを
+        half-close する。
+        """
+        was_running = self._running
         self._running = False
         self._connected = False
 
         if self._session is not None and self._session_id >= 0:
             self._session.close_session(self._session_id)
             await self._send_pending()
+            # run() が並行していないときだけ half-close 完了を待つ
+            if not was_running:
+                for _ in range(10):
+                    await self._receive()
+                    await self._send_pending()
+                    await asyncio.sleep(0.01)
 
         if self._writer is not None:
             self._writer.close()
-            await self._writer.wait_closed()
+            try:
+                await self._writer.wait_closed()
+            except ssl.SSLError, ConnectionError, OSError:
+                pass
 
-    async def __aenter__(self) -> Client:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         """非同期コンテキストマネージャーの終了処理"""
         await self.close()

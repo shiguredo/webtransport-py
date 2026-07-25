@@ -185,6 +185,52 @@ def test_event_type_values():
     assert hasattr(EventType, "SESSION_READY")
     assert hasattr(EventType, "SESSION_CLOSED")
     assert hasattr(EventType, "STREAM_DATA")
+    assert hasattr(EventType, "STREAM_RESET")
+    assert hasattr(EventType, "DATAGRAM")
+    assert hasattr(EventType, "SESSION_DRAINING")
+
+
+def test_client_datagram_and_reset_callbacks():
+    """Client の datagram / reset コールバック設定ができることを確認"""
+    from webtransport.h2 import Client
+
+    client = Client(url="https://localhost:8443/webtransport")
+
+    async def on_datagram(data: bytes) -> None:
+        pass
+
+    async def on_stream_reset(stream_id: int, error_code: int) -> None:
+        pass
+
+    client.on_datagram(on_datagram)
+    client.on_stream_reset(on_stream_reset)
+
+    assert client._on_datagram is not None
+    assert client._on_stream_reset is not None
+
+
+def test_server_datagram_and_reset_callbacks():
+    """Server の datagram / reset コールバック設定ができることを確認"""
+    from webtransport.h2 import Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile="cert.pem",
+        keyfile="key.pem",
+    )
+
+    async def on_datagram(data, session_writer) -> None:
+        pass
+
+    async def on_stream_reset(stream_id, error_code, session_writer) -> None:
+        pass
+
+    server.on_datagram(on_datagram)
+    server.on_stream_reset(on_stream_reset)
+
+    assert server._on_datagram is not None
+    assert server._on_stream_reset is not None
 
 
 def test_session_create_server():
@@ -311,6 +357,285 @@ async def test_server_client_communication(test_certificates):
 
     client_task.cancel()
     await asyncio.gather(client_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_client_datagram_communication(test_certificates):
+    """DATAGRAM capsule で双方向通信できることを確認"""
+    from webtransport.h2 import Client, Server
+
+    client_received: list[bytes] = []
+    server_received: list[bytes] = []
+    client_dg = asyncio.Event()
+    server_dg = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_datagram(data: bytes, session_writer) -> None:
+        server_received.append(data)
+        server_dg.set()
+        await session_writer.send_datagram(b"pong-dg")
+
+    server.on_datagram(on_datagram)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_client_datagram(data: bytes) -> None:
+        client_received.append(data)
+        client_dg.set()
+
+    client.on_datagram(on_client_datagram)
+
+    assert await client.connect() is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    await client.send_datagram(b"ping-dg")
+
+    await asyncio.wait_for(server_dg.wait(), timeout=5.0)
+    await asyncio.wait_for(client_dg.wait(), timeout=5.0)
+
+    assert server_received == [b"ping-dg"]
+    assert client_received == [b"pong-dg"]
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_unidirectional_stream(test_certificates):
+    """単方向ストリームでデータを送れることを確認"""
+    from webtransport.h2 import Client, Server
+
+    server_received: list[bytes] = []
+    server_data = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes, session_writer) -> None:
+        server_received.append(data)
+        if data:
+            server_data.set()
+
+    server.on_stream_data(on_stream_data)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    assert await client.connect() is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    stream_id = await client.open_stream(unidirectional=True)
+    assert stream_id >= 0
+    await client.send_stream_data(stream_id, b"uni-hello", fin=True)
+
+    await asyncio.wait_for(server_data.wait(), timeout=5.0)
+    assert b"uni-hello" in server_received
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_close_notifies_server(test_certificates):
+    """クライアントの close_session がサーバーに通知されることを確認"""
+    from webtransport.h2 import Client, Server
+
+    session_closed = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_closed(session_writer) -> None:
+        session_closed.set()
+
+    server.on_session_closed(on_session_closed)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    assert await client.connect() is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    await asyncio.sleep(0.1)
+    await client.close()
+
+    await asyncio.wait_for(session_closed.wait(), timeout=5.0)
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_resets_client_stream(test_certificates):
+    """サーバーがクライアントストリームをリセットできることを確認"""
+    from webtransport.h2 import Client, Server
+
+    reset_event = asyncio.Event()
+    reset_codes: list[int] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes, session_writer) -> None:
+        if data:
+            await session_writer.reset_stream(stream_id, error_code=42)
+
+    server.on_stream_data(on_stream_data)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_stream_reset(stream_id: int, error_code: int) -> None:
+        reset_codes.append(error_code)
+        reset_event.set()
+
+    client.on_stream_reset(on_stream_reset)
+    assert await client.connect() is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    stream_id = await client.open_stream(unidirectional=False)
+    await client.send_stream_data(stream_id, b"reset-me", fin=False)
+
+    await asyncio.wait_for(reset_event.wait(), timeout=5.0)
+    assert 42 in reset_codes
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_chunked_stream_data(test_certificates):
+    """複数回に分けたストリームデータが届くことを確認"""
+    from webtransport.h2 import Client, Server
+
+    server_chunks: list[bytes] = []
+    done = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes, session_writer) -> None:
+        if data:
+            server_chunks.append(data)
+        if b"".join(server_chunks) == b"ABCDEF":
+            done.set()
+
+    server.on_stream_data(on_stream_data)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    assert await client.connect() is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    stream_id = await client.open_stream(unidirectional=False)
+    await client.send_stream_data(stream_id, b"ABC", fin=False)
+    await client.send_stream_data(stream_id, b"DEF", fin=True)
+
+    await asyncio.wait_for(done.wait(), timeout=5.0)
+    assert b"".join(server_chunks) == b"ABCDEF"
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_is_webtransport_ready_after_settings(test_certificates):
+    """SETTINGS 交換後に is_webtransport_ready が真になることを確認"""
+    from webtransport.h2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    assert await client.connect() is True
+    assert client._session is not None
+    assert client._session.is_webtransport_ready() is True
 
     await client.close()
     await server.stop()

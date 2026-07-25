@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from webtransport.webtransport_ext import h2 as h2_low
 
@@ -43,7 +43,12 @@ class SessionWriter:
         Returns:
             ストリーム ID
         """
-        return self._session.open_stream(self._session_id, unidirectional)
+        stream_id = self._session.open_stream(self._session_id, unidirectional)
+        send_data = self._session.send()
+        if send_data:
+            self._writer.write(send_data)
+            await self._writer.drain()
+        return stream_id
 
     async def send_stream_data(
         self,
@@ -64,6 +69,21 @@ class SessionWriter:
             self._writer.write(send_data)
             await self._writer.drain()
 
+    async def send_datagram(self, data: bytes) -> None:
+        """データグラムを送信する
+
+        Capsule Protocol の DATAGRAM capsule (RFC 9297) を使う。
+        draft-15 Section 6.11
+
+        Args:
+            data: 送信データ
+        """
+        self._session.send_datagram(self._session_id, data)
+        send_data = self._session.send()
+        if send_data:
+            self._writer.write(send_data)
+            await self._writer.drain()
+
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームをリセットする
 
@@ -72,6 +92,21 @@ class SessionWriter:
             error_code: エラーコード
         """
         self._session.reset_stream(self._session_id, stream_id, error_code)
+        send_data = self._session.send()
+        if send_data:
+            self._writer.write(send_data)
+            await self._writer.drain()
+
+    async def close_session(self, error_code: int = 0, error_message: str = "") -> None:
+        """セッションを閉じる
+
+        draft-15 Section 6.12
+
+        Args:
+            error_code: アプリケーションエラーコード
+            error_message: エラーメッセージ (最大 1024 バイト)
+        """
+        self._session.close_session(self._session_id, error_code, error_message)
         send_data = self._session.send()
         if send_data:
             self._writer.write(send_data)
@@ -116,6 +151,8 @@ class Server:
         self._on_session_ready: Callable[[SessionWriter], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[SessionWriter], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, SessionWriter], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int, SessionWriter], Awaitable[None]] | None = None
+        self._on_datagram: Callable[[bytes, SessionWriter], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -170,6 +207,28 @@ class Server:
         """
         self._on_stream_data = callback
 
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int, SessionWriter], Awaitable[None]],
+    ) -> None:
+        """ストリームリセット受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int, session_writer: SessionWriter) -> None
+        """
+        self._on_stream_reset = callback
+
+    def on_datagram(
+        self,
+        callback: Callable[[bytes, SessionWriter], Awaitable[None]],
+    ) -> None:
+        """データグラム受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(data: bytes, session_writer: SessionWriter) -> None
+        """
+        self._on_datagram = callback
+
     async def start(self) -> None:
         """サーバーを開始する"""
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -196,12 +255,12 @@ class Server:
             self._server.close()
             await self._server.wait_closed()
 
-    async def __aenter__(self) -> Server:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         """非同期コンテキストマネージャーの終了処理"""
         await self.stop()
 
@@ -259,6 +318,20 @@ class Server:
                                 event.data,
                                 session_writer,
                             )
+
+                    elif event.type == h2_low.EventType.STREAM_RESET:
+                        session_writer = session_writers.get(event.session_id)
+                        if session_writer is not None and self._on_stream_reset is not None:
+                            await self._on_stream_reset(
+                                event.stream_id,
+                                event.error_code,
+                                session_writer,
+                            )
+
+                    elif event.type == h2_low.EventType.DATAGRAM:
+                        session_writer = session_writers.get(event.session_id)
+                        if session_writer is not None and self._on_datagram is not None:
+                            await self._on_datagram(event.data, session_writer)
 
                 data = session.send()
                 if data:
