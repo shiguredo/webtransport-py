@@ -146,7 +146,8 @@ jobs:
         if: matrix.name == 'windows-11_arm64'
         shell: bash
         run: |
-          arch=$(uv run python -c "import platform; print(platform.machine())")
+          # --no-project: 依存同期で cryptography 等のソースビルドが走らないようにする
+          arch=$(uv run --no-project python -c "import platform; print(platform.machine())")
           echo "Python machine=${arch}"
           test "${arch}" = "ARM64"
 
