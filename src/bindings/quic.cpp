@@ -1016,8 +1016,11 @@ std::optional<QuicPacket> QuicConnection::send() {
               if (buf.data.empty()) {
                 buffers.pop_front();
               }
+              // パケットに空きがあるため同じ呼び出し内で続きを書く
+              continue;
             }
-            continue;
+            // 進捗がない場合はこの呼び出しで諦めて次へ
+            break;
           case NGTCP2_ERR_STREAM_DATA_BLOCKED:
             // フロー制御でブロックされた場合は次のストリームへ
             break;
@@ -1046,6 +1049,10 @@ std::optional<QuicPacket> QuicConnection::send() {
         return make_packet(send_buffer_.data(),
                            static_cast<size_t>(nwrite), path);
       }
+
+      // nwrite == 0: パケットを書けなかった (cwnd 枯渇など)。
+      // ループを続けると無限ループになるため、ACK 待ちとして次回に回す
+      break;
     }
   }
 
@@ -1065,8 +1072,11 @@ std::optional<QuicPacket> QuicConnection::send() {
       if (nwrite == NGTCP2_ERR_WRITE_MORE) {
         if (accepted) {
           datagram_queue_.pop_front();
+          // パケットに空きがあるため同じ呼び出し内で続きを書く
+          continue;
         }
-        continue;
+        // 進捗がない場合はこの呼び出しで諦めて次へ
+        break;
       }
       break;
     }
@@ -1079,6 +1089,10 @@ std::optional<QuicPacket> QuicConnection::send() {
       return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
                          path);
     }
+
+    // nwrite == 0: パケットを書けなかった。ループを続けると無限ループに
+    // なるため、次回の呼び出しに回す
+    break;
   }
 
   // 通常のパケット (ACK など)
