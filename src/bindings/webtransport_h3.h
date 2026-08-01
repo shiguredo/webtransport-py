@@ -47,6 +47,9 @@ struct H3SessionConfig {
 
   // サーバーモードかどうか
   bool is_server = false;
+
+  // 許可オリジン (サーバー用。空なら全オリジンを受理する)
+  std::vector<std::string> allowed_origins;
 };
 
 /**
@@ -298,6 +301,21 @@ class H3Session {
    * @param max_streams 最大ストリーム数
    */
   void set_max_client_streams_bidi(uint64_t max_streams);
+
+  /**
+   * リクエストヘッダーの Origin を検証する (サーバー用)
+   *
+   * 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は常に受理し、
+   * Origin ヘッダーが無いリクエストも受理する (仕様上 Origin は非ブラウザ
+   * クライアントでは OPTIONAL)。Origin ヘッダーが複数ある場合、値が空の
+   * 場合、許可リストと一致しない場合は拒否する。照合はバイト列の完全一致
+   * であり、RFC 6454 の origin 正規化 (デフォルトポートの省略やホスト名の
+   * 大文字小文字) は行わない。
+   * @param headers 受信したリクエストヘッダー
+   * @return 受理してよい場合は true
+   */
+  bool verify_origin(
+      const std::vector<std::pair<std::string, std::string>>& headers) const;
 
   /**
    * nghttp3 の read_data コールバックから呼ばれる

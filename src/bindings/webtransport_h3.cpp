@@ -476,6 +476,47 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
                                nullptr);
 }
 
+bool H3Session::verify_origin(
+    const std::vector<std::pair<std::string, std::string>>& headers) const {
+  // 許可リストが空 (未設定) の場合は従来どおり全オリジンを受理する
+  if (config_.allowed_origins.empty()) {
+    return true;
+  }
+
+  // Origin ヘッダーが無いリクエストは受理する
+  // (draft-ietf-webtrans-http3-16 Section 3.2: 非ブラウザクライアントでは
+  // OPTIONAL)
+  std::string origin;
+  bool has_origin = false;
+  bool multiple_origins = false;
+  for (const auto& header : headers) {
+    if (header.first == "origin") {
+      if (has_origin) {
+        multiple_origins = true;
+      }
+      has_origin = true;
+      origin = header.second;
+    }
+  }
+
+  // 複数・空値の Origin は検証失敗として扱う (RFC 6454 の serialized
+  // origin は単一かつ非空)
+  if (multiple_origins || (has_origin && origin.empty())) {
+    return false;
+  }
+
+  if (!has_origin) {
+    return true;
+  }
+
+  for (const auto& allowed_origin : config_.allowed_origins) {
+    if (origin == allowed_origin) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // WebTransport データストリーム用の read_data コールバック
 // stream_buffers_ からデータを取得して返す
 static nghttp3_ssize wt_data_read_callback(nghttp3_conn* /*conn*/,
@@ -950,6 +991,13 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
   }
 
   if (is_connect && is_webtransport && session->is_server_) {
+    // Origin 検証に失敗した場合は 403 で拒否する
+    if (!session->verify_origin(headers)) {
+      session->reject_session(stream_id, 403);
+      session->pending_headers_.erase(it);
+      return 0;
+    }
+
     // サーバー: WebTransport セッションリクエストを受信
     session->session_ids_.insert(stream_id);
 
@@ -1124,7 +1172,9 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_rw("qpack_max_dtable_capacity",
               &H3SessionConfig::qpack_max_dtable_capacity)
       .def_rw("qpack_blocked_streams", &H3SessionConfig::qpack_blocked_streams)
-      .def_rw("is_server", &H3SessionConfig::is_server);
+      .def_rw("is_server", &H3SessionConfig::is_server)
+      .def_rw("allowed_origins", &H3SessionConfig::allowed_origins,
+              "許可オリジンリスト (空なら全オリジンを受理)");
 
   // H3EventType
   nb::enum_<H3EventType>(h3_mod, "EventType", "WebTransport イベント種別")
