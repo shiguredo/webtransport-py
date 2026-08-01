@@ -170,8 +170,9 @@ class Client:
         """0-RTT early data が拒否されたときのコールバックを設定する
 
         拒否された early data とそれに紐づくストリームの状態は破棄される
-        (RFC 9001 Section 4.6.2)。接続自体は 1-RTT として継続するため、
-        再送する場合は呼び出し側でストリームを開き直してデータを送信する。
+        (RFC 9001 Section 4.6.2)。接続自体は 1-RTT として継続するため
+        (RFC 9000 Section 7.4.1)、再送する場合は呼び出し側でストリームを
+        開き直してデータを送信する。
 
         Args:
             callback: async def callback() -> None
@@ -193,15 +194,22 @@ class Client:
         Args:
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            RuntimeError: connect() の呼び出し後に登録しようとした場合
         """
+        if self._connection is not None:
+            raise RuntimeError("early data must be registered before connect()")
         self._early_data_queue.append((data, fin))
 
     def _flush_early_data(self) -> None:
         """登録済みの early data を 0-RTT として送信待ちキューへ積む
 
-        接続作成直後に呼び出し、ハンドシェイク完了前にストリームを開く。
-        0-RTT を試行しない接続 (session_ticket 未指定など) ではストリームを
-        開けない (open_stream が -1 を返す) ため送出されずに破棄される。
+        接続作成直後に呼び出し、ハンドシェイク完了前にストリームを開いて
+        アプリケーションデータを 0-RTT パケットで送れるようにする
+        (RFC 9001 Section 4.6.1)。0-RTT を試行しない接続
+        (session_ticket 未指定など) ではストリームを開けない
+        (open_stream が -1 を返す) ため送出されずに破棄される。
         破棄した項目があれば警告ログを出す。
         """
         if self._connection is None:
@@ -216,7 +224,9 @@ class Client:
             self._connection.send_stream_data(stream_id, data, fin)
         if dropped > 0:
             logger.warning(
-                "early data was not sent because 0-RTT is not attempted: %d item(s)",
+                "early data was not sent because a stream could not be opened "
+                "before handshake completion (0-RTT not attempted or flow "
+                "control limit reached): %d item(s)",
                 dropped,
             )
         self._early_data_queue.clear()
