@@ -313,7 +313,9 @@ void H3Session::bind_qpack_decoder_stream(int64_t stream_id) {
   }
 }
 
-bool H3Session::connect(int64_t stream_id, const std::string& url) {
+bool H3Session::connect(int64_t stream_id,
+                        const std::string& url,
+                        const std::string& origin) {
   if (!conn_ || is_server_) {
     return false;
   }
@@ -356,6 +358,7 @@ bool H3Session::connect(int64_t stream_id, const std::string& url) {
   static const char* header_authority = ":authority";
   static const char* header_path = ":path";
   static const char* header_protocol = ":protocol";
+  static const char* header_origin = "origin";
 
   std::string method = "CONNECT";
   std::string scheme = "https";
@@ -378,6 +381,15 @@ bool H3Session::connect(int64_t stream_id, const std::string& url) {
        reinterpret_cast<uint8_t*>(const_cast<char*>(protocol.data())),
        strlen(header_protocol), protocol.size(), NGHTTP3_NV_FLAG_NONE},
   };
+
+  // Origin ヘッダーは指定された場合のみ付与する
+  // (draft-ietf-webtrans-http3-16 Section 3.2: 非ブラウザクライアントでは OPTIONAL)
+  if (!origin.empty()) {
+    nva.push_back(
+        {reinterpret_cast<uint8_t*>(const_cast<char*>(header_origin)),
+         reinterpret_cast<uint8_t*>(const_cast<char*>(origin.data())),
+         strlen(header_origin), origin.size(), NGHTTP3_NV_FLAG_NONE});
+  }
 
   // WebTransport 専用の submit 関数を使用
   int rv = nghttp3_conn_submit_wt_request(conn_, stream_id, nva.data(),
@@ -1249,7 +1261,9 @@ void bind_webtransport_h3(nb::module_& m) {
                "def bind_qpack_decoder_stream(self, stream_id: int) -> None"),
            "QPACK デコーダーストリーム ID を設定")
       .def("connect", &H3Session::connect, nb::arg("stream_id"), nb::arg("url"),
-           nb::sig("def connect(self, stream_id: int, url: str) -> bool"),
+           nb::arg("origin") = "",
+           nb::sig("def connect(self, stream_id: int, url: str, "
+                   "origin: str = '') -> bool"),
            "WebTransport セッションを開始 (クライアント用)")
       .def("accept_session", &H3Session::accept_session, nb::arg("stream_id"),
            nb::sig("def accept_session(self, stream_id: int) -> bool"),

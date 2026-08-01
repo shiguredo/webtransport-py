@@ -36,6 +36,7 @@ class Client:
         self,
         url: str,
         verify_peer: bool = True,
+        origin: str = "",
         idle_timeout_ns: int = 30_000_000_000,
         ca_file: str | None = None,
         verify_callback: Callable[[list[bytes]], bool] | None = None,
@@ -45,12 +46,14 @@ class Client:
         Args:
             url: WebTransport エンドポイント URL
             verify_peer: サーバー証明書を検証するかどうか
+            origin: Origin ヘッダー値 (空なら付与しない)
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
             ca_file: CA 証明書ファイルパス
             verify_callback: ピア証明書検証コールバック
         """
         self._url = url
         self._verify_peer = verify_peer
+        self._origin = origin
         self._idle_timeout_ns = idle_timeout_ns
         self._ca_file = ca_file
         self._verify_callback = verify_callback
@@ -336,7 +339,7 @@ class Client:
             return False
 
         request_stream_id = self._quic_connection.open_stream(True)
-        if self._webtransport_session.connect(request_stream_id, self._url):
+        if self._webtransport_session.connect(request_stream_id, self._url, self._origin):
             self._session_id = request_stream_id
             await self._send_pending()
             self._connected = True

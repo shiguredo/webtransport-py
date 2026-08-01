@@ -74,6 +74,20 @@ def test_h3_session_client():
     assert len(required) == 3  # control, qpack_encoder, qpack_decoder
 
 
+def test_h3_session_connect_with_origin():
+    """H3 Session.connect が origin 引数を受け付けることを確認
+
+    QPACK ストリームが未バインドのため接続は失敗するが、
+    シグネチャ (origin 引数) のリグレッションを検出する。
+    """
+    from webtransport import h3
+
+    config = h3.Config()
+    session = h3.Session.create_client(config)
+    # QPACK ストリーム未設定のため false を返す (引数は受け付けられる)
+    assert session.connect(0, "https://example.com/path", "https://example.com") is False
+
+
 def test_h3_session_server():
     """WebTransport H3 Session (サーバー) が作成できることを確認"""
     from webtransport import h3
