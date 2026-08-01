@@ -58,14 +58,15 @@ class Server:
             certfile: 証明書ファイルパス
             keyfile: 秘密鍵ファイルパス
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
-            allowed_origins: 許可オリジンリスト (None なら全オリジンを受理)
+            allowed_origins: 許可オリジンリスト (None と空リストは
+                どちらも全オリジンを受理する)
         """
         self._host = host
         self._port = port
         self._certfile = certfile
         self._keyfile = keyfile
         self._idle_timeout_ns = idle_timeout_ns
-        self._allowed_origins = allowed_origins
+        self._allowed_origins: list[str] | None = allowed_origins
 
         self._socket: socket.socket | None = None
         # bind 後のローカルアドレス (host, port)

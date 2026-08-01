@@ -303,6 +303,19 @@ class H3Session {
   void set_max_client_streams_bidi(uint64_t max_streams);
 
   /**
+   * リクエストヘッダーの Origin を検証する (サーバー用)
+   *
+   * 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は常に受理し、
+   * Origin ヘッダーが無いリクエストも受理する (仕様上 Origin は非ブラウザ
+   * クライアントでは OPTIONAL)。Origin ヘッダーが複数ある場合、値が空の
+   * 場合、許可リストと一致しない場合は拒否する。
+   * @param headers 受信したリクエストヘッダー
+   * @return 受理してよい場合は true
+   */
+  bool verify_origin(
+      const std::vector<std::pair<std::string, std::string>>& headers) const;
+
+  /**
    * nghttp3 の read_data コールバックから呼ばれる
    * stream_buffers_ からデータを取得して返す
    */

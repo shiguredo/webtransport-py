@@ -270,14 +270,16 @@ def test_session_create_client():
 
 @pytest.mark.asyncio
 async def test_origin_verification_accepts_allowed_origin(test_certificates):
-    """許可されたオリジンからの接続が受理されることを確認する
+    """許可されたオリジンからの接続が 2xx で受理されることを確認する
 
     allowed_origins に含まれる Origin ヘッダーを送るクライアントの接続は
-    2xx で受理され、サーバー側でセッションが確立される。
+    受理され、クライアント側の SESSION_READY (2xx 応答の受信) とサーバー
+    側のセッション確立の両方が発生する。
     """
     from webtransport.h3 import Client, Server
 
-    session_ready_event = asyncio.Event()
+    server_session_ready = asyncio.Event()
+    client_session_ready = asyncio.Event()
 
     server = Server(
         host="127.0.0.1",
@@ -287,10 +289,10 @@ async def test_origin_verification_accepts_allowed_origin(test_certificates):
         allowed_origins=["https://allowed.example.com"],
     )
 
-    async def on_session_ready(session_id, addr):
-        session_ready_event.set()
+    async def on_server_session_ready(session_id, addr):
+        server_session_ready.set()
 
-    server.on_session_ready(on_session_ready)
+    server.on_session_ready(on_server_session_ready)
     await server.start()
 
     async def run_server():
@@ -307,6 +309,11 @@ async def test_origin_verification_accepts_allowed_origin(test_certificates):
         origin="https://allowed.example.com",
     )
 
+    async def on_client_session_ready(session_id):
+        client_session_ready.set()
+
+    client.on_session_ready(on_client_session_ready)
+
     connected = await client.connect()
     assert connected is True
 
@@ -318,7 +325,9 @@ async def test_origin_verification_accepts_allowed_origin(test_certificates):
 
     client_task = asyncio.create_task(run_client())
 
-    await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+    await asyncio.wait_for(server_session_ready.wait(), timeout=5.0)
+    # クライアント側の SESSION_READY は 2xx 応答の受信でのみ発火する
+    await asyncio.wait_for(client_session_ready.wait(), timeout=5.0)
 
     client_task.cancel()
     server_task.cancel()
@@ -333,8 +342,10 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
     """許可されていないオリジンからの接続が拒否されることを確認する
 
     allowed_origins に含まれない Origin ヘッダーを送るクライアントの接続は
-    403 で拒否され、サーバー側でセッションが確立されない
-    (on_session_ready が発火しない)。
+    拒否され、サーバー側でセッションが確立されない (on_session_ready が
+    発火しない)。このテストが観測できるのはセッション不確立のみであり、
+    403 応答の受信はクライアントが非 200 をイベント化しないため観測
+    対象外である。
     """
     from webtransport.h3 import Client, Server
 
@@ -379,9 +390,68 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
 
     client_task = asyncio.create_task(run_client())
 
-    # セッションが確立されないことを確認する (403 で拒否される)
+    # セッションが確立されないことを確認する
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(session_ready_event.wait(), timeout=1.0)
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_origin_verification_accepts_without_origin(test_certificates):
+    """allowed_origins 設定時でも Origin ヘッダー無しの接続は受理されることを確認する
+
+    仕様上 Origin ヘッダーは非ブラウザクライアントでは OPTIONAL であり、
+    Origin ヘッダーが無いリクエストは従来どおり受理する。
+    """
+    from webtransport.h3 import Client, Server
+
+    session_ready_event = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        allowed_origins=["https://allowed.example.com"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
 
     client_task.cancel()
     server_task.cancel()

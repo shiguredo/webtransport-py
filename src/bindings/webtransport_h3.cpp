@@ -476,6 +476,48 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
                                nullptr);
 }
 
+bool H3Session::verify_origin(
+    const std::vector<std::pair<std::string, std::string>>& headers) const {
+  // 許可リストが空 (未設定) の場合は従来どおり全オリジンを受理する
+  if (config_.allowed_origins.empty()) {
+    return true;
+  }
+
+  // Origin ヘッダーが無いリクエストは受理する
+  // (draft-ietf-webtrans-http3-16 Section 3.2: 非ブラウザクライアントでは
+  // OPTIONAL)
+  std::string origin;
+  bool has_origin = false;
+  bool multiple_origins = false;
+  for (const auto& header : headers) {
+    if (header.first == "origin") {
+      if (has_origin) {
+        multiple_origins = true;
+      }
+      has_origin = true;
+      origin = header.second;
+    }
+  }
+
+  // Origin ヘッダーが複数ある場合、または値が空の場合は検証失敗として
+  // 扱う (RFC 6454 の serialized origin は単一かつ非空)
+  if (multiple_origins || (has_origin && origin.empty())) {
+    return false;
+  }
+
+  if (!has_origin) {
+    return true;
+  }
+
+  // 許可リストと完全一致する場合のみ受理する
+  for (const auto& allowed_origin : config_.allowed_origins) {
+    if (origin == allowed_origin) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // WebTransport データストリーム用の read_data コールバック
 // stream_buffers_ からデータを取得して返す
 static nghttp3_ssize wt_data_read_callback(nghttp3_conn* /*conn*/,
@@ -953,33 +995,11 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     // Origin ヘッダーの検証 (draft-ietf-webtrans-http3-16 Section 3.2:
     // Origin ヘッダーがある場合 MUST で検証し、失敗時は SHOULD で 403。
     // 将来改訂される可能性がある)
-    // 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は
-    // 従来どおり全オリジンを受理し、Origin ヘッダーが無いリクエストも
-    // 受理する (仕様上 Origin は非ブラウザクライアントでは OPTIONAL)
-    if (!session->config_.allowed_origins.empty()) {
-      std::string origin;
-      for (const auto& header : headers) {
-        if (header.first == "origin") {
-          origin = header.second;
-          break;
-        }
-      }
-      if (!origin.empty()) {
-        bool allowed = false;
-        for (const auto& allowed_origin : session->config_.allowed_origins) {
-          if (origin == allowed_origin) {
-            allowed = true;
-            break;
-          }
-        }
-        if (!allowed) {
-          // 許可されていないオリジンは 403 で拒否する。
-          // SESSION_READY イベントを発行せず、セッション ID にも登録しない
-          session->reject_session(stream_id, 403);
-          session->pending_headers_.erase(it);
-          return 0;
-        }
-      }
+    if (!session->verify_origin(headers)) {
+      // 403 で拒否し、SESSION_READY を発行せずセッション ID にも登録しない
+      session->reject_session(stream_id, 403);
+      session->pending_headers_.erase(it);
+      return 0;
     }
 
     // サーバー: WebTransport セッションリクエストを受信
