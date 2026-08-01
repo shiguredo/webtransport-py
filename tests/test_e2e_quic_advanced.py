@@ -437,12 +437,14 @@ async def test_early_data_rejected(test_certificates):
 
     1 回目で得た ticket のペイロード末尾を反転し、同一サーバーへの再接続で
     early data を試行する。サーバー側の復号・検証が失敗するため 0-RTT は
-    拒否され、EARLY_DATA_REJECTED イベントが観測でき、early data は
-    サーバーに届かない。
+    拒否され、EARLY_DATA_REJECTED イベントが観測できる。拒否された early data
+    はサーバーに届かず、コールバック内で開き直したストリームからの再送
+    データだけが届く (RFC 9001 Section 4.6.2 の再送パス)。
     """
     from webtransport.quic import Client, Server
 
     server_received: list[bytes] = []
+    server_got_retransmitted = asyncio.Event()
     early_data_rejected = asyncio.Event()
 
     server = Server(
@@ -456,6 +458,8 @@ async def test_early_data_rejected(test_certificates):
         stream_id: int, data: bytes, fin: bool, addr: tuple[str, int]
     ) -> None:
         server_received.append(data)
+        if data == b"retransmitted":
+            server_got_retransmitted.set()
 
     server.on_stream_data(on_server_stream)
     await server.start()
@@ -505,6 +509,13 @@ async def test_early_data_rejected(test_certificates):
     async def on_early_data_rejected() -> None:
         logger.info("0-RTT early data が拒否された")
         early_data_rejected.set()
+        # 拒否後はストリームを開き直して再送する (1-RTT で送出される)
+        retransmitted_stream = await client2.open_stream(bidirectional=True)
+        await client2.send_stream_data(
+            retransmitted_stream,
+            b"retransmitted",
+            fin=True,
+        )
 
     client2.on_early_data_rejected(on_early_data_rejected)
     client2.register_early_data(b"should-be-rejected", fin=True)
@@ -515,14 +526,77 @@ async def test_early_data_rejected(test_certificates):
 
     client2_task = asyncio.create_task(client2.run())
     await asyncio.wait_for(early_data_rejected.wait(), timeout=5.0)
-    # 拒否された early data が遅れて届かないことを確認する
-    await asyncio.sleep(0.3)
-    assert server_received == [], "拒否された early data はサーバーに届かないべき"
+    # 再送データはサーバーに届く (拒否された early data は届かない)
+    await asyncio.wait_for(server_got_retransmitted.wait(), timeout=5.0)
+    assert server_received == [b"retransmitted"], "拒否された early data は届かず再送のみ届くべき"
 
     client2_task.cancel()
     server_task.cancel()
     await asyncio.gather(client2_task, server_task, return_exceptions=True)
     await client2.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_early_data_not_sent_without_session_ticket(test_certificates):
+    """session_ticket 未指定の接続では early data が送出されないことを確認する
+
+    0-RTT を試行しない接続では register_early_data で登録したデータは
+    ストリームを開けずに破棄される。接続自体は通常どおり通信でき、
+    通常のストリーム送信は届くが、登録済みの early data は届かない。
+    """
+    from webtransport.quic import Client, Server
+
+    server_received: list[bytes] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream(
+        stream_id: int, data: bytes, fin: bool, addr: tuple[str, int]
+    ) -> None:
+        server_received.append(data)
+
+    server.on_stream_data(on_server_stream)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    # 0-RTT を試行しない (session_ticket 未指定) 接続に early data を登録する
+    client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+    client.register_early_data(b"never-sent", fin=True)
+    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+    assert client.was_early_data_attempted() is False, "ticket 未指定では 0-RTT を試行しないべき"
+
+    # 接続自体は正常に通信できることを確認する
+    client_task = asyncio.create_task(client.run())
+    stream_id = await client.open_stream(bidirectional=True)
+    await client.send_stream_data(stream_id, b"normal-data", fin=True)
+
+    for _ in range(50):
+        if b"normal-data" in server_received:
+            break
+        await asyncio.sleep(0.05)
+    assert b"normal-data" in server_received, "通常のストリーム送信は届くべき"
+
+    # 登録済みの early data が送られていないことを確認する
+    await asyncio.sleep(0.2)
+    assert b"never-sent" not in server_received, "early data は送出されないべき"
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+    await client.close()
     await server.stop()
 
 

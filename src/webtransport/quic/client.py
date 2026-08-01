@@ -6,6 +6,7 @@ asyncio と UDP を使用した高レベル QUIC クライアント実装。
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
@@ -13,6 +14,8 @@ from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 class Client:
@@ -166,8 +169,9 @@ class Client:
     ) -> None:
         """0-RTT early data が拒否されたときのコールバックを設定する
 
-        拒否後は接続状態が破棄されているため、再送する場合は呼び出し側で
-        ストリームを開き直してデータを送信する (RFC 9001 Section 4.6.2)。
+        拒否された early data とそれに紐づくストリームの状態は破棄される
+        (RFC 9001 Section 4.6.2)。接続自体は 1-RTT として継続するため、
+        再送する場合は呼び出し側でストリームを開き直してデータを送信する。
 
         Args:
             callback: async def callback() -> None
@@ -179,8 +183,12 @@ class Client:
 
         connect() を呼び出す前に登録し、接続作成後にハンドシェイク完了前の
         最初の送信機会で 0-RTT として送出する。登録ごとに双方向ストリームを
-        1 本開いて送信する。0-RTT を試行しない接続 (session_ticket 未指定など)
-        では送出されない。
+        1 本開いて送信する。0-RTT は session_ticket と 0-RTT トランスポート
+        パラメータを指定した接続でのみ試行される (RFC 9000 Section 7.4.1)。
+        試行されない接続では送出されず、破棄される。
+
+        0-RTT はリプレイ攻撃のリスクがあるため (RFC 9001 Section 9.2)、
+        冪等でない処理を early data として送信しないこと。
 
         Args:
             data: 送信データ
@@ -192,17 +200,25 @@ class Client:
         """登録済みの early data を 0-RTT として送信待ちキューへ積む
 
         接続作成直後に呼び出し、ハンドシェイク完了前にストリームを開く。
-        0-RTT を試行しない接続ではストリームを開けない (open_stream が
-        -1 を返す) ため、何も送出されない。
+        0-RTT を試行しない接続 (session_ticket 未指定など) ではストリームを
+        開けない (open_stream が -1 を返す) ため送出されずに破棄される。
+        破棄した項目があれば警告ログを出す。
         """
         if self._connection is None:
             return
 
+        dropped = 0
         for data, fin in self._early_data_queue:
             stream_id = self._connection.open_stream(bidirectional=True)
             if stream_id < 0:
+                dropped += 1
                 continue
             self._connection.send_stream_data(stream_id, data, fin)
+        if dropped > 0:
+            logger.warning(
+                "early data was not sent because 0-RTT is not attempted: %d item(s)",
+                dropped,
+            )
         self._early_data_queue.clear()
 
     def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
@@ -269,6 +285,11 @@ class Client:
         if self._on_session_ticket is not None:
             await self._on_session_ticket(event.data)
 
+    async def _handle_early_data_rejected_event(self) -> None:
+        """EARLY_DATA_REJECTED イベントを処理する"""
+        if self._on_early_data_rejected is not None:
+            await self._on_early_data_rejected()
+
     async def connect(self) -> bool:
         """サーバーに接続する
 
@@ -324,8 +345,7 @@ class Client:
                     await self._handle_session_ticket_event(event)
 
                 elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
-                    if self._on_early_data_rejected is not None:
-                        await self._on_early_data_rejected()
+                    await self._handle_early_data_rejected_event()
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
@@ -479,8 +499,7 @@ class Client:
                     await self._handle_session_ticket_event(event)
 
                 elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
-                    if self._on_early_data_rejected is not None:
-                        await self._on_early_data_rejected()
+                    await self._handle_early_data_rejected_event()
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
