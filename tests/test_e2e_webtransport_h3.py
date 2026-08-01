@@ -380,6 +380,7 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
     )
 
     connected = await client.connect()
+    # QUIC トランスポートの接続は成功するが、CONNECT リクエスト自体は拒否される
     assert connected is True
 
     async def run_client():
