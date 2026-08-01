@@ -6,6 +6,7 @@ asyncio と UDP を使用した高レベル QUIC クライアント実装。
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
@@ -13,6 +14,8 @@ from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 class Client:
@@ -85,6 +88,10 @@ class Client:
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
         self._on_connection_closed: Callable[[], Awaitable[None]] | None = None
         self._on_session_ticket: Callable[[bytes], Awaitable[None]] | None = None
+        self._on_early_data_rejected: Callable[[], Awaitable[None]] | None = None
+
+        # 0-RTT early data の送信待ちキュー (データ、fin)
+        self._early_data_queue: list[tuple[bytes, bool]] = []
 
     @property
     def host(self) -> str:
@@ -156,6 +163,70 @@ class Client:
         """
         self._on_session_ticket = callback
 
+    def on_early_data_rejected(
+        self,
+        callback: Callable[[], Awaitable[None]],
+    ) -> None:
+        """0-RTT early data が拒否されたときのコールバックを設定する
+
+        拒否された early data とそれに紐づくストリームの状態は破棄される
+        (RFC 9001 Section 4.6.2。将来改訂される可能性がある)。再送する場合
+        は呼び出し側でストリームを開き直してデータを送信する。
+
+        Args:
+            callback: async def callback() -> None
+        """
+        self._on_early_data_rejected = callback
+
+    def register_early_data(self, data: bytes, fin: bool = False) -> None:
+        """0-RTT として送信する early data を登録する
+
+        connect() を呼び出す前に登録する。送出のタイミングと破棄の条件は
+        _flush_early_data を参照。0-RTT はリプレイ攻撃のリスクがあるため
+        (RFC 9001 Section 9.2。将来改訂される可能性がある)、冪等でない
+        処理を early data として送信しないこと。
+
+        Args:
+            data: 送信データ
+            fin: ストリームを終了するか
+
+        Raises:
+            RuntimeError: connect() の呼び出し後に登録しようとした場合
+        """
+        if self._connected:
+            raise RuntimeError("early data must be registered before connect()")
+        self._early_data_queue.append((data, fin))
+
+    def _flush_early_data(self) -> None:
+        """登録済みの early data を 0-RTT として送信待ちキューへ積む
+
+        接続作成直後に呼び出し、ハンドシェイク完了前にストリームを開いて
+        アプリケーションデータを 0-RTT パケットで送れるようにする。
+        登録ごとに双方向ストリームを 1 本開いて送信する。0-RTT は
+        session_ticket と 0-RTT トランスポートパラメータを指定した接続でのみ
+        試行され (RFC 9000 Section 7.4.1。将来改訂される可能性がある)、
+        試行されない接続ではストリームを開けない (open_stream が -1 を返す)
+        ため送出されずに破棄される。破棄した項目があれば警告ログを出す。
+        """
+        if self._connection is None:
+            return
+
+        dropped = 0
+        for data, fin in self._early_data_queue:
+            stream_id = self._connection.open_stream(bidirectional=True)
+            if stream_id < 0:
+                dropped += 1
+                continue
+            self._connection.send_stream_data(stream_id, data, fin)
+        if dropped > 0:
+            logger.warning(
+                "early data was not sent because a stream could not be opened "
+                "before handshake completion (0-RTT not attempted or flow "
+                "control limit reached): %d item(s)",
+                dropped,
+            )
+        self._early_data_queue.clear()
+
     def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
         """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
         host = addr[0]
@@ -220,6 +291,11 @@ class Client:
         if self._on_session_ticket is not None:
             await self._on_session_ticket(event.data)
 
+    async def _handle_early_data_rejected_event(self) -> None:
+        """EARLY_DATA_REJECTED イベントを処理する"""
+        if self._on_early_data_rejected is not None:
+            await self._on_early_data_rejected()
+
     async def connect(self) -> bool:
         """サーバーに接続する
 
@@ -251,6 +327,7 @@ class Client:
             self._local_addr,
             (self._host, self._port),
         )
+        self._flush_early_data()
         await self._send_pending()
         self._running = True
 
@@ -271,6 +348,9 @@ class Client:
 
                 elif event.type == quic_low.EventType.SESSION_TICKET:
                     await self._handle_session_ticket_event(event)
+
+                elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
+                    await self._handle_early_data_rejected_event()
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
@@ -422,6 +502,9 @@ class Client:
 
                 elif event.type == quic_low.EventType.SESSION_TICKET:
                     await self._handle_session_ticket_event(event)
+
+                elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
+                    await self._handle_early_data_rejected_event()
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False

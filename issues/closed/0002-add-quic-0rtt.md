@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-25
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-01
 - Model: Composer
 - Branch: feature/add-quic-0rtt
 - Polished: 2026-08-01
@@ -37,7 +37,8 @@ README が掲げる「0-RTT / Session Resumption」を完成させる。QUIC 層
 
 ## 解決方法
 
-- `open_stream` のハンドシェイク完了前のゲートを、0-RTT を試行するクライアント接続でのみ緩める（サーバー側の挙動は変えない）
-- asyncio `quic.Client` に、ハンドシェイク完了前に送る早期データを登録できる窓口を追加する（`connect()` の呼び出し前に登録し、接続作成後の最初の送信機会に 0-RTT として送出する方式を想定）
-- asyncio 層で `EARLY_DATA_REJECTED` イベントを処理する
-- early data の送受信を検証する再接続 e2e を追加する（同一サーバープロセスに対して 2 回接続し、ticket の復号が可能な状態で行う。拒否の観測は ticket のペイロード部を改変した再接続で `EARLY_DATA_REJECTED` を確認する）
+- `src/bindings/quic.cpp` の `QuicConnection::open_stream` のハンドシェイク完了前のゲートを、0-RTT を試行するクライアント接続 (`early_data_attempted_`) でのみ緩めた。サーバー側は `early_data_attempted_` が常に false のため挙動は変わらない。根拠は RFC 9001 Section 4.6.1
+- `src/bindings/quic.cpp` の `QuicConnection::setup_client_session` で、0-RTT トランスポートパラメータを記憶していない接続では 0-RTT を試行しないようにした (RFC 9000 Section 7.4.1 の MUST)
+- `src/webtransport/quic/client.py` の `Client` に `register_early_data` を追加した。`connect()` の前に登録し、接続作成後の最初の送信機会に 0-RTT として送出する。登録ごとに双方向ストリームを 1 本開いて送信する。0-RTT を試行しない接続では送出されず、警告ログを出す
+- `src/webtransport/quic/client.py` の `Client` に `on_early_data_rejected` を追加し、asyncio 層で `EARLY_DATA_REJECTED` イベントを処理する。拒否後はストリームを開き直して呼び出し側が再送できる (RFC 9001 Section 4.6.2)
+- `tests/test_e2e_quic_advanced.py` に e2e テストを 4 本追加した: early data の受理とエコーバック、破損 ticket による拒否と再送、session_ticket 未指定での非送出、0-RTT トランスポートパラメータ未指定での非試行

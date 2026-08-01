@@ -478,8 +478,12 @@ bool QuicConnection::setup_client_session() {
     }
     if (config_.enable_early_data &&
         SSL_SESSION_early_data_capable(session)) {
-      SSL_set_early_data_enabled(ssl_, 1);
-      early_data_attempted_ = true;
+      // 0-RTT トランスポートパラメータを記憶していない場合は試行しない
+      // (RFC 9000 Section 7.4.1 の MUST。将来改訂される可能性がある)
+      if (!config_.early_transport_params.empty()) {
+        SSL_set_early_data_enabled(ssl_, 1);
+        early_data_attempted_ = true;
+      }
     }
     SSL_SESSION_free(session);
   }
@@ -1217,7 +1221,12 @@ void QuicConnection::handle_timeout() {
 }
 
 int64_t QuicConnection::open_stream(bool bidirectional) {
-  if (!conn_ || closed_ || !handshake_completed_) {
+  // 0-RTT を試行するクライアント接続 (early_data_attempted_) では、
+  // ハンドシェイク完了前にストリームを開いて early data を送れるようにする。
+  // 根拠は RFC 9001 Section 4.6.1 (0-RTT でのアプリケーションデータ送信。
+  // 将来改訂される可能性がある)。
+  // サーバー側は early_data_attempted_ が常に false のため挙動は変わらない。
+  if (!conn_ || closed_ || (!handshake_completed_ && !early_data_attempted_)) {
     return -1;
   }
 
@@ -1582,7 +1591,10 @@ int QuicConnection::handshake_completed_cb(ngtcp2_conn* conn, void* user_data) {
   auto* self = static_cast<QuicConnection*>(user_data);
   self->handshake_completed_ = true;
 
-  // BoringSSL 以外のバックエンド向け: ハンドシェイク完了後に early data 拒否を検出
+  // 早期データ拒否のフォールバック検出 (RFC 9001 Section 4.6.2。
+  // 将来改訂される可能性がある)。BoringSSL 統合層が
+  // SSL_ERROR_EARLY_DATA_REJECTED で通知するため通常は呼ばれないが、
+  // ngtcp2 側のフラグガードにより二重実行しても安全である。
   if (self->early_data_attempted_ && self->ssl_ != nullptr &&
       !SSL_early_data_accepted(self->ssl_)) {
     ngtcp2_conn_tls_early_data_rejected(conn);
