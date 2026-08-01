@@ -25,6 +25,8 @@
   - @voluntas
 - [ADD] QUIC の 0-RTT による early data 送受信を実装する
   - @voluntas
+- [ADD] WebTransport over HTTP/3 クライアントに Origin ヘッダー送信機能を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える

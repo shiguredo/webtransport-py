@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 クライアントに Origin ヘッダー送信機能を追加する
 
 - Created: 2026-08-01
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-01
 - Branch: feature/add-h3-client-origin
 - Polished: 2026-08-01
 
@@ -27,3 +27,10 @@
 
 - 低レベル API と高レベル API の両方で Origin ヘッダーを送信できる
 - 0005 で実装されるサーバー側 Origin 検証 (`allowed_origins`) を利用したモックなしの e2e テストで、Origin ヘッダーの送信を検証できる。非許可オリジンの接続が 403 で拒否されることの観測が、Origin ヘッダー送信の決定的な検証となる。403 の観測はサーバー側 (サーバーが 403 を送出し SESSION_READY を発行しないこと) で行う。現行の h3 クライアントは非 200 レスポンスをイベント化しないため、クライアント側での 403 観測は対象外 (0005 の完了条件の検証で確認する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::connect` に `origin` 引数 (デフォルト空文字) を追加し、空でなければ CONNECT リクエストの nva に小文字の `origin` ヘッダーを付与する (draft-ietf-webtrans-http3-16 Section 3.2: 非ブラウザクライアントでは OPTIONAL)
+- `src/bindings/webtransport_h3.h` の宣言と、バインディング (`nb::sig`) を更新した。`h3.pyi` は nanobind の stubgen が自動生成するため手動更新は不要
+- `src/webtransport/h3/client.py` の `Client` に `origin: str = ""` を追加し (h2 と同様に `verify_peer` の直後)、`connect()` 内の低レベル `Session.connect` 呼び出しに渡す
+- `tests/test_e2e_webtransport_h3.py` に `test_client_connect_with_origin` を追加した。origin 付きリクエストで接続が確立できることのスモークテストであり、Origin ヘッダー送信の実質検証 (403 の観測) はサーバー側 Origin 検証の e2e テストで行う (実装後は本スモークテストを削除する)

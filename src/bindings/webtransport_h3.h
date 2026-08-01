@@ -187,9 +187,12 @@ class H3Session {
    * CONNECT リクエストを送信
    * @param stream_id リクエストストリーム ID
    * @param url 接続先 URL (例: "https://example.com/path")
+   * @param origin Origin ヘッダー値 (空なら付与しない)
    * @return 成功したかどうか
    */
-  bool connect(int64_t stream_id, const std::string& url);
+  bool connect(int64_t stream_id,
+               const std::string& url,
+               const std::string& origin = "");
 
   /**
    * WebTransport セッションを受理 (サーバー用)
