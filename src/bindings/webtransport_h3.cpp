@@ -382,8 +382,8 @@ bool H3Session::connect(int64_t stream_id,
        strlen(header_protocol), protocol.size(), NGHTTP3_NV_FLAG_NONE},
   };
 
-  // 指定された場合のみ付与する (draft-ietf-webtrans-http3-16 Section 3.2:
-  // 非ブラウザクライアントでは OPTIONAL。将来改訂される可能性がある)
+  // draft-ietf-webtrans-http3-16 Section 3.2: 非ブラウザクライアントでは
+  // OPTIONAL。将来改訂される可能性がある
   if (!origin.empty()) {
     nva.push_back(
         {reinterpret_cast<uint8_t*>(const_cast<char*>(header_origin)),

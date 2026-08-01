@@ -78,8 +78,8 @@ def test_h3_session_connect_signature_with_origin():
     """H3 Session.connect が origin 引数を受け付けることを確認
 
     QPACK ストリームが未バインドのため接続は失敗し、C++ 側の origin 付与
-    ロジックは実行されない。このテストが検出できるのはシグネチャ (origin
-    引数) のリグレッションのみであり、origin ヘッダーの送信そのものは
+    ロジックは実行されない。検出できるのはシグネチャ (origin 引数) の
+    リグレッションのみであり、origin ヘッダーの送信そのものは将来の
     サーバー側 Origin 検証の e2e テストで検証する。
     """
     from webtransport import h3
