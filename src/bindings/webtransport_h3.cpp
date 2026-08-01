@@ -950,6 +950,38 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
   }
 
   if (is_connect && is_webtransport && session->is_server_) {
+    // Origin ヘッダーの検証 (draft-ietf-webtrans-http3-16 Section 3.2:
+    // Origin ヘッダーがある場合 MUST で検証し、失敗時は SHOULD で 403。
+    // 将来改訂される可能性がある)
+    // 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は
+    // 従来どおり全オリジンを受理し、Origin ヘッダーが無いリクエストも
+    // 受理する (仕様上 Origin は非ブラウザクライアントでは OPTIONAL)
+    if (!session->config_.allowed_origins.empty()) {
+      std::string origin;
+      for (const auto& header : headers) {
+        if (header.first == "origin") {
+          origin = header.second;
+          break;
+        }
+      }
+      if (!origin.empty()) {
+        bool allowed = false;
+        for (const auto& allowed_origin : session->config_.allowed_origins) {
+          if (origin == allowed_origin) {
+            allowed = true;
+            break;
+          }
+        }
+        if (!allowed) {
+          // 許可されていないオリジンは 403 で拒否する。
+          // SESSION_READY イベントを発行せず、セッション ID にも登録しない
+          session->reject_session(stream_id, 403);
+          session->pending_headers_.erase(it);
+          return 0;
+        }
+      }
+    }
+
     // サーバー: WebTransport セッションリクエストを受信
     session->session_ids_.insert(stream_id);
 
@@ -1124,7 +1156,9 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_rw("qpack_max_dtable_capacity",
               &H3SessionConfig::qpack_max_dtable_capacity)
       .def_rw("qpack_blocked_streams", &H3SessionConfig::qpack_blocked_streams)
-      .def_rw("is_server", &H3SessionConfig::is_server);
+      .def_rw("is_server", &H3SessionConfig::is_server)
+      .def_rw("allowed_origins", &H3SessionConfig::allowed_origins,
+              "許可オリジンリスト (空なら全オリジンを受理)");
 
   // H3EventType
   nb::enum_<H3EventType>(h3_mod, "EventType", "WebTransport イベント種別")

@@ -269,15 +269,133 @@ def test_session_create_client():
 
 
 @pytest.mark.asyncio
-async def test_client_connect_with_origin(test_certificates):
-    """origin を指定して接続が確立できることを確認する
+async def test_origin_verification_accepts_allowed_origin(test_certificates):
+    """許可されたオリジンからの接続が受理されることを確認する
 
-    サーバーは Origin ヘッダーを無視して受理するため、このテストが検証
-    するのは「Client コンストラクタが origin を受け付け、origin 付き
-    リクエストで接続が確立できること」のみ。origin 配線が壊れても検出
-    できない。Origin ヘッダーの送信検証は将来のサーバー側 Origin 検証の
-    e2e テスト (403 の観測) で行う。本テストはその実装までのスモーク
-    テストであり、実装後は削除する。
+    allowed_origins に含まれる Origin ヘッダーを送るクライアントの接続は
+    2xx で受理され、サーバー側でセッションが確立される。
+    """
+    from webtransport.h3 import Client, Server
+
+    session_ready_event = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        allowed_origins=["https://allowed.example.com"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        origin="https://allowed.example.com",
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_origin_verification_rejects_disallowed_origin(test_certificates):
+    """許可されていないオリジンからの接続が拒否されることを確認する
+
+    allowed_origins に含まれない Origin ヘッダーを送るクライアントの接続は
+    403 で拒否され、サーバー側でセッションが確立されない
+    (on_session_ready が発火しない)。
+    """
+    from webtransport.h3 import Client, Server
+
+    session_ready_event = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        allowed_origins=["https://allowed.example.com"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        origin="https://disallowed.example.com",
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    # セッションが確立されないことを確認する (403 で拒否される)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(session_ready_event.wait(), timeout=1.0)
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_origin_verification_accepts_without_allowed_origins(test_certificates):
+    """allowed_origins 未設定時は origin 付きの接続も受理されることを確認する
+
+    許可リストが未設定 (空) の場合は従来どおり全オリジンを受理する。
     """
     from webtransport.h3 import Client, Server
 

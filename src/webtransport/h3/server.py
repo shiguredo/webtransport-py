@@ -48,6 +48,7 @@ class Server:
         certfile: str | None = None,
         keyfile: str | None = None,
         idle_timeout_ns: int = 30_000_000_000,
+        allowed_origins: list[str] | None = None,
     ) -> None:
         """サーバーを初期化する
 
@@ -57,12 +58,14 @@ class Server:
             certfile: 証明書ファイルパス
             keyfile: 秘密鍵ファイルパス
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
+            allowed_origins: 許可オリジンリスト (None なら全オリジンを受理)
         """
         self._host = host
         self._port = port
         self._certfile = certfile
         self._keyfile = keyfile
         self._idle_timeout_ns = idle_timeout_ns
+        self._allowed_origins = allowed_origins
 
         self._socket: socket.socket | None = None
         # bind 後のローカルアドレス (host, port)
@@ -216,6 +219,8 @@ class Server:
 
         webtransport_config = h3_low.Config()
         webtransport_config.is_server = True
+        if self._allowed_origins is not None:
+            webtransport_config.allowed_origins = self._allowed_origins
 
         if self._local_addr is None:
             raise RuntimeError("サーバーが開始されていません")

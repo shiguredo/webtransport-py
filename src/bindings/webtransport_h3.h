@@ -47,6 +47,9 @@ struct H3SessionConfig {
 
   // サーバーモードかどうか
   bool is_server = false;
+
+  // 許可オリジン (サーバー用。空なら全オリジンを受理する)
+  std::vector<std::string> allowed_origins;
 };
 
 /**
