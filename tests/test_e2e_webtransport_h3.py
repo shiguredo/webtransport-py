@@ -1364,10 +1364,8 @@ async def test_server_unidirectional_stream(test_certificates):
     )
 
     async def on_session_ready(session_id, addr):
-        # セッション確立後にサーバーから単方向ストリームを開いて送信する
         nonlocal opened_stream_id
-        opened_stream_id = await server.open_stream(addr, session_id, unidirectional=True)
-        assert opened_stream_id >= 0
+        opened_stream_id = await server.open_stream(addr, session_id)
         await server.send_stream_data(addr, opened_stream_id, b"server-uni-payload", fin=True)
 
     server.on_session_ready(on_session_ready)
@@ -1382,19 +1380,18 @@ async def test_server_unidirectional_stream(test_certificates):
 
     server_task = asyncio.create_task(run_server())
 
-    client = Client(
-        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
-        verify_peer=False,
-    )
-
-    connected = await client.connect()
-    assert connected is True
-
     async def on_stream_data(stream_id, data):
         client_received.append((stream_id, data))
         client_data_received.set()
 
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
     client.on_stream_data(on_stream_data)
+
+    connected = await client.connect()
+    assert connected is True
 
     async def run_client():
         try:
@@ -1407,6 +1404,7 @@ async def test_server_unidirectional_stream(test_certificates):
     await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
 
     assert opened_stream_id is not None
+    assert opened_stream_id >= 0
     assert client_received == [(opened_stream_id, b"server-uni-payload")]
 
     client_task.cancel()
@@ -1414,6 +1412,34 @@ async def test_server_unidirectional_stream(test_certificates):
     await asyncio.gather(client_task, server_task, return_exceptions=True)
 
     await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_open_stream_errors(test_certificates):
+    """Server.open_stream のエラーパスを確認
+
+    クライアント接続が無いアドレスへの呼び出しは -1、双方向ストリームの
+    指定は NotImplementedError を返す。
+    """
+    from webtransport.h3 import Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    # 接続が無いクライアントアドレスには -1 を返す
+    stream_id = await server.open_stream(("127.0.0.1", 9999), 0)
+    assert stream_id == -1
+
+    # 双方向ストリームは対象外のため NotImplementedError を上げる
+    with pytest.raises(NotImplementedError):
+        await server.open_stream(("127.0.0.1", 9999), 0, unidirectional=False)
+
     await server.stop()
 
 
