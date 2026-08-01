@@ -1203,7 +1203,11 @@ void QuicConnection::handle_timeout() {
 }
 
 int64_t QuicConnection::open_stream(bool bidirectional) {
-  if (!conn_ || closed_ || !handshake_completed_) {
+  // 0-RTT を試行するクライアント接続 (early_data_attempted_) では、
+  // ハンドシェイク完了前にストリームを開いて early data を送れるようにする。
+  // 根拠は RFC 9001 Section 4.6.1 (0-RTT のストリームデータ送信)。
+  // サーバー側は early_data_attempted_ が常に false のため挙動は変わらない。
+  if (!conn_ || closed_ || (!handshake_completed_ && !early_data_attempted_)) {
     return -1;
   }
 

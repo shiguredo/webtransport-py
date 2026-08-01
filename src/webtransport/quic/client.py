@@ -85,6 +85,10 @@ class Client:
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
         self._on_connection_closed: Callable[[], Awaitable[None]] | None = None
         self._on_session_ticket: Callable[[bytes], Awaitable[None]] | None = None
+        self._on_early_data_rejected: Callable[[], Awaitable[None]] | None = None
+
+        # connect() 前に登録された 0-RTT early data のキュー (データ, fin)
+        self._early_data_queue: list[tuple[bytes, bool]] = []
 
     @property
     def host(self) -> str:
@@ -155,6 +159,51 @@ class Client:
             callback: async def callback(ticket: bytes) -> None
         """
         self._on_session_ticket = callback
+
+    def on_early_data_rejected(
+        self,
+        callback: Callable[[], Awaitable[None]],
+    ) -> None:
+        """0-RTT early data が拒否されたときのコールバックを設定する
+
+        拒否後は接続状態が破棄されているため、再送する場合は呼び出し側で
+        ストリームを開き直してデータを送信する (RFC 9001 Section 4.6.2)。
+
+        Args:
+            callback: async def callback() -> None
+        """
+        self._on_early_data_rejected = callback
+
+    def register_early_data(self, data: bytes, fin: bool = False) -> None:
+        """0-RTT として送信する early data を登録する
+
+        connect() を呼び出す前に登録し、接続作成後にハンドシェイク完了前の
+        最初の送信機会で 0-RTT として送出する。登録ごとに双方向ストリームを
+        1 本開いて送信する。0-RTT を試行しない接続 (session_ticket 未指定など)
+        では送出されない。
+
+        Args:
+            data: 送信データ
+            fin: ストリームを終了するか
+        """
+        self._early_data_queue.append((data, fin))
+
+    def _flush_early_data(self) -> None:
+        """登録済みの early data を 0-RTT として送信待ちキューへ積む
+
+        接続作成直後に呼び出し、ハンドシェイク完了前にストリームを開く。
+        0-RTT を試行しない接続ではストリームを開けない (open_stream が
+        -1 を返す) ため、何も送出されない。
+        """
+        if self._connection is None:
+            return
+
+        for data, fin in self._early_data_queue:
+            stream_id = self._connection.open_stream(bidirectional=True)
+            if stream_id < 0:
+                continue
+            self._connection.send_stream_data(stream_id, data, fin)
+        self._early_data_queue.clear()
 
     def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
         """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
@@ -251,6 +300,8 @@ class Client:
             self._local_addr,
             (self._host, self._port),
         )
+        # 登録済み early data を最初の送信機会で 0-RTT として送出する
+        self._flush_early_data()
         await self._send_pending()
         self._running = True
 
@@ -271,6 +322,10 @@ class Client:
 
                 elif event.type == quic_low.EventType.SESSION_TICKET:
                     await self._handle_session_ticket_event(event)
+
+                elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
+                    if self._on_early_data_rejected is not None:
+                        await self._on_early_data_rejected()
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
@@ -422,6 +477,10 @@ class Client:
 
                 elif event.type == quic_low.EventType.SESSION_TICKET:
                     await self._handle_session_ticket_event(event)
+
+                elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
+                    if self._on_early_data_rejected is not None:
+                        await self._on_early_data_rejected()
 
                 elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False

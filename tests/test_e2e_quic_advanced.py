@@ -10,6 +10,65 @@ import pytest
 logger = logging.getLogger(__name__)
 
 
+def _parse_der_tlv(data: bytes, start: int) -> tuple[int, int, int]:
+    """DER 要素を解析して (タグ, 内容開始位置, 内容長) を返す
+
+    Args:
+        data: DER データ
+        start: 要素のタグ位置
+
+    Returns:
+        (タグ, 内容開始位置, 内容長)
+    """
+    tag = data[start]
+    length = data[start + 1]
+    content_start = start + 2
+    if length & 0x80:
+        # long form: 長さを表すバイト数が続く
+        num_bytes = length & 0x7F
+        content_length = int.from_bytes(data[content_start : content_start + num_bytes], "big")
+        content_start += num_bytes
+    else:
+        content_length = length
+    return tag, content_start, content_length
+
+
+def _find_ticket_element(session_der: bytes) -> tuple[int, int]:
+    """SSL_SESSION の DER から ticket 要素 ([10]) の内容位置と内容長を探す
+
+    BoringSSL の SSL_SESSION は SEQUENCE 直下に TLV を並べた構造で、
+    ticket は context-specific 構造型のタグ 10 (0xAA) として現れる。
+
+    Returns:
+        (ticket 内容の開始位置, 内容の長さ)
+    """
+    pos = 0
+    tag, content_start, content_length = _parse_der_tlv(session_der, pos)
+    assert tag == 0x30, "SSL_SESSION は SEQUENCE で始まるべき"
+    end = content_start + content_length
+    pos = content_start
+    while pos < end:
+        tag, content_start, content_length = _parse_der_tlv(session_der, pos)
+        if tag == 0xAA:
+            return content_start, content_length
+        pos = content_start + content_length
+    raise AssertionError("ticket ([10]) 要素が見つからない")
+
+
+def _corrupt_session_ticket(ticket: bytes) -> bytes:
+    """セッションチケット (DER) の ticket ペイロード末尾 1 バイトを反転する
+
+    サーバーが復号・検証する暗号化ペイロードの末尾を破壊するため、
+    サーバー側の検証は必ず失敗して 0-RTT が拒否される。ticket は
+    opaque データのため DER 構造は保たれ、クライアント側のチケット復元
+    (d2i_SSL_SESSION) は成功する。
+    """
+    content_start, content_length = _find_ticket_element(ticket)
+    corrupted = bytearray(ticket)
+    corrupted[content_start + content_length - 1] ^= 0xFF
+    return bytes(corrupted)
+
+
 @pytest.mark.asyncio
 async def test_verify_peer_rejects_self_signed(test_certificates):
     """自己署名証明書を verify_peer=True で拒否することを確認する"""
@@ -245,6 +304,221 @@ async def test_session_ticket_and_0rtt(test_certificates):
     # 受理されなくても試行できていれば完了条件を満たす
     # (サーバ設定やタイミングで拒否される場合がある)
     client2_task = asyncio.create_task(client2.run())
+    client2_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client2_task, server_task, return_exceptions=True)
+    await client2.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_early_data_send_receive(test_certificates):
+    """0-RTT early data をハンドシェイク完了前にサーバーへ届け、応答を受け取れることを確認する
+
+    同一サーバープロセスへ 2 回接続し、1 回目で得た ticket と 0-RTT
+    トランスポートパラメータを使って 2 回目に early data を送信する。
+    サーバー側は自身のハンドシェイク完了前に early data を受信し、
+    ハンドシェイク完了後にエコーバックする。
+    """
+    from webtransport.quic import Client, Server
+
+    server_received: list[bytes] = []
+    server_received_before_handshake: list[bool] = []
+    server_handshake_done: set[tuple[str, int]] = set()
+    # ハンドシェイク完了前に届いた early data は、完了後にエコーバックする
+    pending_echo: dict[tuple[str, int], list[tuple[int, bytes, bool]]] = {}
+    client_received: list[bytes] = []
+    client_got_echo = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_handshake(addr: tuple[str, int]) -> None:
+        # ハンドシェイク完了時点を記録する
+        server_handshake_done.add(addr)
+        # ハンドシェイク完了前に受信した early data をエコーバックする
+        for stream_id, data, fin in pending_echo.pop(addr, []):
+            await server.send_stream_data(addr, stream_id, data, fin)
+
+    async def on_server_stream(
+        stream_id: int, data: bytes, fin: bool, addr: tuple[str, int]
+    ) -> None:
+        server_received.append(data)
+        # early data はサーバー自身のハンドシェイク完了前に届くはず
+        server_received_before_handshake.append(addr not in server_handshake_done)
+        logger.info(
+            "サーバー受信: %s (ハンドシェイク完了前=%s)", data, addr not in server_handshake_done
+        )
+        if addr not in server_handshake_done:
+            pending_echo.setdefault(addr, []).append((stream_id, data, fin))
+        else:
+            await server.send_stream_data(addr, stream_id, data, fin)
+
+    server.on_handshake_completed(on_server_handshake)
+    server.on_stream_data(on_server_stream)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    port = server.actual_port
+
+    # 1 回目: フルハンドシェイクで ticket と 0-RTT トランスポートパラメータを得る
+    client1 = Client(host="127.0.0.1", port=port, verify_peer=False)
+    assert await asyncio.wait_for(client1.connect(), timeout=5.0) is True
+
+    client1_task = asyncio.create_task(client1.run())
+    # NewSessionTicket 到着を待つ
+    for _ in range(50):
+        ticket = client1.export_session_ticket()
+        if ticket:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        ticket = client1.export_session_ticket()
+
+    assert ticket, "セッションチケットを取得できるべき"
+    early_tp = client1.export_0rtt_transport_params()
+    assert early_tp, "0-RTT トランスポートパラメータを取得できるべき"
+
+    client1_task.cancel()
+    await asyncio.gather(client1_task, return_exceptions=True)
+    await client1.close()
+
+    # 2 回目: connect() の前に early data を登録し、0-RTT として送信する
+    client2 = Client(
+        host="127.0.0.1",
+        port=port,
+        verify_peer=False,
+        session_ticket=ticket,
+        early_transport_params=early_tp,
+        enable_early_data=True,
+    )
+
+    async def on_client_stream(stream_id: int, data: bytes, fin: bool) -> None:
+        client_received.append(data)
+        logger.info("クライアント受信: %s", data)
+        client_got_echo.set()
+
+    client2.on_stream_data(on_client_stream)
+    client2.register_early_data(b"early-request", fin=True)
+
+    assert await asyncio.wait_for(client2.connect(), timeout=5.0) is True
+    assert client2.was_early_data_attempted() is True, "0-RTT を試行しているべき"
+    assert client2.is_early_data_accepted() is True, "0-RTT は受理されるべき"
+
+    client2_task = asyncio.create_task(client2.run())
+    await asyncio.wait_for(client_got_echo.wait(), timeout=5.0)
+
+    assert server_received == [b"early-request"], "サーバーは early data を受信するべき"
+    assert server_received_before_handshake == [True], (
+        "サーバーはハンドシェイク完了前に受信するべき"
+    )
+    assert client_received == [b"early-request"], "エコーバックを受信するべき"
+
+    client2_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client2_task, server_task, return_exceptions=True)
+    await client2.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_early_data_rejected(test_certificates):
+    """ticket のペイロードを破損した再接続で 0-RTT が拒否されることを確認する
+
+    1 回目で得た ticket のペイロード末尾を反転し、同一サーバーへの再接続で
+    early data を試行する。サーバー側の復号・検証が失敗するため 0-RTT は
+    拒否され、EARLY_DATA_REJECTED イベントが観測でき、early data は
+    サーバーに届かない。
+    """
+    from webtransport.quic import Client, Server
+
+    server_received: list[bytes] = []
+    early_data_rejected = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream(
+        stream_id: int, data: bytes, fin: bool, addr: tuple[str, int]
+    ) -> None:
+        server_received.append(data)
+
+    server.on_stream_data(on_server_stream)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    port = server.actual_port
+
+    # 1 回目: 正常な ticket を得る
+    client1 = Client(host="127.0.0.1", port=port, verify_peer=False)
+    assert await asyncio.wait_for(client1.connect(), timeout=5.0) is True
+
+    client1_task = asyncio.create_task(client1.run())
+    # NewSessionTicket 到着を待つ
+    for _ in range(50):
+        ticket = client1.export_session_ticket()
+        if ticket:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        ticket = client1.export_session_ticket()
+
+    assert ticket, "セッションチケットを取得できるべき"
+    early_tp = client1.export_0rtt_transport_params()
+    assert early_tp, "0-RTT トランスポートパラメータを取得できるべき"
+
+    client1_task.cancel()
+    await asyncio.gather(client1_task, return_exceptions=True)
+    await client1.close()
+
+    # 2 回目: 破損した ticket で early data を試行する
+    corrupted_ticket = _corrupt_session_ticket(ticket)
+    client2 = Client(
+        host="127.0.0.1",
+        port=port,
+        verify_peer=False,
+        session_ticket=corrupted_ticket,
+        early_transport_params=early_tp,
+        enable_early_data=True,
+    )
+
+    async def on_early_data_rejected() -> None:
+        logger.info("0-RTT early data が拒否された")
+        early_data_rejected.set()
+
+    client2.on_early_data_rejected(on_early_data_rejected)
+    client2.register_early_data(b"should-be-rejected", fin=True)
+
+    assert await asyncio.wait_for(client2.connect(), timeout=5.0) is True
+    assert client2.was_early_data_attempted() is True, "0-RTT を試行しているべき"
+    assert client2.is_early_data_accepted() is False, "破損 ticket では受理されないべき"
+
+    client2_task = asyncio.create_task(client2.run())
+    await asyncio.wait_for(early_data_rejected.wait(), timeout=5.0)
+    # 拒否された early data が遅れて届かないことを確認する
+    await asyncio.sleep(0.3)
+    assert server_received == [], "拒否された early data はサーバーに届かないべき"
+
     client2_task.cancel()
     server_task.cancel()
     await asyncio.gather(client2_task, server_task, return_exceptions=True)
