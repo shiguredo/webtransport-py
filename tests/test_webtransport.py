@@ -74,17 +74,18 @@ def test_h3_session_client():
     assert len(required) == 3  # control, qpack_encoder, qpack_decoder
 
 
-def test_h3_session_connect_with_origin():
+def test_h3_session_connect_signature_with_origin():
     """H3 Session.connect が origin 引数を受け付けることを確認
 
-    QPACK ストリームが未バインドのため接続は失敗するが、
-    シグネチャ (origin 引数) のリグレッションを検出する。
+    QPACK ストリームが未バインドのため接続は失敗し、C++ 側の origin 付与
+    ロジックは実行されない。このテストが検出できるのはシグネチャ (origin
+    引数) のリグレッションのみであり、origin ヘッダーの送信そのものは
+    サーバー側 Origin 検証の e2e テストで検証する。
     """
     from webtransport import h3
 
     config = h3.Config()
     session = h3.Session.create_client(config)
-    # QPACK ストリーム未設定のため false を返す (引数は受け付けられる)
     assert session.connect(0, "https://example.com/path", "https://example.com") is False
 
 

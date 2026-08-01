@@ -272,9 +272,11 @@ def test_session_create_client():
 async def test_client_connect_with_origin(test_certificates):
     """origin を指定して接続が確立できることを確認する
 
-    サーバーは Origin ヘッダーを無視して受理するため、接続確立のみを確認する
-    スモークテスト。Origin ヘッダーが実際に送信されることの検証は、
-    サーバー側 Origin 検証の e2e テストで行う。
+    サーバーは Origin ヘッダーを無視して受理するため、このテストが検証する
+    のは「Client コンストラクタが origin を受け付け、origin 付きリクエスト
+    で接続が確立できること」のみ。Origin ヘッダーが実際に送信されることの
+    検証は、サーバー側 Origin 検証の e2e テスト (403 の観測) で行い、
+    本テストはその実装までのスモークテストである。
     """
     from webtransport.h3 import Client, Server
 
