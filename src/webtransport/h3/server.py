@@ -491,11 +491,12 @@ class Server:
 
         Returns:
             ストリーム ID。失敗した場合は -1。返された stream_id は
-            既存の send_stream_data で送信できる
+            既存の send_stream_data で送信できる。ストリームは送信するまで
+            クライアントに認識されない
         """
-        # 本 API は単方向ストリームのみを対象とする
-        # (draft-ietf-webtrans-http3-16 Section 4.2)。双方向ストリーム
-        # (unidirectional=False) は未実装
+        # 単方向ストリームのみを対象とする (draft-ietf-webtrans-http3-16
+        # Section 4.2)。サーバー起動の双方向ストリーム (Section 4.3) は
+        # "can" であり実装義務が無いため未実装
         if not unidirectional:
             raise NotImplementedError("双方向ストリームは未実装です")
 
