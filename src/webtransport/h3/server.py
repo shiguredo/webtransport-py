@@ -475,6 +475,43 @@ class Server:
         client.webtransport_session.send_datagram(session_id, data)
         await self._send_to(addr, client)
 
+    async def open_stream(
+        self,
+        addr: tuple[str, int],
+        session_id: int,
+        unidirectional: bool = True,
+    ) -> int:
+        """サーバーから WebTransport ストリームを開く
+
+        Args:
+            addr: クライアントアドレス
+            session_id: セッション ID
+            unidirectional: 単方向ストリームにするかどうか
+
+        Returns:
+            ストリーム ID。失敗した場合は -1
+        """
+        # 双方向ストリームは本 API の対象外 (Client.open_stream との対称性の
+        # ため引数だけ用意する)
+        if not unidirectional:
+            raise NotImplementedError("双方向ストリームは未実装です")
+
+        client = self._clients.get(addr)
+        if client is None or client.quic_connection is None or client.webtransport_session is None:
+            return -1
+
+        # QUIC の bidirectional フラグは極性が反転している (Client.open_stream と対称)
+        # サーバー起動の単方向ストリームは QUIC の uni ストリーム (stream_id % 4 == 3)
+        stream_id = client.quic_connection.open_stream(False)
+        if stream_id < 0:
+            return -1
+
+        # h3 側の登録に失敗した場合は -1 を返す
+        if not client.webtransport_session.open_stream(session_id, stream_id, True):
+            return -1
+
+        return stream_id
+
     async def run(self) -> None:
         """メインループを実行する
 

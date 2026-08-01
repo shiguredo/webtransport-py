@@ -1345,6 +1345,79 @@ async def test_unidirectional_stream(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_server_unidirectional_stream(test_certificates):
+    """サーバー起点の単方向ストリームがクライアントに届くことを確認
+
+    test_unidirectional_stream の逆方向。クライアント側の変更は伴わない。
+    """
+    from webtransport.h3 import Client, Server
+
+    client_received = []
+    opened_stream_id = None
+    client_data_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        # セッション確立後にサーバーから単方向ストリームを開いて送信する
+        nonlocal opened_stream_id
+        opened_stream_id = await server.open_stream(addr, session_id, unidirectional=True)
+        assert opened_stream_id >= 0
+        await server.send_stream_data(addr, opened_stream_id, b"server-uni-payload", fin=True)
+
+    server.on_session_ready(on_session_ready)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def on_stream_data(stream_id, data):
+        client_received.append((stream_id, data))
+        client_data_received.set()
+
+    client.on_stream_data(on_stream_data)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+
+    assert opened_stream_id is not None
+    assert client_received == [(opened_stream_id, b"server-uni-payload")]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_large_stream_payload(test_certificates):
     """比較的大きなストリームペイロードが往復することを確認"""
     from webtransport.h3 import Client, Server

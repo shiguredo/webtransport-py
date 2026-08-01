@@ -13,7 +13,7 @@ WebTransport サーバーが実ブラウザ (Chromium) の WebTransport API か�
 
 - テストは `tests/test_e2e_webtransport_h3.py` などの自ライブラリの asyncio クライアントから同一プロセス内のサーバーへ接続する構成のみ
 - サーバー実装は QUIC v1 (`src/bindings/quic.cpp` の `NGTCP2_PROTO_VER_V1`) と `sec-webtransport-http3-draft: draft02` ヘッダー (`src/bindings/webtransport_h3.cpp`) を使用しているが、実際にブラウザから接続して確認できていない。`sec-webtransport-http3-draft` は draft-ietf-webtrans-http3-02 世代のヘッダーであり、現行の draft-ietf-webtrans-http3-16 には定義されていない。ブラウザとの互換性は実測でのみ確認できる
-- Origin ヘッダーの検証 (draft-ietf-webtrans-http3-16 Section 3.2 の MUST) はサーバー実装に存在しない。ブラウザからの接続は必ず Origin ヘッダーを送るが、本 issue では相互運用性の検証のみを対象とし、Origin 検証の実装は対象外とする
+- Origin ヘッダーの検証 (draft-ietf-webtrans-http3-16 Section 3.2 の MUST) はサーバー実装に実装済みである (issue 0005 で `Server` の `allowed_origins` に追加)。ブラウザからの接続は必ず Origin ヘッダーを送るため、テスト用サーバーにはテストページのオリジン (`https://moqt-devtools.shiguredo.app`) を `allowed_origins` に設定する必要がある
 
 ## 設計方針
 
@@ -26,7 +26,7 @@ WebTransport サーバーが実ブラウザ (Chromium) の WebTransport API か�
   - 単方向ストリームの送信 (サーバー側 `on_stream_data` で受信を確認。クライアント起点の単方向ストリームにはエコーしない)
   - サーバーからクライアントへの一方的なストリーム送信 (ページ側の Incoming Streams への表示で確認)
   - データグラムの送受信 (エコーバック。サーバー側 `on_datagram` とページ側の RECV 表示の両方で確認。UDP のロスに備えて複数回送信し、少なくとも 1 回の受信を確認する)
-- 検証に使うサーバーは 2 つに分ける。接続確立・双方向ストリーム・単方向ストリーム送信・データグラムは高レベル `Server` (`src/webtransport/h3/server.py`) で構築した echo サーバーで行う。サーバーからクライアントへの単方向ストリーム送信は、高レベル `Server` にストリームを開く API が無いため、低レベル API (`webtransport.h3.Session` と `quic.Connection`) で構築したテスト専用のサーバーで行う
+- 検証に使うサーバーは高レベル `Server` (`src/webtransport/h3/server.py`) で構築した echo サーバー 1 つで行う。サーバーからクライアントへの単方向ストリーム送信は、`Server.open_stream` (issue 0006 で追加) を使用する
 - ブラウザテストは `tests/browser/` ディレクトリに分離して配置し、`pyproject.toml` の `addopts` に `--ignore=tests/browser` を設定することで通常の `make test` と CI の collection 対象から除外する (marker の `-m` だけでは collection 時の import を防げず、playwright 未導入の CI で失敗するため)。`pytest.mark.browser` の marker は `pyproject.toml` に登録する。実行は `playwright install chromium` でバイナリを導入したうえで `uv run pytest tests/browser -m browser --timeout=60` によりローカルで手動実行する。CI ジョブの追加は対象外 (必要になったら別 issue とする)
 - playwright / pytest-playwright は pyproject.toml の dev グループに追加する (test グループに追加すると CI の `uv sync --only-group test` で常に導入されてしまうため)
 - WebTransport over HTTP/2 は Chromium が対応していないため対象外 (既存の in-process テストでカバー)
