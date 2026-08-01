@@ -326,7 +326,6 @@ async def test_origin_verification_accepts_allowed_origin(test_certificates):
     client_task = asyncio.create_task(run_client())
 
     await asyncio.wait_for(server_session_ready.wait(), timeout=5.0)
-    # クライアント側の SESSION_READY は 2xx 応答の受信でのみ発火する
     await asyncio.wait_for(client_session_ready.wait(), timeout=5.0)
 
     client_task.cancel()

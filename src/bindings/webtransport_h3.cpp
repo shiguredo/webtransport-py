@@ -499,8 +499,8 @@ bool H3Session::verify_origin(
     }
   }
 
-  // Origin ヘッダーが複数ある場合、または値が空の場合は検証失敗として
-  // 扱う (RFC 6454 の serialized origin は単一かつ非空)
+  // 複数・空値の Origin は検証失敗として扱う (RFC 6454 の serialized
+  // origin は単一かつ非空)
   if (multiple_origins || (has_origin && origin.empty())) {
     return false;
   }
@@ -509,7 +509,6 @@ bool H3Session::verify_origin(
     return true;
   }
 
-  // 許可リストと完全一致する場合のみ受理する
   for (const auto& allowed_origin : config_.allowed_origins) {
     if (origin == allowed_origin) {
       return true;
@@ -992,11 +991,8 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
   }
 
   if (is_connect && is_webtransport && session->is_server_) {
-    // Origin ヘッダーの検証 (draft-ietf-webtrans-http3-16 Section 3.2:
-    // Origin ヘッダーがある場合 MUST で検証し、失敗時は SHOULD で 403。
-    // 将来改訂される可能性がある)
+    // Origin 検証に失敗した場合は 403 で拒否する
     if (!session->verify_origin(headers)) {
-      // 403 で拒否し、SESSION_READY を発行せずセッション ID にも登録しない
       session->reject_session(stream_id, 403);
       session->pending_headers_.erase(it);
       return 0;
