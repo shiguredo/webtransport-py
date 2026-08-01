@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-25
-- Completed: YYYY-MM-DD
+- Completed: 2026-07-26
 - Model: Composer
 - Branch: feature/add-quic-connection-migration
 - Polished: YYYY-MM-DD
@@ -38,6 +38,11 @@ Sans-I/O の `receive` / `send` に実アドレスを通し、Connection Migrati
 
 ## 解決方法
 
-- path ヘルパーとイベント型を追加する
-- バインディングと asyncio client/server の UDP 経路を更新する
-- migration e2e を追加する
+コミット 6792805 で実装した。
+
+- `receive` / `send` / `create_client` / `accept` に実アドレスを必須化する（`src/bindings/quic.cpp`。CHANGES.md に `[CHANGE]` で明示済み）
+- `QuicPacket` に送信元 / 送信先アドレスを載せる（`make_packet`）
+- `path_validation` コールバックから `PathValidated` / `PathValidationFailed` イベントを送出する
+- `initiate_migration(local_addr, remote_addr)` を公開する（`ngtcp2_conn_initiate_migration`）
+- asyncio 層に `Client.migrate()` とサーバー側の migration 受付を実装する
+- `tests/test_e2e_quic_advanced.py` に migration の e2e テストを追加する
