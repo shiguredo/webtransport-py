@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-25
-- Completed: YYYY-MM-DD
+- Completed: 2026-07-26
 - Model: Composer
 - Branch: feature/add-quic-certificate-verification
 - Polished: YYYY-MM-DD
@@ -40,7 +40,10 @@ ngtcp2 の BoringSSL client example（`tls_client_context_boringssl.cc`）に合
 
 ## 解決方法
 
-- `QuicConfig` に `ca_file` と verify コールバックを追加する
-- `create_ssl_ctx()` / `SSL_new` 後に検証設定とホスト名を適用する
-- [`src/webtransport/quic/__init__.pyi`](src/webtransport/quic/__init__.pyi) と asyncio client 群を更新する
-- cryptography で生成した実証明書を使うテストを追加する
+コミット 6792805 で実装した。
+
+- `QuicConfig` に `ca_file` / `verify_callback` を追加する（`src/bindings/quic.h` の `QuicConfig`）
+- `create_ssl_ctx()` で `verify_peer=True` 時に `SSL_VERIFY_PEER` + `ca_file` / 既定 verify paths を設定する
+- `setup_client_session()` でカスタム検証コールバック（`SSL_set_custom_verify`）と SNI ベースのホスト名検証（`SSL_set1_host` / `X509_VERIFY_PARAM_set1_ip_asc`）を適用する
+- asyncio QUIC / HTTP3 / H3 クライアントに `ca_file` / `verify_callback` を配線する
+- `tests/test_e2e_quic_advanced.py` に証明書検証の e2e テストを追加する（自己署名拒否 / `ca_file` 成功 / カスタムコールバック許可・拒否）
