@@ -518,6 +518,72 @@ async def test_multiple_streams_with_more_flag(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_cwnd_exhaustion_does_not_hang(test_certificates):
+    """輻輳ウィンドウ枯渇後もストリームデータ送信が停止しないことを確認する
+
+    run() を回さずに send_stream_data を連続呼び出しすると ACK を受信しない
+    ため輻輳ウィンドウ (cwnd) が枯渇する。この状態で send() がパケットを
+    書けずに無限ループするとイベントループがブロックして送信が止まるため、
+    その後 run() を開始したときに送信が完了することを確認する。
+    """
+    from webtransport.quic import Client, Server
+
+    total = 64 * 1024
+    server_received = bytearray()
+    server_complete = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream(stream_id, data, fin, addr):
+        server_received.extend(data)
+        if len(server_received) >= total:
+            server_complete.set()
+
+    server.on_stream_data(on_server_stream)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+    stream_id = await client.open_stream(bidirectional=True)
+    assert stream_id >= 0
+
+    # run() を回さずに連続送信して cwnd を枯渇させる
+    for i in range(64):
+        await asyncio.wait_for(
+            client.send_stream_data(stream_id, b"x" * 1024, fin=(i == 63)),
+            timeout=5.0,
+        )
+
+    # ここで run() を開始すると、溜まった ACK を処理して残りを送信する
+    client_task = asyncio.create_task(client.run())
+    await asyncio.wait_for(server_complete.wait(), timeout=30.0)
+    assert len(server_received) == total, "全データが届くべき"
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_stream_and_datagram_combined(test_certificates):
     """ストリームとデータグラムの同時送信が正しく機能することを確認"""
     from webtransport.quic import Client, Server

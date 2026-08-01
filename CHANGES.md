@@ -27,6 +27,8 @@
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
   - @voluntas
+- [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
+  - @voluntas
 
 ### misc
 
