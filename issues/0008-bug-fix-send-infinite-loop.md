@@ -1,7 +1,7 @@
 # QUIC の send() が輻輳ウィンドウ枯渇時に無限ループするバグを修正する
 
 - Created: 2026-08-01
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-01
 - Branch: feature/fix-send-infinite-loop
 - Polished: {YYYY-MM-DD}
 
@@ -27,3 +27,10 @@ QUIC の送信パス (`src/bindings/quic.cpp` の `QuicConnection::send`) が、
 - 輻輳ウィンドウ枯渇状態で `send` が無限ループせず返る
 - フロー制御枠を超えるデータ (2MB など) の送信が停止せず完了する
 - モックなしの e2e テストで大容量データの送受信を検証できる
+
+## 解決方法
+
+- `src/bindings/quic.cpp` の `QuicConnection::send` で、ストリームデータと Datagram の送信ループがパケットを書けない場合 (nwrite == 0) に無限ループしていたのを、ループを抜けて次回の送信機会に回すように修正した
+- `NGTCP2_ERR_WRITE_MORE` でデータを消費できなかった場合 (ndatalen == 0 / accepted == false) も同様にループを抜けるようにした
+- 送信できなかったデータはバッファに残るため、ACK 受信後の `send` 呼び出しで再送される
+- `tests/test_e2e_quic.py` に `test_cwnd_exhaustion_does_not_hang` を追加した。run() を回さずに 64KB を連続送信して cwnd を枯渇させ、その後 run() で送信が完了することを検証する
