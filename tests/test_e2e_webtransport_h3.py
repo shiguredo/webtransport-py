@@ -1407,6 +1407,8 @@ async def test_server_unidirectional_stream(test_certificates):
     await asyncio.wait_for(opened_event.wait(), timeout=5.0)
     assert opened_stream_id is not None
     assert opened_stream_id >= 0
+    # RFC 9000 Section 2.1 Table 1 によりサーバー起点の単方向ストリームは % 4 == 3
+    assert opened_stream_id % 4 == 3
 
     await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
     assert client_received == [(opened_stream_id, b"server-uni-payload")]
@@ -1452,10 +1454,12 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
     from webtransport.h3 import Client, Server
 
     client_received = []
+    client_resets = []
     client_addr = None
     client_session_id = None
     session_ready_event = asyncio.Event()
     client_data_received = asyncio.Event()
+    client_reset_received = asyncio.Event()
 
     server = Server(
         host="127.0.0.1",
@@ -1486,11 +1490,16 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
         client_received.append((stream_id, data))
         client_data_received.set()
 
+    async def on_stream_reset(stream_id, error_code):
+        client_resets.append((stream_id, error_code))
+        client_reset_received.set()
+
     client = Client(
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
     client.on_stream_data(on_stream_data)
+    client.on_stream_reset(on_stream_reset)
 
     connected = await client.connect()
     assert connected is True
@@ -1510,6 +1519,12 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
     # 存在しないセッション ID には -1 を返す
     invalid_stream_id = await server.open_stream(client_addr, 9999)
     assert invalid_stream_id == -1
+
+    # 開いた QUIC ストリームの RESET_STREAM がクライアントに届き、
+    # クライアントは接続を維持する
+    await asyncio.wait_for(client_reset_received.wait(), timeout=5.0)
+    assert len(client_resets) == 1
+    assert client_resets[0][1] == 0
 
     # 正しいセッション ID では引き続きストリームを開いて送信できる
     stream_id = await server.open_stream(client_addr, client_session_id)

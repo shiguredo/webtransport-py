@@ -498,7 +498,7 @@ class Server:
         # Section 4.2)。サーバー起動の双方向ストリーム (Section 4.3) は
         # "can" であり実装義務が無いため未実装
         if not unidirectional:
-            raise NotImplementedError("双方向ストリームは未実装です")
+            raise NotImplementedError("bidirectional streams are not implemented")
 
         client = self._clients.get(addr)
         if client is None or client.quic_connection is None or client.webtransport_session is None:
