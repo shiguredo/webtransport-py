@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_der_tlv(data: bytes, start: int) -> tuple[int, int, int]:
-    """DER 要素を解析して (タグ, 内容開始位置, 内容長) を返す
+    """DER 要素を解析して (タグ、内容開始位置、内容長) を返す
 
     Args:
         data: DER データ
         start: 要素のタグ位置
 
     Returns:
-        (タグ, 内容開始位置, 内容長)
+        (タグ、内容開始位置、内容長)
     """
     tag = data[start]
     length = data[start + 1]
@@ -42,7 +42,7 @@ def _find_ticket_element(session_der: bytes) -> tuple[int, int]:
     ticket は context-specific 構造型のタグ 10 (0xAA) として現れる。
 
     Returns:
-        (ticket 内容の開始位置, 内容の長さ)
+        (ticket 内容の開始位置、内容の長さ)
     """
     pos = 0
     tag, content_start, content_length = _parse_der_tlv(session_der, pos)
@@ -80,7 +80,7 @@ async def _await_session_ticket(client: Client) -> tuple[bytes, bytes]:
         client: 接続済みのクライアント
 
     Returns:
-        (セッションチケット, 0-RTT トランスポートパラメータ)
+        (セッションチケット、0-RTT トランスポートパラメータ)
     """
     for _ in range(50):
         ticket = client.export_session_ticket()
@@ -97,7 +97,6 @@ async def _await_session_ticket(client: Client) -> tuple[bytes, bytes]:
 @pytest.mark.asyncio
 async def test_verify_peer_rejects_self_signed(test_certificates):
     """自己署名証明書を verify_peer=True で拒否することを確認する"""
-    from webtransport.quic import Client, Server
 
     server = Server(
         host="127.0.0.1",
@@ -133,7 +132,6 @@ async def test_verify_peer_rejects_self_signed(test_certificates):
 @pytest.mark.asyncio
 async def test_verify_peer_with_ca_file(test_certificates):
     """ca_file にサーバー証明書を渡せば verify_peer=True で接続できることを確認する"""
-    from webtransport.quic import Client, Server
 
     server = Server(
         host="127.0.0.1",
@@ -172,7 +170,6 @@ async def test_verify_peer_with_ca_file(test_certificates):
 @pytest.mark.asyncio
 async def test_custom_verify_callback_accept(test_certificates):
     """カスタム検証コールバックで許可できることを確認する"""
-    from webtransport.quic import Client, Server
 
     server = Server(
         host="127.0.0.1",
@@ -221,7 +218,6 @@ async def test_custom_verify_callback_accept(test_certificates):
 @pytest.mark.asyncio
 async def test_custom_verify_callback_reject(test_certificates):
     """カスタム検証コールバックで拒否できることを確認する"""
-    from webtransport.quic import Client, Server
 
     server = Server(
         host="127.0.0.1",
@@ -261,7 +257,6 @@ async def test_custom_verify_callback_reject(test_certificates):
 @pytest.mark.asyncio
 async def test_session_ticket_and_0rtt(test_certificates):
     """初回接続で ticket を取得し、再接続で 0-RTT を試行できることを確認する"""
-    from webtransport.quic import Client, Server
 
     server = Server(
         host="127.0.0.1",
@@ -334,7 +329,6 @@ async def test_early_data_send_receive(test_certificates):
     サーバー側は自身のハンドシェイク完了前に early data を受信し、
     ハンドシェイク完了後にエコーバックする。
     """
-    from webtransport.quic import Client, Server
 
     server_received: list[bytes] = []
     server_received_before_handshake: list[bool] = []
@@ -365,7 +359,7 @@ async def test_early_data_send_receive(test_certificates):
         # early data はサーバー自身のハンドシェイク完了前に届くはず
         server_received_before_handshake.append(addr not in server_handshake_done)
         logger.info(
-            "サーバー受信: %s (ハンドシェイク完了前=%s)", data, addr not in server_handshake_done
+            "サーバー受信: %s (ハンドシェイク完了前 = %s)", data, addr not in server_handshake_done
         )
         if addr not in server_handshake_done:
             pending_echo.setdefault(addr, []).append((stream_id, data, fin))
@@ -409,10 +403,13 @@ async def test_early_data_send_receive(test_certificates):
     async def on_client_stream(stream_id: int, data: bytes, fin: bool) -> None:
         client_received.append(data)
         logger.info("クライアント受信: %s", data)
-        client_got_echo.set()
+        if len(client_received) >= 2:
+            client_got_echo.set()
 
     client2.on_stream_data(on_client_stream)
-    client2.register_early_data(b"early-request", fin=True)
+    # 登録ごとに双方向ストリームを 1 本開いて送信される
+    client2.register_early_data(b"early-1", fin=False)
+    client2.register_early_data(b"early-2", fin=True)
 
     assert await asyncio.wait_for(client2.connect(), timeout=5.0) is True
     assert client2.was_early_data_attempted() is True, "0-RTT を試行しているべき"
@@ -421,11 +418,11 @@ async def test_early_data_send_receive(test_certificates):
     client2_task = asyncio.create_task(client2.run())
     await asyncio.wait_for(client_got_echo.wait(), timeout=5.0)
 
-    assert server_received == [b"early-request"], "サーバーは early data を受信するべき"
-    assert server_received_before_handshake == [True], (
+    assert server_received == [b"early-1", b"early-2"], "early data は登録順に届くべき"
+    assert server_received_before_handshake == [True, True], (
         "サーバーはハンドシェイク完了前に受信するべき"
     )
-    assert client_received == [b"early-request"], "エコーバックを受信するべき"
+    assert client_received == [b"early-1", b"early-2"], "エコーバックを登録順に受信するべき"
 
     client2_task.cancel()
     server_task.cancel()
@@ -444,7 +441,6 @@ async def test_early_data_rejected(test_certificates):
     はサーバーに届かず、コールバック内で開き直したストリームからの再送
     データだけが届く (RFC 9001 Section 4.6.2 の再送パス)。
     """
-    from webtransport.quic import Client, Server
 
     server_received: list[bytes] = []
     server_handshake_done: set[tuple[str, int]] = set()
@@ -548,7 +544,6 @@ async def test_early_data_not_sent_without_session_ticket(test_certificates, cap
     ストリームを開けずに破棄される。接続自体は通常どおり通信でき、
     通常のストリーム送信は届くが、登録済みの early data は届かない。
     """
-    from webtransport.quic import Client, Server
 
     server_received: list[bytes] = []
 
@@ -694,7 +689,6 @@ async def test_early_data_not_attempted_without_transport_params(test_certificat
 @pytest.mark.asyncio
 async def test_connection_migration(test_certificates):
     """initiate_migration 後もストリーム通信が継続することを確認する"""
-    from webtransport.quic import Client, Server
 
     server_received: list[bytes] = []
     client_received: list[bytes] = []

@@ -90,7 +90,7 @@ class Client:
         self._on_session_ticket: Callable[[bytes], Awaitable[None]] | None = None
         self._on_early_data_rejected: Callable[[], Awaitable[None]] | None = None
 
-        # connect() 前に登録された 0-RTT early data のキュー (データ, fin)
+        # 0-RTT early data の送信待ちキュー (データ、fin)
         self._early_data_queue: list[tuple[bytes, bool]] = []
 
     @property
@@ -170,9 +170,8 @@ class Client:
         """0-RTT early data が拒否されたときのコールバックを設定する
 
         拒否された early data とそれに紐づくストリームの状態は破棄される
-        (RFC 9001 Section 4.6.2)。接続自体は 1-RTT として継続するため
-        (RFC 9000 Section 7.4.1)、再送する場合は呼び出し側でストリームを
-        開き直してデータを送信する。
+        (RFC 9001 Section 4.6.2。将来改訂される可能性がある)。再送する場合
+        は呼び出し側でストリームを開き直してデータを送信する。
 
         Args:
             callback: async def callback() -> None
@@ -182,14 +181,10 @@ class Client:
     def register_early_data(self, data: bytes, fin: bool = False) -> None:
         """0-RTT として送信する early data を登録する
 
-        connect() を呼び出す前に登録し、接続作成後にハンドシェイク完了前の
-        最初の送信機会で 0-RTT として送出する。登録ごとに双方向ストリームを
-        1 本開いて送信する。0-RTT は session_ticket と 0-RTT トランスポート
-        パラメータを指定した接続でのみ試行される (RFC 9000 Section 7.4.1)。
-        試行されない接続では送出されず、破棄される。
-
-        0-RTT はリプレイ攻撃のリスクがあるため (RFC 9001 Section 9.2)、
-        冪等でない処理を early data として送信しないこと。
+        connect() を呼び出す前に登録する。送出のタイミングと破棄の条件は
+        _flush_early_data を参照。0-RTT はリプレイ攻撃のリスクがあるため
+        (RFC 9001 Section 9.2。将来改訂される可能性がある)、冪等でない
+        処理を early data として送信しないこと。
 
         Args:
             data: 送信データ
@@ -198,7 +193,7 @@ class Client:
         Raises:
             RuntimeError: connect() の呼び出し後に登録しようとした場合
         """
-        if self._connection is not None:
+        if self._connected:
             raise RuntimeError("early data must be registered before connect()")
         self._early_data_queue.append((data, fin))
 
@@ -206,11 +201,12 @@ class Client:
         """登録済みの early data を 0-RTT として送信待ちキューへ積む
 
         接続作成直後に呼び出し、ハンドシェイク完了前にストリームを開いて
-        アプリケーションデータを 0-RTT パケットで送れるようにする
-        (RFC 9001 Section 4.6.1)。0-RTT を試行しない接続
-        (session_ticket 未指定など) ではストリームを開けない
-        (open_stream が -1 を返す) ため送出されずに破棄される。
-        破棄した項目があれば警告ログを出す。
+        アプリケーションデータを 0-RTT パケットで送れるようにする。
+        登録ごとに双方向ストリームを 1 本開いて送信する。0-RTT は
+        session_ticket と 0-RTT トランスポートパラメータを指定した接続でのみ
+        試行され (RFC 9000 Section 7.4.1。将来改訂される可能性がある)、
+        試行されない接続ではストリームを開けない (open_stream が -1 を返す)
+        ため送出されずに破棄される。破棄した項目があれば警告ログを出す。
         """
         if self._connection is None:
             return
@@ -331,7 +327,6 @@ class Client:
             self._local_addr,
             (self._host, self._port),
         )
-        # 登録済み early data を最初の送信機会で 0-RTT として送出する
         self._flush_early_data()
         await self._send_pending()
         self._running = True
