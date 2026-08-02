@@ -1345,6 +1345,204 @@ async def test_unidirectional_stream(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_server_unidirectional_stream(test_certificates):
+    """サーバー起点の単方向ストリームがクライアントに届くことを確認
+
+    test_unidirectional_stream の逆方向。クライアント側の変更は伴わない。
+    """
+    from webtransport.h3 import Client, Server
+
+    client_received = []
+    opened_stream_id = None
+    opened_event = asyncio.Event()
+    client_data_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        nonlocal opened_stream_id
+        opened_stream_id = await server.open_stream(addr, session_id)
+        opened_event.set()
+        if opened_stream_id >= 0:
+            await server.send_stream_data(addr, opened_stream_id, b"server-uni-payload", fin=True)
+
+    server.on_session_ready(on_session_ready)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    async def on_stream_data(stream_id, data):
+        client_received.append((stream_id, data))
+        client_data_received.set()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    client.on_stream_data(on_stream_data)
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(opened_event.wait(), timeout=5.0)
+    assert opened_stream_id is not None
+    assert opened_stream_id >= 0
+    # RFC 9000 Section 2.1 Table 1 によりサーバー起点の単方向ストリームは % 4 == 3
+    assert opened_stream_id % 4 == 3
+
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+    assert client_received == [(opened_stream_id, b"server-uni-payload")]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_open_stream_errors():
+    """Server.open_stream のエラーパスを確認
+
+    クライアント接続が無いアドレスへの呼び出しは -1、双方向ストリームの
+    指定は NotImplementedError を上げる。
+    """
+    from webtransport.h3 import Server
+
+    server = Server(host="127.0.0.1", port=0)
+    await server.start()
+
+    # 接続が無いクライアントアドレスには -1 を返す
+    stream_id = await server.open_stream(("127.0.0.1", 9999), 0)
+    assert stream_id == -1
+
+    # 双方向ストリームは対象外のため NotImplementedError を上げる
+    with pytest.raises(NotImplementedError):
+        await server.open_stream(("127.0.0.1", 9999), 0, unidirectional=False)
+
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_open_stream_invalid_session_id(test_certificates):
+    """存在しないセッション ID で open_stream を呼ぶと -1 を返す
+
+    h3 側の登録失敗時は開いた QUIC ストリームを閉じるため、クライアントは
+    RESET_STREAM を受けて接続を維持でき、後続のストリーム送信も機能する。
+    """
+    from webtransport.h3 import Client, Server
+
+    client_received = []
+    client_resets = []
+    client_addr = None
+    client_session_id = None
+    session_ready_event = asyncio.Event()
+    client_data_received = asyncio.Event()
+    client_reset_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        nonlocal client_addr, client_session_id
+        client_addr = addr
+        client_session_id = session_id
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    async def on_stream_data(stream_id, data):
+        client_received.append((stream_id, data))
+        client_data_received.set()
+
+    async def on_stream_reset(stream_id, error_code):
+        client_resets.append((stream_id, error_code))
+        client_reset_received.set()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    client.on_stream_data(on_stream_data)
+    client.on_stream_reset(on_stream_reset)
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+    assert client_addr is not None
+    assert client_session_id is not None
+
+    # 存在しないセッション ID には -1 を返す
+    invalid_stream_id = await server.open_stream(client_addr, 9999)
+    assert invalid_stream_id == -1
+
+    # 開いた QUIC ストリームの RESET_STREAM がクライアントに届き、
+    # クライアントは接続を維持する
+    await asyncio.wait_for(client_reset_received.wait(), timeout=5.0)
+    assert len(client_resets) == 1
+    assert client_resets[0][1] == 0
+
+    # 正しいセッション ID では引き続きストリームを開いて送信できる
+    stream_id = await server.open_stream(client_addr, client_session_id)
+    assert stream_id >= 0
+    await server.send_stream_data(client_addr, stream_id, b"after-invalid", fin=True)
+
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+    assert client_received == [(stream_id, b"after-invalid")]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_large_stream_payload(test_certificates):
     """比較的大きなストリームペイロードが往復することを確認"""
     from webtransport.h3 import Client, Server

@@ -475,6 +475,48 @@ class Server:
         client.webtransport_session.send_datagram(session_id, data)
         await self._send_to(addr, client)
 
+    async def open_stream(
+        self,
+        addr: tuple[str, int],
+        session_id: int,
+        unidirectional: bool = True,
+    ) -> int:
+        """サーバーから WebTransport ストリームを開く
+
+        Args:
+            addr: クライアントアドレス
+            session_id: セッション ID (on_session_ready で受け取った有効な値)
+            unidirectional: 単方向ストリームにするかどうか。False は未実装のため
+                NotImplementedError を上げる
+
+        Returns:
+            ストリーム ID。失敗した場合は -1。返された stream_id は
+            既存の send_stream_data で送信できる。ストリームは送信するまで
+            クライアントに認識されない
+        """
+        # 単方向ストリームのみを対象とする (draft-ietf-webtrans-http3-16
+        # Section 4.2)。サーバー起動の双方向ストリーム (Section 4.3) は
+        # "can" であり実装義務が無いため未実装
+        if not unidirectional:
+            raise NotImplementedError("bidirectional streams are not implemented")
+
+        client = self._clients.get(addr)
+        if client is None or client.quic_connection is None or client.webtransport_session is None:
+            return -1
+
+        # QUIC の uni ストリームとして開く (RFC 9000 Section 2.1 Table 1 により
+        # server-initiated unidirectional は stream_id % 4 == 3)
+        stream_id = client.quic_connection.open_stream(False)
+        if stream_id < 0:
+            return -1
+
+        # h3 側の登録に失敗した場合は開いた QUIC ストリームを閉じて -1 を返す
+        if not client.webtransport_session.open_stream(session_id, stream_id, True):
+            client.quic_connection.reset_stream(stream_id, 0)
+            return -1
+
+        return stream_id
+
     async def run(self) -> None:
         """メインループを実行する
 
