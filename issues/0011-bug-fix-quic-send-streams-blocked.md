@@ -1,7 +1,7 @@
 # QUIC の open_stream がストリーム上限到達時に STREAMS_BLOCKED を送出しないのを修正する
 
 - Created: 2026-08-02
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-03
 - Branch: feature/fix-quic-send-streams-blocked
 - Polished: {YYYY-MM-DD}
 
@@ -24,3 +24,11 @@ RFC 9000 Section 4.6 の SHOULD「An endpoint that is unable to open a new strea
 
 - ストリーム上限到達時の `open_stream` が -1 を返し、STREAMS_BLOCKED フレームが送出される
 - モックなしのテストで検証できる (ピアのストリーム制限を下げて上限に到達させ、STREAMS_BLOCKED の受信を確認する)
+
+## 解決方法
+
+- 対応しない (必要ないと判断)
+- ngtcp2 に STREAMS_BLOCKED フレームを自発的に送出する API が存在しない (v1.19.0 / webtransport ブランチ / master を確認済み。STREAMS_BLOCKED の送出は ngtcp2 側のストリーム ID 採番処理に組み込まれており、アプリケーションから呼び出せる API は無い)
+- 自前で STREAMS_BLOCKED フレームを構築して送信するには ngtcp2 のフォークが必要になるが、依存ライブラリのフォークはプロジェクト方針 (依存ライブラリは上流に従う) と矛盾する
+- RFC 9000 Section 4.6 の「An endpoint that is unable to open a new stream due to the peer's limits SHOULD send a STREAMS_BLOCKED frame.」は SHOULD であり、ngtcp2 が内部で送出しない場合でも機能面では -1 を返して `open_stream` 側で対処できる (検知自体は可能)
+- 以上から、本 issue の実装は不要と判断して closed にする
