@@ -242,6 +242,50 @@ class Http3Connection {
    */
   bool is_closed() const;
 
+  /**
+   * ストリームが書き込み可能か確認
+   *
+   * 存在しない・closed・フロー制御ブロック・入力データ待ち・half-closed の
+   * いずれかで書き込み不可。
+   * @param stream_id ストリーム ID
+   * @return 書き込み可能なら 1、不可なら 0、コネクションが無いか閉じている
+   *   場合は nullopt
+   */
+  std::optional<int> stream_writable(int64_t stream_id) const;
+
+  /**
+   * ストリームの全送信データが QUIC スタックに受け渡し済みか確認
+   *
+   * write offset ベースの判定であり、ACK は考慮しない。新たに送信した
+   * データは get_streams_to_send() による送信処理の後に反映される。
+   * 存在しないストリームは受け渡し済み扱い (1) になる。
+   * @param stream_id ストリーム ID
+   * @return 受け渡し済みなら 1、未了なら 0、コネクションが無いか閉じている
+   *   場合は nullopt
+   */
+  std::optional<int> stream_flushed(int64_t stream_id) const;
+
+  /**
+   * 受信中フレームのペイロード残量を取得
+   *
+   * クライアント双方向ストリームまたはリモート制御ストリーム以外は 0。
+   * 負の stream_id と varint 最大値 (2**62 - 1) を超える stream_id は
+   * nghttp3 の assert を避けるため 0 を返す。
+   * @param stream_id ストリーム ID
+   * @return 残量。コネクションが無いか閉じている場合は nullopt
+   */
+  std::optional<uint64_t> frame_payload_left(int64_t stream_id) const;
+
+  /**
+   * ドレイン状態か確認 (サーバー専用)
+   *
+   * goaway() を呼び、アクティブなリモート双方向ストリームが無く、
+   * GOAWAY フレームの書き出し (送信処理) が完了している場合に true。
+   * @return ドレイン状態なら true、それ以外は false、クライアント
+   *   またはコネクションが無いか閉じている場合は nullopt
+   */
+  std::optional<bool> drained() const;
+
  private:
   Http3Connection(bool is_server, const Http3Config& config);
 

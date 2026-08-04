@@ -1,7 +1,7 @@
 # nghttp3 のストリーム状態確認 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-04
 - Branch: feature/add-h3-stream-state
 - Polished: 2026-08-04
 
@@ -34,3 +34,15 @@ HTTP/3 ストリームの書き込み可否・送信完了・受信状況を Pyt
 - Python から受信中フレームの残量が取得できる (Http3Connection。HTTP/3 のリクエストストリームで検証する)
 - Python からストリームの WebTransport セッション ID が取得できる (H3Session。存在しないストリームは None)
 - モックなしのテストで、各 API が動作することを確認する (H3Session は 0013 と同じ h3.Session 同士の直接受け渡し構成、Http3Connection は新規に低レベル受け渡し構成 (0013 と同様の `_pump` 方式) を構築する。`drained` はサーバー側で `goaway()` → リモート双方向ストリーム 0 を経て true になることを確認する)
+
+## 解決方法
+
+`src/bindings/webtransport_h3.cpp` / `.h` (H3Session) と `src/bindings/http3.cpp` / `.h` (Http3Connection) にストリーム状態確認メソッドを追加し、nanobind で公開した。
+
+- `H3Session` に `stream_writable` (nghttp3_conn_is_stream_writable2) / `stream_flushed` (nghttp3_conn_is_stream_flushed) / `stream_wt_session_id` (nghttp3_conn_get_stream_wt_session_id) を追加
+- `Http3Connection` に `stream_writable` / `stream_flushed` / `frame_payload_left` (nghttp3_conn_get_frame_payload_left2) / `drained` (nghttp3_conn_is_drained2、サーバーのみ) を追加
+- コネクションが無いか閉じている場合は None を返す。`frame_payload_left` は nghttp3 の assert を避けるため負の stream_id と varint 最大値超を C++ 側でガード (ガード時は 0)。`drained` はサーバー以外と制御ストリーム未バインド時に None
+- `stream_wt_session_id` は存在しないストリームと WebTransport データストリームでないストリーム (CONNECT ストリーム自身を含む) に None を返す (-1 を変換)
+- `stream_flushed` は存在しないストリームに 1 (受け渡し済み扱い) を返す nghttp3 の仕様を doc に明記
+
+テストは `tests/test_webtransport_h3_stream_state.py` (h3.Session 同士の直接受け渡し構成) と `tests/test_http3_stream_state.py` (Http3Connection の低レベル受け渡し構成を新規構築) に追加した。`frame_payload_left` は DATA フレームを 4 バイトずつ受信して残量の単調減少 (14 → 10 → 6 → 2 → 0) を検証し、`drained` はサーバーで `close_stream` → `goaway` → 送信処理の順で true になることを検証した。

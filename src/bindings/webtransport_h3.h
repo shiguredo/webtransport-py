@@ -320,6 +320,41 @@ class H3Session {
   std::optional<bool> has_stream_buffer(int64_t stream_id) const;
 
   /**
+   * ストリームが書き込み可能か確認
+   *
+   * 存在しない・closed・フロー制御ブロック・入力データ待ち・half-closed の
+   * いずれかで書き込み不可。
+   * @param stream_id ストリーム ID
+   * @return 書き込み可能なら 1、不可なら 0、コネクションが無いか閉じている
+   *   場合は nullopt
+   */
+  std::optional<int> stream_writable(int64_t stream_id) const;
+
+  /**
+   * ストリームの全送信データが QUIC スタックに受け渡し済みか確認
+   *
+   * write offset ベースの判定であり、ACK は考慮しない。新たに送信した
+   * データは get_streams_to_send() による送信処理の後に反映される。
+   * 存在しないストリームは受け渡し済み扱い (1) になる。
+   * @param stream_id ストリーム ID
+   * @return 受け渡し済みなら 1、未了なら 0、コネクションが無いか閉じている
+   *   場合は nullopt
+   */
+  std::optional<int> stream_flushed(int64_t stream_id) const;
+
+  /**
+   * ストリームが属する WebTransport セッション ID を取得
+   *
+   * WebTransport データストリーム以外 (CONNECT ストリーム自身・制御
+   * ストリーム・QPACK ストリーム) はセッション ID を持たない。
+   * @param stream_id ストリーム ID
+   * @return セッション ID。ストリームが存在しない場合、WebTransport
+   *   データストリームでない場合、コネクションが無いか閉じている場合は
+   *   nullopt
+   */
+  std::optional<int64_t> stream_wt_session_id(int64_t stream_id) const;
+
+  /**
    * リクエストヘッダーの Origin を検証する (サーバー用)
    *
    * 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は常に受理し、
