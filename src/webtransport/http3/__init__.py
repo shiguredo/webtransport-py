@@ -20,22 +20,24 @@ Usage:
     from webtransport.http3 import Server, Client
 """
 
+from webtransport.http3.client import Client
+from webtransport.http3.server import Server
 from webtransport.webtransport_ext.http3 import (
     Config,
     Connection,
     Event,
     EventType,
     get_version,
+    parse_priority,
 )
-from webtransport.http3.server import Server
-from webtransport.http3.client import Client
 
 __all__ = [
+    "Client",
     "Config",
     "Connection",
     "Event",
     "EventType",
-    "get_version",
     "Server",
-    "Client",
+    "get_version",
+    "parse_priority",
 ]

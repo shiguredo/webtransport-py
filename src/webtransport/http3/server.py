@@ -53,6 +53,9 @@ class ClientConnection:
             return
         self.http3_connection.bind_qpack_decoder_stream(self.qpack_decoder_stream_id)
 
+        # クライアントからの双方向ストリームを受け入れる準備
+        self.http3_connection.set_max_client_streams_bidi(100)
+
         self.http3_streams_setup = True
 
 
@@ -352,7 +355,13 @@ class Server:
                     if quic_event is None:
                         break
 
-                    if quic_event.type == quic_low.EventType.STREAM_DATA:
+                    if quic_event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
+                        # ハンドシェイク完了時に HTTP/3 ストリームを設定する
+                        # (クライアントからの PRIORITY_UPDATE を最初の
+                        # フライトで受信できるように、ストリームデータの
+                        # 処理より前に呼ぶ)
+                        client.setup_http3_streams()
+                    elif quic_event.type == quic_low.EventType.STREAM_DATA:
                         client.http3_connection.receive_stream_data(
                             quic_event.stream_id,
                             quic_event.data,
@@ -369,9 +378,6 @@ class Server:
                         if addr in self._clients:
                             del self._clients[addr]
                         continue
-
-                # ハンドシェイク完了後に HTTP/3 ストリームを設定
-                client.setup_http3_streams()
 
                 while True:
                     http3_event = client.http3_connection.next_event()

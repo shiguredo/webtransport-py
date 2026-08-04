@@ -336,6 +336,62 @@ class Http3Connection {
    */
   std::optional<bool> drained() const;
 
+  /**
+   * ストリームの優先度を取得 (サーバー専用)
+   *
+   * クライアントから Priority ヘッダーや PRIORITY_UPDATE フレームで
+   * 設定された優先度を返す。設定されていない場合は nghttp3 の
+   * 内部デフォルト (urgency=3 / incremental=false) を返す。
+   * @param stream_id クライアント起動双方向ストリーム ID
+   * @return (urgency, incremental) のタプル。クライアントで呼び出した
+   *   場合・クライアント起動双方向でないストリーム・存在しない
+   *   ストリーム・範囲外の stream_id・コネクションが無いか閉じている
+   *   場合は nullopt
+   */
+  std::optional<std::pair<uint32_t, bool>> stream_priority(
+      int64_t stream_id) const;
+
+  /**
+   * クライアントからの双方向ストリームの最大数を設定 (サーバー専用)
+   *
+   * QUIC 層が MAX_STREAMS で許可するクライアント起動双方向ストリームの
+   * 累積数を nghttp3 に伝える。設定しない場合、PRIORITY_UPDATE フレーム
+   * が H3_ID_ERROR で拒否される。累積最大数は単調増加のみ許可され、
+   * 減らす呼び出しは nghttp3 の assert に違反する (Release ビルドでは
+   * 無効化されるため C++ 側で減算を防ぐ)。
+   * @param max_streams クライアント起動双方向ストリームの累積最大数
+   */
+  void set_max_client_streams_bidi(uint64_t max_streams);
+
+  /**
+   * クライアント起動双方向ストリームの優先度を設定 (クライアント専用)
+   *
+   * PRIORITY_UPDATE フレームを送信して優先度を通知する。
+   * 送信するだけであり、クライアント自身の送信順序には反映されない
+   * (反映されるのはサーバー側のスケジューリング)。
+   * @param stream_id クライアント起動双方向ストリーム ID
+   * @param urgency 優先度 (0-7。0 が最高)
+   * @param incremental インクリメンタル処理が可能か
+   * @return 成功したかどうか
+   */
+  bool client_stream_priority(int64_t stream_id,
+                              uint32_t urgency,
+                              bool incremental);
+
+  /**
+   * クライアント起動双方向ストリームの優先度を設定 (サーバー専用)
+   *
+   * クライアントから設定された優先度を上書きする。サーバーが
+   * 設定すると、以降のクライアントからの優先度更新は無視される。
+   * @param stream_id クライアント起動双方向ストリーム ID
+   * @param urgency 優先度 (0-7。0 が最高)
+   * @param incremental インクリメンタル処理が可能か
+   * @return 成功したかどうか
+   */
+  bool server_stream_priority(int64_t stream_id,
+                              uint32_t urgency,
+                              bool incremental);
+
  private:
   Http3Connection(bool is_server, const Http3Config& config);
 
@@ -457,6 +513,9 @@ class Http3Connection {
 
   // submit_shutdown_notice 呼び出し済み (同一 GOAWAY ID の重複送信の防止用)
   bool shutdown_notice_sent_ = false;
+
+  // set_max_client_streams_bidi で設定した累積最大数 (単調増加ガード用)
+  uint64_t max_client_streams_bidi_ = 0;
 };
 
 // Python バインディングを定義
