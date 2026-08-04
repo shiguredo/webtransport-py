@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の送信バッファが ACK 時に解放されないのを修正する
 
 - Created: 2026-08-03
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-04
 - Branch: feature/fix-h3-ack-offset
 - Polished: {YYYY-MM-DD}
 
@@ -26,3 +26,18 @@ h3 層の送信バッファ (`stream_buffers_`) が ACK 受信時に解放され
 
 - ACK 受信時に `acked_stream_data_cb` が発火し、ACK 済みデータが `stream_buffers_` から削除され、空になったエントリも削除される
 - モックなしのテストで検証できる (送信 → ACK 処理 → バッファ解放を確認する)
+
+## 解決方法
+
+`src/bindings/webtransport_h3.cpp` の `H3Session::get_streams_to_send` で `nghttp3_conn_add_write_offset` を呼び出しているのと同じタイミングで `nghttp3_conn_add_ack_offset` を呼び出すようにした。QUIC (ngtcp2) が再送用データを保持するため、書き出したデータを ACK を待たずに nghttp3 の送信バッファから解放してよい。これにより `acked_stream_data_cb` が発火し、`stream_buffers_` のエントリが解放されるようになった。
+
+追加の修正:
+
+- `H3Session::acked_stream_data_cb` で ACK 済みデータの消費後に空になったマップエントリを削除するようにした
+- `H3Session::read_data_callback` で FIN のみの空エントリ (データ量 0 のため ACK 通知では発火しない) を読み出し時に削除するようにした
+- テスト専用アクセサ `H3Session::has_stream_buffer` (Python 側は `_has_stream_buffer`) を追加した。恒久的な公開 API ではなく、テストでのバッファ解放検証にのみ使う
+- `src/bindings/http3.cpp` の `Http3Connection` は本 issue の対象外 (影響限定的) とした
+
+テストは `tests/test_webtransport_h3_ack_offset.py` に追加した。h3.Session 同士でセッションを確立し (QUIC レイヤーを介さないモックなしの直接受け渡し)、送信処理 (get_streams_to_send) 後のバッファ解放を `_has_stream_buffer` で確認する。
+
+なお、`src/webtransport/h3.pyi` はビルド時に nanobind が生成する成果物であり git 追跡対象外のため、テスト用アクセサの pyi 更新は不要であることを確認した。

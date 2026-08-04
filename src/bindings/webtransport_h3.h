@@ -303,6 +303,15 @@ class H3Session {
   void set_max_client_streams_bidi(uint64_t max_streams);
 
   /**
+   * テスト専用: ストリームの送信バッファエントリが存在するか
+   *
+   * 恒久的な公開 API ではなく、テストでのバッファ解放検証にのみ使う。
+   * @param stream_id ストリーム ID
+   * @return エントリが存在する場合は true、存在しない場合は nullopt
+   */
+  std::optional<bool> has_stream_buffer(int64_t stream_id) const;
+
+  /**
    * リクエストヘッダーの Origin を検証する (サーバー用)
    *
    * 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は常に受理し、

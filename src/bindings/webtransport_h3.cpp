@@ -220,9 +220,15 @@ H3Session::get_streams_to_send() {
     }
     if (total > 0) {
       nghttp3_conn_add_write_offset(conn_, stream_id, total);
+      // 書き出したデータを nghttp3 の送信バッファから解放する
+      // QUIC (ngtcp2) が再送用データを保持するため、ACK を待たずに
+      // 解放してよい。この呼び出しで acked_stream_data コールバックが
+      // 発火し、stream_buffers_ が解放される
+      nghttp3_conn_add_ack_offset(conn_, stream_id, total);
     } else if (fin) {
       // FIN のみの場合も offset 0 を通知する
       nghttp3_conn_add_write_offset(conn_, stream_id, 0);
+      nghttp3_conn_add_ack_offset(conn_, stream_id, 0);
     }
   }
 
@@ -672,6 +678,13 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
     if (remaining == 0) {
       if (front.fin) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        // 読み出し済みの空エントリを削除する
+        // データ量 0 のため acked_stream_data コールバックは発火せず、
+        // ACK 経路では解放されない
+        buffers.pop_front();
+        if (buffers.empty()) {
+          stream_buffers_.erase(it);
+        }
         return 0;
       }
       buffers.pop_front();
@@ -807,6 +820,13 @@ void H3Session::set_max_client_streams_bidi(uint64_t max_streams) {
   nghttp3_conn_set_max_client_streams_bidi(conn_, max_streams);
 }
 
+std::optional<bool> H3Session::has_stream_buffer(int64_t stream_id) const {
+  if (stream_buffers_.find(stream_id) == stream_buffers_.end()) {
+    return std::nullopt;
+  }
+  return true;
+}
+
 void H3Session::push_event(H3Event event) {
   events_.push_back(std::move(event));
 }
@@ -843,6 +863,11 @@ int H3Session::acked_stream_data_cb(nghttp3_conn* /*conn*/,
                        front.data.begin() + static_cast<ptrdiff_t>(remaining));
       remaining = 0;
     }
+  }
+
+  // 空になったエントリを削除する
+  if (buffers.empty()) {
+    session->stream_buffers_.erase(it);
   }
 
   return 0;
@@ -1386,7 +1411,12 @@ void bind_webtransport_h3(nb::module_& m) {
            &H3Session::set_max_client_streams_bidi, nb::arg("max_streams"),
            nb::sig("def set_max_client_streams_bidi(self, max_streams: int) -> "
                    "None"),
-           "クライアントからの双方向ストリームの最大数を設定");
+           "クライアントからの双方向ストリームの最大数を設定")
+      .def("_has_stream_buffer", &H3Session::has_stream_buffer,
+           nb::arg("stream_id"),
+           nb::sig("def _has_stream_buffer(self, stream_id: int) -> "
+                   "bool | None"),
+           "テスト専用: ストリームの送信バッファエントリの有無を確認");
 }
 
 }  // namespace h3
