@@ -397,6 +397,48 @@ bool Http3Connection::is_closed() const {
   return closed_;
 }
 
+std::optional<int> Http3Connection::stream_writable(int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp3_conn_is_stream_writable2(conn_, stream_id);
+}
+
+std::optional<int> Http3Connection::stream_flushed(int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp3_conn_is_stream_flushed(conn_, stream_id);
+}
+
+std::optional<uint64_t> Http3Connection::frame_payload_left(
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  // nghttp3 は assert で stream_id の範囲を検証する (Release ビルドでは
+  // 無効化されるため C++ 側でガードする。 NGHTTP3_MAX_VARINT は非公開
+  // マクロ )
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return 0;
+  }
+  return nghttp3_conn_get_frame_payload_left2(conn_, stream_id);
+}
+
+std::optional<bool> Http3Connection::drained() const {
+  if (!conn_ || closed_ || !is_server_) {
+    return std::nullopt;
+  }
+  // nghttp3 は assert でサーバーセッションを要求し、制御ストリームを
+  // 無条件に参照する (Release ビルドでは assert が無効化されるため
+  // C++ 側でガードする。 goaway() と同じガード条件)
+  if (control_stream_id_ < 0) {
+    return std::nullopt;
+  }
+  return nghttp3_conn_is_drained2(conn_) != 0;
+}
+
 void Http3Connection::push_event(Http3Event event) {
   events_.push_back(std::move(event));
 }
@@ -846,7 +888,22 @@ void bind_http3(nb::module_& m) {
            nb::sig("def get_required_streams(self) -> list[tuple[str, bool]]"),
            "必要な QUIC ストリームのリストを取得")
       .def("is_closed", &Http3Connection::is_closed,
-           nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか");
+           nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
+      .def("stream_writable", &Http3Connection::stream_writable,
+           nb::arg("stream_id"),
+           nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
+           "ストリームが書き込み可能か確認")
+      .def("stream_flushed", &Http3Connection::stream_flushed,
+           nb::arg("stream_id"),
+           nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
+           "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
+      .def("frame_payload_left", &Http3Connection::frame_payload_left,
+           nb::arg("stream_id"),
+           nb::sig("def frame_payload_left(self, stream_id: int) -> int | None"),
+           "受信中フレームのペイロード残量を取得")
+      .def_prop_ro("drained", &Http3Connection::drained,
+                   nb::sig("def drained(self) -> bool | None"),
+                   "ドレイン状態か確認 (サーバーのみ)");
 
   // nghttp3 バージョン情報
   http3_m.def(

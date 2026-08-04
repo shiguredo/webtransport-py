@@ -874,6 +874,32 @@ std::optional<bool> H3Session::has_stream_buffer(int64_t stream_id) const {
   return true;
 }
 
+std::optional<int> H3Session::stream_writable(int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp3_conn_is_stream_writable2(conn_, stream_id);
+}
+
+std::optional<int> H3Session::stream_flushed(int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp3_conn_is_stream_flushed(conn_, stream_id);
+}
+
+std::optional<int64_t> H3Session::stream_wt_session_id(
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  int64_t session_id = nghttp3_conn_get_stream_wt_session_id(conn_, stream_id);
+  if (session_id < 0) {
+    return std::nullopt;
+  }
+  return session_id;
+}
+
 void H3Session::push_event(H3Event event) {
   events_.push_back(std::move(event));
 }
@@ -1457,7 +1483,18 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::arg("stream_id"),
            nb::sig("def _has_stream_buffer(self, stream_id: int) -> "
                    "bool | None"),
-           "テスト専用: ストリームの送信バッファエントリの有無を確認");
+           "テスト専用: ストリームの送信バッファエントリの有無を確認")
+      .def("stream_writable", &H3Session::stream_writable, nb::arg("stream_id"),
+           nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
+           "ストリームが書き込み可能か確認")
+      .def("stream_flushed", &H3Session::stream_flushed, nb::arg("stream_id"),
+           nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
+           "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
+      .def("stream_wt_session_id", &H3Session::stream_wt_session_id,
+           nb::arg("stream_id"),
+           nb::sig("def stream_wt_session_id(self, stream_id: int) -> "
+                   "int | None"),
+           "ストリームが属する WebTransport セッション ID を取得");
 }
 
 }  // namespace h3
