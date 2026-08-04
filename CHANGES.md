@@ -33,6 +33,8 @@
   - @voluntas
 - [ADD] WebTransport over HTTP/3 と HTTP/3 のストリーム状態確認 API を公開する
   - @voluntas
+- [ADD] HTTP/3 の送信側拡張 API (トレーラ / 1xx レスポンス / graceful shutdown の開始通知 / 書き込み側シャットダウン) を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
