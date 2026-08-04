@@ -1,7 +1,7 @@
 # サーバー側の STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
 
 - Created: 2026-08-02
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-04
 - Branch: feature/fix-reset-stream-session-id
 - Polished: 2026-08-04
 
@@ -36,3 +36,23 @@
   - 2 セッションを確立した状態で、データ未受信のままリセットされたストリームには -1 が渡される (ストリームを開いてデータを送信せずにリセットする構成で確認する。open_stream と reset_stream の間に送信処理を挟むと WT ヘッダーが先に届いて stream_info_ に登録されるため、-1 が決定的にならない点に注意。旧実装では無関係なセッション ID が渡っていたケース)
   - 2 つ目のセッションの CONNECT ストリーム (最小 ID でない CONNECT) をクライアントがリセットしたときに、セッション ID (= CONNECT ストリーム ID) が渡される
 - 既存のリセット系テスト (`tests/test_e2e_webtransport_h3.py` の `test_client_resets_server_stream` 等) が、`on_stream_reset` の `session_id` を `on_session_ready` で受け取ったセッション ID と比較する assert を含む形に強化され、引き続き通る
+
+## 解決方法
+
+`src/bindings/webtransport_h3.cpp` の `H3Session::close_stream` の戻り値をセッション ID (`int64_t`) に変更し、`src/webtransport/h3/server.py` の `Server._process_quic_events` の STREAM_RESET ハンドラが `get_session_ids()` の先頭要素を使うのをやめて、`close_stream` の戻り値をそのまま `on_stream_reset` に渡すようにした。
+
+セッション ID の復元順序:
+
+- `stream_info_` にストリームが登録されていれば、そのエントリのセッション ID を返す
+- `stream_info_` に無く `session_ids_` に含まれるストリーム (CONNECT ストリーム。セッション ID は CONNECT ストリーム ID そのものであり、draft-ietf-webtrans-http3-16 Section 2.2) はストリーム ID 自身を返す
+- それ以外 (制御ストリーム・QPACK ストリーム・WT ヘッダー未受信のままリセットされたストリーム・データストリームの二重リセット) は -1 を返す
+- セッション ID の復元は `nghttp3_conn_close_stream` 呼び出しより前に行う (同期実行される `stream_close_cb` が `stream_info_` からエントリを削除するため)
+- 戻り値の型変更に伴い、`src/bindings/webtransport_h3.h` の宣言と nanobind バインディングの `nb::sig` (`-> int`) も更新した。`H3Session::reset_stream` は close_stream に委譲するだけのため変更していない
+
+テストは `tests/test_e2e_webtransport_h3.py` に追加した。低レベル API クライアント (`_LowLevelClient`。`quic.Connection` + `h3.Session` で同一 QUIC 接続上に複数セッションを確立) と高レベル `Server` を組み合わせた e2e テスト 3 本を追加した:
+
+- `test_stream_reset_second_session_id`: 2 つ目のセッションのデータストリームのリセットで 2 つ目のセッション ID が渡る
+- `test_stream_reset_before_data_received_minus_one`: WT ヘッダー未受信のままリセットされたストリームに -1 が渡る
+- `test_stream_reset_connect_stream_session_id`: 2 つ目のセッションの CONNECT ストリームのリセットでセッション ID が渡る
+
+また既存の `test_client_resets_server_stream` を、`on_stream_reset` の `session_id` を `on_session_ready` で受け取ったセッション ID と比較する assert を含む形に強化した (リセット前にサーバー側のデータ受信を待つ同期も追加)。
