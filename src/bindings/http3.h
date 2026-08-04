@@ -23,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -225,6 +226,55 @@ class Http3Connection {
   void goaway(int64_t id = 0);
 
   /**
+   * トレーラを送信
+   *
+   * send_data(fin=True) で本体を積んだ後、flush 前に呼ぶこと。
+   * 呼び出し自体がストリーム終端 (WRITE_END_STREAM) を担う。
+   * flush で fin が送信処理された後に呼ぶと
+   * NGHTTP3_ERR_INVALID_STATE になるため False を返す。
+   * @param stream_id ストリーム ID
+   * @param headers トレーラヘッダー
+   * @return 成功したかどうか
+   */
+  bool submit_trailers(
+      int64_t stream_id,
+      const std::vector<std::pair<std::string, std::string>>& headers);
+
+  /**
+   * 1xx レスポンスを送信 (サーバー専用)
+   *
+   * 最終レスポンス (submit_response) より前に呼ぶこと。1xx は
+   * frq の書き出し順で最終レスポンスより先に送られる。
+   * @param stream_id ストリーム ID
+   * @param headers レスポンスヘッダー (:status を含む)
+   * @return 成功したかどうか
+   */
+  bool submit_info(
+      int64_t stream_id,
+      const std::vector<std::pair<std::string, std::string>>& headers);
+
+  /**
+   * graceful shutdown の開始通知を送信 (サーバー専用)
+   *
+   * ピアに新しいストリームの作成を止めるよう通知する (GOAWAY 相当)。
+   * 通知後に nghttp3_conn_shutdown (goaway()) を呼ぶことで graceful
+   * shutdown を完了させる。goaway() の後に呼ぶと GOAWAY ID の
+   * 単調減少 (RFC 9114 5.2 節の MUST NOT) に違反するため False を返す。
+   * @return 成功したかどうか
+   */
+  bool submit_shutdown_notice();
+
+  /**
+   * ストリームの書き込み側をシャットダウン
+   *
+   * QUIC FIN ではなく、以降の書き込みを禁止する。
+   * シャットダウン後の send_data は no-op、submit_trailers は
+   * False を返す。
+   * @param stream_id ストリーム ID
+   */
+  void shutdown_stream_write(int64_t stream_id);
+
+  /**
    * 次のイベントを取得
    * @return イベント (なければ nullopt)
    */
@@ -398,6 +448,15 @@ class Http3Connection {
 
   // 接続状態
   bool closed_ = false;
+
+  // shutdown_stream_write 済みのストリーム ID (send_data の no-op 用)
+  std::set<int64_t> shutdown_stream_ids_;
+
+  // goaway() 呼び出し済み (submit_shutdown_notice のガード用)
+  bool shutdown_commenced_ = false;
+
+  // submit_shutdown_notice 呼び出し済み (同一 GOAWAY ID の重複送信の防止用)
+  bool shutdown_notice_sent_ = false;
 };
 
 // Python バインディングを定義

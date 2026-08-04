@@ -34,7 +34,10 @@ Http3Connection::Http3Connection(Http3Connection&& other) noexcept
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
       qpack_decoder_stream_id_(other.qpack_decoder_stream_id_),
-      closed_(other.closed_) {
+      closed_(other.closed_),
+      shutdown_stream_ids_(std::move(other.shutdown_stream_ids_)),
+      shutdown_commenced_(other.shutdown_commenced_),
+      shutdown_notice_sent_(other.shutdown_notice_sent_) {
   other.conn_ = nullptr;
 }
 
@@ -54,6 +57,9 @@ Http3Connection& Http3Connection::operator=(Http3Connection&& other) noexcept {
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
     qpack_decoder_stream_id_ = other.qpack_decoder_stream_id_;
     closed_ = other.closed_;
+    shutdown_stream_ids_ = std::move(other.shutdown_stream_ids_);
+    shutdown_commenced_ = other.shutdown_commenced_;
+    shutdown_notice_sent_ = other.shutdown_notice_sent_;
 
     other.conn_ = nullptr;
   }
@@ -321,6 +327,11 @@ void Http3Connection::send_data(int64_t stream_id,
     return;
   }
 
+  // 書き込み側シャットダウン済みのストリームは no-op とする
+  if (shutdown_stream_ids_.contains(stream_id)) {
+    return;
+  }
+
   StreamData sd;
   sd.data = data;
   sd.offset = 0;
@@ -337,6 +348,7 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
   // nghttp3 に読み取り停止を伝え、高レベル側で QUIC RESET_STREAM を送出する
   nghttp3_conn_shutdown_stream_read(conn_, stream_id);
   stream_buffers_.erase(stream_id);
+  shutdown_stream_ids_.erase(stream_id);
 
   Http3Event event;
   event.type = Http3EventType::ResetStream;
@@ -368,6 +380,142 @@ void Http3Connection::goaway(int64_t id) {
   }
 
   nghttp3_conn_shutdown(conn_);
+
+  // 以降の submit_shutdown_notice は GOAWAY ID の単調減少に違反するため
+  // ガードする (RFC 9114 5.2 節の MUST NOT)
+  shutdown_commenced_ = true;
+}
+
+bool Http3Connection::submit_trailers(
+    int64_t stream_id,
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  if (!conn_ || closed_) {
+    return false;
+  }
+
+  // QPACK ストリームがバインドされていない場合は false を返す
+  // nghttp3 は tx.qenc が設定されていることを assert する
+  if (qpack_encoder_stream_id_ < 0 || qpack_decoder_stream_id_ < 0) {
+    return false;
+  }
+
+  // 書き込み側シャットダウン済みのストリームには送信しない
+  if (shutdown_stream_ids_.contains(stream_id)) {
+    return false;
+  }
+
+  std::vector<nghttp3_nv> nva;
+  nva.reserve(headers.size());
+
+  for (const auto& [name, value] : headers) {
+    nghttp3_nv nv;
+    nv.name =
+        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
+    nv.namelen = name.size();
+    nv.value =
+        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
+    nv.valuelen = value.size();
+    nv.flags = NGHTTP3_NV_FLAG_NONE;
+    nva.push_back(nv);
+  }
+
+  // トレーラはフレームキューに積まれる。flush 済み (WRITE_END_STREAM) の
+  // ストリームでは NGHTTP3_ERR_INVALID_STATE になる
+  int rv =
+      nghttp3_conn_submit_trailers(conn_, stream_id, nva.data(), nva.size());
+  if (rv != 0) {
+    return false;
+  }
+
+  // READ_DATA_BLOCKED を解除してトレーラの書き出しを促す
+  // (本体送信処理が完了している場合はフラグが立っているため)
+  nghttp3_conn_resume_stream(conn_, stream_id);
+  return true;
+}
+
+bool Http3Connection::submit_info(
+    int64_t stream_id,
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  if (!conn_ || closed_ || !is_server_) {
+    return false;
+  }
+
+  // QPACK ストリームがバインドされていない場合は false を返す
+  // nghttp3 は tx.qenc が設定されていることを assert する
+  if (qpack_encoder_stream_id_ < 0 || qpack_decoder_stream_id_ < 0) {
+    return false;
+  }
+
+  std::vector<nghttp3_nv> nva;
+  nva.reserve(headers.size());
+
+  for (const auto& [name, value] : headers) {
+    nghttp3_nv nv;
+    nv.name =
+        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
+    nv.namelen = name.size();
+    nv.value =
+        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
+    nv.valuelen = value.size();
+    nv.flags = NGHTTP3_NV_FLAG_NONE;
+    nva.push_back(nv);
+  }
+
+  // 1xx レスポンスはフレームキューに積まれる。最終レスポンス
+  // (submit_response) より前に呼ぶこと。クライアントは is_server_
+  // ガードで拒否する (nghttp3 は conn->server を assert する)
+  int rv = nghttp3_conn_submit_info(conn_, stream_id, nva.data(), nva.size());
+  if (rv != 0) {
+    return false;
+  }
+
+  return true;
+}
+
+bool Http3Connection::submit_shutdown_notice() {
+  if (!conn_ || closed_ || !is_server_) {
+    return false;
+  }
+
+  // 制御ストリームがバインドされていない場合は false を返す
+  // nghttp3 は tx.ctrl が設定されていることを assert する
+  if (control_stream_id_ < 0) {
+    return false;
+  }
+
+  // goaway() 済みの場合は false を返す。shutdown notice の GOAWAY ID は
+  // shutdown の GOAWAY ID より大きいため、単調減少に違反する
+  // (RFC 9114 5.2 節の MUST NOT。Release ビルドでは assert が
+  // 無効化されるため C++ 側でガードする)
+  if (shutdown_commenced_) {
+    return false;
+  }
+
+  // 送信済みの場合は false を返す。同一 GOAWAY ID の重複送信を避ける
+  // (RFC 9114 5.2 節では許容されるが、ピアに無意味なフレームを送らない)
+  if (shutdown_notice_sent_) {
+    return false;
+  }
+
+  int rv = nghttp3_conn_submit_shutdown_notice(conn_);
+  if (rv != 0) {
+    return false;
+  }
+
+  shutdown_notice_sent_ = true;
+  return true;
+}
+
+void Http3Connection::shutdown_stream_write(int64_t stream_id) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // nghttp3 に書き込み側シャットダウンを伝える
+  // (SHUT_WR フラグを立てる。クライアント発双方向ストリームでは
+  // スケジューラからも外す)
+  nghttp3_conn_shutdown_stream_write(conn_, stream_id);
+  shutdown_stream_ids_.insert(stream_id);
 }
 
 std::optional<Http3Event> Http3Connection::next_event() {
@@ -489,6 +637,7 @@ int Http3Connection::stream_close_cb(nghttp3_conn* conn,
   self->push_event(std::move(event));
 
   self->stream_buffers_.erase(stream_id);
+  self->shutdown_stream_ids_.erase(stream_id);
   return 0;
 }
 
@@ -641,6 +790,7 @@ int Http3Connection::reset_stream_cb(nghttp3_conn* conn,
   self->push_event(std::move(event));
 
   self->stream_buffers_.erase(stream_id);
+  self->shutdown_stream_ids_.erase(stream_id);
   return 0;
 }
 
@@ -881,6 +1031,23 @@ void bind_http3(nb::module_& m) {
            "QUIC ストリーム終了を nghttp3 に通知する")
       .def("goaway", &Http3Connection::goaway, nb::arg("id") = 0,
            nb::sig("def goaway(self, id: int = 0) -> None"), "GOAWAY を送信")
+      .def("submit_trailers", &Http3Connection::submit_trailers,
+           nb::arg("stream_id"), nb::arg("headers"),
+           nb::sig("def submit_trailers(self, stream_id: int, headers: "
+                   "list[tuple[str, str]]) -> bool"),
+           "トレーラを送信")
+      .def("submit_info", &Http3Connection::submit_info, nb::arg("stream_id"),
+           nb::arg("headers"),
+           nb::sig("def submit_info(self, stream_id: int, headers: "
+                   "list[tuple[str, str]]) -> bool"),
+           "1xx レスポンスを送信 (サーバーのみ)")
+      .def("submit_shutdown_notice", &Http3Connection::submit_shutdown_notice,
+           nb::sig("def submit_shutdown_notice(self) -> bool"),
+           "graceful shutdown の開始通知を送信 (サーバーのみ)")
+      .def("shutdown_stream_write", &Http3Connection::shutdown_stream_write,
+           nb::arg("stream_id"),
+           nb::sig("def shutdown_stream_write(self, stream_id: int) -> None"),
+           "ストリームの書き込み側をシャットダウン")
       .def("next_event", &Http3Connection::next_event,
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
