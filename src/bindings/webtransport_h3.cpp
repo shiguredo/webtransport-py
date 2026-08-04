@@ -726,20 +726,40 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
     return -1;
   }
 
-  // セッション ID の復元は nghttp3 呼び出しより前に行う
+  // セッション ID の復元とバッファ削除は nghttp3 呼び出しより前に行う
   // (nghttp3_conn_close_stream は同期実行される stream_close_cb を呼び、
   // stream_close_cb が stream_info_ からエントリを削除するため)
   int64_t session_id = -1;
   auto it = stream_info_.find(stream_id);
   if (it != stream_info_.end()) {
     session_id = it->second.session_id;
-  } else if (session_ids_.count(stream_id) > 0) {
-    // CONNECT ストリームは stream_info_ に登録されないため session_ids_ で判定する。
-    // セッション ID は CONNECT ストリーム ID そのもの (draft-ietf-webtrans-http3-16
-    // Section 2.2)。CONNECT ストリームのリセットはセッション終了の正当な経路
-    // (Section 6 のセッション終了条件の 1 つ目)
-    session_id = stream_id;
   }
+  // CONNECT ストリームは stream_info_ に登録されないため session_ids_ で判定する。
+  // セッション ID は CONNECT ストリーム ID そのもの (draft-ietf-webtrans-http3-16
+  // Section 2.2)。CONNECT ストリームのリセットはセッション終了の正当な経路
+  // (Section 6 のセッション終了条件の 1 つ目)。QUIC のストリーム ID は接続内で
+  // 一意なため、session_ids_ に含まれる ID を持つ未登録ストリームは CONNECT
+  // ストリームしかあり得ない
+  bool is_connect_stream =
+      (it == stream_info_.end() && session_ids_.count(stream_id) > 0);
+  if (is_connect_stream) {
+    session_id = stream_id;
+    // セッションに属するデータストリームの送信バッファを stream_info_ の走査で
+    // 削除する。stream_info_ エントリ自体は削除しない (nghttp3_conn_close_stream の
+    // 同期コールバックで発火する reset_stream_cb / stop_sending_cb の
+    // セッション ID 取得に必要。エントリの清掃はセッション終了の後始末と
+    // 合わせて別途検討する)。session_ids_ からも削除しない (close_stream の
+    // 戻り値復元フォールバックが session_ids_ の残留に依存しているため)
+    for (const auto& pair : stream_info_) {
+      if (pair.second.session_id == session_id) {
+        stream_buffers_.erase(pair.first);
+      }
+    }
+  }
+  // 該当ストリームの送信バッファを削除する (CONNECT ストリームは stream_info_
+  // 走査の対象外のため自身のエントリをここで削除する)。リセット後は再送信が
+  // 停止するため未送信データを保持する義務がない (RFC 9000 Section 19.4)
+  stream_buffers_.erase(stream_id);
 
   // WT ヘッダー未受信 (stream_info_ に未登録) のストリーム等は
   // NGHTTP3_ERR_STREAM_NOT_FOUND が返るため戻り値は無視し、
@@ -752,6 +772,22 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
 void H3Session::reset_stream(int64_t stream_id, uint64_t error_code) {
   // nghttp3 への通知は close_stream と同じ。QUIC RESET_STREAM は高レベル側で送る
   close_stream(stream_id, error_code);
+}
+
+void H3Session::erase_session_streams(int64_t session_id) {
+  // 破棄されたストリームの未送信データを接続終了まで保持しない。
+  // ローカル送信バッファの破棄は draft-ietf-webtrans-http3-16 Section 6 の
+  // セッション終了時のストリーム破棄 (MUST) に反しない
+  std::vector<int64_t> streams_to_remove;
+  for (const auto& pair : stream_info_) {
+    if (pair.second.session_id == session_id) {
+      streams_to_remove.push_back(pair.first);
+    }
+  }
+  for (int64_t stream_id : streams_to_remove) {
+    stream_buffers_.erase(stream_id);
+    stream_info_.erase(stream_id);
+  }
 }
 
 void H3Session::close_session(int64_t session_id,
@@ -772,16 +808,8 @@ void H3Session::close_session(int64_t session_id,
     return;
   }
 
-  // ローカルのストリーム情報をクリーンアップ
-  std::vector<int64_t> streams_to_remove;
-  for (const auto& pair : stream_info_) {
-    if (pair.second.session_id == session_id) {
-      streams_to_remove.push_back(pair.first);
-    }
-  }
-  for (int64_t stream_id : streams_to_remove) {
-    stream_info_.erase(stream_id);
-  }
+  // ローカルのストリーム情報と送信バッファをクリーンアップする
+  erase_session_streams(session_id);
 
   session_ids_.erase(session_id);
 
@@ -1179,16 +1207,8 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
 
   auto* session = static_cast<H3Session*>(conn_user_data);
 
-  // 当該セッションに属するストリーム情報を削除する
-  std::vector<int64_t> streams_to_remove;
-  for (const auto& pair : session->stream_info_) {
-    if (pair.second.session_id == session_id) {
-      streams_to_remove.push_back(pair.first);
-    }
-  }
-  for (int64_t stream_id : streams_to_remove) {
-    session->stream_info_.erase(stream_id);
-  }
+  // 当該セッションに属するストリーム情報と送信バッファを削除する
+  session->erase_session_streams(session_id);
   session->session_ids_.erase(session_id);
 
   H3Event event;

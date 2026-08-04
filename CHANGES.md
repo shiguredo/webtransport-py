@@ -39,6 +39,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 のリセット・セッション終了時に送信バッファが解放されないのを修正する
+  - @voluntas
 
 ### misc
 

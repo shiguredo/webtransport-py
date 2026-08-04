@@ -420,6 +420,9 @@ class H3Session {
   // ヘルパー
   void push_event(H3Event event);
 
+  // セッションに属するストリームの送信バッファとストリーム情報を削除する
+  // close_session / recv_wt_close_session_cb から呼ばれる
+  void erase_session_streams(int64_t session_id);
   bool is_server_;
   H3SessionConfig config_;
   nghttp3_conn* conn_ = nullptr;
