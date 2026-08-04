@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の close_stream / reset_stream / close_session が送信バッファを削除しないのを修正する
 
 - Created: 2026-08-02
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-04
 - Branch: feature/fix-h3-stream-buffer-cleanup
 - Polished: 2026-08-04
 
@@ -35,3 +35,18 @@
 - モックなしのテストで検証できる (テストは `tests/test_webtransport_h3_stream_buffer_cleanup.py` に追加し、0013 と同じ h3.Session 同士の直接受け渡し構成で構築する):
   - リセット経路: h3.Session 同士を直接受け渡しで構築し (0013 の `tests/test_webtransport_h3_ack_offset.py` と同じ構成。`get_streams_to_send` の出力を `receive_stream_data` で渡す)、検証対象側で事前に `send_stream_data` してバッファエントリを生成した状態でリセットし、アクセサでバッファエントリが削除されたこと (None) と接続が維持されること (`is_closed()` が False) を確認する (リセット前に送信しておかないと、削除されるべきバッファエントリが存在しない状態での検証になってしまう。リセット前に送信処理 (`get_streams_to_send` / QUIC 送信) を挟むと、0013 実装済みの ACK 処理でバッファエントリが解放されてしまい、本修正の削除を検証できないため、送信処理を挟まずにリセットする。リセットは h3 層の `close_stream` / `reset_stream` を直接呼ぶ形でよい (対向からの QUIC RESET_STREAM 受信経由でも同一関数が呼ばれるため))
   - セッション終了経路: 同じく h3.Session 同士の直接受け渡しで構築し、`close_session` 呼び出し側と WT_CLOSE_SESSION 受信側の両方で事前に `send_stream_data` してバッファエントリを生成した状態で、`close_session` 呼び出しと WT_CLOSE_SESSION 受信を処理し、両側のセッションに属するストリームのバッファエントリが削除されたこと (None) をアクセサで確認する (両側で送信しておかないと、`close_session` 呼び出し側と WT_CLOSE_SESSION 受信側のどちらか一方の削除経路が実データなしでしか検証できない。なお高レベル `Server` には close_session メソッドが無いため、セッション終了経路のテストは低レベル API で行う)。バッファエントリを生成した後は、WT_CLOSE_SESSION 受信処理 (`recv_wt_close_session_cb`) より前に自身の送信処理を挟まない (0013 実装済みのため送信処理で `acked_stream_data_cb` が発火し、`recv_wt_close_session_cb` での削除を検証する前にエントリが消えるため)。CONNECT ストリームのリセット経路 (セッション ID に対する `close_stream` / `reset_stream`) も同じ前提で、セッションに属するデータストリームのバッファエントリが削除されたこと (None) をアクセサで確認する。なお、削除は `stream_info_` の走査をセッション ID で絞り込む設計のため、複数セッションを張った状態で対象セッションのバッファのみが削除され、他セッションのバッファエントリが残ることもアクセサで確認する (0013 の `_establish_session` 相当は 1 セッション構成のため、2 本目の CONNECT を確立する拡張が必要)
+
+## 解決方法
+
+`src/bindings/webtransport_h3.cpp` の送信バッファ (`stream_buffers_`) の削除を、リセット・セッション終了の各経路に明示的に追加した。
+
+- `H3Session::close_stream` (reset_stream は委譲のため同箇所) で、`nghttp3_conn_close_stream` 呼び出しより前に送信バッファを削除するようにした。通常のデータストリームは該当ストリームのエントリを、CONNECT ストリーム (セッション ID) のリセットではセッションに属するデータストリームのエントリを `stream_info_` の走査で削除する。CONNECT ストリームの場合は `stream_info_` エントリ自体は削除しない (同期コールバックで発火する reset_stream_cb / stop_sending_cb のセッション ID 取得に必要)
+- `H3Session::close_session` と `H3Session::recv_wt_close_session_cb` のセッション所属ストリームのクリーンアップに送信バッファの削除を追加した。共通処理はプライベートヘルパー `erase_session_streams` に集約した
+
+テストは `tests/test_webtransport_h3_stream_buffer_cleanup.py` に追加した。h3.Session 同士の直接受け渡し構成 (モックなし) で、送信処理を挟まない前提 (ACK 経路での解放を避ける) の下で検証する。
+
+- `test_reset_releases_send_buffer` (close_stream / reset_stream の 2 経路): リセットでバッファエントリが削除され、接続が維持される
+- `test_close_session_releases_send_buffers`: 2 セッション構成で、close_session 呼び出し側と WT_CLOSE_SESSION 受信側の両方でバッファが削除され、他セッションのバッファが残る
+- `test_connect_stream_reset_releases_session_send_buffers`: CONNECT ストリームのリセットでセッションに属するバッファのみ削除され、他セッションのバッファが残る。同期コールバック (ResetStream / StopSending) のセッション ID が stream_info_ の残存により復元されることも確認する
+
+なお、`get_streams_to_send` は 1 回の呼び出しで全てのデータを返すとは限らない (WT_CLOSE_SESSION 等は他のストリームの書き出し後に返る) ことをテスト実装中に確認し、テストの転送ヘルパーはデータが無くなるまで繰り返す形にした。
