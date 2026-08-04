@@ -37,7 +37,8 @@ Http3Connection::Http3Connection(Http3Connection&& other) noexcept
       closed_(other.closed_),
       shutdown_stream_ids_(std::move(other.shutdown_stream_ids_)),
       shutdown_commenced_(other.shutdown_commenced_),
-      shutdown_notice_sent_(other.shutdown_notice_sent_) {
+      shutdown_notice_sent_(other.shutdown_notice_sent_),
+      max_client_streams_bidi_(other.max_client_streams_bidi_) {
   other.conn_ = nullptr;
 }
 
@@ -60,6 +61,7 @@ Http3Connection& Http3Connection::operator=(Http3Connection&& other) noexcept {
     shutdown_stream_ids_ = std::move(other.shutdown_stream_ids_);
     shutdown_commenced_ = other.shutdown_commenced_;
     shutdown_notice_sent_ = other.shutdown_notice_sent_;
+    max_client_streams_bidi_ = other.max_client_streams_bidi_;
 
     other.conn_ = nullptr;
   }
@@ -587,6 +589,101 @@ std::optional<bool> Http3Connection::drained() const {
   return nghttp3_conn_is_drained2(conn_) != 0;
 }
 
+std::optional<std::pair<uint32_t, bool>> Http3Connection::stream_priority(
+    int64_t stream_id) const {
+  if (!conn_ || closed_ || !is_server_) {
+    return std::nullopt;
+  }
+  // nghttp3 は assert で stream_id の範囲を検証する (Release ビルドでは
+  // 無効化されるため C++ 側でガードする。 NGHTTP3_MAX_VARINT は非公開
+  // マクロ )
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return std::nullopt;
+  }
+
+  nghttp3_pri pri;
+  int rv = nghttp3_conn_get_stream_priority2(conn_, &pri, stream_id);
+  if (rv != 0) {
+    return std::nullopt;
+  }
+  return std::make_pair(pri.urgency, pri.inc != 0);
+}
+
+void Http3Connection::set_max_client_streams_bidi(uint64_t max_streams) {
+  if (!conn_ || closed_ || !is_server_) {
+    return;
+  }
+  // 累積最大数は単調増加のみ許可される (nghttp3 は assert で検証するが
+  // Release ビルドでは無効化されるため C++ 側で減算を防ぐ)
+  if (max_streams < max_client_streams_bidi_) {
+    return;
+  }
+  max_client_streams_bidi_ = max_streams;
+  nghttp3_conn_set_max_client_streams_bidi(conn_, max_streams);
+}
+
+bool Http3Connection::client_stream_priority(int64_t stream_id,
+                                             uint32_t urgency,
+                                             bool incremental) {
+  if (!conn_ || closed_ || is_server_) {
+    return false;
+  }
+
+  // 制御ストリームがバインドされていない場合は false を返す
+  // (nghttp3 は制御ストリーム未バインド時に conn->tx.ctrl を NULL
+  // 参照するため。 goaway() と同様のガード)
+  if (control_stream_id_ < 0) {
+    return false;
+  }
+
+  // nghttp3 は assert で stream_id と urgency の範囲を検証する
+  // (Release ビルドでは無効化されるため C++ 側でガードする。
+  // NGHTTP3_MAX_VARINT は非公開マクロ )
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return false;
+  }
+  if (urgency > NGHTTP3_URGENCY_LOW) {
+    return false;
+  }
+
+  // RFC 9218 の Dictionary キーは u / i のみのため、タプルを
+  // シリアライズ済みの priority field value に変換して渡す
+  std::string value = "u=" + std::to_string(urgency);
+  if (incremental) {
+    value += ", i";
+  }
+
+  int rv = nghttp3_conn_set_client_stream_priority(
+      conn_, stream_id, reinterpret_cast<const uint8_t*>(value.data()),
+      value.size());
+  return rv == 0;
+}
+
+bool Http3Connection::server_stream_priority(int64_t stream_id,
+                                             uint32_t urgency,
+                                             bool incremental) {
+  if (!conn_ || closed_ || !is_server_) {
+    return false;
+  }
+
+  // nghttp3 は assert で stream_id と urgency の範囲を検証する
+  // (Release ビルドでは無効化されるため C++ 側でガードする。
+  // NGHTTP3_MAX_VARINT は非公開マクロ )
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return false;
+  }
+  if (urgency > NGHTTP3_URGENCY_LOW) {
+    return false;
+  }
+
+  nghttp3_pri pri = {urgency, static_cast<uint8_t>(incremental ? 1 : 0)};
+  int rv = nghttp3_conn_set_server_stream_priority(conn_, stream_id, &pri);
+  return rv == 0;
+}
+
 void Http3Connection::push_event(Http3Event event) {
   events_.push_back(std::move(event));
 }
@@ -1070,7 +1167,28 @@ void bind_http3(nb::module_& m) {
            "受信中フレームのペイロード残量を取得")
       .def_prop_ro("drained", &Http3Connection::drained,
                    nb::sig("def drained(self) -> bool | None"),
-                   "ドレイン状態か確認 (サーバーのみ)");
+                   "ドレイン状態か確認 (サーバーのみ)")
+      .def("stream_priority", &Http3Connection::stream_priority,
+           nb::arg("stream_id"),
+           nb::sig("def stream_priority(self, stream_id: int) -> "
+                   "tuple[int, bool] | None"),
+           "ストリームの優先度を取得 (サーバーのみ)")
+      .def("set_max_client_streams_bidi",
+           &Http3Connection::set_max_client_streams_bidi,
+           nb::arg("max_streams"),
+           nb::sig("def set_max_client_streams_bidi(self, "
+                   "max_streams: int) -> None"),
+           "クライアントからの双方向ストリームの最大数を設定 (サーバーのみ)")
+      .def("client_stream_priority", &Http3Connection::client_stream_priority,
+           nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
+           nb::sig("def client_stream_priority(self, stream_id: int, "
+                   "urgency: int, incremental: bool) -> bool"),
+           "クライアント起動双方向ストリームの優先度を設定 (クライアントのみ)")
+      .def("server_stream_priority", &Http3Connection::server_stream_priority,
+           nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
+           nb::sig("def server_stream_priority(self, stream_id: int, "
+                   "urgency: int, incremental: bool) -> bool"),
+           "クライアント起動双方向ストリームの優先度を設定 (サーバーのみ)");
 
   // nghttp3 バージョン情報
   http3_m.def(
@@ -1080,6 +1198,27 @@ void bind_http3(nb::module_& m) {
         return std::string(ver->version_str);
       },
       nb::sig("def get_version() -> str"), "nghttp3 のバージョンを取得");
+
+  // RFC 9218 の Priority ヘッダー値のパース
+  http3_m.def(
+      "parse_priority",
+      [](const std::string& value)
+          -> std::optional<std::pair<uint32_t, bool>> {
+        // nghttp3 のパーサは対象の構造体を初期化しないため、デフォルト
+        // (urgency=3 / incremental=false) で初期化してからパースする
+        // (RFC 9218 のデフォルト適用と同じ挙動)
+        nghttp3_pri pri = {NGHTTP3_DEFAULT_URGENCY, 0};
+        int rv = nghttp3_pri_parse_priority(
+            &pri, reinterpret_cast<const uint8_t*>(value.data()),
+            value.size());
+        if (rv != 0) {
+          return std::nullopt;
+        }
+        return std::make_pair(pri.urgency, pri.inc != 0);
+      },
+      nb::arg("value"),
+      nb::sig("def parse_priority(value: str) -> tuple[int, bool] | None"),
+      "RFC 9218 の Priority ヘッダー値をパース");
 }
 
 }  // namespace http3
