@@ -1,8 +1,19 @@
-"""webtransport.h3 (WebTransport over HTTP/3) 高レベル API テスト"""
+"""webtransport.h3 (WebTransport over HTTP/3) テスト
+
+高レベル API (Client / Server) のテストに加え、同一 QUIC 接続上に
+複数セッションを確立する検証では低レベル API (quic.Connection +
+h3.Session) を使う。
+"""
 
 import asyncio
+import socket
+from dataclasses import dataclass, field
 
 import pytest
+
+from webtransport import h3 as h3_low
+from webtransport import quic
+from webtransport.h3 import Server
 
 
 def test_import_server_client():
@@ -929,8 +940,10 @@ async def test_client_resets_server_stream(test_certificates):
     from webtransport.h3 import Client, Server
 
     session_ready_event = asyncio.Event()
+    server_data_received = asyncio.Event()
     server_reset_received = asyncio.Event()
     reset_info = {}
+    expected_session_id = {}
 
     server = Server(
         host="127.0.0.1",
@@ -939,15 +952,31 @@ async def test_client_resets_server_stream(test_certificates):
         keyfile=test_certificates["keyfile"],
     )
 
-    async def on_session_ready(session_id, addr):
+    async def on_session_ready(session_id: int, addr: tuple[str, int]) -> None:
+        expected_session_id["session_id"] = session_id
         session_ready_event.set()
 
-    async def on_stream_reset(session_id, stream_id, error_code, addr):
+    async def on_stream_data(
+        session_id: int,
+        stream_id: int,
+        data: bytes,
+        addr: tuple[str, int],
+    ) -> None:
+        server_data_received.set()
+
+    async def on_stream_reset(
+        session_id: int,
+        stream_id: int,
+        error_code: int,
+        addr: tuple[str, int],
+    ) -> None:
+        reset_info["session_id"] = session_id
         reset_info["stream_id"] = stream_id
         reset_info["error_code"] = error_code
         server_reset_received.set()
 
     server.on_session_ready(on_session_ready)
+    server.on_stream_data(on_stream_data)
     server.on_stream_reset(on_stream_reset)
 
     await server.start()
@@ -981,6 +1010,8 @@ async def test_client_resets_server_stream(test_certificates):
     client_task = asyncio.create_task(run_client())
 
     await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+    # サーバー側でデータ受信 (stream_info_ への登録) を確認してからリセットする
+    await asyncio.wait_for(server_data_received.wait(), timeout=5.0)
 
     # クライアント側からストリームをリセットする
     await client.reset_stream(stream_id, error_code=0x02)
@@ -989,6 +1020,8 @@ async def test_client_resets_server_stream(test_certificates):
 
     assert reset_info["stream_id"] == stream_id
     assert reset_info["error_code"] == 0x02
+    # リセットされたストリームの属するセッション ID が渡される
+    assert reset_info["session_id"] == expected_session_id["session_id"]
 
     client_task.cancel()
     server_task.cancel()
@@ -1696,3 +1729,440 @@ async def test_client_session_ready_callback(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+class _LowLevelClient:
+    """低レベル API (quic.Connection + h3.Session) で構築するクライアント
+
+    高レベル Client は 1 接続 1 セッションのため、同一 QUIC 接続上に
+    複数の WebTransport セッションを確立する検証には低レベル API を使う。
+    接続手順は高レベル Client の connect (src/webtransport/h3/client.py) を
+    参考にしている
+    """
+
+    def __init__(self, server_port: int) -> None:
+        self._server_addr: tuple[str, int] = ("127.0.0.1", server_port)
+        self._socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.setblocking(False)
+        self._socket.bind(("127.0.0.1", 0))
+        self._local_addr: tuple[str, int] = (
+            "127.0.0.1",
+            self._socket.getsockname()[1],
+        )
+
+        quic_config = quic.Config()
+        quic_config.alpn_protocols = ["h3"]
+        quic_config.verify_peer = False
+        quic_config.server_name = "127.0.0.1"
+        self._quic_connection: quic.Connection = quic.Connection.create_client(
+            quic_config,
+            self._local_addr,
+            self._server_addr,
+        )
+        h3_config = h3_low.Config()
+        h3_config.is_server = False
+        self._h3_session: h3_low.Session = h3_low.Session.create_client(h3_config)
+
+    def close(self) -> None:
+        """QUIC 接続とソケットを閉じる
+
+        同期メソッドのため CONNECTION_CLOSE パケットは送出しない
+        (サーバー側の終了検知はテストの後片付けが server.stop() で
+        行うため、このクラスでは不要)
+        """
+        self._quic_connection.close()
+        self._socket.close()
+
+    async def _send_packet(self) -> None:
+        """QUIC 層のパケットを送信する"""
+        loop = asyncio.get_running_loop()
+        packet = self._quic_connection.send()
+        if packet is None:
+            return
+        await loop.sock_sendto(self._socket, packet.data, self._server_addr)
+
+    async def _pump(self) -> None:
+        """h3 層の送信データを QUIC に渡して送信する"""
+        for stream_id, stream_data, fin in self._h3_session.get_streams_to_send():
+            self._quic_connection.send_stream_data(stream_id, stream_data, fin)
+        await self._send_packet()
+
+    async def _send_quic_only(self) -> None:
+        """QUIC 層の送信だけを実行する
+
+        h3 層の get_streams_to_send を呼ばないため、h3 層に積まれた
+        WT ヘッダーはワイヤに出ない。データ未受信のままリセットする
+        検証で使う
+        """
+        await self._send_packet()
+
+    async def _receive(self) -> None:
+        """QUIC パケットを 1 件受信して処理する (タイムアウト時は何もしない)"""
+        loop = asyncio.get_running_loop()
+        try:
+            data, raw_remote = await asyncio.wait_for(
+                loop.sock_recvfrom(self._socket, 65535),
+                timeout=0.1,
+            )
+        except TimeoutError:
+            return
+        remote = (str(raw_remote[0]), raw_remote[1])
+        self._quic_connection.receive(data, self._local_addr, remote)
+
+    def _process_quic_events(self) -> bool:
+        """QUIC イベントを処理して h3 層に流す
+
+        Returns:
+            接続が継続する場合は True
+        """
+        while True:
+            quic_event = self._quic_connection.next_event()
+            if quic_event is None:
+                break
+            if quic_event.type == quic.EventType.STREAM_DATA:
+                self._h3_session.receive_stream_data(
+                    quic_event.stream_id,
+                    quic_event.data,
+                    quic_event.fin,
+                )
+            elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                return False
+        return True
+
+    async def connect(self) -> bool:
+        """QUIC ハンドシェイクと制御ストリームのバインドを行う
+
+        Returns:
+            接続に成功した場合は True
+        """
+        await self._pump()
+        handshake_done = False
+        while not handshake_done:
+            await self._receive()
+            while True:
+                quic_event = self._quic_connection.next_event()
+                if quic_event is None:
+                    break
+                if quic_event.type == quic.EventType.HANDSHAKE_COMPLETED:
+                    handshake_done = True
+                    # 以降のイベント (サーバーの SETTINGS 等) は
+                    # 次の SETTINGS 待ちループで処理する
+                    break
+                elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                    return False
+            await self._pump()
+
+        control_stream_id = self._quic_connection.open_stream(False)
+        self._h3_session.bind_control_stream(control_stream_id)
+        encoder_stream_id = self._quic_connection.open_stream(False)
+        self._h3_session.bind_qpack_encoder_stream(encoder_stream_id)
+        decoder_stream_id = self._quic_connection.open_stream(False)
+        self._h3_session.bind_qpack_decoder_stream(decoder_stream_id)
+        await self._pump()
+
+        # サーバーの SETTINGS を受信するまで待機
+        # サーバーの制御ストリームは server.py の _setup_streams が
+        # 最初に開く単方向ストリーム (stream_id=3) のため、その受信を
+        # SETTINGS 受信の完了とみなす (高レベル Client の connect と同じ)
+        settings_received = False
+        max_attempts = 100
+        attempt = 0
+        while not settings_received and attempt < max_attempts:
+            await self._receive()
+            while True:
+                quic_event = self._quic_connection.next_event()
+                if quic_event is None:
+                    break
+                if quic_event.type == quic.EventType.STREAM_DATA:
+                    self._h3_session.receive_stream_data(
+                        quic_event.stream_id,
+                        quic_event.data,
+                        quic_event.fin,
+                    )
+                    if quic_event.stream_id == 3:
+                        settings_received = True
+                elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                    return False
+            await self._pump()
+            attempt += 1
+        return settings_received
+
+    async def establish_session(self) -> int:
+        """WebTransport セッションを確立してセッション ID を返す
+
+        Returns:
+            セッション ID。接続が閉じた場合は -1
+        """
+        request_stream_id = self._quic_connection.open_stream(True)
+        assert (
+            self._h3_session.connect(
+                request_stream_id,
+                f"https://127.0.0.1:{self._server_addr[1]}/webtransport",
+            )
+            is True
+        )
+        await self._pump()
+
+        while True:
+            await self._receive()
+            if not self._process_quic_events():
+                return -1
+            while True:
+                h3_event = self._h3_session.next_event()
+                if h3_event is None:
+                    break
+                if h3_event.type == h3_low.EventType.SESSION_READY:
+                    return h3_event.session_id
+            await self._pump()
+
+    async def establish_two_sessions(self) -> tuple[int, int]:
+        """同一 QUIC 接続上に 2 セッションを確立する
+
+        Returns:
+            (1 つ目のセッション ID, 2 つ目のセッション ID)
+        """
+        first_session_id = await asyncio.wait_for(self.establish_session(), timeout=5.0)
+        second_session_id = await asyncio.wait_for(self.establish_session(), timeout=5.0)
+        assert first_session_id >= 0
+        assert second_session_id >= 0
+        assert first_session_id != second_session_id
+        return first_session_id, second_session_id
+
+    async def open_stream(self, session_id: int) -> int:
+        """セッションに双方向データストリームを開く
+
+        WT ヘッダーは h3 層のキューに積まれるだけで、この時点では送信しない。
+        送信は send_stream_data / reset_stream の QUIC 側送出に依存する。
+        -1 検証テストの決定的性はこの「送信しない」前提に依存している
+        (送信するとサーバー側の stream_info_ に登録され、セッション ID が
+        復元可能になる)
+
+        Returns:
+            ストリーム ID
+        """
+        stream_id = self._quic_connection.open_stream(True)
+        assert self._h3_session.open_stream(session_id, stream_id, False) is True
+        return stream_id
+
+    async def send_stream_data(self, stream_id: int, data: bytes) -> None:
+        """ストリームにデータを送信する"""
+        self._h3_session.send_stream_data(stream_id, data)
+        await self._pump()
+
+    async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームをリセットする
+
+        QUIC と h3 層の両方にリセットを通知し、QUIC 層の送信のみを
+        実行する。h3 層の get_streams_to_send を呼ぶと積まれた WT
+        ヘッダーが送信されてしまうため、WT ヘッダー未受信のまま
+        リセットする検証が決定的でなくなる
+        """
+        self._quic_connection.reset_stream(stream_id, error_code)
+        self._h3_session.reset_stream(stream_id, error_code)
+        await self._send_quic_only()
+
+
+@dataclass
+class _ResetTestServerInfo:
+    """STREAM_RESET 検証用サーバーの観測結果"""
+
+    session_ids: list[int] = field(default_factory=list)
+    sessions_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    data_session_id: int | None = None
+    data_received: asyncio.Event = field(default_factory=asyncio.Event)
+    reset_session_id: int | None = None
+    reset_stream_id: int | None = None
+    reset_received: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+async def _start_reset_test_server(
+    test_certificates,
+    expected_sessions: int,
+) -> tuple[Server, asyncio.Task, _ResetTestServerInfo]:
+    """STREAM_RESET 検証用の高レベル Server を起動する
+
+    Args:
+        test_certificates: テスト用証明書フィクスチャ
+        expected_sessions: セッション確立待ちの数
+
+    Returns:
+        (server, server_task, info) のタプル
+    """
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    info = _ResetTestServerInfo()
+
+    async def on_session_ready(session_id: int, addr: tuple[str, int]) -> None:
+        info.session_ids.append(session_id)
+        if len(info.session_ids) == expected_sessions:
+            info.sessions_ready.set()
+
+    async def on_stream_data(
+        session_id: int,
+        stream_id: int,
+        data: bytes,
+        addr: tuple[str, int],
+    ) -> None:
+        info.data_session_id = session_id
+        info.data_received.set()
+
+    async def on_stream_reset(
+        session_id: int,
+        stream_id: int,
+        error_code: int,
+        addr: tuple[str, int],
+    ) -> None:
+        info.reset_session_id = session_id
+        info.reset_stream_id = stream_id
+        info.reset_received.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_stream_data(on_stream_data)
+    server.on_stream_reset(on_stream_reset)
+
+    # サーバーの起動を完了させてからタスクを作成する
+    # (run() は未開始状態だと RuntimeError を上げるため)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    return server, server_task, info
+
+
+async def _cleanup_reset_test_server(
+    server: Server,
+    server_task: asyncio.Task,
+    client: _LowLevelClient,
+) -> None:
+    """リセット検証テストの後片付けを行う
+
+    サーバータスクが例外終了していた場合は、テスト本体の失敗を
+    覆い隠さないよう元の例外を raise する
+    """
+    if server_task.done():
+        exception = server_task.exception()
+        if exception is not None:
+            raise exception
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await server.stop()
+    client.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_reset_second_session_id(test_certificates):
+    """複数セッション確立時にリセットしたストリームのセッション ID が渡ることを確認
+
+    同一 QUIC 接続上に 2 セッションを確立し、2 つ目のセッションでクライアントが
+    開いたデータストリームを、サーバー側の on_stream_data で受信を確認してから
+    リセットすると、2 つ目のセッション ID が on_stream_reset に渡る
+    (旧実装ではセッション ID 集合の先頭要素が渡っていた)
+    """
+    server, server_task, info = await _start_reset_test_server(
+        test_certificates, expected_sessions=2
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        # 同一 QUIC 接続上に 2 セッションを確立する
+        first_session_id, second_session_id = await client.establish_two_sessions()
+
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        assert info.session_ids == [first_session_id, second_session_id]
+
+        # 2 つ目のセッションでデータストリームを開いて送信する
+        stream_id = await client.open_stream(second_session_id)
+        await client.send_stream_data(stream_id, b"payload")
+
+        # サーバー側の受信を確認してからリセットする
+        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        assert info.data_session_id == second_session_id
+
+        await client.reset_stream(stream_id)
+
+        # リセットされたストリームの属するセッション ID が渡る
+        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        assert info.reset_stream_id == stream_id
+        assert info.reset_session_id == second_session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+async def test_stream_reset_before_data_received_minus_one(test_certificates):
+    """WT ヘッダー未受信のままリセットされたストリームには -1 が渡ることを確認
+
+    open_stream と reset_stream の間に送信処理を挟まない (WT ヘッダーが先に
+    届くと stream_info_ に登録され、-1 が決定的にならない)。セッションとの
+    関連付けはストリーム先頭のヘッダー経由のみであり (draft-ietf-webtrans-http3-16
+    Section 4.4)、本実装は RESET_STREAM_AT 未対応のためヘッダー未受信のまま
+    リセットされたストリームは復元できない。旧実装では無関係なセッション ID が
+    渡っていたケース
+    """
+    server, server_task, info = await _start_reset_test_server(
+        test_certificates, expected_sessions=2
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        _first_session_id, second_session_id = await client.establish_two_sessions()
+
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        # データストリームを開くが、データは送信しない
+        stream_id = await client.open_stream(second_session_id)
+
+        # 送信処理を挟まずにリセットする
+        await client.reset_stream(stream_id)
+
+        # セッション ID を復元できないため -1 が渡る
+        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        assert info.reset_stream_id == stream_id
+        assert info.reset_session_id == -1
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+async def test_stream_reset_connect_stream_session_id(test_certificates):
+    """CONNECT ストリームのリセットでセッション ID が渡ることを確認
+
+    2 つ目のセッションの CONNECT ストリーム (最小 ID でない CONNECT) を
+    クライアントがリセットすると、セッション ID (= CONNECT ストリーム ID。
+    draft-ietf-webtrans-http3-16 Section 2.2) が on_stream_reset に渡る
+    """
+    server, server_task, info = await _start_reset_test_server(
+        test_certificates, expected_sessions=2
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        _first_session_id, second_session_id = await client.establish_two_sessions()
+
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        # 2 つ目のセッションの CONNECT ストリームをリセットする
+        await client.reset_stream(second_session_id)
+
+        # セッション ID (= CONNECT ストリーム ID) が渡る
+        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        assert info.reset_stream_id == second_session_id
+        assert info.reset_session_id == second_session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)

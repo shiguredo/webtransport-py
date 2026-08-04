@@ -721,13 +721,32 @@ void H3Session::send_datagram(int64_t session_id,
   pending_datagrams_.push_back(std::move(datagram));
 }
 
-void H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
+int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   if (!conn_) {
-    return;
+    return -1;
   }
 
-  nghttp3_conn_close_stream(conn_, stream_id, error_code);
+  // セッション ID の復元は nghttp3 呼び出しより前に行う
+  // (nghttp3_conn_close_stream は同期実行される stream_close_cb を呼び、
+  // stream_close_cb が stream_info_ からエントリを削除するため)
+  int64_t session_id = -1;
+  auto it = stream_info_.find(stream_id);
+  if (it != stream_info_.end()) {
+    session_id = it->second.session_id;
+  } else if (session_ids_.count(stream_id) > 0) {
+    // CONNECT ストリームは stream_info_ に登録されないため session_ids_ で判定する。
+    // セッション ID は CONNECT ストリーム ID そのもの (draft-ietf-webtrans-http3-16
+    // Section 2.2)。CONNECT ストリームのリセットはセッション終了の正当な経路
+    // (Section 6 のセッション終了条件の 1 つ目)
+    session_id = stream_id;
+  }
+
+  // WT ヘッダー未受信 (stream_info_ に未登録) のストリーム等は
+  // NGHTTP3_ERR_STREAM_NOT_FOUND が返るため戻り値は無視し、
+  // 復元したセッション ID (復元できない場合は -1) を返す
+  (void)nghttp3_conn_close_stream(conn_, stream_id, error_code);
   stream_info_.erase(stream_id);
+  return session_id;
 }
 
 void H3Session::reset_stream(int64_t stream_id, uint64_t error_code) {
@@ -1379,8 +1398,10 @@ void bind_webtransport_h3(nb::module_& m) {
       .def("close_stream", &H3Session::close_stream, nb::arg("stream_id"),
            nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
-                   "0) -> None"),
-           "WebTransport ストリームを閉じる (nghttp3 に通知)")
+                   "0) -> int"),
+           "WebTransport ストリームを閉じる (nghttp3 に通知)。戻り値は"
+           "リセットされたストリームが属するセッション ID。復元できない"
+           "場合は -1")
       .def("reset_stream", &H3Session::reset_stream, nb::arg("stream_id"),
            nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "

@@ -37,6 +37,8 @@
   - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
+  - @voluntas
 
 ### misc
 

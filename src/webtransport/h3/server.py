@@ -144,6 +144,10 @@ class Server:
     ) -> None:
         """ストリームリセット受信時のコールバックを設定する
 
+        session_id はリセットされたストリームが属するセッション ID。
+        セッション ID を復元できない場合 (WT ヘッダー未受信のまま
+        リセットされたストリーム等) は -1 が渡る。
+
         Args:
             callback: async def callback(session_id: int, stream_id: int, error_code: int, addr: tuple[str, int]) -> None
         """
@@ -318,13 +322,11 @@ class Server:
             elif quic_event.type == quic.EventType.DATAGRAM:
                 client.webtransport_session.receive_datagram(quic_event.data)
             elif quic_event.type == quic.EventType.STREAM_RESET:
-                client.webtransport_session.close_stream(
+                session_id = client.webtransport_session.close_stream(
                     quic_event.stream_id,
                     quic_event.error_code,
                 )
                 if self._on_stream_reset is not None:
-                    session_ids = client.webtransport_session.get_session_ids()
-                    session_id = session_ids[0] if session_ids else -1
                     await self._on_stream_reset(
                         session_id,
                         quic_event.stream_id,

@@ -246,13 +246,21 @@ class H3Session {
    * 受信した後に呼び出す。
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
+   * @return リセットされたストリームが属するセッション ID。
+   *   CONNECT ストリーム (セッション ID は CONNECT ストリーム ID そのもの。
+   *   draft-ietf-webtrans-http3-16 Section 2.2) の場合はストリーム ID 自身を返す。
+   *   セッション ID を復元できない場合 (制御ストリーム・QPACK ストリーム・
+   *   WT ヘッダー未受信のままリセットされたストリーム等) は -1 を返す。
+   *   コネクションが無い場合も -1 を返す。
    */
-  void close_stream(int64_t stream_id, uint64_t error_code = 0);
+  int64_t close_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
    * WebTransport ストリームをリセットする
    *
-   * close_stream と同じ。高レベル API では QUIC RESET_STREAM 送出と合わせて使う。
+   * nghttp3 への通知は close_stream と同じ。close_stream の戻り値
+   * (セッション ID) は破棄する。高レベル API では QUIC RESET_STREAM
+   * 送出と合わせて使う。
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
    */
