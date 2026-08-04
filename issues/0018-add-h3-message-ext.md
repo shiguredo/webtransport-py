@@ -1,7 +1,7 @@
 # nghttp3 の送信側拡張 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-04
 - Branch: feature/add-h3-message-ext
 - Polished: 2026-08-04
 
@@ -37,3 +37,14 @@ HTTP/3 のトレーラ送信・1xx レスポンス・graceful shutdown (shutdown
 - Python から graceful shutdown (shutdown notice) を開始できる (goaway() のセマンティクスが変更されていないことを確認する。受信側の確認は既存の GoAway イベントで行う)
 - Python からストリームの書き込み側をシャットダウンできる (shutdown 後の `send_data` は no-op となり送出されないことを確認する。0017 実装済みなら `stream_writable` が false になることも確認する)
 - モックなしのテストで、各 API が動作することを確認する (Http3Connection は低レベル受け渡し構成 (0017 と同様の `_pump` 方式) でテストする。0017 実装済みなら流用し、未実装なら 0013 と同様の構成を新規に構築する)
+
+## 解決方法
+
+`src/bindings/http3.cpp` / `.h` の `Http3Connection` に 4 つの送信側拡張 API を追加し、nanobind で公開した。
+
+- `submit_trailers` (nghttp3_conn_submit_trailers): ストリーム ID とヘッダーを受け取り、トレーラを送信する。呼び出し自体がストリーム終端 (WRITE_END_STREAM) を担う。flush で fin が送信処理された後の呼び出しは NGHTTP3_ERR_INVALID_STATE になり False を返す
+- `submit_info` (nghttp3_conn_submit_info): 1xx レスポンスを送信する。サーバー専用 (is_server_ ガード)。QPACK ストリーム未バインド時は False
+- `submit_shutdown_notice` (nghttp3_conn_submit_shutdown_notice): graceful shutdown の開始通知 (GOAWAY 相当) を送信する。サーバー専用。制御ストリーム未バインド・goaway() 済み・送信済みの場合は False (GOAWAY ID の単調減少と重複送信の防止)
+- `shutdown_stream_write` (nghttp3_conn_shutdown_stream_write): ストリームの書き込み側をシャットダウンする。shutdown 済みストリーム ID を C++ 側で追跡し、shutdown 後の `send_data` は no-op、`submit_trailers` は False を返す
+
+テストは `tests/test_http3_message_ext.py` に追加した (15 件)。低レベル受け渡し構成 (`_pump` / `_create_connection_pair`) は 0017 と同様に構築し、トレーラ・1xx・shutdown notice・書き込み側シャットダウンの各動作をモックなしで検証した。GOAWAY ID の単調減少 ((1<<62)-4 → 0) と drained の遷移も確認している。
