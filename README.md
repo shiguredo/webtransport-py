@@ -4,6 +4,7 @@
 [![image](https://img.shields.io/pypi/pyversions/webtransport-py.svg)](https://pypi.python.org/pypi/webtransport-py)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Actions status](https://github.com/shiguredo/webtransport-py/workflows/wheel/badge.svg)](https://github.com/shiguredo/webtransport-py/actions)
+[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/shiguredo)
 
 ## About Shiguredo's open source software
 
