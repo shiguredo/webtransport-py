@@ -1,0 +1,164 @@
+"""実ブラウザ (Chromium / WebKit) を使った WebTransport E2E 検証のヘルパー
+
+Shiguredo WebTransport DevTools
+(https://moqt-devtools.shiguredo.app/webtransport-devtools) をブラウザ側
+WebTransport クライアントとして、webtransport-py の echo サーバーへの接続と
+送受信を検証する。このモジュールはブラウザ種別ごとのテストファイル
+(test_webtransport_chromium.py / test_webtransport_webkit.py) から呼び出される
+共通実装であり、pytest の collection 対象にならないように test_ / prop_ 以外の
+ファイル名にしている。通常の make test と CI の collection 対象からは
+pyproject.toml の addopts の --ignore=tests/browser で除外されている。
+"""
+
+import queue
+import urllib.parse
+
+from playwright.sync_api import Page, expect
+
+# DevTools テストページの URL
+DEVTOOLS_URL = "https://moqt-devtools.shiguredo.app/webtransport-devtools"
+
+
+def _devtools_url(browser_server, certificate_hash_value: str) -> str:
+    """DevTools テストページの URL を組み立てる
+
+    certificateHash は base64 で、URL パラメータに含めるには percent-encoding
+    が必要である。base64 に含まれる '+' は URLSearchParams がスペースに
+    デコードされ、atob() は空白を無視するため正しいバイト列に復元できず
+    証明書ハッシュ検証が失敗する。urllib.parse.urlencode は '+' を '%2B' に
+    percent-encode するため正しく渡せる。
+    """
+    params = urllib.parse.urlencode(
+        {
+            "url": browser_server.url,
+            "certificateHash": certificate_hash_value,
+        }
+    )
+    return f"{DEVTOOLS_URL}?{params}"
+
+
+def run_browser_e2e_webtransport(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """実ブラウザから WebTransport サーバーへの接続と送受信を検証する
+
+    検証観点 5 項目 (接続確立・双方向ストリームの送受信・単方向ストリームの
+    送信・サーバーからの単方向ストリーム送信・データグラムの送受信) を
+    1 回の接続で順次検証する。ページロードは外部ホスト依存のため最小限に
+    留め、接続イベントの混線を避ける。
+    """
+    # 接続先 URL と証明書ハッシュを指定して DevTools ページを開く
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+
+    # WebTransport API が利用可能な状態でページがロードされることを確認する
+    expect(page.get_by_text("WebTransport Not Supported")).not_to_be_visible()
+
+    # 検証観点 1: 接続確立
+    # Connect ボタンをクリックし、ページ側の Connected 表示 (部分一致で
+    # "Disconnected" にマッチしないよう完全一致にする) とサーバー側の
+    # on_session_ready の両方で確認する
+    page.get_by_role("button", name="Connect").click()
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+    # 検証観点 2: サーバーからの単方向ストリーム送信
+    # セッション確立をトリガーに Server.open_stream で単方向ストリームが
+    # 開かれ (戻り値が 0 以上)、Incoming Streams セクションに表示されることを
+    # 確認する
+    try:
+        opened_payload = browser_server.wait_event("server_stream_opened", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側で単方向ストリームが開かれませんでした") from error
+    opened_stream_id, _ = opened_payload
+    assert opened_stream_id >= 0
+
+    incoming_section = (
+        page.get_by_role("heading", name="Incoming Streams").locator("..").locator("..")
+    )
+    incoming_message = (
+        incoming_section.locator("div.text-xs")
+        .filter(has_text="RECV:")
+        .filter(has_text="server-unidirectional-payload")
+    )
+    expect(incoming_message).to_be_visible(timeout=10_000)
+
+    # 検証観点 3: 双方向ストリームの送受信
+    # 双方向ストリーム (QUIC stream_id % 4 == 0) のみエコーバックする。
+    # ページ側でメッセージを送信し、RECV 表示とサーバー側の on_stream_data で
+    # 確認する
+    # h2 -> ヘッダー行 div -> カード div の順に親を辿ってセクションを特定する
+    bidi_section = (
+        page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
+    )
+    bidi_section.get_by_role("button", name="+ New Stream").click()
+    bidi_message = "bidi-echo-message"
+    bidi_section.get_by_placeholder("Enter message...").fill(bidi_message)
+    bidi_section.get_by_role("button", name="Send").click()
+
+    # DevTools はメッセージをタイムスタンプ・SEND:/RECV: ラベル・データの
+    # 別要素で表示するため、"RECV:" ラベルとデータを含むメッセージ要素で確認する
+    recv_message = (
+        bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=bidi_message)
+    )
+    expect(recv_message).to_be_visible(timeout=10_000)
+    try:
+        bidi_payload = browser_server.wait_event("stream_data", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側で双方向ストリームが受信されませんでした") from error
+    _, bidi_stream_id, bidi_data, _ = bidi_payload
+    assert bidi_stream_id % 4 == 0
+    assert bidi_data == bidi_message.encode()
+
+    # 検証観点 4: 単方向ストリームの送信
+    # クライアント起点の単方向ストリーム (QUIC stream_id % 4 == 2) は
+    # エコーバックしないため、ページ側の SEND 表示とサーバー側の
+    # on_stream_data で受信を確認する
+    outgoing_section = (
+        page.get_by_role("heading", name="Outgoing Streams").locator("..").locator("..")
+    )
+    outgoing_section.get_by_role("button", name="+ New Stream").click()
+    uni_message = "uni-send-message"
+    outgoing_section.get_by_placeholder("Enter message...").fill(uni_message)
+    outgoing_section.get_by_role("button", name="Send").click()
+
+    send_message = (
+        outgoing_section.locator("div.text-xs")
+        .filter(has_text="SEND:")
+        .filter(has_text=uni_message)
+    )
+    expect(send_message).to_be_visible(timeout=10_000)
+    try:
+        uni_payload = browser_server.wait_event("stream_data", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側で単方向ストリームが受信されませんでした") from error
+    _, uni_stream_id, uni_data, _ = uni_payload
+    assert uni_stream_id % 4 == 2
+    assert uni_data == uni_message.encode()
+
+    # 検証観点 5: データグラムの送受信
+    # UDP のロスに備えて複数回送信し、サーバー側・ページ側それぞれで
+    # 少なくとも 1 回の受信を確認する
+    datagram_section = page.get_by_role("heading", name="Datagrams").locator("..").locator("..")
+    datagram_message = "datagram-echo-message"
+    datagram_input = datagram_section.get_by_placeholder("Enter datagram message...")
+    for _ in range(5):
+        datagram_input.fill(datagram_message)
+        datagram_input.press("Enter")
+
+    # 複数回送信するため複数の RECV 要素が生じるので、先頭要素で確認する
+    recv_datagram = (
+        datagram_section.locator("div.text-xs")
+        .filter(has_text="RECV:")
+        .filter(has_text=datagram_message)
+        .first
+    )
+    expect(recv_datagram).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("datagram", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でデータグラムが受信されませんでした") from error

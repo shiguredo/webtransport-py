@@ -28,5 +28,8 @@ py.typed
 
 .DS_Store
 
+# pytest-playwright の成果物出力先
+test-results/
+
 # Agents
 .claude/
