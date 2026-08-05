@@ -53,6 +53,8 @@
   - @voluntas
 - [FIX] QUIC サーバーの RETRY 送出要求時に接続が閉じられた状態にならない問題を修正する
   - @voluntas
+- [FIX] close() が生成した CONNECTION_CLOSE パケットを送出しない問題を修正する
+  - @voluntas
 
 ### misc
 

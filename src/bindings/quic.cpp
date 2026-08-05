@@ -980,6 +980,15 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
 }
 
 std::optional<QuicPacket> QuicConnection::send() {
+  // close() が生成した CONNECTION_CLOSE を 1 回だけ返す。closed_ が立って
+  // いても未配送の CONNECTION_CLOSE があれば優先して返し、返した後は
+  // 従来どおり nullopt を返す (Sans-IO 設計と整合)。
+  if (pending_close_packet_) {
+    auto packet = std::move(pending_close_packet_);
+    pending_close_packet_ = std::nullopt;
+    return packet;
+  }
+
   if (!conn_ || closed_) {
     return std::nullopt;
   }
@@ -1335,9 +1344,23 @@ void QuicConnection::close(uint64_t error_code, const std::string& reason) {
       &ccerr, error_code, reinterpret_cast<const uint8_t*>(reason.c_str()),
       reason.size());
 
-  ngtcp2_conn_write_connection_close(conn_, &path, &pi, send_buffer_.data(),
-                                     send_buffer_.size(), &ccerr,
-                                     timestamp_ns_);
+  ngtcp2_ssize nwrite = ngtcp2_conn_write_connection_close(
+      conn_, &path, &pi, send_buffer_.data(), send_buffer_.size(), &ccerr,
+      timestamp_ns_);
+
+  // CONNECTION_CLOSE が生成できた場合はパケットを保持し、send() が 1 回
+  // だけ返すようにする。生成できない場合 (クライアント Initial 未送信の
+  // NGTCP2_ERR_INVALID_STATE やサーバー Initial 未受信の送出量上限) は
+  // パケット無しで終了する (state 未確立のエンドポイントは closing 状態に
+  // 入らない (RFC 9000 Section 10.2.3))。
+  //
+  // ハンドシェイク途中 (Initial 交換済み) で呼んだ場合は Initial または
+  // Handshake パケットで CONNECTION_CLOSE を書けるが、ngtcp2 が error_code
+  // を APPLICATION_ERROR に置換し reason を落とす (RFC 9000 Section 10.2.3)。
+  if (nwrite > 0) {
+    pending_close_packet_ =
+        make_packet(send_buffer_.data(), static_cast<size_t>(nwrite), path);
+  }
 
   closed_ = true;
 }

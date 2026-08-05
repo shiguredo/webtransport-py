@@ -460,3 +460,152 @@ def test_conn_state_after_retry():
     assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0
     assert server.next_event() is None
     assert server.send() is None
+
+
+def test_close_delivers_connection_close():
+    """close() が生成した CONNECTION_CLOSE をピアが受信して error_code / reason と DRAINING になる"""
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet)
+
+    # クライアント側の HANDSHAKE_COMPLETED イベントを消費しておく
+    while client.next_event() is not None:
+        pass
+
+    # サーバーが非ゼロの error_code で close() する。サーバーはハンドシェイク
+    # 完了で確認状態 (HANDSHAKE_CONFIRMED) になり 1-RTT パケットで
+    # CONNECTION_CLOSE を送るため、error_code が指定値のまま届く
+    server.close(0x100, "server error")
+    assert server.is_closed()
+
+    # close() 後、send() が CONNECTION_CLOSE パケットを 1 回だけ返す
+    close_packet = server.send()
+    assert close_packet is not None
+    assert server.send() is None
+
+    # ピア (クライアント) が CONNECTION_CLOSE を受信すると、ccerr が設定され
+    # て error_code / reason が取得でき、DRAINING 状態になる
+    # (ピアの CONNECTION_CLOSE 受信で DRAINING 状態に入る (RFC 9000
+    # Section 10.2.2))
+    client.receive(close_packet.data, CLIENT_ADDR, SERVER_ADDR)
+    assert client.is_closed() is True
+    assert client.in_draining_period is True
+    assert client.error_code == 0x100
+    assert client.reason == "server error"
+
+    # CONNECTION_CLOSED イベントが push される。終了系共通の合成値になる
+    event = client.next_event()
+    assert event is not None
+    assert event.type == EventType.CONNECTION_CLOSED
+    assert event.reason == "connection draining"
+    assert event.error_code == 0
+    assert event.stream_id == -1
+    assert event.fin is False
+
+
+def test_client_close_delivers_connection_close():
+    """クライアント側 close() が生成した CONNECTION_CLOSE もピアに届く"""
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet)
+
+    # 両側の HANDSHAKE_COMPLETED イベントを消費しておく
+    while client.next_event() is not None:
+        pass
+    while server.next_event() is not None:
+        pass
+
+    # クライアントが非ゼロの error_code で close() する。ハンドシェイク
+    # 完了後に呼んでいるため 1-RTT パケットで CONNECTION_CLOSE が送られ、
+    # error_code が指定値のまま届く
+    client.close(0x2A, "client error")
+    close_packet = client.send()
+    assert close_packet is not None
+    assert client.send() is None
+
+    # ピア (サーバー) が CONNECTION_CLOSE を受信して DRAINING 状態になる
+    server.receive(close_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    assert server.is_closed() is True
+    assert server.in_draining_period is True
+    assert server.error_code == 0x2A
+    assert server.reason == "client error"
+
+    # CONNECTION_CLOSED イベントが push される
+    event = server.next_event()
+    assert event is not None
+    assert event.type == EventType.CONNECTION_CLOSED
+    assert event.reason == "connection draining"
+
+
+def test_close_before_handshake():
+    """ハンドシェイク前の close() はクラッシュせず is_closed() になる"""
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.verify_peer = False
+    client_config.server_name = "localhost"
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    # クライアント Initial 未送信の close() (ngtcp2 の状態は
+    # NGTCP2_CS_CLIENT_INITIAL のため CONNECTION_CLOSE を書けない)
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+    client.close(0x100, "client close before initial")
+    assert client.is_closed() is True
+    # パケットは生成されないため in_closing_period は false のまま
+    assert client.in_closing_period is False
+    assert client.send() is None
+
+    # サーバー Initial 未受信の close() (accept 直後で receive 前)
+    client2 = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+    initial_packet = client2.send()
+    assert initial_packet is not None
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    server.close(0x100, "server close before initial")
+    assert server.is_closed() is True
+    # accept 直後は ngtcp2 が Initial 鍵を持っていないためパケット無し
+    assert server.in_closing_period is False
+    assert server.send() is None
+
+
+def test_close_mid_handshake_replaces_error_code():
+    """ハンドシェイク途中の close() は CONNECTION_CLOSE を生成するが error_code が置換される"""
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.verify_peer = False
+    client_config.server_name = "localhost"
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+
+    # クライアントの Initial をサーバーに渡して Initial 交換済みの状態にする
+    # (ハンドシェイクは未完了)
+    first_initial = client.send()
+    assert first_initial is not None
+    server = Connection.accept(server_config, first_initial.data, SERVER_ADDR, CLIENT_ADDR)
+    server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR)
+    second_initial = client.send()
+    if second_initial:
+        server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR)
+    assert server.is_handshake_completed() is False
+
+    # ハンドシェイク途中の close() は Initial または Handshake パケットで
+    # CONNECTION_CLOSE を生成できるため in_closing_period は true になる
+    server.close(0x100, "mid handshake close")
+    assert server.is_closed() is True
+    assert server.in_closing_period is True
+    close_packet = server.send()
+    assert close_packet is not None
+
+    # Initial パケットの CONNECTION_CLOSE では error_code が
+    # APPLICATION_ERROR (0x0c) に置換され reason が落ちる
+    # (RFC 9000 Section 10.2.3)
+    client.receive(close_packet.data, CLIENT_ADDR, SERVER_ADDR)
+    assert client.is_closed() is True
+    assert client.in_draining_period is True
+    assert client.error_code == 0x0C
+    assert client.reason == ""

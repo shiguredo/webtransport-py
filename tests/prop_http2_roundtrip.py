@@ -127,7 +127,12 @@ def prop_http2_custom_headers_roundtrip(custom_headers: list[tuple[str, str]]):
     filtered_headers = [
         (name.lower(), value)
         for name, value in custom_headers
-        if valid_header_name(name) and valid_header_value(value) and not name.startswith(":")
+        if valid_header_name(name)
+        and valid_header_value(value)
+        and not name.startswith(":")
+        # te ヘッダーは値が trailers のみ許容されるため生成対象から外す
+        # (RFC 9113 Section 8.2.2)
+        and name.lower() != "te"
     ]
 
     headers = [

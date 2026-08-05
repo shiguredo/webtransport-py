@@ -207,6 +207,9 @@ class QuicConnection {
 
   /**
    * 送信すべきデータを取得
+   *
+   * close() が生成した CONNECTION_CLOSE がある場合はそれを 1 回だけ返し、
+   * 返した後は nullopt を返す。
    * @return 送信すべき UDP パケット (なければ nullopt)
    */
   std::optional<QuicPacket> send();
@@ -497,10 +500,12 @@ class QuicConnection {
    * CLOSING 状態か
    *
    * ngtcp2 のプロトコル状態を返す。close() が CONNECTION_CLOSE を書き出せた
-   * 場合のみ true になるため、通常はハンドシェイク完了後に close() を呼んだ
-   * 場合に true になる。ハンドシェイク前に close() を呼んだ場合は ngtcp2 が
+   * 場合のみ true になる。クライアント Initial 未送信 (クライアント) /
+   * Initial 未受信 (サーバー) の時点で close() を呼んだ場合は ngtcp2 が
    * CONNECTION_CLOSE を書けないため false のままになり、is_closed() と
-   * 一致しないことがある。
+   * 一致しないことがある。ハンドシェイク途中 (Initial 交換済み) の close()
+   * は Initial または Handshake パケットで CONNECTION_CLOSE を書けるため
+   * true になる。
    */
   bool in_closing_period() const;
 
@@ -711,6 +716,9 @@ class QuicConnection {
   // 接続状態
   bool handshake_completed_ = false;
   bool closed_ = false;
+
+  // close() が生成した CONNECTION_CLOSE パケット (send() が 1 回だけ返す)
+  std::optional<QuicPacket> pending_close_packet_;
 
   // 0-RTT 状態
   bool early_data_attempted_ = false;

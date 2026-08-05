@@ -142,11 +142,10 @@ def test_connection_draining_state():
     assert perform_handshake(client, server, initial_packet)
 
     # サーバーから接続をクローズ
-    # close() は内部でクローズパケットを生成し closed_ フラグを立てる
+    # close() は CONNECTION_CLOSE パケットを生成して closed_ フラグを立てる
     server.close(0, "normal close")
 
-    # close() 後は closed_ が true なので send() は None を返す
-    # これは期待される動作
+    # close() 後は closed_ が true になり、send() が CONNECTION_CLOSE を返す
     assert server.is_closed()
 
     # クライアント側では、サーバーからの明示的なクローズパケットがなくても
@@ -174,22 +173,21 @@ def test_receive_after_close():
 
 
 def test_send_after_close():
-    """接続クローズ後に send() を呼んでもクラッシュしない"""
+    """接続クローズ後は CONNECTION_CLOSE を 1 回だけ送出し、以降は None を返す"""
     client, server, initial_packet = create_client_server_pair()
     assert perform_handshake(client, server, initial_packet)
 
     # 接続をクローズ
-    # close() は内部でクローズパケットを生成し closed_ フラグを立てる
     client.close(0, "normal close")
 
     # close() 後は closed_ が true
     assert client.is_closed()
 
-    # close() 後に send() を呼ぶと None が返る（期待される動作）
+    # close() 後に send() を呼ぶと CONNECTION_CLOSE パケットを 1 回だけ返す
     result = client.send()
-    assert result is None
+    assert result is not None
 
-    # さらに send() を呼んでも None が返る
+    # 2 回目以降の send() は None を返す
     result = client.send()
     assert result is None
 
@@ -221,17 +219,22 @@ def test_stream_data_after_fin():
 
 
 def test_multiple_close_calls():
-    """接続を複数回クローズしてもクラッシュしない"""
+    """接続を複数回クローズしても CONNECTION_CLOSE は 1 回だけ送出される"""
     client, server, initial_packet = create_client_server_pair()
     assert perform_handshake(client, server, initial_packet)
 
-    # 複数回クローズを呼ぶ
+    # 複数回クローズを呼ぶ (2 回目以降は closed_ ガードで no-op)
     client.close(0, "first close")
     client.close(1, "second close")
     client.close(2, "third close")
 
-    # クラッシュしないことを確認
+    # クラッシュしないこと、closed_ が立つことを確認
     assert client.is_closed()
+
+    # CONNECTION_CLOSE は 1 回だけ送出される (2 回目以降は None)
+    result = client.send()
+    assert result is not None
+    assert client.send() is None
 
 
 def test_multiple_stream_close_calls():
@@ -290,7 +293,7 @@ def test_datagram_after_close():
     # クローズ後にデータグラムを送信
     client.send_datagram(b"test datagram")
 
-    # send() を呼んでもクラッシュしない
+    # send() を呼んでもクラッシュしない。close() が生成した
+    # CONNECTION_CLOSE パケットが返る
     result = client.send()
-    # クローズパケットまたは None が返る
-    assert result is None or isinstance(result, bytes)
+    assert result is not None
