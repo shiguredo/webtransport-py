@@ -1,12 +1,12 @@
 """WebKit (Safari) を使った WebTransport E2E テスト
 
 実ブラウザ (WebKit / Safari) の WebTransport API から echo サーバーへの
-接続と送受信を検証する。検証ロジックは共通実装 (_webtransport_e2e.py) にあり、
-ここでは WebKit ブラウザのページとサーバーフィクスチャを渡すだけである。
+接続と送受信を検証する。検証ロジックはヘルパー (helpers.py) にあり、ここでは
+WebKit ブラウザのページとサーバーフィクスチャを渡すだけである。
 """
 
 import pytest
-from _webtransport_e2e import run_browser_e2e_webtransport
+from helpers import run_browser_e2e_webtransport
 from playwright.sync_api import Page
 
 pytestmark = pytest.mark.browser

@@ -1,13 +1,13 @@
-"""実ブラウザ (Chromium / WebKit) を使った WebTransport E2E 検証の共通実装
+"""実ブラウザ (Chromium / WebKit) を使った WebTransport E2E 検証のヘルパー
 
 Shiguredo WebTransport DevTools
 (https://moqt-devtools.shiguredo.app/webtransport-devtools) をブラウザ側
 WebTransport クライアントとして、webtransport-py の echo サーバーへの接続と
 送受信を検証する。このモジュールはブラウザ種別ごとのテストファイル
 (test_webtransport_chromium.py / test_webtransport_webkit.py) から呼び出される
-共通実装であり、pytest の collection 対象にならないように _ プレフィックスで
-始めている。通常の make test と CI の collection 対象からは pyproject.toml の
-addopts の --ignore=tests/browser で除外されている。
+共通実装であり、pytest の collection 対象にならないように test_ / prop_ 以外の
+ファイル名にしている。通常の make test と CI の collection 対象からは
+pyproject.toml の addopts の --ignore=tests/browser で除外されている。
 """
 
 import queue
