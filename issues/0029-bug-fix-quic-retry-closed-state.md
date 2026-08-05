@@ -1,7 +1,7 @@
 # QUIC サーバーの RETRY 送出要求時に接続が閉じられた状態にならない
 
 - Created: 2026-08-05
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-06
 - Branch: feature/fix-quic-retry-closed-state
 - Polished: 2026-08-05
 
@@ -29,3 +29,10 @@
 - サーバー側の `receive()` が `NGTCP2_ERR_RETRY` を処理した後、`is_closed()` が true を返すこと
 - 同状態で接続統計 API (`ngtcp2_conn_info` 等) が None を返すこと
 - モックなしのテストでサーバー側の `NGTCP2_ERR_RETRY` 経路を再現して確認する。RETRY が返るのは、サーバーが `NGTCP2_CS_SERVER_INITIAL` の間に CRYPTO オフセットが 0 のまま Initial パケットの CRYPTO フレームがバッファリングされた場合 (分割された ClientHello の順序逆転。0-RTT パケットには CRYPTO フレームが含まれないため単独では条件を満たさない) で、本ライブラリのサーバーはアドレス検証トークンを設定しない (ngtcp2 の既定値) ため到達し得る。再現手段 (ClientHello を 1 つの Initial パケットに収まらないサイズにする等) は実測で特定し、再現が困難な場合はその旨と調査結果を報告する
+
+## 解決方法
+
+- `src/bindings/quic.cpp` の `receive` メソッド内の `NGTCP2_ERR_RETRY` 分岐で、他の終了系エラーと同じく `closed_ = true` を立てるようにした。これにより RETRY 送出要求を受けた接続は `is_closed()` が true になり、接続統計 API (`ngtcp2_conn_info` 等) が「閉じている場合は None」の契約どおり None を返す
+- Retry パケット送出の実装は対象外 (設計方針どおり)。RFC 9000 Section 8.1.2 が許可する (can) 応答であること、本ライブラリのサーバーには送出手段が無く継続不能であることをコードコメントに明記した
+- `tests/test_quic_conn_state.py` に `test_conn_state_after_retry` を追加した。クライアントの ClientHello が複数の Initial パケットに分割されることを利用し、2 つ目の Initial を先に受信させて `NGTCP2_ERR_RETRY` 経路をモックなしで再現する。閉鎖後の状態 (is_closed / is_established / in_closing_period / in_draining_period / error_code / reason / 統計 API / get_timeout / 送受信無効化) を検証する
+- `CHANGES.md` の `## develop` セクションに `[FIX]` エントリを追加した
