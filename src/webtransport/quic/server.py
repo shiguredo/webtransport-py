@@ -6,6 +6,7 @@ asyncio と UDP を使用した高レベル QUIC サーバー実装。
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
@@ -13,6 +14,8 @@ from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 class Server:
@@ -155,12 +158,21 @@ class Server:
     async def stop(self) -> None:
         """サーバーを停止する"""
         self._running = False
-        for connection in self._connections.values():
-            connection.close()
-        self._connections.clear()
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        try:
+            for addr, connection in list(self._connections.items()):
+                connection.close()
+                try:
+                    # close() が生成した CONNECTION_CLOSE をピアへ送出する。
+                    # 1 接続の送出失敗で残りの接続への送出が中断されないよう
+                    # 接続ごとに例外を隔離する
+                    await self._send_to(addr, connection)
+                except OSError as exc:
+                    logger.warning("failed to send connection close: %s", exc)
+        finally:
+            self._connections.clear()
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""

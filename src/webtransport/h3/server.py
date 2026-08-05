@@ -6,6 +6,7 @@ asyncio と UDP を使用した高レベル WebTransport サーバー実装。
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
@@ -14,6 +15,8 @@ from webtransport import quic
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 class ClientConnection:
@@ -184,13 +187,23 @@ class Server:
     async def stop(self) -> None:
         """サーバーを停止する"""
         self._running = False
-        for client in self._clients.values():
-            if client.quic_connection is not None:
+        try:
+            for addr, client in list(self._clients.items()):
+                if client.quic_connection is None:
+                    continue
                 client.quic_connection.close()
-        self._clients.clear()
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+                try:
+                    # close() が生成した CONNECTION_CLOSE をピアへ送出する。
+                    # 1 接続の送出失敗で残りの接続への送出が中断されないよう
+                    # 接続ごとに例外を隔離する
+                    await self._send_to(addr, client)
+                except OSError as exc:
+                    logger.warning("failed to send connection close: %s", exc)
+        finally:
+            self._clients.clear()
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
