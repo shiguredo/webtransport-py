@@ -1369,6 +1369,189 @@ std::vector<uint8_t> QuicConnection::get_connection_id() const {
   return std::vector<uint8_t>(dcid->data, dcid->data + dcid->datalen);
 }
 
+std::optional<ngtcp2_conn_info> QuicConnection::get_conn_info() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+
+  ngtcp2_conn_info info;
+  ngtcp2_conn_get_conn_info2(conn_, &info);
+  return info;
+}
+
+std::optional<uint64_t> QuicConnection::latest_rtt() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->latest_rtt;
+}
+
+std::optional<uint64_t> QuicConnection::min_rtt() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->min_rtt;
+}
+
+std::optional<uint64_t> QuicConnection::smoothed_rtt() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->smoothed_rtt;
+}
+
+std::optional<uint64_t> QuicConnection::rttvar() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->rttvar;
+}
+
+std::optional<uint64_t> QuicConnection::cwnd() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->cwnd;
+}
+
+std::optional<uint64_t> QuicConnection::ssthresh() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->ssthresh;
+}
+
+std::optional<uint64_t> QuicConnection::bytes_in_flight() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->bytes_in_flight;
+}
+
+std::optional<uint64_t> QuicConnection::pkt_sent() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->pkt_sent;
+}
+
+std::optional<uint64_t> QuicConnection::bytes_sent() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->bytes_sent;
+}
+
+std::optional<uint64_t> QuicConnection::pkt_recv() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->pkt_recv;
+}
+
+std::optional<uint64_t> QuicConnection::bytes_recv() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->bytes_recv;
+}
+
+std::optional<uint64_t> QuicConnection::pkt_lost() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->pkt_lost;
+}
+
+std::optional<uint64_t> QuicConnection::bytes_lost() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->bytes_lost;
+}
+
+std::optional<uint64_t> QuicConnection::ping_recv() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->ping_recv;
+}
+
+std::optional<uint64_t> QuicConnection::pkt_discarded() const {
+  const auto info = get_conn_info();
+  if (!info) {
+    return std::nullopt;
+  }
+  return info->pkt_discarded;
+}
+
+std::optional<uint64_t> QuicConnection::pto() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return ngtcp2_conn_get_pto2(conn_);
+}
+
+std::optional<uint64_t> QuicConnection::cwnd_left() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return ngtcp2_conn_get_cwnd_left2(conn_);
+}
+
+std::optional<uint64_t> QuicConnection::max_data_left() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return ngtcp2_conn_get_max_data_left2(conn_);
+}
+
+std::optional<uint64_t> QuicConnection::max_stream_data_left(
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return ngtcp2_conn_get_max_stream_data_left2(conn_, stream_id);
+}
+
+std::optional<uint64_t> QuicConnection::stream_loss_count(
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return static_cast<uint64_t>(
+      ngtcp2_conn_get_stream_loss_count2(conn_, stream_id));
+}
+
+std::optional<uint64_t> QuicConnection::send_quantum() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return static_cast<uint64_t>(ngtcp2_conn_get_send_quantum2(conn_));
+}
+
+std::optional<uint64_t> QuicConnection::path_max_tx_udp_payload_size() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+  return static_cast<uint64_t>(
+      ngtcp2_conn_get_path_max_tx_udp_payload_size2(conn_));
+}
+
 void QuicConnection::push_event(QuicEvent event) {
   events_.push_back(std::move(event));
 }
@@ -2035,7 +2218,78 @@ void bind_quic(nb::module_& m) {
             return nb::bytes(reinterpret_cast<const char*>(cid.data()),
                              cid.size());
           },
-          nb::sig("def get_connection_id(self) -> bytes"), "接続 ID を取得");
+          nb::sig("def get_connection_id(self) -> bytes"), "接続 ID を取得")
+      .def_prop_ro("latest_rtt", &QuicConnection::latest_rtt,
+                   nb::sig("def latest_rtt(self) -> int | None"),
+                   "最新の RTT (ナノ秒)")
+      .def_prop_ro("min_rtt", &QuicConnection::min_rtt,
+                   nb::sig("def min_rtt(self) -> int | None"),
+                   "最小の RTT (ナノ秒)")
+      .def_prop_ro("smoothed_rtt", &QuicConnection::smoothed_rtt,
+                   nb::sig("def smoothed_rtt(self) -> int | None"),
+                   "平滑化された RTT (ナノ秒)")
+      .def_prop_ro("rttvar", &QuicConnection::rttvar,
+                   nb::sig("def rttvar(self) -> int | None"),
+                   "RTT の平均偏差 (ナノ秒)")
+      .def_prop_ro("cwnd", &QuicConnection::cwnd,
+                   nb::sig("def cwnd(self) -> int | None"),
+                   "輻輳ウィンドウ (バイト)")
+      .def_prop_ro("ssthresh", &QuicConnection::ssthresh,
+                   nb::sig("def ssthresh(self) -> int | None"),
+                   "スロー スタート閾値 (バイト)")
+      .def_prop_ro("bytes_in_flight", &QuicConnection::bytes_in_flight,
+                   nb::sig("def bytes_in_flight(self) -> int | None"),
+                   "送信中で未 ACK のバイト数")
+      .def_prop_ro("pkt_sent", &QuicConnection::pkt_sent,
+                   nb::sig("def pkt_sent(self) -> int | None"),
+                   "送信したパケット数")
+      .def_prop_ro("bytes_sent", &QuicConnection::bytes_sent,
+                   nb::sig("def bytes_sent(self) -> int | None"),
+                   "送信したバイト数")
+      .def_prop_ro("pkt_recv", &QuicConnection::pkt_recv,
+                   nb::sig("def pkt_recv(self) -> int | None"),
+                   "受信したパケット数 (破棄パケット除外)")
+      .def_prop_ro("bytes_recv", &QuicConnection::bytes_recv,
+                   nb::sig("def bytes_recv(self) -> int | None"),
+                   "受信したバイト数 (破棄パケット除外)")
+      .def_prop_ro("pkt_lost", &QuicConnection::pkt_lost,
+                   nb::sig("def pkt_lost(self) -> int | None"),
+                   "損失したパケット数 (PMTUD パケット除外)")
+      .def_prop_ro("bytes_lost", &QuicConnection::bytes_lost,
+                   nb::sig("def bytes_lost(self) -> int | None"),
+                   "損失したバイト数 (PMTUD パケット除外)")
+      .def_prop_ro("ping_recv", &QuicConnection::ping_recv,
+                   nb::sig("def ping_recv(self) -> int | None"),
+                   "受信した PING フレーム数")
+      .def_prop_ro("pkt_discarded", &QuicConnection::pkt_discarded,
+                   nb::sig("def pkt_discarded(self) -> int | None"),
+                   "破棄したパケット数")
+      .def_prop_ro("pto", &QuicConnection::pto,
+                   nb::sig("def pto(self) -> int | None"),
+                   "PTO (プローブタイムアウト) (ナノ秒)")
+      .def_prop_ro("cwnd_left", &QuicConnection::cwnd_left,
+                   nb::sig("def cwnd_left(self) -> int | None"),
+                   "輻輳ウィンドウ残量 (バイト)")
+      .def_prop_ro("max_data_left", &QuicConnection::max_data_left,
+                   nb::sig("def max_data_left(self) -> int | None"),
+                   "コネクション全体のフロー制御残量 (バイト)")
+      .def("max_stream_data_left", &QuicConnection::max_stream_data_left,
+           nb::arg("stream_id"),
+           nb::sig(
+               "def max_stream_data_left(self, stream_id: int) -> int | None"),
+           "ストリームごとのフロー制御残量 (バイト)")
+      .def("stream_loss_count", &QuicConnection::stream_loss_count,
+           nb::arg("stream_id"),
+           nb::sig("def stream_loss_count(self, stream_id: int) -> int | None"),
+           "STREAM フレームを含む損失パケット数 (スプリアス損失を含む)")
+      .def_prop_ro("send_quantum", &QuicConnection::send_quantum,
+                   nb::sig("def send_quantum(self) -> int | None"),
+                   "送信クォンタム (バイト)")
+      .def_prop_ro(
+          "path_max_tx_udp_payload_size",
+          &QuicConnection::path_max_tx_udp_payload_size,
+          nb::sig("def path_max_tx_udp_payload_size(self) -> int | None"),
+          "現在パスの最大 UDP ペイロードサイズ (バイト)");
 
   // ngtcp2 バージョン情報
   quic_m.def(
