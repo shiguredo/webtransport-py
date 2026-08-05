@@ -1,7 +1,7 @@
 # ngtcp2 の接続状態・エラー・ピア情報 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-05
 - Branch: feature/add-quic-conn-state
 - Polished: 2026-08-04
 
@@ -46,3 +46,16 @@ QUIC コネクションの状態・エラー詳細・ピア情報を Python か�
 - モックなしのテストで、ハンドシェイク後とエラー発生時に値が取得できることを確認する (エラー発生は tls_alert を verify_callback の失敗 (証明書検証失敗) で発生させる。tls_error はこの経路では設定されない場合がある。ccerr は CONNECTION_CLOSE 受信でのみ設定されるが、現状の close() は CONNECTION_CLOSE を送出しないため、受信経路の確保は実測で判断し、送出実装が必要な場合は別 issue として切り出す)
 - モックなしのテストで、ハンドシェイク前は `None` にならず初期値 (0 / false / 空リスト。SCID は 1 個以上) がそのまま返ることを確認する (`get_remote_transport_params2` と `get_ccerr2` のみ None)
 - モックなしのテストで、コネクションを閉じた後も値が取得できることを確認する (ccerr は受信経路の制約に従う)
+
+## 解決方法
+
+`src/bindings/quic.cpp` / `quic.h` の `QuicConnection` に接続状態・エラー・ピア情報取得 API を追加し、nanobind で公開した (Python 側は `webtransport.quic.Connection`)。
+
+- コネクションエラーを `error_code` / `reason` の 2 つの独立プロパティで公開する。エラー無し (ccerr の error_code が 0) はどちらも `None`。`reason` はピア制御の任意バイト列のため、Python 側では surrogateescape でデコードして例外を防ぐ
+- TLS エラーとアラートを `tls_error` / `tls_alert` で公開する (エラー無し時は 0 をそのまま返す)
+- トランスポートパラメータの主要 9 フィールドを `remote_` / `local_` プレフィックス付きプロパティで公開する (remote_ は未受信時に None)
+- `negotiated_version` / `client_chosen_version` / `in_closing_period` / `in_draining_period` / `scid` (list[bytes]) / `active_dcid` (list[bytes]) を公開する
+- deprecated の 1 系ではなく 2 系 (const ポインタ版) のみを使用する
+- 本 getter 群はコネクションが閉じた後も値を返す (ccerr / tls_error / tls_alert は閉じた後のエラー診断用のため、0014 の「閉じている場合は None」パターンは適用しない)
+
+テストは `tests/test_quic_conn_state.py` に追加した。`test_conn_state_before_handshake` (クライアント) と `test_conn_state_server_before_handshake` (accept 直後のサーバー) でハンドシェイク前の初期値を、`test_conn_state_after_handshake` でハンドシェイク後の値取得を、`test_conn_state_remote_reflects_peer_config` でピアの設定値が remote_* に反映されることを確認する。`test_conn_state_after_close` でクローズ後も値が取得できることを、`test_tls_alert_on_certificate_verification_failure` で verify_callback の失敗 (証明書検証失敗) により tls_alert が設定されることを確認する。ccerr の非 None 経路 (CONNECTION_CLOSE 受信) は受信経路の制約によりテスト不能のため、テストは None 側のみを検証する。
