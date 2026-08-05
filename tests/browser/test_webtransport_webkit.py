@@ -7,9 +7,13 @@ WebKit ブラウザのページとサーバーフィクスチャを渡すだけ�
 
 import pytest
 from helpers import (
+    run_browser_e2e_close_stream,
     run_browser_e2e_close_with_code,
+    run_browser_e2e_connection_options,
+    run_browser_e2e_custom_headers,
     run_browser_e2e_datagram_settings,
     run_browser_e2e_send_order_stream,
+    run_browser_e2e_stream_options,
     run_browser_e2e_webtransport,
 )
 from playwright.sync_api import Page
@@ -51,3 +55,39 @@ def test_browser_e2e_datagram_settings(
 ) -> None:
     """WebKit (Safari) でデータグラムの動的設定を検証する"""
     run_browser_e2e_datagram_settings(webkit_page, browser_server, certificate_hash_value)
+
+
+def test_browser_e2e_connection_options(
+    webkit_page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """WebKit (Safari) で WebTransport オプション指定時の接続を検証する"""
+    run_browser_e2e_connection_options(webkit_page, browser_server, certificate_hash_value)
+
+
+def test_browser_e2e_custom_headers(
+    webkit_page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """WebKit (Safari) でカスタムヘッダー付きの接続を検証する"""
+    run_browser_e2e_custom_headers(webkit_page, browser_server, certificate_hash_value)
+
+
+def test_browser_e2e_stream_options(
+    webkit_page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """WebKit (Safari) でストリーム作成オプション (sendOrder / waitUntilAvailable) を検証する"""
+    run_browser_e2e_stream_options(webkit_page, browser_server, certificate_hash_value)
+
+
+def test_browser_e2e_close_stream(
+    webkit_page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """WebKit (Safari) で双方向ストリームの close を検証する"""
+    run_browser_e2e_close_stream(webkit_page, browser_server, certificate_hash_value)

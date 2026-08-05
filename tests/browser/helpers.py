@@ -287,3 +287,170 @@ def run_browser_e2e_datagram_settings(
         browser_server.wait_event("datagram", timeout=10.0)
     except queue.Empty as error:
         raise AssertionError("サーバー側でデータグラムが受信されませんでした") from error
+
+
+def run_browser_e2e_connection_options(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """WebTransport オプション指定時の接続を検証する
+
+    requireUnreliable / congestionControl は W3C WebTransport §6.9 の接続
+    オプション。サーバーは QUIC (UDP) ベースで unreliable に対応しているため、
+    これらのオプションを指定しても接続が確立できることを確認する。
+
+    注: allowPooling は certificateHash と排他のため、自己署名証明書を
+    certificateHash でピン留めする本テストでは指定できない。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+
+    # requireUnreliable を ON、congestionControl を low-latency に指定する
+    page.get_by_test_id("connection-require-unreliable").check()
+    page.get_by_test_id("connection-congestion-control").select_option("low-latency")
+    page.get_by_test_id("connection-connect").click()
+
+    # オプション指定でも接続が確立できることを確認する
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+
+def run_browser_e2e_custom_headers(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """カスタムヘッダー付きの接続を検証する
+
+    headers オプションは W3C WebTransport §6.9 で、CONNECT リクエストに
+    カスタムヘッダーを付与する。ヘッダー付きでも接続が確立できることを
+    確認する。サーバー側の高レベル API では受信ヘッダーを観測できないため、
+    接続成功のみを確認する。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+
+    # カスタムヘッダーを指定する
+    page.get_by_test_id("connection-headers").fill(
+        "X-Custom-Header: custom-value\nX-Another-Header: test-value"
+    )
+    page.get_by_test_id("connection-connect").click()
+
+    # ヘッダー付きでも接続が確立できることを確認する
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+
+def run_browser_e2e_stream_options(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """ストリーム作成オプション (sendOrder / waitUntilAvailable) を検証する
+
+    sendOrder (§6.11) は送信優先度、waitUntilAvailable (§6.12) は送信準備が
+    整うまでストリーム作成を待つオプション。sendOrder 付きの単方向ストリームと
+    waitUntilAvailable 付きの双方向ストリームをそれぞれ作成し、送受信が
+    機能することを確認する。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    page.get_by_test_id("connection-connect").click()
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+    # sendOrder 付きの単方向ストリームを作成して送信する
+    outgoing_section = (
+        page.get_by_role("heading", name="Outgoing Streams").locator("..").locator("..")
+    )
+    outgoing_section.get_by_test_id("uni-send-stream-send-order").fill("3")
+    outgoing_section.get_by_test_id("uni-send-new-stream").click()
+    uni_message = "uni-with-send-order"
+    outgoing_section.get_by_placeholder("Enter message...").fill(uni_message)
+    outgoing_section.get_by_role("button", name="Send").click()
+
+    send_message = (
+        outgoing_section.locator("div.text-xs")
+        .filter(has_text="SEND:")
+        .filter(has_text=uni_message)
+    )
+    expect(send_message).to_be_visible(timeout=10_000)
+    try:
+        uni_payload = browser_server.wait_event("stream_data", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側で単方向ストリームが受信されませんでした") from error
+    _, uni_stream_id, uni_data, _ = uni_payload
+    assert uni_stream_id % 4 == 2
+    assert uni_data == uni_message.encode()
+
+    # waitUntilAvailable 付きの双方向ストリームを作成して送信する
+    bidi_section = (
+        page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
+    )
+    bidi_section.get_by_test_id("bidi-stream-wait-until-available").check()
+    bidi_section.get_by_test_id("bidi-new-stream").click()
+    bidi_message = "bidi-wait-until-available"
+    bidi_section.get_by_placeholder("Enter message...").fill(bidi_message)
+    bidi_section.get_by_role("button", name="Send").click()
+
+    recv_message = (
+        bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=bidi_message)
+    )
+    expect(recv_message).to_be_visible(timeout=10_000)
+    try:
+        bidi_payload = browser_server.wait_event("stream_data", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側で双方向ストリームが受信されませんでした") from error
+    _, bidi_stream_id, bidi_data, _ = bidi_payload
+    assert bidi_stream_id % 4 == 0
+    assert bidi_data == bidi_message.encode()
+
+
+def run_browser_e2e_close_stream(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """双方向ストリームを close する動作を検証する
+
+    双方向ストリームの Close ボタンをクリックすると writer.close() が呼ばれ、
+    ストリームパネルが Closed 表示になることを確認する。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    page.get_by_test_id("connection-connect").click()
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+    # 双方向ストリームを作成してメッセージを送信する
+    bidi_section = (
+        page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
+    )
+    bidi_section.get_by_test_id("bidi-new-stream").click()
+    message = "before-close"
+    bidi_section.get_by_placeholder("Enter message...").fill(message)
+    bidi_section.get_by_role("button", name="Send").click()
+
+    recv_message = (
+        bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=message)
+    )
+    expect(recv_message).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("stream_data", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でストリームデータが受信されませんでした") from error
+
+    # Close stream ボタンをクリックしてストリームを閉じる
+    bidi_section.get_by_title("Close stream").click()
+
+    # ストリームパネルが Closed 表示になることを確認する
+    expect(bidi_section.get_by_text("Closed", exact=True)).to_be_visible(timeout=10_000)
