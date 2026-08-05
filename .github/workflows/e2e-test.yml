@@ -1,0 +1,66 @@
+name: e2e-test
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test_browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-26_arm64
+            runs_on: macos-26
+        python_version:
+          - "3.14"
+    runs-on: ${{ matrix.platform.runs_on }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python_version }}
+
+      - name: Cache dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _deps
+          key: ${{ runner.os }}-deps-${{ matrix.platform.name }}-${{ hashFiles('deps.json', 'CMakeLists.txt', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ matrix.platform.name }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('uv.lock') }}
+
+      - name: Install build dependencies
+        run: |
+          brew install nasm go
+
+      - name: Build wheel
+        run: uv build --wheel --out-dir wheelhouse
+
+      - name: Install wheel and test dependencies
+        run: |
+          uv sync
+          uv pip install wheelhouse/*.whl
+
+      - name: Install Playwright browsers
+        run: |
+          uv run playwright install chromium webkit
+
+      - name: Run browser E2E tests
+        run: |
+          # pythonpath=["src"] だとチェックアウトの src が wheel より優先され、
+          # 拡張モジュール無しのパッケージを import してしまうため無効化する
+          uv run pytest tests/browser -m browser --timeout=60 --tb=short -v -o pythonpath=
+        env:
+          UV_NO_SYNC: 1
