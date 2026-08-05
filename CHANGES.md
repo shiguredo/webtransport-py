@@ -51,6 +51,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 のリセット・セッション終了時に送信バッファが解放されないのを修正する
   - @voluntas
+- [FIX] QUIC サーバーの RETRY 送出要求時に接続が閉じられた状態にならない問題を修正する
+  - @voluntas
 
 ### misc
 

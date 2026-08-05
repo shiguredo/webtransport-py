@@ -946,6 +946,10 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     "connection dropped"});
         break;
       case NGTCP2_ERR_RETRY:
+        // Retry 送出は RFC 9000 Section 8.1.2 が許可する (can) アドレス検証の
+        // 応答だが、本ライブラリのサーバーには送出手段が無く継続不能なため、
+        // 他の終了系エラーと同じく closed_ を立てる。
+        closed_ = true;
         push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
                     "retry required"});
         break;
