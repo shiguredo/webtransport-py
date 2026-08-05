@@ -37,6 +37,8 @@
   - @voluntas
 - [ADD] HTTP/3 の優先度制御 API (RFC 9218) と Priority ヘッダー値のパースを追加する
   - @voluntas
+- [ADD] QUIC の接続統計 API (RTT / 輻輳ウィンドウ / フロー制御残量 / 送受信量等) を公開する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える

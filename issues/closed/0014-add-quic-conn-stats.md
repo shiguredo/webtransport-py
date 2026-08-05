@@ -1,7 +1,7 @@
 # ngtcp2 の接続統計 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-05
 - Branch: feature/add-quic-conn-stats
 - Polished: 2026-08-04
 
@@ -38,3 +38,15 @@ QUIC コネクションのネットワーク品質 (RTT・輻輳ウィンドウ�
 - Python から RTT (latest / min / smoothed / rttvar)・cwnd・ssthresh・bytes_in_flight・送受信パケット数・送受信バイト数・損失パケット数・損失バイト数・PING 受信数・破棄パケット数が取得できる (`ngtcp2_conn_info` の全フィールド)
 - Python から PTO・輻輳ウィンドウ残量・フロー制御残量 (コネクション / ストリーム)・ストリームの損失パケット数・送信クォンタム・最大ペイロードサイズが取得できる
 - モックなしのテストで、ハンドシェイク後の値が取得できること、ハンドシェイク前は `None` にならず初期値 (`UINT64_MAX` 等) がそのまま返ること、存在しないストリーム ID には 0 が返ること、コネクションが閉じている場合は `None` を返すことを確認する
+
+## 解決方法
+
+`src/bindings/quic.cpp` / `quic.h` の `QuicConnection` に接続統計取得 API を追加し、nanobind で公開した (Python 側は `webtransport.quic.Connection`)。
+
+- `ngtcp2_conn_info` (V2) の全 15 フィールドを個別プロパティで公開する (`latest_rtt` / `min_rtt` / `smoothed_rtt` / `rttvar` / `cwnd` / `ssthresh` / `bytes_in_flight` / `pkt_sent` / `bytes_sent` / `pkt_recv` / `bytes_recv` / `pkt_lost` / `bytes_lost` / `ping_recv` / `pkt_discarded`)。RTT 系 4 フィールドはナノ秒のまま
+- `pto` / `cwnd_left` / `max_data_left` / `send_quantum` / `path_max_tx_udp_payload_size` をプロパティで公開し、ストリーム ID を引数に取る `max_stream_data_left(stream_id)` / `stream_loss_count(stream_id)` をメソッドで公開する
+- deprecated の 1 系ではなく 2 系 (const ポインタ版) のみを使用する
+- コネクションが無いか閉じている場合のみ `None` を返し、ハンドシェイク前の初期値 (`UINT64_MAX` 等) は変換せずそのまま返す (ストリーム系は存在しないストリームに 0)
+- `ngtcp2_conn_get_timestamp` はアプリケーション用途が無いため公開しない
+
+テストは `tests/test_quic_conn_stats.py` に追加した。`test_conn_stats_before_handshake` (ハンドシェイク前の初期値)、`test_conn_stats_after_handshake` (ハンドシェイク後の値取得とデータ送信によるフロー制御残量の減少・送受信カウンタの増加)、`test_conn_stats_nonexistent_stream` (存在しない・負・巨大なストリーム ID への 0 返却)、`test_conn_stats_after_close` (クローズ後の None) の 4 テストで構成する。テストは `tests/test_quic_error_handling.py` と同じモックなしの Sans-IO 実通信構成。

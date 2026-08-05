@@ -328,6 +328,91 @@ class QuicConnection {
    */
   std::vector<uint8_t> get_connection_id() const;
 
+  /**
+   * 接続統計情報 (ngtcp2_conn_info V2) を取得
+   *
+   * 各フィールドは独立したプロパティとして公開する。latest_rtt / min_rtt /
+   * smoothed_rtt / rttvar の単位はナノ秒。cwnd / ssthresh / bytes_in_flight /
+   * bytes_sent / bytes_recv / bytes_lost はバイト、pkt_sent / pkt_recv /
+   * pkt_lost / ping_recv / pkt_discarded は個数。
+   * ハンドシェイク前は ngtcp2 が返す初期値をそのまま返し、None には変換
+   * しない。コネクションが無いか閉じている場合のみ nullopt。
+   */
+  std::optional<uint64_t> latest_rtt() const;
+  std::optional<uint64_t> min_rtt() const;
+  std::optional<uint64_t> smoothed_rtt() const;
+  std::optional<uint64_t> rttvar() const;
+  std::optional<uint64_t> cwnd() const;
+  std::optional<uint64_t> ssthresh() const;
+  std::optional<uint64_t> bytes_in_flight() const;
+  std::optional<uint64_t> pkt_sent() const;
+  std::optional<uint64_t> bytes_sent() const;
+  std::optional<uint64_t> pkt_recv() const;
+  std::optional<uint64_t> bytes_recv() const;
+  std::optional<uint64_t> pkt_lost() const;
+  std::optional<uint64_t> bytes_lost() const;
+  std::optional<uint64_t> ping_recv() const;
+  std::optional<uint64_t> pkt_discarded() const;
+
+  /**
+   * PTO (プローブタイムアウト) を取得 (ナノ秒)
+   *
+   * @return PTO (ナノ秒)。コネクションが無いか閉じている場合は nullopt
+   */
+  std::optional<uint64_t> pto() const;
+
+  /**
+   * 輻輳ウィンドウ残量を取得 (バイト)
+   *
+   * @return 輻輳ウィンドウ残量 (バイト)。コネクションが無いか閉じている場合は
+   *   nullopt
+   */
+  std::optional<uint64_t> cwnd_left() const;
+
+  /**
+   * コネクション全体のフロー制御残量を取得 (バイト)
+   *
+   * @return フロー制御残量 (バイト)。コネクションが無いか閉じている場合は
+   *   nullopt
+   */
+  std::optional<uint64_t> max_data_left() const;
+
+  /**
+   * ストリームごとのフロー制御残量を取得 (バイト)
+   *
+   * 存在しないストリームは 0 を返す。
+   * @param stream_id ストリーム ID
+   * @return フロー制御残量 (バイト)。コネクションが無いか閉じている場合は
+   *   nullopt
+   */
+  std::optional<uint64_t> max_stream_data_left(int64_t stream_id) const;
+
+  /**
+   * ストリームの損失パケット数を取得
+   *
+   * STREAM フレームを含み損失と判定されたパケットの数で、スプリアス損失を
+   * 含む場合がある。存在しないストリームは 0 を返す。
+   * @param stream_id ストリーム ID
+   * @return 損失パケット数。コネクションが無いか閉じている場合は nullopt
+   */
+  std::optional<uint64_t> stream_loss_count(int64_t stream_id) const;
+
+  /**
+   * 送信クォンタムを取得 (バイト)
+   *
+   * @return 送信クォンタム (バイト)。コネクションが無いか閉じている場合は
+   *   nullopt
+   */
+  std::optional<uint64_t> send_quantum() const;
+
+  /**
+   * 現在パスの最大 UDP ペイロードサイズを取得 (バイト)
+   *
+   * @return 最大 UDP ペイロードサイズ (バイト)。コネクションが無いか閉じて
+   *   いる場合は nullopt
+   */
+  std::optional<uint64_t> path_max_tx_udp_payload_size() const;
+
  private:
   QuicConnection(bool is_server, const QuicConfig& config);
 
@@ -361,6 +446,9 @@ class QuicConnection {
   // パスから QuicPacket を組み立てる
   QuicPacket make_packet(const uint8_t* data, size_t len,
                          const ngtcp2_path& path) const;
+
+  // 接続統計のスナップショットを取得 (コネクションが無いか閉じている場合は nullopt)
+  std::optional<ngtcp2_conn_info> get_conn_info() const;
 
   // ngtcp2 コールバック
   static int client_initial_cb(ngtcp2_conn* conn, void* user_data);
