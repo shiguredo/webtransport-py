@@ -413,6 +413,121 @@ class QuicConnection {
    */
   std::optional<uint64_t> path_max_tx_udp_payload_size() const;
 
+  /**
+   * コネクションエラーのコードを取得
+   *
+   * 受信した CONNECTION_CLOSE / APPLICATION_CLOSE フレームでのみ設定される。
+   * エラーが無い場合は nullopt。ピアが NO_ERROR (0) の CONNECTION_CLOSE を
+   * 送って正常終了した場合も error_code は 0 になり、エラー無し (nullopt) と
+   * 区別できない点に注意する。コネクションが閉じた後も取得できる。
+   */
+  std::optional<uint64_t> error_code() const;
+
+  /**
+   * コネクションエラーの理由を取得
+   *
+   * エラーが無い場合、およびピアが NO_ERROR (0) の CONNECTION_CLOSE を送った
+   * 場合も nullopt になる (error_code と連動)。理由が無い場合は空文字。
+   * 受信した理由は 1024 バイトに切り詰められる。ピアが送る理由は UTF-8 とは
+   * 限らない (RFC 9000 は SHOULD) ため、Python 側では不正バイトを
+   * surrogateescape でデコードする。
+   */
+  std::optional<std::string> reason() const;
+
+  /**
+   * TLS 処理時に ngtcp2 が記録した内部エラーコードを取得
+   *
+   * エラーが無い場合は 0 を返す。
+   */
+  int tls_error() const;
+
+  /**
+   * TLS アラートを取得
+   *
+   * エラーが無い場合は 0 を返す。
+   */
+  int tls_alert() const;
+
+  /**
+   * リモートのトランスポートパラメータを取得
+   *
+   * ピアからトランスポートパラメータを受信していない場合は nullopt。
+   * 0-RTT 復元時はハンドシェイク完了前でも前回セッションの値が返る。
+   * コネクションが閉じた後も取得できる。
+   */
+  std::optional<uint64_t> remote_max_idle_timeout() const;
+  std::optional<uint64_t> remote_max_udp_payload_size() const;
+  std::optional<uint64_t> remote_initial_max_data() const;
+  std::optional<uint64_t> remote_initial_max_stream_data_bidi_local() const;
+  std::optional<uint64_t> remote_initial_max_stream_data_bidi_remote() const;
+  std::optional<uint64_t> remote_initial_max_stream_data_uni() const;
+  std::optional<uint64_t> remote_initial_max_streams_bidi() const;
+  std::optional<uint64_t> remote_initial_max_streams_uni() const;
+  std::optional<uint64_t> remote_max_datagram_frame_size() const;
+
+  /**
+   * ローカルのトランスポートパラメータを取得
+   *
+   * ローカルのトランスポートパラメータは常に存在する。コネクションが閉じた
+   * 後も取得できる。
+   */
+  uint64_t local_max_idle_timeout() const;
+  uint64_t local_max_udp_payload_size() const;
+  uint64_t local_initial_max_data() const;
+  uint64_t local_initial_max_stream_data_bidi_local() const;
+  uint64_t local_initial_max_stream_data_bidi_remote() const;
+  uint64_t local_initial_max_stream_data_uni() const;
+  uint64_t local_initial_max_streams_bidi() const;
+  uint64_t local_initial_max_streams_uni() const;
+  uint64_t local_max_datagram_frame_size() const;
+
+  /**
+   * ネゴシエーションされた QUIC バージョンを取得
+   *
+   * バージョンが確定するまでは 0。
+   */
+  uint32_t negotiated_version() const;
+
+  /**
+   * クライアントが選択した QUIC バージョンを取得
+   */
+  uint32_t client_chosen_version() const;
+
+  /**
+   * CLOSING 状態か
+   *
+   * ngtcp2 のプロトコル状態を返す。close() が CONNECTION_CLOSE を書き出せた
+   * 場合のみ true になるため、通常はハンドシェイク完了後に close() を呼んだ
+   * 場合に true になる。ハンドシェイク前に close() を呼んだ場合は ngtcp2 が
+   * CONNECTION_CLOSE を書けないため false のままになり、is_closed() と
+   * 一致しないことがある。
+   */
+  bool in_closing_period() const;
+
+  /**
+   * DRAINING 状態か
+   *
+   * ピアの CONNECTION_CLOSE を受信した場合に true になる。受信経路の制約に
+   * より、ローカルの close() では true にならない。
+   */
+  bool in_draining_period() const;
+
+  /**
+   * 送信元接続 ID (SCID) の一覧を取得
+   *
+   * ハンドシェイク前は初期 SCID が 1 個以上含まれる。コネクションが閉じた
+   * 後も取得できる。
+   */
+  std::vector<std::vector<uint8_t>> scid() const;
+
+  /**
+   * アクティブな宛先接続 ID (DCID) の一覧を取得
+   *
+   * ハンドシェイク完了前は空リスト。cid のみを公開し、seq / token 等は
+   * 対象外とする。コネクションが閉じた後も取得できる。
+   */
+  std::vector<std::vector<uint8_t>> active_dcid() const;
+
  private:
   QuicConnection(bool is_server, const QuicConfig& config);
 
@@ -449,6 +564,12 @@ class QuicConnection {
 
   // 接続統計のスナップショットを取得 (コネクションが無いか閉じている場合は nullopt)
   std::optional<ngtcp2_conn_info> get_conn_info() const;
+
+  // リモートのトランスポートパラメータを取得 (未受信なら nullptr)
+  const ngtcp2_transport_params* get_remote_transport_params() const;
+
+  // ローカルのトランスポートパラメータを取得
+  const ngtcp2_transport_params* get_local_transport_params() const;
 
   // ngtcp2 コールバック
   static int client_initial_cb(ngtcp2_conn* conn, void* user_data);

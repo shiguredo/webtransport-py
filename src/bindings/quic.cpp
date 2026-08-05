@@ -1552,6 +1552,268 @@ std::optional<uint64_t> QuicConnection::path_max_tx_udp_payload_size() const {
       ngtcp2_conn_get_path_max_tx_udp_payload_size2(conn_));
 }
 
+std::optional<uint64_t> QuicConnection::error_code() const {
+  if (!conn_) {
+    return std::nullopt;
+  }
+  const auto* ccerr = ngtcp2_conn_get_ccerr2(conn_);
+  if (ccerr->error_code == 0) {
+    return std::nullopt;
+  }
+  return ccerr->error_code;
+}
+
+std::optional<std::string> QuicConnection::reason() const {
+  if (!conn_) {
+    return std::nullopt;
+  }
+  const auto* ccerr = ngtcp2_conn_get_ccerr2(conn_);
+  if (ccerr->error_code == 0) {
+    return std::nullopt;
+  }
+  if (ccerr->reason == nullptr) {
+    return std::string();
+  }
+  return std::string(reinterpret_cast<const char*>(ccerr->reason),
+                     ccerr->reasonlen);
+}
+
+int QuicConnection::tls_error() const {
+  if (!conn_) {
+    return 0;
+  }
+  return ngtcp2_conn_get_tls_error2(conn_);
+}
+
+int QuicConnection::tls_alert() const {
+  if (!conn_) {
+    return 0;
+  }
+  return ngtcp2_conn_get_tls_alert2(conn_);
+}
+
+const ngtcp2_transport_params* QuicConnection::get_remote_transport_params()
+    const {
+  if (!conn_) {
+    return nullptr;
+  }
+  return ngtcp2_conn_get_remote_transport_params2(conn_);
+}
+
+const ngtcp2_transport_params* QuicConnection::get_local_transport_params()
+    const {
+  if (!conn_) {
+    return nullptr;
+  }
+  return ngtcp2_conn_get_local_transport_params2(conn_);
+}
+
+std::optional<uint64_t> QuicConnection::remote_max_idle_timeout() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->max_idle_timeout;
+}
+
+std::optional<uint64_t> QuicConnection::remote_max_udp_payload_size() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->max_udp_payload_size;
+}
+
+std::optional<uint64_t> QuicConnection::remote_initial_max_data() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->initial_max_data;
+}
+
+std::optional<uint64_t>
+QuicConnection::remote_initial_max_stream_data_bidi_local() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->initial_max_stream_data_bidi_local;
+}
+
+std::optional<uint64_t>
+QuicConnection::remote_initial_max_stream_data_bidi_remote() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->initial_max_stream_data_bidi_remote;
+}
+
+std::optional<uint64_t> QuicConnection::remote_initial_max_stream_data_uni()
+    const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->initial_max_stream_data_uni;
+}
+
+std::optional<uint64_t> QuicConnection::remote_initial_max_streams_bidi()
+    const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->initial_max_streams_bidi;
+}
+
+std::optional<uint64_t> QuicConnection::remote_initial_max_streams_uni() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->initial_max_streams_uni;
+}
+
+std::optional<uint64_t> QuicConnection::remote_max_datagram_frame_size() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->max_datagram_frame_size;
+}
+
+uint64_t QuicConnection::local_max_idle_timeout() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->max_idle_timeout;
+}
+
+uint64_t QuicConnection::local_max_udp_payload_size() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->max_udp_payload_size;
+}
+
+uint64_t QuicConnection::local_initial_max_data() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->initial_max_data;
+}
+
+uint64_t QuicConnection::local_initial_max_stream_data_bidi_local() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->initial_max_stream_data_bidi_local;
+}
+
+uint64_t QuicConnection::local_initial_max_stream_data_bidi_remote() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->initial_max_stream_data_bidi_remote;
+}
+
+uint64_t QuicConnection::local_initial_max_stream_data_uni() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->initial_max_stream_data_uni;
+}
+
+uint64_t QuicConnection::local_initial_max_streams_bidi() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->initial_max_streams_bidi;
+}
+
+uint64_t QuicConnection::local_initial_max_streams_uni() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->initial_max_streams_uni;
+}
+
+uint64_t QuicConnection::local_max_datagram_frame_size() const {
+  const auto* params = get_local_transport_params();
+  if (!params) {
+    return 0;
+  }
+  return params->max_datagram_frame_size;
+}
+
+uint32_t QuicConnection::negotiated_version() const {
+  if (!conn_) {
+    return 0;
+  }
+  return ngtcp2_conn_get_negotiated_version2(conn_);
+}
+
+uint32_t QuicConnection::client_chosen_version() const {
+  if (!conn_) {
+    return 0;
+  }
+  return ngtcp2_conn_get_client_chosen_version2(conn_);
+}
+
+bool QuicConnection::in_closing_period() const {
+  if (!conn_) {
+    return false;
+  }
+  return ngtcp2_conn_in_closing_period2(conn_) != 0;
+}
+
+bool QuicConnection::in_draining_period() const {
+  if (!conn_) {
+    return false;
+  }
+  return ngtcp2_conn_in_draining_period2(conn_) != 0;
+}
+
+std::vector<std::vector<uint8_t>> QuicConnection::scid() const {
+  std::vector<std::vector<uint8_t>> result;
+  if (!conn_) {
+    return result;
+  }
+  const size_t n = ngtcp2_conn_get_scid2(conn_, nullptr);
+  std::vector<ngtcp2_cid> cids(n);
+  ngtcp2_conn_get_scid2(conn_, cids.data());
+  result.reserve(n);
+  for (const auto& cid : cids) {
+    result.emplace_back(cid.data, cid.data + cid.datalen);
+  }
+  return result;
+}
+
+std::vector<std::vector<uint8_t>> QuicConnection::active_dcid() const {
+  std::vector<std::vector<uint8_t>> result;
+  if (!conn_) {
+    return result;
+  }
+  const size_t n = ngtcp2_conn_get_active_dcid3(conn_, nullptr);
+  std::vector<ngtcp2_cid_token2> dcids(n);
+  ngtcp2_conn_get_active_dcid3(conn_, dcids.data());
+  result.reserve(n);
+  for (const auto& dcid : dcids) {
+    result.emplace_back(dcid.cid.data, dcid.cid.data + dcid.cid.datalen);
+  }
+  return result;
+}
+
 void QuicConnection::push_event(QuicEvent event) {
   events_.push_back(std::move(event));
 }
@@ -2289,7 +2551,153 @@ void bind_quic(nb::module_& m) {
           "path_max_tx_udp_payload_size",
           &QuicConnection::path_max_tx_udp_payload_size,
           nb::sig("def path_max_tx_udp_payload_size(self) -> int | None"),
-          "現在パスの最大 UDP ペイロードサイズ (バイト)");
+          "現在パスの最大 UDP ペイロードサイズ (バイト)")
+      .def_prop_ro("error_code", &QuicConnection::error_code,
+                   nb::sig("def error_code(self) -> int | None"),
+                   "コネクションエラーのコード (エラーが無い場合は None)")
+      .def_prop_ro(
+          "reason",
+          [](const QuicConnection& self) -> nb::object {
+            const auto reason = self.reason();
+            if (!reason) {
+              return nb::none();
+            }
+            // ピアが送る reason は UTF-8 とは限らない (RFC 9000 は SHOULD)。
+            // 不正バイトで例外にしないため surrogateescape でデコードする。
+            return nb::steal(PyUnicode_DecodeUTF8(
+                reason->c_str(), static_cast<Py_ssize_t>(reason->size()),
+                "surrogateescape"));
+          },
+          nb::sig("def reason(self) -> str | None"),
+          "コネクションエラーの理由 (エラーが無い場合は None)")
+      .def_prop_ro(
+          "tls_error", &QuicConnection::tls_error,
+          nb::sig("def tls_error(self) -> int"),
+          "TLS 処理時に ngtcp2 が記録した内部エラーコード (無ければ 0)")
+      .def_prop_ro("tls_alert", &QuicConnection::tls_alert,
+                   nb::sig("def tls_alert(self) -> int"),
+                   "TLS アラート (エラーが無い場合は 0)")
+      .def_prop_ro("remote_max_idle_timeout",
+                   &QuicConnection::remote_max_idle_timeout,
+                   nb::sig("def remote_max_idle_timeout(self) -> int | None"),
+                   "ピアのアイドルタイムアウト (ナノ秒)")
+      .def_prop_ro(
+          "remote_max_udp_payload_size",
+          &QuicConnection::remote_max_udp_payload_size,
+          nb::sig("def remote_max_udp_payload_size(self) -> int | None"),
+          "ピアの最大 UDP ペイロードサイズ (バイト)")
+      .def_prop_ro("remote_initial_max_data",
+                   &QuicConnection::remote_initial_max_data,
+                   nb::sig("def remote_initial_max_data(self) -> int | None"),
+                   "ピアのコネクション全体のフロー制御上限")
+      .def_prop_ro(
+          "remote_initial_max_stream_data_bidi_local",
+          &QuicConnection::remote_initial_max_stream_data_bidi_local,
+          nb::sig("def remote_initial_max_stream_data_bidi_local(self) -> int "
+                  "| None"),
+          "ピアの双方向ストリーム (ローカル開始) のフロー制御上限")
+      .def_prop_ro(
+          "remote_initial_max_stream_data_bidi_remote",
+          &QuicConnection::remote_initial_max_stream_data_bidi_remote,
+          nb::sig("def remote_initial_max_stream_data_bidi_remote(self) -> "
+                  "int | None"),
+          "ピアの双方向ストリーム (リモート開始) のフロー制御上限")
+      .def_prop_ro(
+          "remote_initial_max_stream_data_uni",
+          &QuicConnection::remote_initial_max_stream_data_uni,
+          nb::sig("def remote_initial_max_stream_data_uni(self) -> int | None"),
+          "ピアの単方向ストリームのフロー制御上限")
+      .def_prop_ro(
+          "remote_initial_max_streams_bidi",
+          &QuicConnection::remote_initial_max_streams_bidi,
+          nb::sig("def remote_initial_max_streams_bidi(self) -> int | None"),
+          "ピアの双方向ストリーム並列数上限")
+      .def_prop_ro(
+          "remote_initial_max_streams_uni",
+          &QuicConnection::remote_initial_max_streams_uni,
+          nb::sig("def remote_initial_max_streams_uni(self) -> int | None"),
+          "ピアの単方向ストリーム並列数上限")
+      .def_prop_ro(
+          "remote_max_datagram_frame_size",
+          &QuicConnection::remote_max_datagram_frame_size,
+          nb::sig("def remote_max_datagram_frame_size(self) -> int | None"),
+          "ピアの Datagram フレームサイズ上限")
+      .def_prop_ro("local_max_idle_timeout",
+                   &QuicConnection::local_max_idle_timeout,
+                   nb::sig("def local_max_idle_timeout(self) -> int"),
+                   "ローカルのアイドルタイムアウト (ナノ秒)")
+      .def_prop_ro("local_max_udp_payload_size",
+                   &QuicConnection::local_max_udp_payload_size,
+                   nb::sig("def local_max_udp_payload_size(self) -> int"),
+                   "ローカルの最大 UDP ペイロードサイズ (バイト)")
+      .def_prop_ro("local_initial_max_data",
+                   &QuicConnection::local_initial_max_data,
+                   nb::sig("def local_initial_max_data(self) -> int"),
+                   "ローカルのコネクション全体のフロー制御上限")
+      .def_prop_ro(
+          "local_initial_max_stream_data_bidi_local",
+          &QuicConnection::local_initial_max_stream_data_bidi_local,
+          nb::sig("def local_initial_max_stream_data_bidi_local(self) -> int"),
+          "ローカルの双方向ストリーム (ローカル開始) のフロー制御上限")
+      .def_prop_ro(
+          "local_initial_max_stream_data_bidi_remote",
+          &QuicConnection::local_initial_max_stream_data_bidi_remote,
+          nb::sig("def local_initial_max_stream_data_bidi_remote(self) -> int"),
+          "ローカルの双方向ストリーム (リモート開始) のフロー制御上限")
+      .def_prop_ro(
+          "local_initial_max_stream_data_uni",
+          &QuicConnection::local_initial_max_stream_data_uni,
+          nb::sig("def local_initial_max_stream_data_uni(self) -> int"),
+          "ローカルの単方向ストリームのフロー制御上限")
+      .def_prop_ro("local_initial_max_streams_bidi",
+                   &QuicConnection::local_initial_max_streams_bidi,
+                   nb::sig("def local_initial_max_streams_bidi(self) -> int"),
+                   "ローカルの双方向ストリーム並列数上限")
+      .def_prop_ro("local_initial_max_streams_uni",
+                   &QuicConnection::local_initial_max_streams_uni,
+                   nb::sig("def local_initial_max_streams_uni(self) -> int"),
+                   "ローカルの単方向ストリーム並列数上限")
+      .def_prop_ro("local_max_datagram_frame_size",
+                   &QuicConnection::local_max_datagram_frame_size,
+                   nb::sig("def local_max_datagram_frame_size(self) -> int"),
+                   "ローカルの Datagram フレームサイズ上限")
+      .def_prop_ro("negotiated_version", &QuicConnection::negotiated_version,
+                   nb::sig("def negotiated_version(self) -> int"),
+                   "ネゴシエーションされた QUIC バージョン (未確定なら 0)")
+      .def_prop_ro("client_chosen_version",
+                   &QuicConnection::client_chosen_version,
+                   nb::sig("def client_chosen_version(self) -> int"),
+                   "クライアントが選択した QUIC バージョン")
+      .def_prop_ro("in_closing_period", &QuicConnection::in_closing_period,
+                   nb::sig("def in_closing_period(self) -> bool"),
+                   "CLOSING 状態か")
+      .def_prop_ro("in_draining_period", &QuicConnection::in_draining_period,
+                   nb::sig("def in_draining_period(self) -> bool"),
+                   "DRAINING 状態か")
+      .def_prop_ro(
+          "scid",
+          [](const QuicConnection& self) {
+            std::vector<nb::bytes> result;
+            for (const auto& cid : self.scid()) {
+              result.emplace_back(reinterpret_cast<const char*>(cid.data()),
+                                  cid.size());
+            }
+            return result;
+          },
+          nb::sig("def scid(self) -> list[bytes]"),
+          "送信元接続 ID (SCID) の一覧")
+      .def_prop_ro(
+          "active_dcid",
+          [](const QuicConnection& self) {
+            std::vector<nb::bytes> result;
+            for (const auto& cid : self.active_dcid()) {
+              result.emplace_back(reinterpret_cast<const char*>(cid.data()),
+                                  cid.size());
+            }
+            return result;
+          },
+          nb::sig("def active_dcid(self) -> list[bytes]"),
+          "アクティブな宛先接続 ID (DCID) の一覧 (ハンドシェイク完了前は空)");
 
   // ngtcp2 バージョン情報
   quic_m.def(
