@@ -32,6 +32,9 @@ dev = [
   { include-group = "example" },
   { include-group = "lint" },
   { include-group = "build" },
+  # 実ブラウザ (Chromium) を使った WebTransport E2E テスト用
+  "playwright~=1.62.0",
+  "pytest-playwright~=0.8.0",
 ]
 test = [
   "pytest",
@@ -86,6 +89,12 @@ pythonpath = ["src"]
 # Property-Based Testing (PBT) は prop_ prefix を使用する
 python_files = ["test_*.py", "prop_*.py"]
 python_functions = ["test_*", "prop_*"]
+# 実ブラウザ (Chromium) を使うテストは playwright 未導入の CI では実行しない
+# ため、collection 対象から除外する (marker の -m だけでは import を防げない)
+addopts = ["--ignore=tests/browser"]
+markers = [
+  "browser: 実ブラウザ (Chromium) を使う E2E テスト",
+]
 
 [tool.ty.rules]
 unresolved-import = "ignore"
