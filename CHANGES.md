@@ -39,6 +39,8 @@
   - @voluntas
 - [ADD] QUIC の接続統計 API (RTT / 輻輳ウィンドウ / フロー制御残量 / 送受信量等) を公開する
   - @voluntas
+- [ADD] QUIC の接続状態・エラー・ピア情報 API (コネクションエラー / TLS エラー / トランスポートパラメータ / バージョン / 接続 ID 等) を公開する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
