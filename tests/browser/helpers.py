@@ -59,7 +59,7 @@ def run_browser_e2e_webtransport(
     # Connect ボタンをクリックし、ページ側の Connected 表示 (部分一致で
     # "Disconnected" にマッチしないよう完全一致にする) とサーバー側の
     # on_session_ready の両方で確認する
-    page.get_by_role("button", name="Connect").click()
+    page.get_by_test_id("connection-connect").click()
     expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
     try:
         browser_server.wait_event("session_ready", timeout=10.0)
@@ -91,11 +91,10 @@ def run_browser_e2e_webtransport(
     # 双方向ストリーム (QUIC stream_id % 4 == 0) のみエコーバックする。
     # ページ側でメッセージを送信し、RECV 表示とサーバー側の on_stream_data で
     # 確認する
-    # h2 -> ヘッダー行 div -> カード div の順に親を辿ってセクションを特定する
     bidi_section = (
         page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
     )
-    bidi_section.get_by_role("button", name="+ New Stream").click()
+    bidi_section.get_by_test_id("bidi-new-stream").click()
     bidi_message = "bidi-echo-message"
     bidi_section.get_by_placeholder("Enter message...").fill(bidi_message)
     bidi_section.get_by_role("button", name="Send").click()
@@ -121,7 +120,7 @@ def run_browser_e2e_webtransport(
     outgoing_section = (
         page.get_by_role("heading", name="Outgoing Streams").locator("..").locator("..")
     )
-    outgoing_section.get_by_role("button", name="+ New Stream").click()
+    outgoing_section.get_by_test_id("uni-send-new-stream").click()
     uni_message = "uni-send-message"
     outgoing_section.get_by_placeholder("Enter message...").fill(uni_message)
     outgoing_section.get_by_role("button", name="Send").click()
@@ -145,12 +144,138 @@ def run_browser_e2e_webtransport(
     # 少なくとも 1 回の受信を確認する
     datagram_section = page.get_by_role("heading", name="Datagrams").locator("..").locator("..")
     datagram_message = "datagram-echo-message"
-    datagram_input = datagram_section.get_by_placeholder("Enter datagram message...")
+    datagram_input = datagram_section.get_by_test_id("datagram-input")
     for _ in range(5):
         datagram_input.fill(datagram_message)
         datagram_input.press("Enter")
 
     # 複数回送信するため複数の RECV 要素が生じるので、先頭要素で確認する
+    recv_datagram = (
+        datagram_section.locator("div.text-xs")
+        .filter(has_text="RECV:")
+        .filter(has_text=datagram_message)
+        .first
+    )
+    expect(recv_datagram).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("datagram", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でデータグラムが受信されませんでした") from error
+
+
+def run_browser_e2e_send_order_stream(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """sendOrder を指定した双方向ストリームの作成と送受信を検証する
+
+    sendOrder は W3C WebTransport §6.11 の送信優先度 (整数値、大きいほど優先)。
+    ページ側で sendOrder を指定して双方向ストリームを作成し、エコーバックを
+    確認する。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    page.get_by_test_id("connection-connect").click()
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+    # sendOrder を指定して双方向ストリームを作成する
+    bidi_section = (
+        page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
+    )
+    bidi_section.get_by_test_id("bidi-stream-send-order").fill("5")
+    bidi_section.get_by_test_id("bidi-new-stream").click()
+
+    # 作成したストリームでメッセージを送信し、エコーバックを確認する
+    message = "send-order-message"
+    bidi_section.get_by_placeholder("Enter message...").fill(message)
+    bidi_section.get_by_role("button", name="Send").click()
+
+    recv_message = (
+        bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=message)
+    )
+    expect(recv_message).to_be_visible(timeout=10_000)
+    try:
+        payload = browser_server.wait_event("stream_data", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でストリームデータが受信されませんでした") from error
+    _, stream_id, data, _ = payload
+    assert stream_id % 4 == 0
+    assert data == message.encode()
+
+
+def run_browser_e2e_close_with_code(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """closeCode / reason を指定した graceful close を検証する
+
+    closeCode / reason は W3C WebTransport §6.10 のセッション終了パラメータ。
+    Disconnect ボタン経由で close() に渡され、サーバー側の SESSION_CLOSED
+    イベントで確認する。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    page.get_by_test_id("connection-connect").click()
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+    # closeCode / reason を指定して切断する
+    page.get_by_test_id("close-code").fill("42")
+    page.get_by_test_id("close-reason").fill("test-close-reason")
+    page.get_by_test_id("connection-connect").click()
+
+    # サーバー側でセッション終了を確認する
+    try:
+        browser_server.wait_event("session_closed", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッション終了が確認されませんでした") from error
+
+
+def run_browser_e2e_datagram_settings(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+) -> None:
+    """データグラムの動的設定 (maxAge / maxBufferedDatagrams) を検証する
+
+    incomingMaxAge / outgoingMaxAge / incomingMaxBufferedDatagrams /
+    outgoingMaxBufferedDatagrams は W3C WebTransport §5.3 のデータグラム設定。
+    接続中に Apply で反映し、設定後にデータグラムの送受信が引き続き
+    機能することを確認する。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    page.get_by_test_id("connection-connect").click()
+    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    try:
+        browser_server.wait_event("session_ready", timeout=10.0)
+    except queue.Empty as error:
+        raise AssertionError("サーバー側でセッションが確立されませんでした") from error
+
+    # データグラム設定を入力して Apply する
+    page.get_by_test_id("datagram-incoming-max-age").fill("1000")
+    page.get_by_test_id("datagram-outgoing-max-age").fill("2000")
+    page.get_by_test_id("datagram-incoming-max-buffered").fill("10")
+    page.get_by_test_id("datagram-outgoing-max-buffered").fill("20")
+    page.get_by_test_id("datagram-apply").click()
+
+    # Apply が成功し、エラーが表示されないことを確認する
+    expect(page.get_by_text("Applied", exact=True)).to_be_visible(timeout=10_000)
+
+    # 設定後にデータグラムの送受信が機能することを確認する
+    datagram_section = page.get_by_role("heading", name="Datagrams").locator("..").locator("..")
+    datagram_message = "datagram-after-settings"
+    datagram_input = datagram_section.get_by_test_id("datagram-input")
+    for _ in range(3):
+        datagram_input.fill(datagram_message)
+        datagram_input.press("Enter")
+
     recv_datagram = (
         datagram_section.locator("div.text-xs")
         .filter(has_text="RECV:")
