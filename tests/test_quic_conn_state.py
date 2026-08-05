@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from webtransport.quic import Config, Connection
+from webtransport.quic import Config, Connection, EventType
 
 # Sans-IO テスト用の固定パスアドレス
 CLIENT_ADDR = ("127.0.0.1", 50000)
@@ -370,3 +370,93 @@ def test_tls_alert_on_certificate_verification_failure():
     # サーバー側はクライアントの close パケットが届かないため閉じられない
     assert server.is_closed() is False
     assert server.error_code is None
+
+
+def test_conn_state_after_retry():
+    """サーバーが RETRY 要求を受けた接続は閉じた状態になり統計 API が None を返す"""
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.verify_peer = False
+    client_config.server_name = "localhost"
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+
+    # クライアントの ClientHello は Initial 1 パケットの実効容量 (~1151 バイト) を
+    # 超えるサイズ (現環境では約 1471 バイト) のため、複数の Initial パケットに
+    # 分割されて送信される。分割の有無は TLS ライブラリのデフォルト設定に依存し
+    # (主因は key_share の X25519MLKEM768)、崩れた場合は下の assert で明示的に
+    # 失敗するため、RETRY 経路が無検証のまま通過することはない。
+    first_initial = client.send()
+    assert first_initial is not None
+    second_initial = client.send()
+    assert second_initial is not None, (
+        "ClientHello が Initial 1 パケットに収まるため RETRY 経路を再現できない "
+        "(ClientHello サイズが Initial パケットの実効容量を超える必要がある)"
+    )
+
+    server = Connection.accept(server_config, first_initial.data, SERVER_ADDR, CLIENT_ADDR)
+
+    # accept は Initial パケットのヘッダーをデコードするだけで CRYPTO フレームは
+    # 処理しない。そのため 2 つ目の Initial (オフセット非ゼロの CRYPTO を含む) を
+    # 受信すると、オフセット 0 のデータが未処理のまま非ゼロ分だけがバッファリング
+    # され、ngtcp2 はアドレス検証の要求として NGTCP2_ERR_RETRY を返す
+    # (ngtcp2_conn_read_pkt のドキュメント: Server must perform address validation
+    # by sending Retry packet [...] and discard the connection state.)。
+    assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0, (
+        "2 つ目の Initial 受信で RETRY 経路に入らず、パケット正常処理 "
+        "(data.size() を返す) または別のエラー経路に入った"
+    )
+
+    # 本ライブラリには Retry パケット送出手段が無いため接続は継続不能として
+    # 扱われ、ConnectionClosed イベントが push される。イベントは終了系共通の
+    # 合成値 (error_code 0 / stream_id -1 / fin false) になる
+    event = server.next_event()
+    assert event is not None
+    assert event.type == EventType.CONNECTION_CLOSED
+    assert event.reason == "retry required"
+    assert event.error_code == 0
+    assert event.stream_id == -1
+    assert event.fin is False
+    assert server.next_event() is None
+
+    # 閉じた状態のため is_closed() は true、確立状態は false のまま。
+    # RETRY は ngtcp2 の状態機械を CLOSING / DRAINING に遷移させないため、
+    # in_closing_period / in_draining_period は close() 後と異なり false のまま
+    assert server.is_closed() is True
+    assert server.is_established() is False
+    assert server.in_closing_period is False
+    assert server.in_draining_period is False
+
+    # ccerr は受信した CONNECTION_CLOSE でのみ設定されるため、RETRY 後も
+    # error_code / reason は None のまま
+    assert server.error_code is None
+    assert server.reason is None
+
+    # 接続統計 API は閉じている場合は None を返す契約どおりに動作する
+    # (ngtcp2_conn_get_conn_info を呼ばず nullopt になる)。全項目の検証は
+    # 接続統計テスト (test_quic_conn_stats.py) が担うため、ここでは
+    # get_conn_info 経由と独立した closed_ ガード (pto) の代表を確認する
+    assert server.cwnd is None
+    assert server.latest_rtt is None
+    assert server.min_rtt is None
+    assert server.smoothed_rtt is None
+    assert server.bytes_in_flight is None
+    assert server.pkt_sent is None
+    assert server.pkt_recv is None
+    assert server.pto is None
+
+    # タイムアウトも閉じているため取得できない
+    assert server.get_timeout() is None
+
+    # 以後の送受信は無効になる (receive は 0 を返し、send は None)。
+    # 2 つ目の Initial を再送しても closed_ ガードで処理されず 0 が返り、
+    # 新たなイベントも push されない (修正前は RETRY が再発して 2 つ目の
+    # ConnectionClosed イベントが push されていた)
+    assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.next_event() is None
+    assert server.send() is None
