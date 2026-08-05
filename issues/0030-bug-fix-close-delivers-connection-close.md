@@ -1,7 +1,7 @@
 # close() が生成した CONNECTION_CLOSE パケットを送出しない
 
 - Created: 2026-08-05
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-06
 - Branch: feature/fix-close-delivers-connection-close
 - Polished: 2026-08-05
 
@@ -41,3 +41,13 @@
 - ピアが DRAINING 状態 (in_draining_period) になること
 - ハンドシェイク前の `close()` の挙動が定まること: クライアント Initial 未送信の `close()` はクラッシュせず `is_closed()` が true になる (パケットは生成されないため in_closing_period() は false のまま)。サーバー Initial 未受信の `close()` もクラッシュしないこと
 - モックなしのテストで確認する (低レベル API の Sans-IO テストで、close() → send() が返すパケットをピアの receive() に渡して error_code / reason の設定と DRAINING 遷移を検証する。サーバー停止 (stop()) 時の配送は e2e テストで確認する)
+
+## 解決方法
+
+- `src/bindings/quic.cpp` の `close` メソッドで `ngtcp2_conn_write_connection_close` の戻り値 (nwrite) を確認し、成功した場合 (nwrite > 0) は生成された CONNECTION_CLOSE パケットを `pending_close_packet_` に保持するようにした。`send()` は未配送の CONNECTION_CLOSE があればそれを 1 回だけ返し、返した後は従来どおり None を返す (closed_ が立っていても返せる)
+- 生成できない場合 (クライアント Initial 未送信の `NGTCP2_ERR_INVALID_STATE`、サーバー Initial 未受信の送出量上限) はパケット無しで終了する。ハンドシェイク途中の close() では error_code が APPLICATION_ERROR に置換され reason が落ちる挙動をコメントとテストに明記した
+- `src/webtransport/quic/server.py` / `src/webtransport/h3/server.py` の `stop()` に CONNECTION_CLOSE の送出処理を追加した。1 接続の送出失敗が残りを中断しないよう接続ごとに例外を隔離し、ソケット close は finally で保証する
+- `src/bindings/quic.h` の `in_closing_period` のドキュメントを正確な条件 (Initial 未送信・未受信、ハンドシェイク途中) に更新した
+- `tests/test_quic_conn_state.py` に `test_close_delivers_connection_close` / `test_client_close_delivers_connection_close` / `test_close_before_handshake` / `test_close_mid_handshake_replaces_error_code` を追加した。`tests/test_quic_error_handling.py` の close() 関連テストを新仕様 (send() が CONNECTION_CLOSE を 1 回だけ返す) に更新した。`tests/test_e2e_webtransport_h3.py` にサーバー stop() 時の CONNECTION_CLOSE 配送を検証する e2e テストを追加した
+- `tests/prop_http2_roundtrip.py` の `prop_http2_custom_headers_roundtrip` が生成する `te` ヘッダーを除外した (RFC 9113 Section 8.2.2 で `te` は値 `trailers` のみ許容されるため)
+- `CHANGES.md` の `## develop` セクションに `[FIX]` エントリを追加した
