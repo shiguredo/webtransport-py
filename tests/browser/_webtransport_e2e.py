@@ -1,18 +1,19 @@
-"""実ブラウザ (Chromium) を使った WebTransport E2E テスト
+"""実ブラウザ (Chromium / WebKit) を使った WebTransport E2E 検証の共通実装
 
-Shiguredo WebTransport DevTools (https://moqt-devtools.shiguredo.app/webtransport-devtools)
-をブラウザ側 WebTransport クライアントとして、webtransport-py の echo サーバーへの
-接続と送受信を検証する。通常の make test と CI の collection 対象からは
-pyproject.toml の addopts の --ignore=tests/browser で除外されている。
+Shiguredo WebTransport DevTools
+(https://moqt-devtools.shiguredo.app/webtransport-devtools) をブラウザ側
+WebTransport クライアントとして、webtransport-py の echo サーバーへの接続と
+送受信を検証する。このモジュールはブラウザ種別ごとのテストファイル
+(test_webtransport_chromium.py / test_webtransport_webkit.py) から呼び出される
+共通実装であり、pytest の collection 対象にならないように _ プレフィックスで
+始めている。通常の make test と CI の collection 対象からは pyproject.toml の
+addopts の --ignore=tests/browser で除外されている。
 """
 
 import queue
 import urllib.parse
 
-import pytest
 from playwright.sync_api import Page, expect
-
-pytestmark = pytest.mark.browser
 
 # DevTools テストページの URL
 DEVTOOLS_URL = "https://moqt-devtools.shiguredo.app/webtransport-devtools"
@@ -36,7 +37,7 @@ def _devtools_url(browser_server, certificate_hash_value: str) -> str:
     return f"{DEVTOOLS_URL}?{params}"
 
 
-def test_browser_e2e_webtransport(
+def run_browser_e2e_webtransport(
     page: Page,
     browser_server,
     certificate_hash_value: str,
@@ -76,10 +77,14 @@ def test_browser_e2e_webtransport(
     opened_stream_id, _ = opened_payload
     assert opened_stream_id >= 0
 
-    incoming_section = page.get_by_role("heading", name="Incoming Streams").locator("..").locator("..")
-    incoming_message = incoming_section.locator("div.text-xs").filter(
-        has_text="RECV:"
-    ).filter(has_text="server-unidirectional-payload")
+    incoming_section = (
+        page.get_by_role("heading", name="Incoming Streams").locator("..").locator("..")
+    )
+    incoming_message = (
+        incoming_section.locator("div.text-xs")
+        .filter(has_text="RECV:")
+        .filter(has_text="server-unidirectional-payload")
+    )
     expect(incoming_message).to_be_visible(timeout=10_000)
 
     # 検証観点 3: 双方向ストリームの送受信
@@ -87,7 +92,9 @@ def test_browser_e2e_webtransport(
     # ページ側でメッセージを送信し、RECV 表示とサーバー側の on_stream_data で
     # 確認する
     # h2 -> ヘッダー行 div -> カード div の順に親を辿ってセクションを特定する
-    bidi_section = page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
+    bidi_section = (
+        page.get_by_role("heading", name="Bidirectional Streams").locator("..").locator("..")
+    )
     bidi_section.get_by_role("button", name="+ New Stream").click()
     bidi_message = "bidi-echo-message"
     bidi_section.get_by_placeholder("Enter message...").fill(bidi_message)
@@ -95,9 +102,9 @@ def test_browser_e2e_webtransport(
 
     # DevTools はメッセージをタイムスタンプ・SEND:/RECV: ラベル・データの
     # 別要素で表示するため、"RECV:" ラベルとデータを含むメッセージ要素で確認する
-    recv_message = bidi_section.locator("div.text-xs").filter(
-        has_text="RECV:"
-    ).filter(has_text=bidi_message)
+    recv_message = (
+        bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=bidi_message)
+    )
     expect(recv_message).to_be_visible(timeout=10_000)
     try:
         bidi_payload = browser_server.wait_event("stream_data", timeout=10.0)
@@ -111,15 +118,19 @@ def test_browser_e2e_webtransport(
     # クライアント起点の単方向ストリーム (QUIC stream_id % 4 == 2) は
     # エコーバックしないため、ページ側の SEND 表示とサーバー側の
     # on_stream_data で受信を確認する
-    outgoing_section = page.get_by_role("heading", name="Outgoing Streams").locator("..").locator("..")
+    outgoing_section = (
+        page.get_by_role("heading", name="Outgoing Streams").locator("..").locator("..")
+    )
     outgoing_section.get_by_role("button", name="+ New Stream").click()
     uni_message = "uni-send-message"
     outgoing_section.get_by_placeholder("Enter message...").fill(uni_message)
     outgoing_section.get_by_role("button", name="Send").click()
 
-    send_message = outgoing_section.locator("div.text-xs").filter(
-        has_text="SEND:"
-    ).filter(has_text=uni_message)
+    send_message = (
+        outgoing_section.locator("div.text-xs")
+        .filter(has_text="SEND:")
+        .filter(has_text=uni_message)
+    )
     expect(send_message).to_be_visible(timeout=10_000)
     try:
         uni_payload = browser_server.wait_event("stream_data", timeout=10.0)
@@ -140,9 +151,12 @@ def test_browser_e2e_webtransport(
         datagram_input.press("Enter")
 
     # 複数回送信するため複数の RECV 要素が生じるので、先頭要素で確認する
-    recv_datagram = datagram_section.locator("div.text-xs").filter(
-        has_text="RECV:"
-    ).filter(has_text=datagram_message).first
+    recv_datagram = (
+        datagram_section.locator("div.text-xs")
+        .filter(has_text="RECV:")
+        .filter(has_text=datagram_message)
+        .first
+    )
     expect(recv_datagram).to_be_visible(timeout=10_000)
     try:
         browser_server.wait_event("datagram", timeout=10.0)

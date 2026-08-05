@@ -1,19 +1,25 @@
-"""実ブラウザ (Chromium) を使った WebTransport E2E テスト用フィクスチャ
+"""実ブラウザ (Chromium / WebKit) を使った WebTransport E2E テスト用フィクスチャ
 
 pytest-playwright の同期 API から asyncio ベースの Server を扱うため、
 サーバーは別スレッドで asyncio.run() により起動する。ティアダウンでは
 別スレッドのイベントループに停止処理をスケジュールして停止する。
+
+ブラウザは pytest-playwright の --browser オプションには依存せず、ファイル
+単位でブラウザを固定するため、sync_playwright() で直接起動したブラウザを
+フィクスチャとして提供する。
 """
 
 import asyncio
 import base64
 import queue
 import threading
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
+from playwright.sync_api import Browser, Page, sync_playwright
 
 from webtransport.h3 import Server
 
@@ -181,9 +187,9 @@ class BrowserWebTransportServer:
             self._thread.join(timeout=10.0)
 
 
-@pytest.fixture(scope="session")
-def browser_type_launch_args() -> dict[str, object]:
-    """Chromium の launch オプションを設定する
+@pytest.fixture(scope="module")
+def chromium_browser() -> Iterator[Browser]:
+    """Chromium ブラウザを起動する
 
     テストページ (公開サイト moqt-devtools.shiguredo.app) から localhost の
     WebTransport サーバーへ接続する。Chrome の Local Network Access (LNA)
@@ -193,7 +199,42 @@ def browser_type_launch_args() -> dict[str, object]:
     certificateHash ピン留めで満たすため、ローカルアドレスへの接続を
     明示的に許可してもセキュリティ上の問題は生じない。
     """
-    return {"args": ["--disable-features=LocalNetworkAccessChecks"]}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--disable-features=LocalNetworkAccessChecks"],
+        )
+        yield browser
+        browser.close()
+
+
+@pytest.fixture(scope="module")
+def webkit_browser() -> Iterator[Browser]:
+    """WebKit (Safari) ブラウザを起動する
+
+    WebKit には Chrome の Local Network Access (LNA) チェックに相当する
+    ローカルアドレスへの接続ブロックがなく、フラグ指定は不要である。
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.webkit.launch(headless=True)
+        yield browser
+        browser.close()
+
+
+@pytest.fixture
+def chromium_page(chromium_browser: Browser) -> Iterator[Page]:
+    """Chromium の新しいページを返す"""
+    page = chromium_browser.new_page()
+    yield page
+    page.close()
+
+
+@pytest.fixture
+def webkit_page(webkit_browser: Browser) -> Iterator[Page]:
+    """WebKit の新しいページを返す"""
+    page = webkit_browser.new_page()
+    yield page
+    page.close()
 
 
 def certificate_hash(certfile: str) -> str:
