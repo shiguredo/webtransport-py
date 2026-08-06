@@ -182,6 +182,38 @@ class Http2Connection {
   void ping();
 
   /**
+   * GOAWAY を送信してセッションを即時終了する
+   *
+   * 既存の goaway() と異なり graceful shutdown ではなく、呼び出し直後から
+   * 受信フレームを無視し、GOAWAY 送出後に want_read / want_write が 0 に
+   * なって終了する。closed_ にはしないため is_closed() は False のまま。
+   * 2 回目の呼び出しは何もせず成功を返す。goaway() の後に呼ぶと GOAWAY が
+   * 2 枚送信される (RFC 9113 6.8 では許容される。2 枚目の last_stream_id
+   * は既に送信した値より大きくならない)
+   * @param error_code エラーコード
+   * @param last_stream_id ピアが開始したストリーム ID (0 は処理済み
+   *  ストリームなし = 全ストリームの終了。クライアントセッションでは
+   *  偶数 / サーバーセッションでは奇数。パリティ違反と負の値は false)
+   * @return 成功したかどうか (コネクションが閉じている場合は false)
+   */
+  bool terminate_session(uint32_t error_code, int32_t last_stream_id);
+
+  /**
+   * ローカルウィンドウサイズを動的に変更する
+   *
+   * stream_id 0 でコネクション全体、それ以外でストリーム単位。
+   * window_size は絶対値 (delta ではない)。増加は WINDOW_UPDATE でピアへ
+   * 通知されるが、減少はローカルでの受信絞り込みのみで通知されない。
+   * 存在しないストリームと負の stream_id は成功扱いになる (nghttp2
+   * v1.70.0 の実装。ヘッダー doc の INVALID_ARGUMENT とは異なる)
+   * @param stream_id ストリーム ID (0 でコネクション全体)
+   * @param window_size 設定するウィンドウサイズ (絶対値)
+   * @return 成功したかどうか (負の window_size / コネクションが閉じている
+   *  場合は false)
+   */
+  bool set_local_window_size(int32_t stream_id, int32_t window_size);
+
+  /**
    * 次のイベントを取得
    * @return イベント (なければ nullopt)
    */

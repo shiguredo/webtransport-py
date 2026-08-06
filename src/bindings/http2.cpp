@@ -272,6 +272,52 @@ void Http2Connection::ping() {
   nghttp2_submit_ping(session_, NGHTTP2_FLAG_NONE, nullptr);
 }
 
+bool Http2Connection::terminate_session(uint32_t error_code,
+                                        int32_t last_stream_id) {
+  if (!session_ || closed_) {
+    return false;
+  }
+
+  // last_stream_id はピアが開始したストリーム ID (0 は全ストリーム終了)。
+  // クライアントセッションでは偶数 / サーバーセッションでは奇数が有効。
+  // パリティ違反を nghttp2 に渡すと INVALID_ARGUMENT を返すが、その前に
+  // セッションの受信処理を無視状態 (IB_IGN_ALL) にしてしまうため、
+  // 事前にガードする。負の値も nghttp2 を素通りして不正な GOAWAY を
+  // 送出してしまうため同様に拒否する
+  if (last_stream_id != 0) {
+    bool is_even = (last_stream_id & 0x1) == 0;
+    bool valid = is_server_ ? !is_even : is_even;
+    if (last_stream_id < 0 || !valid) {
+      return false;
+    }
+  }
+
+  // GOAWAY を送信してセッションを即時終了する。呼び出し直後から受信
+  // フレームを無視し、GOAWAY 送出後に want_read / want_write が 0 になる。
+  // closed_ にはしない (send() を止めないため)。2 回目以降の呼び出しは
+  // GOAWAY_TERM_ON_SEND が立っているため何もせず成功を返す
+  return nghttp2_session_terminate_session2(session_, last_stream_id,
+                                            error_code) == 0;
+}
+
+bool Http2Connection::set_local_window_size(int32_t stream_id,
+                                            int32_t window_size) {
+  if (!session_ || closed_) {
+    return false;
+  }
+
+  // 負のウィンドウサイズはガードする (nghttp2 も INVALID_ARGUMENT を返す)
+  if (window_size < 0) {
+    return false;
+  }
+
+  // 増加時は WINDOW_UPDATE がキュー投入され、減少時はローカルでの
+  // 受信絞り込みのみになる。存在しないストリームと負の stream_id は
+  // 成功扱い (nghttp2 v1.70.0 の実装)
+  return nghttp2_session_set_local_window_size(session_, NGHTTP2_FLAG_NONE,
+                                               stream_id, window_size) == 0;
+}
+
 std::optional<Http2Event> Http2Connection::next_event() {
   if (events_.empty()) {
     return std::nullopt;
@@ -769,6 +815,16 @@ void bind_http2(nb::module_& m) {
            "GOAWAY を送信")
       .def("ping", &Http2Connection::ping, nb::sig("def ping(self) -> None"),
            "PING を送信")
+      .def("terminate_session", &Http2Connection::terminate_session,
+           nb::arg("error_code") = 0, nb::arg("last_stream_id") = 0,
+           nb::sig("def terminate_session(self, error_code: int = 0, "
+                   "last_stream_id: int = 0) -> bool"),
+           "GOAWAY を送信してセッションを即時終了")
+      .def("set_local_window_size", &Http2Connection::set_local_window_size,
+           nb::arg("stream_id"), nb::arg("window_size"),
+           nb::sig("def set_local_window_size(self, stream_id: int, "
+                   "window_size: int) -> bool"),
+           "ローカルウィンドウサイズを動的に変更")
       .def("next_event", &Http2Connection::next_event,
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
