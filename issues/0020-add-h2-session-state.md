@@ -1,7 +1,7 @@
 # nghttp2 のセッション状態・設定確認 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-06
 - Branch: feature/add-h2-session-state
 - Polished: 2026-08-04
 
@@ -43,3 +43,16 @@ HTTP/2 セッションの SETTINGS・ウィンドウサイズ・送信キュー�
 - Python から新しいリクエストの送信可否とストリームの half-closed 状態が取得できる (`request_allowed` が bool を返す。クライアントで True / サーバーで False になることを確認する。コネクションが閉じている場合は None。`stream_local_close` は `send_data(stream_id, data, eof=True)` の送信後に True になり (send() でフレームが送出された後)、`stream_remote_close` はピアの END_STREAM 受信後に True になることを確認する)
 - Python から WINDOW_UPDATE 未送信の受信 DATA バイト数を取得できる (`effective_recv_data_length` 等が int を返す)
 - モックなしのテストで、各 API が動作することを確認する (Http2Connection は低レベル受け渡し構成でテストする。クライアントとサーバーの両方の `Http2Connection` を用意して互いの送信データを受信側に流す構成は、既存の `tests/prop_http2_roundtrip.py` の `create_client_server_pair` / `exchange_settings` パターンを流用・拡張して構築する)
+
+## 解決方法
+
+`src/bindings/http2.cpp` / `.h` の `Http2Connection` にセッション状態確認メソッドを追加し、nanobind で公開した (Python 側は `webtransport.http2.Connection`)。
+
+- 引数を取らない getter はプロパティとして公開: `remote_settings` / `local_settings` (dict) / `outbound_queue_size` / `remote_window_size` / `local_window_size` / `effective_recv_data_length` (int) / `request_allowed` (bool)
+- ストリーム ID 引数のメソッドとして公開: `stream_remote_window_size` / `stream_local_window_size` / `stream_effective_recv_data_length` (int) / `stream_local_close` / `stream_remote_close` (bool)
+- コネクションが閉じている場合と、ストリームが存在しない場合 (nghttp2 が -1 を返す場合) は None を返す
+- SETTINGS の辞書は `initial_window_size` / `max_concurrent_streams` / `max_frame_size` / `max_header_list_size` の 4 キー (nghttp2 の値をそのまま)
+
+テストは `tests/test_http2_session_state.py` に追加した。クライアント・サーバーの `Http2Connection` ペアで SETTINGS 交換から検証し、受信前・ACK 前のデフォルト値、SETTINGS 交換後の値、ウィンドウ残量の増減、WINDOW_UPDATE 未送信の受信 DATA 量と半分閾値でのリセット、half-closed 状態の遷移と完全クローズ後の None、GOAWAY 受信後の全 getter の None を確認する。
+
+設計方針の記述のうち「check_request_allowed は GOAWAY 受信のみをチェックするため、送信後も True を返す」は nghttp2 v1.70.0 の実装と異なる。実際は `session_is_closing` (GOAWAY 送信後に want_read / want_write が 0 になった場合) もチェックするため、GOAWAY 送信後はアクティブストリームが無ければ False を返す。本実装は nghttp2 の戻り値をそのまま公開しており、テストで実際の挙動を検証している。
