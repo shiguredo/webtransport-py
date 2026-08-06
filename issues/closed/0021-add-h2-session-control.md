@@ -1,7 +1,7 @@
 # nghttp2 のセッション制御 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-06
 - Branch: feature/add-h2-session-control
 - Polished: 2026-08-04
 
@@ -32,3 +32,14 @@ HTTP/2 セッションの即時切断とウィンドウサイズの動的調整�
 - Python からコネクション / ストリームのローカルウィンドウサイズを動的に変更できる (増加時に WINDOW_UPDATE が送出され、ピア側で WindowUpdate イベントを受信してウィンドウ残量が増えることを確認する。減少時は WINDOW_UPDATE が送出されないことを確認する)
 - ガード経路も確認する (パリティ違反の `last_stream_id` での False、負の `window_size` での False、コネクションが閉じている場合の False)
 - モックなしのテストで、各 API が動作することを確認する (Http2Connection は低レベル受け渡し構成でテストする。クライアントとサーバーの両方の `Http2Connection` を用意して互いの送信データを受信側に流す構成は、既存の `tests/prop_http2_roundtrip.py` の `create_client_server_pair` / `exchange_settings` パターンを流用・拡張して構築する)
+
+## 解決方法
+
+`src/bindings/http2.cpp` / `.h` の `Http2Connection` にセッション制御メソッドを追加し、nanobind で公開した (Python 側は `webtransport.http2.Connection`)。
+
+- `terminate_session(error_code, last_stream_id)` を追加: `nghttp2_session_terminate_session2` をラップし、GOAWAY を送信してセッションを即時終了する。呼び出し直後から受信フレームを無視し、GOAWAY 送出後に want_read / want_write が 0 になる。`closed_` にはしないため `is_closed()` は False のまま。成功で True / 失敗で False を返す
+- `last_stream_id` のパリティ違反 (クライアントセッションで奇数 / サーバーセッションで偶数) と負の値は C++ 側で事前にガードする。nghttp2 に渡すと NGHTTP2_ERR_INVALID_ARGUMENT を返すが、その前にセッションの受信処理を無視状態 (IB_IGN_ALL) にしてしまうため
+- `set_local_window_size(stream_id, window_size)` を追加: `nghttp2_session_set_local_window_size` をラップし、ローカルウィンドウサイズを絶対値で動的に変更する。増加時は WINDOW_UPDATE でピアへ通知され、減少時はローカルでの受信絞り込みのみ。負の `window_size` はガードして False。存在しないストリームと負の `stream_id` は nghttp2 v1.70.0 の実装で成功扱い (True)
+- `goaway()` の後に `terminate_session()` を呼ぶと GOAWAY が 2 枚送信される (RFC 9113 6.8 では許容される。2 枚目の last_stream_id は既に送信した値より大きくならない)。`goaway_sent_` は `goaway()` 専用のため `terminate_session()` には影響しない
+
+テストは `tests/test_http2_session_control.py` に追加した。クライアント・サーバーの `Http2Connection` ペアで SETTINGS 交換から検証し、terminate_session の want_write 遷移とピア側の GOAWAY 受信 (error_code / last_stream_id 含む)、パリティ違反後も通信が継続できること、ウィンドウ増加の WINDOW_UPDATE 通知とウィンドウ残量の増加、減少時の受信絞り込み (32767 バイト受信でも WINDOW_UPDATE 非送出)、ガード経路を確認する。
