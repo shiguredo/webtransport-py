@@ -293,6 +293,161 @@ bool Http2Connection::is_closed() const {
   return closed_;
 }
 
+// ========== セッション状態確認 API ==========
+
+std::optional<std::map<std::string, uint32_t>>
+Http2Connection::remote_settings() const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  // ピアが送信した SETTINGS の値 (受信前は nghttp2 のデフォルト値。
+  // max_concurrent_streams のみセッション生成時に 100 が設定され、最初の
+  // SETTINGS 受信時にリセットされた後、フレームのエントリ値が適用される)
+  return std::map<std::string, uint32_t>{
+      {"initial_window_size",
+       nghttp2_session_get_remote_settings(
+           session_, NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE)},
+      {"max_concurrent_streams",
+       nghttp2_session_get_remote_settings(
+           session_, NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS)},
+      {"max_frame_size", nghttp2_session_get_remote_settings(
+                             session_, NGHTTP2_SETTINGS_MAX_FRAME_SIZE)},
+      {"max_header_list_size",
+       nghttp2_session_get_remote_settings(
+           session_, NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE)},
+  };
+}
+
+std::optional<std::map<std::string, uint32_t>> Http2Connection::local_settings()
+    const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  // ピアが ACK したローカルの SETTINGS の値 (ACK 前は nghttp2 の
+  // デフォルト値)
+  return std::map<std::string, uint32_t>{
+      {"initial_window_size",
+       nghttp2_session_get_local_settings(
+           session_, NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE)},
+      {"max_concurrent_streams",
+       nghttp2_session_get_local_settings(
+           session_, NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS)},
+      {"max_frame_size", nghttp2_session_get_local_settings(
+                             session_, NGHTTP2_SETTINGS_MAX_FRAME_SIZE)},
+      {"max_header_list_size",
+       nghttp2_session_get_local_settings(
+           session_, NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE)},
+  };
+}
+
+std::optional<size_t> Http2Connection::outbound_queue_size() const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp2_session_get_outbound_queue_size(session_);
+}
+
+std::optional<int32_t> Http2Connection::remote_window_size() const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp2_session_get_remote_window_size(session_);
+}
+
+std::optional<int32_t> Http2Connection::local_window_size() const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp2_session_get_local_window_size(session_);
+}
+
+std::optional<int32_t> Http2Connection::effective_recv_data_length() const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp2_session_get_effective_recv_data_length(session_);
+}
+
+std::optional<bool> Http2Connection::request_allowed() const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+  return nghttp2_session_check_request_allowed(session_) != 0;
+}
+
+std::optional<int32_t> Http2Connection::stream_remote_window_size(
+    int32_t stream_id) const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  int32_t window_size =
+      nghttp2_session_get_stream_remote_window_size(session_, stream_id);
+  if (window_size < 0) {
+    // ストリームが存在しない場合は None を返す (完全に閉じたストリームも
+    // nghttp2 の管理から外れて存在しなくなる)
+    return std::nullopt;
+  }
+  return window_size;
+}
+
+std::optional<int32_t> Http2Connection::stream_local_window_size(
+    int32_t stream_id) const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  int32_t window_size =
+      nghttp2_session_get_stream_local_window_size(session_, stream_id);
+  if (window_size < 0) {
+    return std::nullopt;
+  }
+  return window_size;
+}
+
+std::optional<int32_t> Http2Connection::stream_effective_recv_data_length(
+    int32_t stream_id) const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  int32_t recv_data_length =
+      nghttp2_session_get_stream_effective_recv_data_length(session_,
+                                                            stream_id);
+  if (recv_data_length < 0) {
+    return std::nullopt;
+  }
+  return recv_data_length;
+}
+
+std::optional<bool> Http2Connection::stream_local_close(
+    int32_t stream_id) const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  int rv = nghttp2_session_get_stream_local_close(session_, stream_id);
+  if (rv < 0) {
+    return std::nullopt;
+  }
+  return rv != 0;
+}
+
+std::optional<bool> Http2Connection::stream_remote_close(
+    int32_t stream_id) const {
+  if (!session_ || closed_) {
+    return std::nullopt;
+  }
+
+  int rv = nghttp2_session_get_stream_remote_close(session_, stream_id);
+  if (rv < 0) {
+    return std::nullopt;
+  }
+  return rv != 0;
+}
+
 void Http2Connection::push_event(Http2Event event) {
   events_.push_back(std::move(event));
 }
@@ -620,7 +775,57 @@ void bind_http2(nb::module_& m) {
       .def("want_write", &Http2Connection::want_write,
            nb::sig("def want_write(self) -> bool"), "送信待ちデータがあるか")
       .def("is_closed", &Http2Connection::is_closed,
-           nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか");
+           nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
+      .def_prop_ro(
+          "remote_settings", &Http2Connection::remote_settings,
+          nb::sig("def remote_settings(self) -> dict[str, int] | None"),
+          "ピアの SETTINGS の値を取得")
+      .def_prop_ro("local_settings", &Http2Connection::local_settings,
+                   nb::sig("def local_settings(self) -> dict[str, int] | None"),
+                   "ローカルの SETTINGS の値を取得")
+      .def_prop_ro("outbound_queue_size", &Http2Connection::outbound_queue_size,
+                   nb::sig("def outbound_queue_size(self) -> int | None"),
+                   "送信キューのフレーム数を取得")
+      .def_prop_ro("remote_window_size", &Http2Connection::remote_window_size,
+                   nb::sig("def remote_window_size(self) -> int | None"),
+                   "コネクションのリモートウィンドウ残量を取得")
+      .def_prop_ro("local_window_size", &Http2Connection::local_window_size,
+                   nb::sig("def local_window_size(self) -> int | None"),
+                   "コネクションのローカルウィンドウ残量を取得")
+      .def_prop_ro(
+          "effective_recv_data_length",
+          &Http2Connection::effective_recv_data_length,
+          nb::sig("def effective_recv_data_length(self) -> int | None"),
+          "WINDOW_UPDATE 未送信の受信 DATA バイト数を取得")
+      .def_prop_ro("request_allowed", &Http2Connection::request_allowed,
+                   nb::sig("def request_allowed(self) -> bool | None"),
+                   "新しいリクエストを送信できるかを取得")
+      .def("stream_remote_window_size",
+           &Http2Connection::stream_remote_window_size, nb::arg("stream_id"),
+           nb::sig("def stream_remote_window_size(self, stream_id: int) -> "
+                   "int | None"),
+           "ストリームのリモートウィンドウ残量を取得")
+      .def("stream_local_window_size",
+           &Http2Connection::stream_local_window_size, nb::arg("stream_id"),
+           nb::sig("def stream_local_window_size(self, stream_id: int) -> "
+                   "int | None"),
+           "ストリームのローカルウィンドウ残量を取得")
+      .def("stream_effective_recv_data_length",
+           &Http2Connection::stream_effective_recv_data_length,
+           nb::arg("stream_id"),
+           nb::sig("def stream_effective_recv_data_length(self, stream_id: "
+                   "int) -> int | None"),
+           "ストリームの WINDOW_UPDATE 未送信の受信 DATA バイト数を取得")
+      .def("stream_local_close", &Http2Connection::stream_local_close,
+           nb::arg("stream_id"),
+           nb::sig(
+               "def stream_local_close(self, stream_id: int) -> bool | None"),
+           "ストリームのローカル側が half-closed かを取得")
+      .def("stream_remote_close", &Http2Connection::stream_remote_close,
+           nb::arg("stream_id"),
+           nb::sig(
+               "def stream_remote_close(self, stream_id: int) -> bool | None"),
+           "ストリームのリモート側が half-closed かを取得");
 
   // nghttp2 バージョン情報
   http2_m.def(

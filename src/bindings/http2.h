@@ -8,6 +8,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
@@ -195,6 +196,106 @@ class Http2Connection {
    * 接続が閉じられたか
    */
   bool is_closed() const;
+
+  /**
+   * ピアの SETTINGS の値を取得
+   *
+   * ピアから SETTINGS を受信する前は nghttp2 のデフォルト値
+   * (max_concurrent_streams のみセッション生成時に 100)
+   * @return SETTINGS の辞書 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<std::map<std::string, uint32_t>> remote_settings() const;
+
+  /**
+   * ローカルの SETTINGS の値を取得
+   *
+   * ピアが ACK した値。 ACK を受信する前は nghttp2 のデフォルト値
+   * @return SETTINGS の辞書 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<std::map<std::string, uint32_t>> local_settings() const;
+
+  /**
+   * 送信キューのフレーム数を取得 (deferred DATA を含まない)
+   * @return フレーム数 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<size_t> outbound_queue_size() const;
+
+  /**
+   * コネクションのリモートウィンドウ残量を取得
+   *
+   * ローカルが送れる量。 DATA の送出で減り、ピアの WINDOW_UPDATE 受信で
+   * 増える。コネクションウィンドウは SETTINGS_INITIAL_WINDOW_SIZE の
+   * 影響を受けない
+   * @return ウィンドウ残量 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<int32_t> remote_window_size() const;
+
+  /**
+   * コネクションのローカルウィンドウ残量を取得
+   *
+   * ピアが送れる量。 DATA の受信で減り、WINDOW_UPDATE の送出で増える。
+   * コネクションウィンドウは SETTINGS_INITIAL_WINDOW_SIZE の影響を受けない
+   * @return ウィンドウ残量 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<int32_t> local_window_size() const;
+
+  /**
+   * WINDOW_UPDATE を送信せずに受信した DATA ペイロードのバイト数を取得
+   * @return 受信ウィンドウの消費量 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<int32_t> effective_recv_data_length() const;
+
+  /**
+   * 新しいリクエストを送信できるかを取得 (クライアントのみ)
+   *
+   * サーバーセッションでは常に False。 GOAWAY の受信後とストリーム ID の
+   * 枯渇後も False になる。 GOAWAY 送信後は、アクティブストリームが無く
+   * 送信待ちが無くなった場合に False になる
+   * @return 送信可否 (コネクションが閉じている場合は nullopt)
+   */
+  std::optional<bool> request_allowed() const;
+
+  /**
+   * ストリームのリモートウィンドウ残量を取得
+   *
+   * SETTINGS_INITIAL_WINDOW_SIZE の縮小で内部のウィンドウが負になりうる
+   * が、 nghttp2 が 0 にクランプして返す
+   * @param stream_id ストリーム ID
+   * @return ウィンドウ残量 (ストリームが存在しない・閉じている場合は nullopt)
+   */
+  std::optional<int32_t> stream_remote_window_size(int32_t stream_id) const;
+
+  /**
+   * ストリームのローカルウィンドウ残量を取得
+   *
+   * SETTINGS_INITIAL_WINDOW_SIZE の縮小で内部のウィンドウが負になりうる
+   * が、 nghttp2 が 0 にクランプして返す
+   * @param stream_id ストリーム ID
+   * @return ウィンドウ残量 (ストリームが存在しない・閉じている場合は nullopt)
+   */
+  std::optional<int32_t> stream_local_window_size(int32_t stream_id) const;
+
+  /**
+   * ストリームの WINDOW_UPDATE 未送信の受信 DATA バイト数を取得
+   * @param stream_id ストリーム ID
+   * @return 受信ウィンドウの消費量 (ストリームが存在しない・閉じている場合は nullopt)
+   */
+  std::optional<int32_t> stream_effective_recv_data_length(
+      int32_t stream_id) const;
+
+  /**
+   * ストリームのローカル側が half-closed かを取得
+   * @param stream_id ストリーム ID
+   * @return half-closed かどうか (ストリームが存在しない・閉じている場合は nullopt)
+   */
+  std::optional<bool> stream_local_close(int32_t stream_id) const;
+
+  /**
+   * ストリームのリモート側が half-closed かを取得
+   * @param stream_id ストリーム ID
+   * @return half-closed かどうか (ストリームが存在しない・閉じている場合は nullopt)
+   */
+  std::optional<bool> stream_remote_close(int32_t stream_id) const;
 
  private:
   Http2Connection(bool is_server, const Http2Config& config);
