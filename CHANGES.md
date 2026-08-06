@@ -47,6 +47,8 @@
   - @voluntas
 - [ADD] HTTP/2 のメッセージング拡張 API (トレーラ送信 / RFC 9218 の優先度制御 / Server Push / ALPN 選択) を公開する。`Http2Config` に `no_rfc7540_priorities` (デフォルト true) を追加し、SETTINGS に NO_RFC7540_PRIORITIES を含める
   - @voluntas
+- [ADD] HTTP/3 と WebTransport over HTTP/3 のストリーム・接続制御 API (QUIC フロー制御ブロック / アンブロック / 同時ストリーム数ヒント) を公開する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
@@ -60,6 +62,8 @@
 - [FIX] QUIC サーバーの RETRY 送出要求時に接続が閉じられた状態にならない問題を修正する
   - @voluntas
 - [FIX] close() が生成した CONNECTION_CLOSE パケットを送出しない問題を修正する
+  - @voluntas
+- [FIX] HTTP/3 と WebTransport over HTTP/3 の FIN なしデータ送信で DATA フレームのペイロードが壊れる問題を修正する
   - @voluntas
 
 ### misc

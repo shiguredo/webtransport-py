@@ -311,6 +311,41 @@ class H3Session {
   void set_max_client_streams_bidi(uint64_t max_streams);
 
   /**
+   * ストリームの QUIC フロー制御ブロックを通知
+   *
+   * ストリームが QUIC フロー制御でブロックされたことを nghttp3 に伝え、
+   * スケジューラから外す。クライアント双方向ストリーム (% 4 == 0) のみ
+   * 即時にスケジューラから外れ、単方向ストリームはスケジューラから
+   * 外れないためブロック直後に 1 回の書き込みが通る。
+   * 存在しないストリームは no-op。
+   * @param stream_id ストリーム ID
+   */
+  void block_stream(int64_t stream_id);
+
+  /**
+   * ストリームの QUIC フロー制御ブロック解除を通知
+   *
+   * block_stream でブロックしたストリームの解除を nghttp3 に伝え、
+   * スケジューリングを再開する。GOAWAY 受信 (graceful shutdown) 後も
+   * 既存ストリームのフロー制御ブロック操作は有効なため、closed_ は
+   * 見ない (H3Session の閉鎖は QUIC コネクション層が担う)
+   * @param stream_id ストリーム ID
+   * @return 成功したかどうか (存在しないストリームは成功扱い。メモリ
+   *  不足の場合のみ false。コネクションが無い場合は false)
+   */
+  bool unblock_stream(int64_t stream_id);
+
+  /**
+   * 同時ストリーム数のヒントを設定
+   *
+   * QPACK デコーダーの内部リソース消費のヒント (decoder stream の長さ
+   * 制限)。現在値との max マージのため、小さい値は反映されない
+   * (nghttp3 内部の実効下限は 100)。
+   * @param n 同時ストリーム数のヒント
+   */
+  void max_concurrent_streams(size_t n);
+
+  /**
    * テスト専用: ストリームの送信バッファエントリが存在するか
    *
    * 恒久的な公開 API ではなく、テストでのバッファ解放検証にのみ使う。
