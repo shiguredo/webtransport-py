@@ -98,3 +98,21 @@ markers = [
 
 [tool.ty.rules]
 unresolved-import = "ignore"
+
+# TOML フォーマッタ・リンタ (tombi) の設定。tombi.toml を廃止して pyproject.toml へ統合した
+[tool.tombi]
+
+# scikit-build-core の [[tool.dynamic-metadata]] など、tombi / SchemaStore が
+# まだ正しく扱えない構成があるためスキーマ検証は無効化する
+[tool.tombi.schema]
+enabled = false
+
+# uv.lock などの自動生成ファイルを tombi の処理対象から除外する
+[tool.tombi.files]
+exclude = [
+  "**/uv.lock",
+  "**/_deps/**",
+  "**/_build/**",
+  "**/dist/**",
+  "**/.venv/**",
+]
