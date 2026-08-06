@@ -45,6 +45,8 @@
   - @voluntas
 - [ADD] HTTP/2 のセッション制御 API (GOAWAY による即時終了 / ローカルウィンドウサイズの動的変更) を公開する
   - @voluntas
+- [ADD] HTTP/2 のメッセージング拡張 API (トレーラ送信 / RFC 9218 の優先度制御 / Server Push / ALPN 選択) を公開する。`Http2Config` に `no_rfc7540_priorities` (デフォルト true) を追加し、SETTINGS に NO_RFC7540_PRIORITIES を含める
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える

@@ -58,6 +58,11 @@ struct Http2Config {
 
   // HTTP/2 プリフェイスを送信するか
   bool send_preface = true;
+
+  // SETTINGS_NO_RFC7540_PRIORITIES を送信するか
+  // (RFC 9218 の拡張優先度を有効にする。true にすると SETTINGS に
+  // NO_RFC7540_PRIORITIES=1 が含まれる)
+  bool no_rfc7540_priorities = true;
 };
 
 /**
@@ -72,6 +77,8 @@ enum class Http2EventType {
   WindowUpdate,
   Settings,
   Ping,
+  PushPromise,
+  PriorityUpdate,
 };
 
 /**
@@ -84,6 +91,9 @@ struct Http2Event {
   std::vector<uint8_t> data;
   uint32_t error_code = 0;
   int32_t last_stream_id = 0;
+  int32_t promised_stream_id = 0;
+  // PRIORITY_UPDATE の priority field value (例: "u=5, i")
+  std::string priority_field_value;
 };
 
 /**
@@ -155,6 +165,11 @@ class Http2Connection {
 
   /**
    * ストリームにデータを送信
+   *
+   * クライアントセッションでは submit_request、サーバーセッションでは
+   * submit_response の後に呼ぶこと。トレーラを予約済みのストリームでは
+   * トレーラ HEADERS が END_STREAM を担うため、eof=True の END_STREAM
+   * 付与は無効化される (予約が無ければ従来どおり eof=True で終端する)
    * @param stream_id ストリーム ID
    * @param data 送信データ
    * @param eof ストリーム終了フラグ
@@ -180,6 +195,73 @@ class Http2Connection {
    * PING を送信
    */
   void ping();
+
+  /**
+   * トレーラを送信 (サーバー用)
+   *
+   * トレーラ HEADERS は END_STREAM を担う。send_data(stream_id, data,
+   * eof=False) でデータを積んだ後に呼び、send() で flush する。
+   * データの最終チャンクが送出される時点で nghttp2_submit_trailer が
+   * 呼ばれ、DATA の後にトレーラ HEADERS が送信される。データが既に
+   * flush された後でも、deferred 状態を再開して送信する。トレーラを
+   * 送らない場合は従来どおり eof=True で終端する。トレーラセクションは
+   * 1 つのみ (RFC 9113 8.1 節) のため、同一ストリームへの再呼び出しは
+   * 失敗する
+   * @param stream_id ストリーム ID
+   * @param headers トレーラヘッダー
+   * @return 成功したかどうか (クライアントセッション・コネクションが
+   *  閉じている・ストリームが存在しない・レスポンス (データプロバイダ)
+   *  が設定されていない・ローカル側が half-closed・eof=True のデータが
+   *  積まれている・トレーラを予約済みの場合は false)
+   */
+  bool submit_trailer(
+      int32_t stream_id,
+      const std::vector<std::pair<std::string, std::string>>& headers);
+
+  /**
+   * RFC 9218 の PRIORITY_UPDATE フレームを送信 (クライアント用)
+   *
+   * urgency と incremental から Priority field value
+   * (u={urgency}、incremental のとき , i) をシリアライズして送信する。
+   * 動作にはピアが SETTINGS_NO_RFC7540_PRIORITIES=1 を送信している
+   * 必要がある (ピアが SETTINGS で NO_RFC7540_PRIORITIES=0 を送信した
+   * 場合のみ nghttp2 が noop で成功を返す)
+   * @param stream_id ストリーム ID
+   * @param urgency 緊急度 (0-7)
+   * @param incremental インクリメンタルかどうか
+   * @return 成功したかどうか (サーバーセッション・コネクションが
+   *  閉じている場合は false)
+   */
+  bool submit_priority_update(int32_t stream_id,
+                              uint32_t urgency,
+                              bool incremental);
+
+  /**
+   * ストリームの優先度を変更 (サーバー用)
+   *
+   * RFC 9218 の拡張優先度をローカルのスケジューリングに適用する。
+   * ignore_client_signal は常に 1 (クライアントからの優先度更新を無視)。
+   * 動作には自己が SETTINGS_NO_RFC7540_PRIORITIES=1 を送信している
+   * 必要がある (未送信時は nghttp2 が noop で成功を返す)
+   * @param stream_id ストリーム ID
+   * @param urgency 緊急度 (0-7)
+   * @param incremental インクリメンタルかどうか
+   * @return 成功したかどうか (クライアントセッション・コネクションが
+   *  閉じている場合は false)
+   */
+  bool change_extpri_stream_priority(int32_t stream_id,
+                                     uint32_t urgency,
+                                     bool incremental);
+
+  /**
+   * Server Push を宣言 (サーバー用)
+   * @param stream_id 親ストリーム ID
+   * @param headers プッシュするリクエストヘッダー
+   * @return promised stream ID (失敗時は -1)
+   */
+  int32_t submit_push_promise(
+      int32_t stream_id,
+      const std::vector<std::pair<std::string, std::string>>& headers);
 
   /**
    * GOAWAY を送信してセッションを即時終了する
@@ -391,6 +473,10 @@ class Http2Connection {
   // 現在受信中のヘッダー
   std::map<int32_t, std::vector<std::pair<std::string, std::string>>>
       pending_headers_;
+
+  // 保留中のトレーラ (送信待ち)
+  std::map<int32_t, std::vector<std::pair<std::string, std::string>>>
+      pending_trailers_;
 
   // 接続状態
   bool closed_ = false;
