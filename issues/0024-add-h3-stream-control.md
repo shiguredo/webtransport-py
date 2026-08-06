@@ -1,7 +1,7 @@
 # nghttp3 のストリーム・接続制御 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-06
 - Branch: feature/add-h3-stream-control
 - Polished: 2026-08-04
 
@@ -34,3 +34,11 @@ HTTP/3 ストリームの QUIC フロー制御ブロック制御と、QPACK デ�
 - Python から同時ストリーム数のヒントを設定できる (`max_concurrent_streams` 呼び出し後も、H3Session はセッション確立とデータストリーム送受信が、Http3Connection は通常のリクエスト送受信が継続できることを確認する。効果は外部から観測できないため、これ以上の検証は行わない)
 - ガード経路も確認する (存在しないストリーム ID での `unblock_stream` の True、`conn_` が無い場合の no-op / False)
 - モックなしのテストで、各 API が動作することを確認する (H3Session は 0013 と同じ h3.Session 同士の直接受け渡し構成、Http3Connection は低レベル受け渡し構成 (0017 と同様の `_pump` 方式) でテストする。0017 実装済みなら流用し、未実装なら 0013 と同様の構成を新規に構築する)
+
+## 解決方法
+
+- `block_stream` / `unblock_stream` / `max_concurrent_streams` を `H3Session` (webtransport_h3.cpp) と `Http3Connection` (http3.cpp) に実装し、nanobind で公開した (Python 側は `webtransport.h3.Session` / `webtransport.http3.Connection`)
+- ガードは設計方針通り `H3Session` は `!conn_` のみ、`Http3Connection` は `!conn_ || closed_` とした
+- 検証はクライアント双方向ストリーム (% 4 == 0) で send → block → `get_streams_to_send` (データが出ない) → unblock → `get_streams_to_send` (データが再び出る) の順で行い、`stream_writable` の変化と届いた DATA の内容 (b"hello" / b"request-body") も確認した。ガード経路 (存在しないストリーム ID・負値・2**62 超過) もテストで確認した
+- テスト実装中に既存バグを発見した: `fin=False` の `send_data` / `send_stream_data` で DATA フレームのペイロードが壊れる問題 (read_data コールバックが送信済みバッファを pop_front で解放し、nghttp3 が ALIEN 参照中の領域がダングリングポインタになる)。read_data コールバックの pop_front をイテレータでのスキップに変更し、解放は acked_stream_data コールバックに一本化して修正した
+- テストは 419 件全て pass (HTTP/3 側 3 件、WebTransport over HTTP/3 側 3 件を追加)
