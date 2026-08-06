@@ -11,12 +11,54 @@ pyproject.toml の addopts の --ignore=tests/browser で除外されている�
 """
 
 import queue
+import time
 import urllib.parse
 
 from playwright.sync_api import Page, expect
 
 # DevTools テストページの URL
 DEVTOOLS_URL = "https://moqt-devtools.shiguredo.app/webtransport-devtools"
+
+# 接続確立 (Connect ボタンクリック → Connected 表示) の待ち時間
+# 外部ページの読み込みと WebTransport ハンドシェイクは CI ランナーの負荷で
+# 遅延することがあるため、余裕を持たせる (フレーク対策)
+CONNECT_TIMEOUT_MS = 30_000
+CONNECT_TIMEOUT_S = 30.0
+# メッセージ送受信 (in-process echo) の待ち時間
+MESSAGE_TIMEOUT_MS = 10_000
+MESSAGE_TIMEOUT_S = 10.0
+
+
+def _open_devtools(page: Page, browser_server, certificate_hash_value: str) -> None:
+    """DevTools ページを開き、アプリの初期化完了 (Connect ボタン可視) を待つ
+
+    ページロード (load イベント) とアプリの初期化は同期しないため、
+    初期化完了前にクリックすると操作が失われることがある (フレークの原因)。
+    """
+    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    expect(page.get_by_test_id("connection-connect")).to_be_visible(timeout=CONNECT_TIMEOUT_MS)
+
+
+def _wait_connected(page: Page) -> None:
+    """Connected 表示を待つ
+
+    接続が確立しない場合、ページは "Connecting..." (接続中) または
+    "Error: {理由}" (接続失敗) の状態にある。失敗時はページの状態を
+    エラーメッセージに含めて、原因の切り分けを可能にする。
+    """
+    deadline = time.monotonic() + CONNECT_TIMEOUT_S
+    connected = page.get_by_text("Connected", exact=True)
+    while time.monotonic() < deadline:
+        if connected.count() > 0:
+            return
+        time.sleep(0.2)
+    status = page.get_by_test_id("connection-connect").inner_text()
+    error_text = page.get_by_text("Error:", exact=False)
+    if error_text.count() > 0:
+        raise AssertionError(
+            f"接続に失敗しました: {error_text.first.inner_text()} (ボタン状態: {status})"
+        )
+    raise AssertionError(f"接続が確立されませんでした (ボタン状態: {status})")
 
 
 def _devtools_url(browser_server, certificate_hash_value: str) -> str:
@@ -50,7 +92,7 @@ def run_browser_e2e_webtransport(
     留め、接続イベントの混線を避ける。
     """
     # 接続先 URL と証明書ハッシュを指定して DevTools ページを開く
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
 
     # WebTransport API が利用可能な状態でページがロードされることを確認する
     expect(page.get_by_text("WebTransport Not Supported")).not_to_be_visible()
@@ -60,9 +102,9 @@ def run_browser_e2e_webtransport(
     # "Disconnected" にマッチしないよう完全一致にする) とサーバー側の
     # on_session_ready の両方で確認する
     page.get_by_test_id("connection-connect").click()
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -71,7 +113,9 @@ def run_browser_e2e_webtransport(
     # 開かれ (戻り値が 0 以上)、Incoming Streams セクションに表示されることを
     # 確認する
     try:
-        opened_payload = browser_server.wait_event("server_stream_opened", timeout=10.0)
+        opened_payload = browser_server.wait_event(
+            "server_stream_opened", timeout=MESSAGE_TIMEOUT_S
+        )
     except queue.Empty as error:
         raise AssertionError("サーバー側で単方向ストリームが開かれませんでした") from error
     opened_stream_id, _ = opened_payload
@@ -85,7 +129,7 @@ def run_browser_e2e_webtransport(
         .filter(has_text="RECV:")
         .filter(has_text="server-unidirectional-payload")
     )
-    expect(incoming_message).to_be_visible(timeout=10_000)
+    expect(incoming_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
 
     # 検証観点 3: 双方向ストリームの送受信
     # 双方向ストリーム (QUIC stream_id % 4 == 0) のみエコーバックする。
@@ -104,9 +148,9 @@ def run_browser_e2e_webtransport(
     recv_message = (
         bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=bidi_message)
     )
-    expect(recv_message).to_be_visible(timeout=10_000)
+    expect(recv_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        bidi_payload = browser_server.wait_event("stream_data", timeout=10.0)
+        bidi_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で双方向ストリームが受信されませんでした") from error
     _, bidi_stream_id, bidi_data, _ = bidi_payload
@@ -130,9 +174,9 @@ def run_browser_e2e_webtransport(
         .filter(has_text="SEND:")
         .filter(has_text=uni_message)
     )
-    expect(send_message).to_be_visible(timeout=10_000)
+    expect(send_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        uni_payload = browser_server.wait_event("stream_data", timeout=10.0)
+        uni_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で単方向ストリームが受信されませんでした") from error
     _, uni_stream_id, uni_data, _ = uni_payload
@@ -156,9 +200,9 @@ def run_browser_e2e_webtransport(
         .filter(has_text=datagram_message)
         .first
     )
-    expect(recv_datagram).to_be_visible(timeout=10_000)
+    expect(recv_datagram).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        browser_server.wait_event("datagram", timeout=10.0)
+        browser_server.wait_event("datagram", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でデータグラムが受信されませんでした") from error
 
@@ -174,11 +218,11 @@ def run_browser_e2e_send_order_stream(
     ページ側で sendOrder を指定して双方向ストリームを作成し、エコーバックを
     確認する。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
     page.get_by_test_id("connection-connect").click()
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -197,9 +241,9 @@ def run_browser_e2e_send_order_stream(
     recv_message = (
         bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=message)
     )
-    expect(recv_message).to_be_visible(timeout=10_000)
+    expect(recv_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        payload = browser_server.wait_event("stream_data", timeout=10.0)
+        payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でストリームデータが受信されませんでした") from error
     _, stream_id, data, _ = payload
@@ -218,11 +262,11 @@ def run_browser_e2e_close_with_code(
     Disconnect ボタン経由で close() に渡され、サーバー側の SESSION_CLOSED
     イベントで確認する。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
     page.get_by_test_id("connection-connect").click()
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -233,7 +277,7 @@ def run_browser_e2e_close_with_code(
 
     # サーバー側でセッション終了を確認する
     try:
-        browser_server.wait_event("session_closed", timeout=10.0)
+        browser_server.wait_event("session_closed", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッション終了が確認されませんでした") from error
 
@@ -250,11 +294,11 @@ def run_browser_e2e_datagram_settings(
     接続中に Apply で反映し、設定後にデータグラムの送受信が引き続き
     機能することを確認する。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
     page.get_by_test_id("connection-connect").click()
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -266,7 +310,7 @@ def run_browser_e2e_datagram_settings(
     page.get_by_test_id("datagram-apply").click()
 
     # Apply が成功し、エラーが表示されないことを確認する
-    expect(page.get_by_text("Applied", exact=True)).to_be_visible(timeout=10_000)
+    expect(page.get_by_text("Applied", exact=True)).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
 
     # 設定後にデータグラムの送受信が機能することを確認する
     datagram_section = page.get_by_role("heading", name="Datagrams").locator("..").locator("..")
@@ -282,9 +326,9 @@ def run_browser_e2e_datagram_settings(
         .filter(has_text=datagram_message)
         .first
     )
-    expect(recv_datagram).to_be_visible(timeout=10_000)
+    expect(recv_datagram).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        browser_server.wait_event("datagram", timeout=10.0)
+        browser_server.wait_event("datagram", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でデータグラムが受信されませんでした") from error
 
@@ -303,7 +347,7 @@ def run_browser_e2e_connection_options(
     注: allowPooling は certificateHash と排他のため、自己署名証明書を
     certificateHash でピン留めする本テストでは指定できない。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
 
     # requireUnreliable を ON、congestionControl を low-latency に指定する
     page.get_by_test_id("connection-require-unreliable").check()
@@ -311,9 +355,9 @@ def run_browser_e2e_connection_options(
     page.get_by_test_id("connection-connect").click()
 
     # オプション指定でも接続が確立できることを確認する
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -330,7 +374,7 @@ def run_browser_e2e_custom_headers(
     確認する。サーバー側の高レベル API では受信ヘッダーを観測できないため、
     接続成功のみを確認する。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
 
     # カスタムヘッダーを指定する
     page.get_by_test_id("connection-headers").fill(
@@ -339,9 +383,9 @@ def run_browser_e2e_custom_headers(
     page.get_by_test_id("connection-connect").click()
 
     # ヘッダー付きでも接続が確立できることを確認する
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -358,11 +402,11 @@ def run_browser_e2e_stream_options(
     waitUntilAvailable 付きの双方向ストリームをそれぞれ作成し、送受信が
     機能することを確認する。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
     page.get_by_test_id("connection-connect").click()
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -381,9 +425,9 @@ def run_browser_e2e_stream_options(
         .filter(has_text="SEND:")
         .filter(has_text=uni_message)
     )
-    expect(send_message).to_be_visible(timeout=10_000)
+    expect(send_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        uni_payload = browser_server.wait_event("stream_data", timeout=10.0)
+        uni_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で単方向ストリームが受信されませんでした") from error
     _, uni_stream_id, uni_data, _ = uni_payload
@@ -403,9 +447,9 @@ def run_browser_e2e_stream_options(
     recv_message = (
         bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=bidi_message)
     )
-    expect(recv_message).to_be_visible(timeout=10_000)
+    expect(recv_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        bidi_payload = browser_server.wait_event("stream_data", timeout=10.0)
+        bidi_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で双方向ストリームが受信されませんでした") from error
     _, bidi_stream_id, bidi_data, _ = bidi_payload
@@ -423,11 +467,11 @@ def run_browser_e2e_close_stream(
     双方向ストリームの Close ボタンをクリックすると writer.close() が呼ばれ、
     ストリームパネルが Closed 表示になることを確認する。
     """
-    page.goto(_devtools_url(browser_server, certificate_hash_value))
+    _open_devtools(page, browser_server, certificate_hash_value)
     page.get_by_test_id("connection-connect").click()
-    expect(page.get_by_text("Connected", exact=True)).to_be_visible(timeout=10_000)
+    _wait_connected(page)
     try:
-        browser_server.wait_event("session_ready", timeout=10.0)
+        browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でセッションが確立されませんでした") from error
 
@@ -443,9 +487,9 @@ def run_browser_e2e_close_stream(
     recv_message = (
         bidi_section.locator("div.text-xs").filter(has_text="RECV:").filter(has_text=message)
     )
-    expect(recv_message).to_be_visible(timeout=10_000)
+    expect(recv_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
     try:
-        browser_server.wait_event("stream_data", timeout=10.0)
+        browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でストリームデータが受信されませんでした") from error
 
@@ -453,4 +497,4 @@ def run_browser_e2e_close_stream(
     bidi_section.get_by_title("Close stream").click()
 
     # ストリームパネルが Closed 表示になることを確認する
-    expect(bidi_section.get_by_text("Closed", exact=True)).to_be_visible(timeout=10_000)
+    expect(bidi_section.get_by_text("Closed", exact=True)).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
