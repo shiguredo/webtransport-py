@@ -684,6 +684,27 @@ bool Http3Connection::server_stream_priority(int64_t stream_id,
   return rv == 0;
 }
 
+void Http3Connection::block_stream(int64_t stream_id) {
+  if (!conn_ || closed_) {
+    return;
+  }
+  nghttp3_conn_block_stream(conn_, stream_id);
+}
+
+bool Http3Connection::unblock_stream(int64_t stream_id) {
+  if (!conn_ || closed_) {
+    return false;
+  }
+  return nghttp3_conn_unblock_stream(conn_, stream_id) == 0;
+}
+
+void Http3Connection::max_concurrent_streams(size_t n) {
+  if (!conn_ || closed_) {
+    return;
+  }
+  nghttp3_conn_set_max_concurrent_streams(conn_, n);
+}
+
 void Http3Connection::push_event(Http3Event event) {
   events_.push_back(std::move(event));
 }
@@ -937,17 +958,17 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
 
   auto& buffers = it->second;
 
-  // 送信済みで FIN なしのバッファは捨てて次へ進む
-  // (連続 send_data でキューが積まれたときに 0 返却で nghttp3 が abort するのを防ぐ)
-  while (!buffers.empty()) {
-    auto& buffer = buffers.front();
+  // 送信済みで FIN なしのバッファはスキップして次へ進む
+  // (ここで pop_front すると ALIEN 参照中のバッファが free され、
+  //  ダングリングポインタになるため、削除は acked_stream_data_cb に任せる)
+  for (auto itb = buffers.begin(); itb != buffers.end(); ++itb) {
+    auto& buffer = *itb;
     size_t remaining = buffer.data.size() - buffer.offset;
     if (remaining == 0) {
       if (buffer.fin) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
         return 0;
       }
-      buffers.pop_front();
       continue;
     }
 
@@ -958,7 +979,7 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
     // オフセットを更新（データはまだ削除しない - acked_stream_data_cb で削除）
     buffer.offset = buffer.data.size();
 
-    if (buffer.fin && buffers.size() == 1) {
+    if (buffer.fin && std::next(itb) == buffers.end()) {
       *pflags |= NGHTTP3_DATA_FLAG_EOF;
     }
 
@@ -1188,7 +1209,18 @@ void bind_http3(nb::module_& m) {
            nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
            nb::sig("def server_stream_priority(self, stream_id: int, "
                    "urgency: int, incremental: bool) -> bool"),
-           "クライアント起動双方向ストリームの優先度を設定 (サーバーのみ)");
+           "クライアント起動双方向ストリームの優先度を設定 (サーバーのみ)")
+      .def("block_stream", &Http3Connection::block_stream, nb::arg("stream_id"),
+           nb::sig("def block_stream(self, stream_id: int) -> None"),
+           "ストリームの QUIC フロー制御ブロックを通知")
+      .def("unblock_stream", &Http3Connection::unblock_stream,
+           nb::arg("stream_id"),
+           nb::sig("def unblock_stream(self, stream_id: int) -> bool"),
+           "ストリームの QUIC フロー制御ブロック解除を通知")
+      .def("max_concurrent_streams", &Http3Connection::max_concurrent_streams,
+           nb::arg("n"),
+           nb::sig("def max_concurrent_streams(self, n: int) -> None"),
+           "同時ストリーム数のヒントを設定");
 
   // nghttp3 バージョン情報
   http3_m.def(

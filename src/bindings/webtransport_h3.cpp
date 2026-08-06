@@ -671,9 +671,11 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
 
   auto& buffers = it->second;
 
-  // 送信済み (offset 済み) で FIN なしのバッファは捨てて次へ進む
-  while (!buffers.empty()) {
-    auto& front = buffers.front();
+  // 送信済み (offset 済み) で FIN なしのバッファはスキップして次へ進む
+  // (ここで pop_front すると ALIEN 参照中のバッファが free され、
+  //  ダングリングポインタになるため、削除は acked_stream_data_cb に任せる)
+  for (auto itb = buffers.begin(); itb != buffers.end(); ++itb) {
+    auto& front = *itb;
     size_t remaining = front.data.size() - front.offset;
     if (remaining == 0) {
       if (front.fin) {
@@ -681,13 +683,13 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
         // 読み出し済みの空エントリを削除する
         // データ量 0 のため acked_stream_data コールバックは発火せず、
         // ACK 経路では解放されない
+        // ここでは vec を返していないため pop_front しても安全
         buffers.pop_front();
         if (buffers.empty()) {
           stream_buffers_.erase(it);
         }
         return 0;
       }
-      buffers.pop_front();
       continue;
     }
 
@@ -697,7 +699,7 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
     front.offset = front.data.size();
 
     // 末尾バッファかつ FIN なら EOF を付ける
-    if (front.fin && buffers.size() == 1) {
+    if (front.fin && std::next(itb) == buffers.end()) {
       *pflags |= NGHTTP3_DATA_FLAG_EOF;
     }
 
@@ -865,6 +867,27 @@ void H3Session::set_max_client_streams_bidi(uint64_t max_streams) {
     return;
   }
   nghttp3_conn_set_max_client_streams_bidi(conn_, max_streams);
+}
+
+void H3Session::block_stream(int64_t stream_id) {
+  if (!conn_) {
+    return;
+  }
+  nghttp3_conn_block_stream(conn_, stream_id);
+}
+
+bool H3Session::unblock_stream(int64_t stream_id) {
+  if (!conn_) {
+    return false;
+  }
+  return nghttp3_conn_unblock_stream(conn_, stream_id) == 0;
+}
+
+void H3Session::max_concurrent_streams(size_t n) {
+  if (!conn_) {
+    return;
+  }
+  nghttp3_conn_set_max_concurrent_streams(conn_, n);
 }
 
 std::optional<bool> H3Session::has_stream_buffer(int64_t stream_id) const {
@@ -1494,7 +1517,17 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::arg("stream_id"),
            nb::sig("def stream_wt_session_id(self, stream_id: int) -> "
                    "int | None"),
-           "ストリームが属する WebTransport セッション ID を取得");
+           "ストリームが属する WebTransport セッション ID を取得")
+      .def("block_stream", &H3Session::block_stream, nb::arg("stream_id"),
+           nb::sig("def block_stream(self, stream_id: int) -> None"),
+           "ストリームの QUIC フロー制御ブロックを通知")
+      .def("unblock_stream", &H3Session::unblock_stream, nb::arg("stream_id"),
+           nb::sig("def unblock_stream(self, stream_id: int) -> bool"),
+           "ストリームの QUIC フロー制御ブロック解除を通知")
+      .def("max_concurrent_streams", &H3Session::max_concurrent_streams,
+           nb::arg("n"),
+           nb::sig("def max_concurrent_streams(self, n: int) -> None"),
+           "同時ストリーム数のヒントを設定");
 }
 
 }  // namespace h3
