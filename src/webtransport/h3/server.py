@@ -373,6 +373,16 @@ class Server:
             elif webtransport_event.type == h3_low.EventType.SESSION_CLOSED:
                 if self._on_session_closed is not None:
                     await self._on_session_closed(webtransport_event.session_id, addr)
+                # ピアがセッションを閉じた場合、CONNECT ストリーム (セッション
+                # の制御ストリーム) の送信方向を FIN で閉じてセッション終了の
+                # ハンドシェイクを完了させる。応答しないとピア側はストリームの
+                # クローズが完了せず、接続終了 (browser.close 等) がハングする
+                if client.quic_connection is not None:
+                    client.quic_connection.send_stream_data(
+                        webtransport_event.session_id,
+                        b"",
+                        fin=True,
+                    )
 
             elif webtransport_event.type == h3_low.EventType.STREAM_DATA:
                 if self._on_stream_data is not None:
@@ -559,6 +569,10 @@ class Server:
 
                 connection_alive = await self._process_quic_events(addr, client)
                 if not connection_alive:
+                    # ピアからの CONNECTION_CLOSE への応答 (ngtcp2 が生成した
+                    # CONNECTION_CLOSE) を送信してからエントリを削除する。
+                    # 送信しないとピア側が応答待ちでハングする
+                    await self._send_to(addr, client)
                     if addr in self._clients:
                         del self._clients[addr]
                     continue

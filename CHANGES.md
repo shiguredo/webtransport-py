@@ -65,6 +65,8 @@
   - @voluntas
 - [FIX] HTTP/3 と WebTransport over HTTP/3 の FIN なしデータ送信で DATA フレームのペイロードが壊れる問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 サーバーが終了ハンドシェイクでピアへ応答を送信しない問題を修正する
+  - @voluntas
 
 ### misc
 
