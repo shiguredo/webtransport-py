@@ -70,6 +70,8 @@
 
 ### misc
 
+- [FIX] ブラウザテストの接続確立フレークをリトライで回避する
+  - @voluntas
 - [FIX] CI の wheel テストで `pythonpath=["src"]` が拡張モジュール付き wheel を隠さないようにする
   - @voluntas
 - [UPDATE] refs/ 配下の IETF draft を最新版に更新する

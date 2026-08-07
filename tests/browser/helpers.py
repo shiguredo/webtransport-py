@@ -13,6 +13,7 @@ pyproject.toml の addopts の --ignore=tests/browser で除外されている�
 import queue
 import time
 import urllib.parse
+from collections.abc import Callable
 
 from playwright.sync_api import Page, expect
 
@@ -20,10 +21,12 @@ from playwright.sync_api import Page, expect
 DEVTOOLS_URL = "https://moqt-devtools.shiguredo.app/webtransport-devtools"
 
 # 接続確立 (Connect ボタンクリック → Connected 表示) の待ち時間
-# 外部ページの読み込みと WebTransport ハンドシェイクは CI ランナーの負荷で
-# 遅延することがあるため、余裕を持たせる (フレーク対策)
-CONNECT_TIMEOUT_MS = 30_000
-CONNECT_TIMEOUT_S = 30.0
+# 正常な接続は 1 秒前後で確立する (CI の負荷でも 3 秒以内) ため、余裕を
+# 見て 10 秒としている。10 秒で確立しない接続はフレーク (WebKit の
+# ClientHello 欠落) が原因で、待ち続けても確立しないため _connect の
+# リトライに委ねる
+CONNECT_TIMEOUT_MS = 10_000
+CONNECT_TIMEOUT_S = 10.0
 # メッセージ送受信 (in-process echo) の待ち時間
 MESSAGE_TIMEOUT_MS = 10_000
 MESSAGE_TIMEOUT_S = 10.0
@@ -59,6 +62,43 @@ def _wait_connected(page: Page) -> None:
             f"接続に失敗しました: {error_text.first.inner_text()} (ボタン状態: {status})"
         )
     raise AssertionError(f"接続が確立されませんでした (ボタン状態: {status})")
+
+
+def _connect(
+    page: Page,
+    browser_server,
+    certificate_hash_value: str,
+    set_options: Callable[[], None] | None = None,
+) -> None:
+    """Connect ボタンをクリックして接続確立を待つ (一時的な失敗は 1 回だけリトライ)
+
+    接続確立は実ブラウザの QUIC 実装に依存しており、WebKit では稀に
+    ClientHello の先頭部分が欠落したままハンドシェイクが進行しないことがある
+    (ngtcp2 は RFC 9000 Section 8.1.2 に従い Retry で応答するため、サーバー側
+    では対処できない)。このフレークは接続試行をやり直すことで回避できるため、
+    1 回目の失敗時はページを再読み込みして 1 回だけリトライする。リトライ時は
+    接続オプション (set_options) を再適用する。2 回連続で失敗した場合はページの
+    状態を報告して失敗させる (サーバー実装の欠陥は 2 回とも失敗するため、
+    欠陥を握りつぶさない)。
+
+    Args:
+        page: ブラウザページ
+        browser_server: 接続先サーバー
+        certificate_hash_value: 証明書ハッシュ
+        set_options: 接続オプション設定 (リトライ時に再適用する)
+    """
+    for attempt in range(2):
+        page.get_by_test_id("connection-connect").click()
+        try:
+            _wait_connected(page)
+            return
+        except AssertionError:
+            if attempt == 1:
+                raise
+            # ページを再読み込みして接続オプションを再適用してからリトライする
+            _open_devtools(page, browser_server, certificate_hash_value)
+            if set_options is not None:
+                set_options()
 
 
 def _devtools_url(browser_server, certificate_hash_value: str) -> str:
@@ -101,8 +141,7 @@ def run_browser_e2e_webtransport(
     # Connect ボタンをクリックし、ページ側の Connected 表示 (部分一致で
     # "Disconnected" にマッチしないよう完全一致にする) とサーバー側の
     # on_session_ready の両方で確認する
-    page.get_by_test_id("connection-connect").click()
-    _wait_connected(page)
+    _connect(page, browser_server, certificate_hash_value)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -219,8 +258,7 @@ def run_browser_e2e_send_order_stream(
     確認する。
     """
     _open_devtools(page, browser_server, certificate_hash_value)
-    page.get_by_test_id("connection-connect").click()
-    _wait_connected(page)
+    _connect(page, browser_server, certificate_hash_value)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -263,8 +301,7 @@ def run_browser_e2e_close_with_code(
     イベントで確認する。
     """
     _open_devtools(page, browser_server, certificate_hash_value)
-    page.get_by_test_id("connection-connect").click()
-    _wait_connected(page)
+    _connect(page, browser_server, certificate_hash_value)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -295,8 +332,7 @@ def run_browser_e2e_datagram_settings(
     機能することを確認する。
     """
     _open_devtools(page, browser_server, certificate_hash_value)
-    page.get_by_test_id("connection-connect").click()
-    _wait_connected(page)
+    _connect(page, browser_server, certificate_hash_value)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -350,12 +386,14 @@ def run_browser_e2e_connection_options(
     _open_devtools(page, browser_server, certificate_hash_value)
 
     # requireUnreliable を ON、congestionControl を low-latency に指定する
-    page.get_by_test_id("connection-require-unreliable").check()
-    page.get_by_test_id("connection-congestion-control").select_option("low-latency")
-    page.get_by_test_id("connection-connect").click()
+    def _set_connection_options() -> None:
+        page.get_by_test_id("connection-require-unreliable").check()
+        page.get_by_test_id("connection-congestion-control").select_option("low-latency")
+
+    _set_connection_options()
+    _connect(page, browser_server, certificate_hash_value, set_options=_set_connection_options)
 
     # オプション指定でも接続が確立できることを確認する
-    _wait_connected(page)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -377,13 +415,15 @@ def run_browser_e2e_custom_headers(
     _open_devtools(page, browser_server, certificate_hash_value)
 
     # カスタムヘッダーを指定する
-    page.get_by_test_id("connection-headers").fill(
-        "X-Custom-Header: custom-value\nX-Another-Header: test-value"
-    )
-    page.get_by_test_id("connection-connect").click()
+    def _set_custom_headers() -> None:
+        page.get_by_test_id("connection-headers").fill(
+            "X-Custom-Header: custom-value\nX-Another-Header: test-value"
+        )
+
+    _set_custom_headers()
+    _connect(page, browser_server, certificate_hash_value, set_options=_set_custom_headers)
 
     # ヘッダー付きでも接続が確立できることを確認する
-    _wait_connected(page)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -403,8 +443,7 @@ def run_browser_e2e_stream_options(
     機能することを確認する。
     """
     _open_devtools(page, browser_server, certificate_hash_value)
-    page.get_by_test_id("connection-connect").click()
-    _wait_connected(page)
+    _connect(page, browser_server, certificate_hash_value)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
@@ -468,8 +507,7 @@ def run_browser_e2e_close_stream(
     ストリームパネルが Closed 表示になることを確認する。
     """
     _open_devtools(page, browser_server, certificate_hash_value)
-    page.get_by_test_id("connection-connect").click()
-    _wait_connected(page)
+    _connect(page, browser_server, certificate_hash_value)
     try:
         browser_server.wait_event("session_ready", timeout=CONNECT_TIMEOUT_S)
     except queue.Empty as error:
