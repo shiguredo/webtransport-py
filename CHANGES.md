@@ -82,3 +82,5 @@
   - @voluntas
 - [UPDATE] refs/ 配下の IETF draft を最新版に更新する
   - @voluntas
+- [UPDATE] skills/webtransport-py/SKILL.md の WebTransport over HTTP/3 の記述を最新化する
+  - @voluntas
