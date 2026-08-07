@@ -1,7 +1,7 @@
 # STREAM_DATA イベントにストリームオフセットを追加する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/add-stream-data-offset
 - Polished: 2026-08-07
 - Reporter: @voluntas
@@ -34,4 +34,6 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/bindings/quic.h` の `QuicEvent` の末尾 (reason の直後) に `uint64_t offset = 0` を追加した。デフォルト値 0 の末尾追加のため、`push_event` の集約初期化 (12 箇所) は変更不要で、STREAM_DATA 以外のイベントでは offset が 0 になる
+- `src/bindings/quic.cpp` の `recv_stream_data_cb` で ngtcp2 から渡された `offset` を `event.offset` に設定し、nanobind バインディングに `.def_ro("offset", ...)` を追加した (ngtcp2-py と同じプロパティ名)。ビルド後に `src/webtransport/quic/__init__.pyi` へ再生成されることを確認した
+- テストは `tests/test_quic_stream_data_offset.py` に 1 件を追加した。データを 5 チャンクに分けて送信し、受信イベントの offset が「前のイベントの offset + データ長」と一致すること (累積位置の追跡) と、全チャンクが欠落なく届くことを確認する。ngtcp2 の契約は「offset の非減少順・重複なしで渡す」ことのみであり、連続配送は reorder buffer の挙動に依存する点を docstring に明記した
