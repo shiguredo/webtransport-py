@@ -173,6 +173,7 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
       datagram_queue_(std::move(other.datagram_queue_)),
       handshake_completed_(other.handshake_completed_),
       closed_(other.closed_),
+      post_handshake_write_done_(other.post_handshake_write_done_),
       early_data_attempted_(other.early_data_attempted_),
       early_data_rejected_event_pushed_(
           other.early_data_rejected_event_pushed_),
@@ -208,6 +209,7 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     datagram_queue_ = std::move(other.datagram_queue_);
     handshake_completed_ = other.handshake_completed_;
     closed_ = other.closed_;
+    post_handshake_write_done_ = other.post_handshake_write_done_;
     early_data_attempted_ = other.early_data_attempted_;
     early_data_rejected_event_pushed_ =
         other.early_data_rejected_event_pushed_;
@@ -891,9 +893,124 @@ bool QuicConnection::update_path_addresses(const std::string& local_host,
   return true;
 }
 
+// QUIC の可変長整数 (varint) をデコードする (RFC 9000 Section 16)
+// 先頭 2 ビットでエンコード長 (1 / 2 / 4 / 8 バイト) が決まる。
+// @return デコードした値。不正な入力 (長さ不足) の場合は 0 を返し、
+//   *consumed に 0 をセットする
+static uint64_t decode_varint(const uint8_t* data, size_t len,
+                              size_t* consumed) {
+  if (len == 0) {
+    *consumed = 0;
+    return 0;
+  }
+  uint8_t prefix = data[0] >> 6;
+  size_t varint_len = static_cast<size_t>(1) << prefix;
+  if (len < varint_len) {
+    *consumed = 0;
+    return 0;
+  }
+  uint64_t value = data[0] & 0x3f;
+  for (size_t i = 1; i < varint_len; ++i) {
+    value = (value << 8) | data[i];
+  }
+  *consumed = varint_len;
+  return value;
+}
+
+// データグラム内に short header (1RTT) パケットが含まれるか判定する
+//
+// RFC 9000 Section 12.2 により、1 つの UDP データグラムに複数の QUIC パケット
+// がコアレッシングされることがある (ngtcp2 はハンドシェイク完了後の write で
+// Initial / Handshake / 1RTT を連結して書く)。このため、先頭バイトだけの判定
+// では 1RTT パケットの書き出しを検出できない。long header パケットは
+// length フィールドで長さが分かるため、順にスキップしながら short header
+// パケットの有無を確認する。
+// @param data データグラム
+// @param len データグラムの長さ
+// @return short header パケットが含まれる場合 true
+static bool contains_short_header_packet(const uint8_t* data, size_t len) {
+  size_t offset = 0;
+  while (offset < len) {
+    const uint8_t* pkt = data + offset;
+    size_t remaining = len - offset;
+    if ((pkt[0] & 0x80) == 0) {
+      // short header は 1RTT パケット (RFC 9000 Section 17.3)
+      return true;
+    }
+    // long header パケットを 1 個スキップする (RFC 9000 Section 17.2)。
+    // 固定部: 先頭 1 バイト + version 4 バイト + DCID len 1 バイト + DCID +
+    // SCID len 1 バイト + SCID
+    if (remaining < 6) {
+      return false;
+    }
+    size_t pos = 1 + 4;
+    uint8_t dcid_len = pkt[pos];
+    pos += 1;
+    if (remaining < pos + dcid_len + 1) {
+      return false;
+    }
+    pos += dcid_len;
+    uint8_t scid_len = pkt[pos];
+    pos += 1;
+    if (remaining < pos + scid_len) {
+      return false;
+    }
+    pos += scid_len;
+    // version negotiation パケット (version == 0) は長さを持たず、1RTT
+    // パケットを含むことはないため打ち切る
+    uint32_t version = (static_cast<uint32_t>(pkt[1]) << 24) |
+                       (static_cast<uint32_t>(pkt[2]) << 16) |
+                       (static_cast<uint32_t>(pkt[3]) << 8) |
+                       static_cast<uint32_t>(pkt[4]);
+    if (version == 0) {
+      return false;
+    }
+    // Initial (type 0x00) は token フィールドを持つ (RFC 9000 Section 17.2.2)
+    uint8_t type = (pkt[0] >> 4) & 0x03;
+    if (type == 0x00) {
+      size_t consumed = 0;
+      uint64_t token_len = decode_varint(pkt + pos, remaining - pos, &consumed);
+      if (consumed == 0) {
+        return false;
+      }
+      pos += consumed;
+      if (remaining < pos + token_len) {
+        return false;
+      }
+      pos += token_len;
+    }
+    // length フィールド (varint) でパケット全体の長さを決定する
+    size_t consumed = 0;
+    uint64_t packet_len = decode_varint(pkt + pos, remaining - pos, &consumed);
+    if (consumed == 0) {
+      return false;
+    }
+    pos += consumed;
+    if (remaining < pos + packet_len) {
+      return false;
+    }
+    offset += pos + packet_len;
+  }
+  return false;
+}
+
 QuicPacket QuicConnection::make_packet(const uint8_t* data,
                                        size_t len,
-                                       const ngtcp2_path& path) const {
+                                       const ngtcp2_path& path) {
+  // ハンドシェイク完了後の 1RTT パケット (short header) の書き出しを記録する。
+  // クライアントの initiate_key_update は ngtcp2 内部の assert
+  // (NGTCP2_CS_POST_HANDSHAKE) を回避するため、post-handshake の state 遷移が
+  // 完了している必要がある。クライアントの state 遷移は write パスで行われ、
+  // 遷移後の 1RTT パケット書き出しはその後にしか起こらない (0-RTT 早期データ
+  // は long header で書き出されるため対象外)。書き出せなかった場合は立てず、
+  // assert 回避のため安全側に倒す。1RTT パケットの判定はデータグラム全体を
+  // パースして short header の有無で行う (RFC 9000 Section 12.2 のコアレッ
+  // シングにより、1 データグラムに複数の QUIC パケットが連結されることがあり、
+  // 先頭バイトだけでは 1RTT パケットの書き出しを検出できない)
+  if (handshake_completed_ && len > 0 && contains_short_header_packet(data, len)) {
+    post_handshake_write_done_ = true;
+  }
+
   QuicPacket packet;
   packet.data.assign(data, data + len);
   sockaddr_to_host_port(path.local.addr, path.local.addrlen, &packet.local_host,
@@ -1284,6 +1401,92 @@ int64_t QuicConnection::open_stream(bool bidirectional) {
 
   stream_buffers_[stream_id] = {};
   return stream_id;
+}
+
+std::optional<uint64_t> QuicConnection::streams_bidi_left() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+
+  return ngtcp2_conn_get_streams_bidi_left2(conn_);
+}
+
+std::optional<uint64_t> QuicConnection::streams_uni_left() const {
+  if (!conn_ || closed_) {
+    return std::nullopt;
+  }
+
+  return ngtcp2_conn_get_streams_uni_left2(conn_);
+}
+
+void QuicConnection::keep_alive_timeout(uint64_t timeout_ns) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  ngtcp2_conn_set_keep_alive_timeout(conn_, timeout_ns);
+}
+
+bool QuicConnection::initiate_key_update() {
+  if (!conn_ || closed_) {
+    return false;
+  }
+
+  // ngtcp2 内部に assert (state == NGTCP2_CS_POST_HANDSHAKE) があり、Debug
+  // ビルドではハンドシェイク完了前の呼び出しで abort するため、両側ガードを
+  // 設けて不成立時は False を返す。
+  // サーバーは read パスで state 遷移が完了するため、ハンドシェイク完了のみで
+  // 足りる。クライアントはハンドシェイク完了直後はまだ post-handshake の
+  // write を行っていない (state 遷移は write パスで行われる) ため、
+  // ハンドシェイク完了後の 1RTT パケット書き出し (state 遷移の完了) を
+  // 追加条件とする。
+  if (is_server_) {
+    if (!handshake_completed_) {
+      return false;
+    }
+  } else {
+    if (!handshake_completed_ || !post_handshake_write_done_) {
+      return false;
+    }
+  }
+
+  timestamp_ns_ = get_timestamp_ns();
+  // ガード通過後も Handshake Done 未受信 (HANDSHAKE_CONFIRMED 未成立) なら
+  // NGTCP2_ERR_INVALID_STATE が返り False になる (RFC 9001 Section 4.1.2)
+  return ngtcp2_conn_initiate_key_update(conn_, timestamp_ns_) == 0;
+}
+
+void QuicConnection::extend_max_offset(uint64_t datalen) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  ngtcp2_conn_extend_max_offset(conn_, datalen);
+}
+
+bool QuicConnection::extend_max_stream_offset(int64_t stream_id,
+                                              uint64_t datalen) {
+  if (!conn_ || closed_) {
+    return false;
+  }
+
+  return ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, datalen) == 0;
+}
+
+void QuicConnection::extend_max_streams_bidi(uint64_t n) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  ngtcp2_conn_extend_max_streams_bidi(conn_, n);
+}
+
+void QuicConnection::extend_max_streams_uni(uint64_t n) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  ngtcp2_conn_extend_max_streams_uni(conn_, n);
 }
 
 void QuicConnection::send_stream_data(int64_t stream_id,
@@ -2472,6 +2675,37 @@ void bind_quic(nb::module_& m) {
            nb::arg("bidirectional") = true,
            nb::sig("def open_stream(self, bidirectional: bool = True) -> int"),
            "ストリームを開く")
+      .def_prop_ro("streams_bidi_left", &QuicConnection::streams_bidi_left,
+                   nb::sig("def streams_bidi_left(self) -> int | None"),
+                   "開設可能な残り双方向ストリーム数")
+      .def_prop_ro("streams_uni_left", &QuicConnection::streams_uni_left,
+                   nb::sig("def streams_uni_left(self) -> int | None"),
+                   "開設可能な残り単方向ストリーム数")
+      .def("keep_alive_timeout", &QuicConnection::keep_alive_timeout,
+           nb::arg("timeout_ns"),
+           nb::sig("def keep_alive_timeout(self, timeout_ns: int) -> None"),
+           "keep-alive タイムアウトを設定 (ナノ秒。UINT64_MAX で無効化)")
+      .def("initiate_key_update", &QuicConnection::initiate_key_update,
+           nb::sig("def initiate_key_update(self) -> bool"),
+           "鍵更新を開始 (成功で True)")
+      .def("extend_max_offset", &QuicConnection::extend_max_offset,
+           nb::arg("datalen"),
+           nb::sig("def extend_max_offset(self, datalen: int) -> None"),
+           "コネクション全体のフロー制御を拡張 (バイト)")
+      .def("extend_max_stream_offset",
+           &QuicConnection::extend_max_stream_offset, nb::arg("stream_id"),
+           nb::arg("datalen"),
+           nb::sig("def extend_max_stream_offset(self, stream_id: int, "
+                   "datalen: int) -> bool"),
+           "ストリームのフロー制御を拡張 (バイト。成功で True)")
+      .def("extend_max_streams_bidi", &QuicConnection::extend_max_streams_bidi,
+           nb::arg("n"),
+           nb::sig("def extend_max_streams_bidi(self, n: int) -> None"),
+           "双方向ストリーム上限を拡張")
+      .def("extend_max_streams_uni", &QuicConnection::extend_max_streams_uni,
+           nb::arg("n"),
+           nb::sig("def extend_max_streams_uni(self, n: int) -> None"),
+           "単方向ストリーム上限を拡張")
       .def(
           "send_stream_data",
           [](QuicConnection& self, int64_t stream_id, nb::bytes data,

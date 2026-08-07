@@ -262,6 +262,96 @@ class QuicConnection {
   int64_t open_stream(bool bidirectional = true);
 
   /**
+   * 開設可能な残り双方向ストリーム数を取得
+   *
+   * ハンドシェイク前はピアのトランスポートパラメータが未受信のため
+   * 値が保証されない (クライアントは remote transport params 受信前は 0、
+   * サーバーは最初の receive 後にピアの広告値が反映される。0-RTT 時は
+   * 古いセッションの広告値が入る)。この前提は ngtcp2 の初期値
+   * (max_streams が 0) に依存する。
+   * @return 開設可能な残り双方向ストリーム数。コネクションが無いか閉じて
+   *   いる場合は nullopt
+   */
+  std::optional<uint64_t> streams_bidi_left() const;
+
+  /**
+   * 開設可能な残り単方向ストリーム数を取得
+   *
+   * ハンドシェイク前の値の保証は streams_bidi_left と同じ。
+   * @return 開設可能な残り単方向ストリーム数。コネクションが無いか閉じて
+   *   いる場合は nullopt
+   */
+  std::optional<uint64_t> streams_uni_left() const;
+
+  /**
+   * keep-alive タイムアウトを設定 (ナノ秒)
+   *
+   * 非ゼロ値を設定すると、接続がアイドルになったあと指定時間経過で
+   * keep-alive パケット (PING) が送出され、ピアのアイドルタイムアウトを
+   * 延命する (RFC 9000 Section 10.1.2)。UINT64_MAX で無効化する
+   * (ngtcp2 のデフォルト)。0 は将来拡張用の予約値のため使用しない
+   * (ngtcp2 は 0 を UINT64_MAX 相当として扱う)。
+   * @param timeout_ns keep-alive タイムアウト (ナノ秒)
+   */
+  void keep_alive_timeout(uint64_t timeout_ns);
+
+  /**
+   * 鍵更新を開始する
+   *
+   * ハンドシェイク完了前は False を返す。クライアントはさらに
+   * ハンドシェイク完了後の 1RTT パケット書き出し (post-handshake の
+   * state 遷移の完了) を必要とする。鍵更新確認前の連続呼び出しは
+   * 2 回目が False になる (RFC 9001 Section 6.1 の MUST。ngtcp2 は
+   * 鍵更新未確認フラグで実装)。3*PTO の制約 (RFC 9001 Section 6.5 の
+   * SHOULD。ngtcp2 はハード制約として実装) は 2 回目以降の鍵更新に
+   * 適用される。
+   * @return 成功で true
+   */
+  bool initiate_key_update();
+
+  /**
+   * コネクション全体のフロー制御 (max data) を拡張する
+   *
+   * ピアへは MAX_DATA フレームで通知されるが、未送出の拡張量が
+   * window/4 を超えるまでフレームは送出されない。NGTCP2_MAX_VARINT 超の
+   * 拡張量はクランプされる。
+   * @param datalen 拡張量 (バイト)
+   */
+  void extend_max_offset(uint64_t datalen);
+
+  /**
+   * ストリームのフロー制御 (max stream data) を拡張する
+   *
+   * 存在しないストリーム ID (ローカル単方向を除く) には 0 (成功) を返す。
+   * ローカル単方向ストリーム ID (存在の有無を問わず、負値の単方向 ID も
+   * 含む) には NGTCP2_ERR_INVALID_ARGUMENT (False) を返す (ngtcp2 は
+   * 存在判定より先にローカル単方向判定を行う)。
+   * @param stream_id ストリーム ID
+   * @param datalen 拡張量 (バイト)
+   * @return 成功で true
+   */
+  bool extend_max_stream_offset(int64_t stream_id, uint64_t datalen);
+
+  /**
+   * 双方向ストリーム上限を拡張する
+   *
+   * ngtcp2 はストリーム上限を自動では増加させない (明示 API でのみ増加する。
+   * stream_open コールバック未発火のまま閉じられたストリームの自動増加の
+   * 例外は ngtcp2 の API ドキュメントに記載されている)。ピアへは
+   * MAX_STREAMS フレーム (RFC 9000 Section 19.11 の累積制限) として通知される。
+   * NGTCP2_MAX_STREAMS 超の拡張数はクランプされる。
+   * @param n 拡張するストリーム数
+   */
+  void extend_max_streams_bidi(uint64_t n);
+
+  /**
+   * 単方向ストリーム上限を拡張する
+   * NGTCP2_MAX_STREAMS 超の拡張数はクランプされる。
+   * @param n 拡張するストリーム数
+   */
+  void extend_max_streams_uni(uint64_t n);
+
+  /**
    * ストリームにデータを送信
    * @param stream_id ストリーム ID
    * @param data 送信データ
@@ -565,7 +655,7 @@ class QuicConnection {
 
   // パスから QuicPacket を組み立てる
   QuicPacket make_packet(const uint8_t* data, size_t len,
-                         const ngtcp2_path& path) const;
+                         const ngtcp2_path& path);
 
   // 接続統計のスナップショットを取得 (コネクションが無いか閉じている場合は nullopt)
   std::optional<ngtcp2_conn_info> get_conn_info() const;
@@ -716,6 +806,12 @@ class QuicConnection {
   // 接続状態
   bool handshake_completed_ = false;
   bool closed_ = false;
+
+  // ハンドシェイク完了後の 1RTT パケット (short header) の書き出し記録。
+  // クライアントの initiate_key_update ガードに使う (ngtcp2 内部の assert
+  // (NGTCP2_CS_POST_HANDSHAKE) 回避のため、post-handshake の state 遷移の
+  // 完了が必要。遷移後の 1RTT パケット書き出しはその後にしか起こらない)
+  bool post_handshake_write_done_ = false;
 
   // close() が生成した CONNECTION_CLOSE パケット (send() が 1 回だけ返す)
   std::optional<QuicPacket> pending_close_packet_;
