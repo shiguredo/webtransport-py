@@ -1,7 +1,7 @@
 # WebTransport データストリームのリセットで RESET_STREAM_AT を送出する
 
 - Created: 2026-08-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-07
 - Branch: feature/add-reset-stream-at
 - Polished: 2026-08-07
 
@@ -33,3 +33,11 @@ draft-ietf-webtrans-http3-16 Section 4.4 の MUST「WebTransport implementations
 - QUIC 層 (ngtcp2) に書き込み済みデータがあるデータストリームのリセットで RESET_STREAM_AT が送出され、ピア側のセッション ID 復元が失敗しなくなる (該当ケースが -1 にフォールバックしなくなる)。データがリセットより先に届く通常の順序では RESET_STREAM_AT の有無にかかわらず復元できるため、テストはデータパケットを保留してリセット送出パケットを先に届ける構成で検証する。FLUSH 時、ngtcp2 は未 ACK のストリームデータを保持し、リセット送出パケットに同梱して再書き出しする。ピアは RESET_STREAM_AT 受信時に reliable size 分のデータ到着までリセットを確定しない (draft-ietf-quic-reliable-stream-reset-09 Section 5.3 の Size Known → Data Recvd 遷移) ため、同パケット内の WT ヘッダーが配信されてからリセットが確定し、セッション ID が復元される (本ライブラリ同士 (両側が広告) の接続での挙動)
 - データ未書き込みストリームのリセットは従来どおり通常の RESET_STREAM のままで、0009 の「データ未受信のままリセット → -1」テスト (`test_stream_reset_before_data_received_minus_one`) は変更せず引き続き通る (テストのロジックは変更しないが、docstring の理由付け (RESET_STREAM_AT 未対応 → データ未書き込み) は実装時に更新する)
 - モックなしのテストで検証できる (0009 の低レベル API クライアント構成に、送信済みデータのパケットを生成後にソケットへ送らず保持する機構を追加し、データがリセットより先に届かない順序 (リセット送出パケットを先に送信) で確認する。修正後はリセットパケットにデータが同梱されるため、保持パケットの解放は検証の成立に影響しない。データは 1 パケットに収まる小さなサイズにする (send() は 1 回で 1 パケットしか返さず、複数パケットに分かれると未書き込み分がリセット時に破棄されて意図と乖離する))
+
+## 解決方法
+
+- `src/bindings/quic.cpp` の `QuicConnection::reset_stream` で `NGTCP2_SHUT_STREAM_FLAG_FLUSH` を渡すようにした。ピアが `reset_stream_at` transport parameter を広告している場合は、リセット時点の書き込み済みオフセット全体を Reliable Size に設定した RESET_STREAM_AT を送出し (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)、データ未書き込みのストリームは従来どおり RESET_STREAM を送出する (Reliable Size 0 の RESET_STREAM_AT は RESET_STREAM と等価。draft-ietf-quic-reliable-stream-reset-09 Section 5)
+- `reset_stream_at` transport parameter の受信対応を 4 箇所 (initialize_client / initialize_server / initialize_server_from_packet / setup_server_early_data) で広告した。0-RTT の early data context にも含めて恒常的に広告し、draft-ietf-quic-reliable-stream-reset-09 Section 3 の MUST (0-RTT 受入時に無効化禁止) を満たす
+- テストは `tests/test_e2e_webtransport_h3.py` に `_LowLevelClient` のパケット保留機構 (send_stream_data_withheld / send_withheld_packets) と `test_stream_reset_at_recovers_session_id` を追加した。データパケットを保留してリセット送出パケットを先に送信し、その後保留パケットを送信する構成で、RESET_STREAM_AT の Reliable Size によりピアがデータ到着までリセットを確定しないこと (Section 5.3 の Size Known → Data Recvd 遷移) でセッション ID が復元されることを確認する。データ未書き込みのリセットは従来どおり RESET_STREAM のままで、`test_stream_reset_before_data_received_minus_one` はロジック変更なしで引き続き通る (docstring の理由付けのみ更新)
+- 相互運用の制約の確認: ビルドされる ngtcp2 (webtransport ブランチ) は `reset_stream_at` transport parameter を旧ドラフトの ID (0x17F7586D2CB571) で送出し、draft-09 の 0x1d ではない。RESET_STREAM_AT フレームタイプ (0x24) は一致するため、本ライブラリ同士の接続で MUST を満たす
+- 完了条件 1 の「リセット送出パケットに同梱して再書き出しする」「同パケット内の WT ヘッダーが配信されてから」の記述は実装の実態と異なる。ngtcp2 の writev_stream はアプリのデータ (vec) を直接パケットに書く設計のため、リセット送出パケットに未 ACK データは同梱されない。データは保留パケット経由で配信され、RESET_STREAM_AT の Reliable Size によりピアはデータ到着までリセットを確定しないため、セッション ID の復元が保証される
