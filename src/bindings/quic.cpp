@@ -2242,6 +2242,22 @@ int QuicConnection::recv_stream_data_cb(ngtcp2_conn* conn,
   event.fin = fin;
   self->push_event(std::move(event));
 
+  // 受信したデータ量ぶんのフロー制御を再開放する (ngtcp2-py と同じ順序:
+  // ストリームレベル → コネクションレベル)。再開放しなければ受信ウィンドウは
+  // 接続作成時に広告した初期値のまま増えず、送信側は広告された上限を超えて
+  // 送れない (RFC 9000 Section 4.1 の MUST) ため、初期ウィンドウを超える
+  // データ転送が受信側のフロー制御ブロックで停止する
+  //
+  // 受信データをイベントキューに積んだ直後に即時・全量再開放するため、アプリ
+  // がデータを消費する前にウィンドウが戻り、受信フロー制御はメモリ保護として
+  // 機能しなくなる。これは ngtcp2-py と同じ挙動であり、意図的な選択である
+  // (RFC 9000 Section 4.2 は再開放のタイミングを実装の判断に委ねる)
+  int rv = ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+  if (rv != 0) {
+    return rv;
+  }
+  ngtcp2_conn_extend_max_offset(conn, datalen);
+
   return 0;
 }
 
