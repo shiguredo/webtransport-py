@@ -1044,9 +1044,11 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   info.max_stream_data_remote = config_.wt_initial_max_stream_data;
   wt_session->streams[stream_id] = info;
 
-  // 空の WT_STREAM capsule を送信してストリームを開始
-  std::vector<uint8_t> payload = encode_varint(stream_id);
-  send_capsule(session_id, CapsuleType::WtStream, payload);
+  // 空の WT_STREAM capsule は送信しない。WT_STREAM capsule は最初のデータ送信
+  // (send_stream_data) でストリームを暗黙的に作成する (draft-15 Section 6.4)。
+  // 空の WT_STREAM capsule でストリームを開始してから後続の WT_STREAM_FIN
+  // capsule でデータを送ると、WebKit の WebTransport over HTTP/2 実装がデータを
+  // 破棄するため、実ブラウザとの相互運用性のために空 capsule を送らない。
 
   return static_cast<int64_t>(stream_id);
 }
