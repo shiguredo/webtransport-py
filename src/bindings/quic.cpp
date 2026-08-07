@@ -2240,6 +2240,7 @@ int QuicConnection::recv_stream_data_cb(ngtcp2_conn* conn,
   event.stream_id = stream_id;
   event.data = std::vector<uint8_t>(data, data + datalen);
   event.fin = fin;
+  event.offset = offset;
   self->push_event(std::move(event));
 
   // 受信したデータ量ぶんのフロー制御を再開放する (ngtcp2-py と同じ順序:
@@ -2572,7 +2573,9 @@ void bind_quic(nb::module_& m) {
           "データ")
       .def_ro("fin", &QuicEvent::fin, "FIN フラグ")
       .def_ro("error_code", &QuicEvent::error_code, "エラーコード")
-      .def_ro("reason", &QuicEvent::reason, "理由");
+      .def_ro("reason", &QuicEvent::reason, "理由")
+      .def_ro("offset", &QuicEvent::offset,
+              "STREAM_DATA イベントのストリーム上のオフセット (他イベントでは 0)");
 
   // QuicPacket
   nb::class_<QuicPacket>(quic_m, "Packet", "QUIC UDP パケット (パス情報付き)")
