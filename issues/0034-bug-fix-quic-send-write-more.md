@@ -1,7 +1,7 @@
 # QUIC の send() が ngtcp2 の WRITE_MORE 契約に違反し大容量データ転送でデータが壊れる問題を修正する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/fix-quic-send-write-more
 - Polished: YYYY-MM-DD
 
@@ -31,3 +31,10 @@ QUIC の `QuicConnection::send()` が ngtcp2 の `NGTCP2_WRITE_STREAM_FLAG_MORE`
 
 - `test_large_post_body` のデータ欠落・重複が再現しないこと (ループ実行で確認。断続的なため再現率の低下も許容)
 - 既存の全テスト (HTTP/3 / WebTransport / QUIC / データグラム) が引き続き通ること
+
+## 解決方法
+
+- `src/bindings/quic.cpp` の `QuicConnection::send()` に `more_used` フラグを追加し、`NGTCP2_WRITE_STREAM_FLAG_MORE` を使用してパケットを構築したかを追跡するようにした
+- ストリームデータ・データグラムの書き込み後に `more_used` であれば、`ngtcp2_conn_writev_stream` を `stream_id = -1` で呼んでパケットを確定するようにした (ngtcp2 の契約に合わせ、partial packet を破棄せず確定する)
+- `ngtcp2_conn_write_pkt` は `MORE` 未使用の場合のみ呼ぶようにした (MORE 使用後の `write_pkt` 呼び出しは ngtcp2 の契約で禁止されている)
+- 全テスト 419 件・ブラウザ E2E 24 件が通ることを確認した。`test_large_post_body` はローカルで再現しなかった (断続的) ため、CI (macOS 含む全プラットフォーム) で PASSED することを確認した
