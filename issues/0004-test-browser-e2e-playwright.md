@@ -1,7 +1,7 @@
 # 実ブラウザ (Chromium) を使った WebTransport E2E テストを追加する
 
 - Created: 2026-08-01
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/add-browser-e2e-test
 - Polished: 2026-08-04
 
@@ -40,3 +40,11 @@ WebTransport サーバーが実ブラウザ (Chromium) の WebTransport API か�
 - 設計方針の検証観点 5 項目 (接続確立・双方向ストリームの送受信・単方向ストリームの送信・サーバーからの単方向ストリーム送信・データグラムの送受信) がすべて、各項目に定めた確認方法で検証できる (検証できない場合の終了条件は設計方針に定めたとおり)
 - 自己署名証明書は `certificateHash` パラメータによるピン留めで接続できる。証明書は W3C WebTransport API の Server Authentication using Certificate Hashes の要件 (W3C WebTransport §6.9 の custom certificate requirements。ECDSA P-256、有効期間 2 週間以内) を満たす必要があるが、既存の `test_certificates` フィクスチャ (ECDSA P-256 (SECP256R1)・有効期間 1 日) は要件を満たす
 - ブラウザテストは `tests/browser/` に分離され、通常の `make test` と CI のテスト実行に影響しない
+
+## 解決方法
+
+- `tests/browser/` に pytest-playwright を使った Chromium E2E テスト一式を追加した (`conftest.py` / `helpers.py` / `test_webtransport_chromium.py`)。WebTransport DevTools テストページをブラウザ側クライアントとして利用し、検証観点 5 項目 (接続確立・双方向ストリームの送受信・単方向ストリームの送信・サーバーからの単方向ストリーム送信・データグラムの送受信) を 1 回の接続で順次検証する
+- 自己署名証明書は `certificateHash` パラメータによるピン留めで接続する。base64 に含まれる `+` は percent-encoding して渡し、`atob()` での復元が正しく行われるようにした
+- `pyproject.toml` の dev グループに playwright / pytest-playwright を追加し、`addopts` の `--ignore=tests/browser` で通常のテスト実行と CI の collection 対象から除外した
+- 接続確立のフレーク対策として、接続失敗時のページ再読み込みリトライと待ち時間の調整を追加した
+- ブラウザ E2E テストの CI ジョブ (`e2e-test.yml`) を追加し、Chromium / WebKit の h3 / h2 テスト 24 件が通ることを確認した
