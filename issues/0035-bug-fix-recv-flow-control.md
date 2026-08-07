@@ -1,7 +1,7 @@
 # QUIC の受信フロー制御が初期受信ウィンドウを超えて前進しない問題を修正する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/fix-recv-flow-control
 - Polished: 2026-08-07
 - Reporter: @voluntas
@@ -32,4 +32,8 @@ QUIC の受信フロー制御を前進させ、初期受信ウィンドウを超
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/bindings/quic.cpp` の `recv_stream_data_cb` で、受信したデータ量 (`datalen`) ぶんのストリーム・コネクション両方のフロー制御を再開放するようにした (イベント push 後に `ngtcp2_conn_extend_max_stream_offset` を呼び、エラー時はその値を返す。正常なら `ngtcp2_conn_extend_max_offset` を呼んで 0 を返す。ngtcp2-py と同じ順序)。受信データをイベントキューに積んだ直後に即時・全量再開放するため、アプリがデータを消費する前にウィンドウが戻り、受信フロー制御はメモリ保護として機能しなくなるが、これは ngtcp2-py と同じ挙動であり意図的な選択 (RFC 9000 Section 4.2)
+- テストを 2 件追加した:
+  - `tests/test_quic_recv_flow_control.py` (新規): Sans-IO 実通信で、ストリーム (256 KiB) とコネクション (1 MiB) の初期受信ウィンドウを両方超える 1.2 MiB のデータを送信し、サーバーが全量を受信できることを確認する。再開放が無ければ送信がブロックされ全量が届かないため、全量の受信が両方の再開放の検証になる。あわせてクライアントの送信ウィンドウ (0014 の `max_stream_data_left` / `max_data_left`) が枯渇しないことも確認する
+  - `tests/test_e2e_webtransport_h3.py` に `test_large_echo_over_initial_recv_window` を追加: 512 KiB の echo 転送が止まらず完了することを確認する (ストリームレベルの再開放の回帰テスト)
+- 0016 で追加した `tests/test_quic_stream_control.py` の `test_extend_max_stream_offset` は、自動再開放の 1 バイトが未送出の拡張量に加算されるため期待値を修正した (110,000 → 110,001)
