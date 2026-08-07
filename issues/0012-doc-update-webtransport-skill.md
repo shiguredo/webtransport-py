@@ -1,7 +1,7 @@
 # skills/webtransport-py/SKILL.md の WebTransport over HTTP/3 の記述を最新化する
 
 - Created: 2026-08-02
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/update-webtransport-skill
 - Polished: 2026-08-04
 
@@ -38,3 +38,10 @@
 ## 完了条件
 
 - `skills/webtransport-py/SKILL.md` の h3 セクションが 0009 / 0010 / 0017 のマージ後の実装と一致する。具体的には、h3 の公開 API (asyncio の `Server` / `Client` のコンストラクタ引数・メソッド・プロパティ、Sans I/O の `Session` の全メソッド・`Config` の全プロパティ・`Event` の全フィールド・`StreamInfo`。値が設定される経路の無い `h3.Event.is_unidirectional` と、`on_*` コールバック登録メソッド・テスト専用アクセサ `_has_stream_buffer` は除く) がすべて SKILL.md に記載され、記載された API がすべて実在し、シグネチャ (引数名・順序・デフォルト値・戻り値) が一致する (相互検証)。「注意点」の h3 関連記述の修正とサンプルコードの更新を含む
+
+## 解決方法
+
+- `skills/webtransport-py/SKILL.md` の h3 セクションを現在の実装に合わせて更新した。asyncio の `h3.Server` (コンストラクタ引数 `allowed_origins` / プロパティ 4 種 / `open_stream` / `close_stream` / `start` / `stop` / `run`) と `h3.Client` (コンストラクタ引数 `origin` / プロパティ 5 種 / `close_stream` / `run` / `close`) のシグネチャを実装と一致させ、Sans I/O の `h3.Session` の公開メソッド全 30 本 (セッション系 `is_closed` / `get_session_ids` / `get_session_streams` / `set_max_client_streams_bidi`、ストリーム系 `close_stream` / `reset_stream` / `stream_writable` / `stream_flushed` / `stream_wt_session_id` / `block_stream` / `unblock_stream` / `max_concurrent_streams` を含む) と `Config` の全プロパティ・`Event` の全フィールド・`StreamInfo` を記載した
+- `h3.Event.is_unidirectional` は値が設定される経路が無く常に False である旨、`h3.Server.open_stream` はデフォルト単方向で双方向指定は `NotImplementedError`・失敗時 -1 である旨、`close_stream` は `reset_stream` への委譲である旨を注記した。「注意点」の `unidirectional` の記述を asyncio の `h3.Client` / `h2.Client` / `h2.SessionWriter` (双方向デフォルト)・`h3.Server` (単方向デフォルト)・Sans I/O (デフォルトなし) に書き分けた
+- サンプルコードに `allowed_origins` / `origin` の指定とサーバーからの単方向ストリーム送信例 (`open_stream`) を追加し、`addr` はコールバックで受け取った値をそのまま渡す旨・`on_stream_reset` の session_id が -1 になり得る旨も追記した
+- 検証は `src/webtransport/h3/server.py` / `client.py` / `src/bindings/webtransport_h3.cpp` / `.h` との相互突き合わせで行い、シグネチャの一致と API の実在を確認した。テストはコード変更がないため既存 419 件のパスを確認した
