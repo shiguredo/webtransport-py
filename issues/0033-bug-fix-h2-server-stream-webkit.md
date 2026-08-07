@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のサーバー開始ストリームのデータが WebKit で受信できない問題を修正する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/fix-h2-server-stream-webkit
 - Polished: YYYY-MM-DD
 
@@ -24,3 +24,9 @@ WebTransport over HTTP/2 でサーバーが開始したストリームのデー�
 
 - WebKit (Safari) の WebTransport API から、サーバーが開始した単方向ストリームのデータを受信できること (ブラウザ E2E テストで確認)
 - 既存の in-process テスト (Python クライアント) が引き続き通ること
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `H2Session::open_stream` が送る空の `WT_STREAM` capsule (ストリーム開始の通知) を送信しないようにした
+- `WT_STREAM` capsule は最初のデータ送信 (`send_stream_data`) でストリームを暗黙的に作成する (draft-15 Section 6.4) ため、空 capsule を送らなくなっても仕様に適合する。WebKit はデータ付き capsule でストリームが開始される場合は正しく受信できる
+- ブラウザ E2E テスト (WebKit の「サーバーからの単方向ストリーム送信」検証) と in-process テスト (Python クライアント) の両方で受信できることを確認した
