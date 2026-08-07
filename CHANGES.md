@@ -51,6 +51,8 @@
   - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
+- [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
+  - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
   - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
@@ -66,6 +68,8 @@
 - [FIX] HTTP/3 と WebTransport over HTTP/3 の FIN なしデータ送信で DATA フレームのペイロードが壊れる問題を修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーが終了ハンドシェイクでピアへ応答を送信しない問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/2 のサーバー開始ストリームのデータが WebKit で受信できない問題を修正する
   - @voluntas
 
 ### misc

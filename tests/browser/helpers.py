@@ -4,10 +4,19 @@ Shiguredo WebTransport DevTools
 (https://moqt-devtools.shiguredo.app/webtransport-devtools) をブラウザ側
 WebTransport クライアントとして、webtransport-py の echo サーバーへの接続と
 送受信を検証する。このモジュールはブラウザ種別ごとのテストファイル
-(test_webtransport_chromium.py / test_webtransport_webkit.py) から呼び出される
-共通実装であり、pytest の collection 対象にならないように test_ / prop_ 以外の
-ファイル名にしている。通常の make test と CI の collection 対象からは
-pyproject.toml の addopts の --ignore=tests/browser で除外されている。
+(test_webtransport_chromium.py / test_webtransport_webkit.py /
+test_webtransport_webkit_h2.py) から呼び出される共通実装であり、pytest の
+collection 対象にならないように test_ / prop_ 以外のファイル名にしている。
+通常の make test と CI の collection 対象からは pyproject.toml の addopts の
+--ignore=tests/browser で除外されている。
+
+検証ヘルパーは WebTransport over HTTP/3 と WebTransport over HTTP/2 の両方で
+使える。サーバーイベントのペイロードは h3 サーバーが (session_id, stream_id,
+data, addr) のように末尾に addr を含むのに対し、h2 サーバーは addr を含まない。
+アドレスはどのヘルパーでも使っていないため、イベントの展開は末尾要素を *_ で
+吸収してプロトコル非依存にしている。WebTransport のストリーム ID は QUIC 互換
+(下位 2 bit が initiator / directionality) であり、双方向 (stream_id % 4 == 0)
+と単方向 (stream_id % 4 == 2) の判定はどちらのプロトコルでも共通である。
 """
 
 import queue
@@ -157,7 +166,7 @@ def run_browser_e2e_webtransport(
         )
     except queue.Empty as error:
         raise AssertionError("サーバー側で単方向ストリームが開かれませんでした") from error
-    opened_stream_id, _ = opened_payload
+    opened_stream_id, *_ = opened_payload
     assert opened_stream_id >= 0
 
     incoming_section = (
@@ -171,7 +180,7 @@ def run_browser_e2e_webtransport(
     expect(incoming_message).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
 
     # 検証観点 3: 双方向ストリームの送受信
-    # 双方向ストリーム (QUIC stream_id % 4 == 0) のみエコーバックする。
+    # 双方向ストリーム (WebTransport stream_id % 4 == 0) のみエコーバックする。
     # ページ側でメッセージを送信し、RECV 表示とサーバー側の on_stream_data で
     # 確認する
     bidi_section = (
@@ -192,12 +201,12 @@ def run_browser_e2e_webtransport(
         bidi_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で双方向ストリームが受信されませんでした") from error
-    _, bidi_stream_id, bidi_data, _ = bidi_payload
+    _, bidi_stream_id, bidi_data, *_ = bidi_payload
     assert bidi_stream_id % 4 == 0
     assert bidi_data == bidi_message.encode()
 
     # 検証観点 4: 単方向ストリームの送信
-    # クライアント起点の単方向ストリーム (QUIC stream_id % 4 == 2) は
+    # クライアント起点の単方向ストリーム (WebTransport stream_id % 4 == 2) は
     # エコーバックしないため、ページ側の SEND 表示とサーバー側の
     # on_stream_data で受信を確認する
     outgoing_section = (
@@ -218,7 +227,7 @@ def run_browser_e2e_webtransport(
         uni_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で単方向ストリームが受信されませんでした") from error
-    _, uni_stream_id, uni_data, _ = uni_payload
+    _, uni_stream_id, uni_data, *_ = uni_payload
     assert uni_stream_id % 4 == 2
     assert uni_data == uni_message.encode()
 
@@ -284,7 +293,7 @@ def run_browser_e2e_send_order_stream(
         payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側でストリームデータが受信されませんでした") from error
-    _, stream_id, data, _ = payload
+    _, stream_id, data, *_ = payload
     assert stream_id % 4 == 0
     assert data == message.encode()
 
@@ -373,6 +382,7 @@ def run_browser_e2e_connection_options(
     page: Page,
     browser_server,
     certificate_hash_value: str,
+    require_unreliable: bool = True,
 ) -> None:
     """WebTransport オプション指定時の接続を検証する
 
@@ -380,14 +390,21 @@ def run_browser_e2e_connection_options(
     オプション。サーバーは QUIC (UDP) ベースで unreliable に対応しているため、
     これらのオプションを指定しても接続が確立できることを確認する。
 
+    require_unreliable=False のときは requireUnreliable を指定しない。
+    WebTransport over HTTP/2 は requireUnreliable を指定すると HTTP/3 へ
+    フォールバックが試行されるため (W3C WebTransport §6.9)、HTTP/2 専用
+    サーバーでは接続できない。
+
     注: allowPooling は certificateHash と排他のため、自己署名証明書を
     certificateHash でピン留めする本テストでは指定できない。
     """
     _open_devtools(page, browser_server, certificate_hash_value)
 
-    # requireUnreliable を ON、congestionControl を low-latency に指定する
+    # congestionControl を low-latency に指定し、requireUnreliable は
+    # 指定が有効な場合のみ ON にする
     def _set_connection_options() -> None:
-        page.get_by_test_id("connection-require-unreliable").check()
+        if require_unreliable:
+            page.get_by_test_id("connection-require-unreliable").check()
         page.get_by_test_id("connection-congestion-control").select_option("low-latency")
 
     _set_connection_options()
@@ -469,7 +486,7 @@ def run_browser_e2e_stream_options(
         uni_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で単方向ストリームが受信されませんでした") from error
-    _, uni_stream_id, uni_data, _ = uni_payload
+    _, uni_stream_id, uni_data, *_ = uni_payload
     assert uni_stream_id % 4 == 2
     assert uni_data == uni_message.encode()
 
@@ -491,7 +508,7 @@ def run_browser_e2e_stream_options(
         bidi_payload = browser_server.wait_event("stream_data", timeout=MESSAGE_TIMEOUT_S)
     except queue.Empty as error:
         raise AssertionError("サーバー側で双方向ストリームが受信されませんでした") from error
-    _, bidi_stream_id, bidi_data, _ = bidi_payload
+    _, bidi_stream_id, bidi_data, *_ = bidi_payload
     assert bidi_stream_id % 4 == 0
     assert bidi_data == bidi_message.encode()
 
@@ -536,3 +553,18 @@ def run_browser_e2e_close_stream(
 
     # ストリームパネルが Closed 表示になることを確認する
     expect(bidi_section.get_by_text("Closed", exact=True)).to_be_visible(timeout=MESSAGE_TIMEOUT_MS)
+
+
+def assert_http2_protocol(page: Page) -> None:
+    """DevTools ページの reliability 表示が HTTP/2 であることを確認する
+
+    Safari の WebTransport over HTTP/2 は reliability が reliable-only であり、
+    DevTools は reliability 行に HTTP/2 バッジを表示する。HTTP/3 接続では
+    supports-unreliable になり HTTP/3 バッジが表示されるため、HTTP/2 バッジの
+    表示により WebTransport over HTTP/2 で接続されたことを検証できる。
+    """
+    # Connection Settings パネルの reliability 行に表示される HTTP/2 バッジを確認する
+    connection_panel = page.get_by_role("heading", name="Connection Settings").locator("..")
+    expect(connection_panel.get_by_text("HTTP/2", exact=True)).to_be_visible(
+        timeout=MESSAGE_TIMEOUT_MS
+    )
