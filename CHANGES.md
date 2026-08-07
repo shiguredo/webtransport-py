@@ -51,6 +51,8 @@
   - @voluntas
 - [ADD] QUIC のストリーム・接続制御 API (ストリーム上限確認 / keep-alive / 鍵更新 / フロー制御の動的拡張) を公開する
   - @voluntas
+- [ADD] WebTransport データストリームのリセットで RESET_STREAM_AT を送出する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
