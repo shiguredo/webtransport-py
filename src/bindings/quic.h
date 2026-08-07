@@ -110,6 +110,8 @@ struct QuicEvent {
   bool fin = false;
   uint64_t error_code = 0;
   std::string reason;
+  // STREAM_DATA イベントのストリーム上のオフセット (他イベントでは 0)
+  uint64_t offset = 0;
 };
 
 /**

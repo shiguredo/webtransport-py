@@ -53,6 +53,8 @@
   - @voluntas
 - [ADD] WebTransport データストリームのリセットで RESET_STREAM_AT を送出する
   - @voluntas
+- [ADD] QUIC の STREAM_DATA イベントにストリームオフセットを追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
