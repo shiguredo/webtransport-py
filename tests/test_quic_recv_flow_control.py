@@ -5,6 +5,8 @@ recv_stream_data_cb が受信したデータ量ぶんのストリーム・コネ
 完了することを確認する。
 """
 
+import time
+
 from conftest import (
     CLIENT_ADDR,
     SERVER_ADDR,
@@ -17,6 +19,25 @@ from webtransport import quic
 # ストリーム / コネクションの初期受信ウィンドウ (QuicConfig のデフォルト値)
 STREAM_INITIAL_WINDOW = 262144
 CONNECTION_INITIAL_WINDOW = 1048576
+# パケット交換のループ上限。1.2 MiB の転送は実測で 8 ラウンドで完了する
+# ため、4 桁の上限は十分な余裕を持つ
+MAX_ROUNDS = 3000
+# タイマーを実時間で満了させる閾値 (ナノ秒)。ACK 遅延タイマーの期限は
+# 受信時刻 + max_ack_delay 以下 (デフォルト 25ms) のため 100ms 未満に
+# 収まる
+TIMER_SLEEP_THRESHOLD_NS = 100_000_000
+
+
+def drain_stream_data_count(connection: quic.Connection) -> int:
+    """イベントキューを drain し STREAM_DATA のデータ量を集計する"""
+    total = 0
+    while True:
+        event = connection.next_event()
+        if event is None:
+            break
+        if event.type == quic.EventType.STREAM_DATA:
+            total += len(event.data)
+    return total
 
 
 def exchange_until_all_received(
@@ -26,52 +47,63 @@ def exchange_until_all_received(
 ) -> int:
     """サーバーが expected_bytes を受信するまでパケットを交換する
 
-    Sans-IO では時間が明示的に進まないため、ACK 遅延等のタイマーは
-    get_timeout() で期限を確認し、handle_timeout() で処理する。タイマーを
-    消化しなくても実時間の経過で ACK は送出されるが、消化することで
-    必要なイテレーション数が減る (1.2 MiB 転送の実測で 875 → 727 ラウンド)。
-    ループ上限 3000 は、1.2 MiB の転送が実測で約 730 ラウンドで完了する
-    ことに対して 4 倍以上の余裕を持つ。
+    クライアントは送れるだけ送り、サーバーは受信への応答 (MAX_STREAM_DATA /
+    MAX_DATA / ACK) を送れるだけ送る。Sans-IO では時間が明示的に進まない
+    ため、ACK 遅延等のタイマーは get_timeout() で期限を確認し、
+    handle_timeout() で処理する。期限がまだ来ていないタイマー (ACK 遅延等、
+    100ms 未満) は期限まで実時間を進めてから処理する。これは CI 環境のように
+    パケット交換ループの実行時間が ACK 遅延 (25ms) を下回る場合、タイマーが
+    満了せず ACK が送出されず、クライアントの送信が輻輳ウィンドウ (cwnd) で
+    ブロックされて転送が進まないためである。
+    ループ上限は MAX_ROUNDS で、1.2 MiB の転送が実測で 8 ラウンドで完了する
+    ことに対して十分な余裕を持つ。
 
     Returns:
         サーバーが受信したバイト数
     """
     server_received = 0
-    for _ in range(3000):
-        client_packet = client.send()
-        if client_packet is not None:
+    for _ in range(MAX_ROUNDS):
+        # クライアントは送れるだけ送る (cwnd / 送信ウィンドウが枯渇するまで)
+        while True:
+            client_packet = client.send()
+            if client_packet is None:
+                break
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
-            while True:
-                event = server.next_event()
-                if event is None:
-                    break
-                if event.type == quic.EventType.STREAM_DATA:
-                    server_received += len(event.data)
+            server_received += drain_stream_data_count(server)
 
-        server_packet = server.send()
-        if server_packet is not None:
+        # サーバーは送れるだけ送る (MAX_STREAM_DATA / MAX_DATA / ACK)
+        while True:
+            server_packet = server.send()
+            if server_packet is None:
+                break
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
-        # ACK 遅延等のタイマーを消化する
-        for connection, peer, local_addr, remote_addr in (
-            (server, client, SERVER_ADDR, CLIENT_ADDR),
-            (client, server, CLIENT_ADDR, SERVER_ADDR),
+        # ACK 遅延等のタイマーを消化する。期限が短いタイマー (ACK 遅延等、
+        # TIMER_SLEEP_THRESHOLD_NS 未満) は期限まで実時間を進めてから
+        # handle_timeout() を呼ぶ。ACK 遅延タイマーの期限は受信時刻 +
+        # max_ack_delay 以下 (RFC 9000 Section 13.2.1、デフォルト 25ms
+        # (RFC 9000 Section 18.2)) のため閾値未満に収まり、これによりループ
+        # の実行速度に関係なくタイマーを確実に満了させ、ACK の送出を保証
+        # する。期限前の handle_timeout() は ngtcp2 側で no-op のため、他の
+        # タイマー (PTO / ハウスキーピング等) は実時間を進めずに呼ぶだけで
+        # よい。
+        for connection, peer, peer_local_addr, peer_remote_addr in (
+            (server, client, CLIENT_ADDR, SERVER_ADDR),
+            (client, server, SERVER_ADDR, CLIENT_ADDR),
         ):
             timeout = connection.get_timeout()
-            if timeout is not None and timeout <= 0:
-                connection.handle_timeout()
-                packet = connection.send()
-                if packet is not None:
-                    peer.receive(packet.data, local_addr, remote_addr)
-                    # タイマー消化で送信されたデータが運ぶイベントを集計する
-                    # (受信側は peer のため、peer のキューを drain する)
-                    if peer is server:
-                        while True:
-                            event = server.next_event()
-                            if event is None:
-                                break
-                            if event.type == quic.EventType.STREAM_DATA:
-                                server_received += len(event.data)
+            if timeout is None:
+                continue
+            if timeout > 0 and timeout < TIMER_SLEEP_THRESHOLD_NS:
+                time.sleep(timeout / 1_000_000_000)
+            connection.handle_timeout()
+            packet = connection.send()
+            if packet is not None:
+                peer.receive(packet.data, peer_local_addr, peer_remote_addr)
+                # タイマー消化で送信されたデータが運ぶイベントを集計する
+                # (受信側は peer のため、peer のキューを drain する)
+                if peer is server:
+                    server_received += drain_stream_data_count(peer)
 
         if server_received >= expected_bytes:
             break
