@@ -1763,6 +1763,11 @@ class _LowLevelClient:
         h3_config.is_server = False
         self._h3_session: h3_low.Session = h3_low.Session.create_client(h3_config)
 
+        # QUIC 層で生成済みだがワイヤに送出していないパケット
+        # (RESET_STREAM_AT の検証で、データがリセットより先に届かない
+        # 順序を作るために使う)
+        self._withheld_packets: list[quic.Packet] = []
+
     def close(self) -> None:
         """QUIC 接続とソケットを閉じる
 
@@ -1949,6 +1954,36 @@ class _LowLevelClient:
         self._h3_session.send_stream_data(stream_id, data)
         await self._pump()
 
+    async def send_stream_data_withheld(self, stream_id: int, data: bytes) -> None:
+        """ストリームにデータを送信するが、生成したパケットは送出せず保持する
+
+        QUIC 層 (ngtcp2) にデータを書き込み済み (tx offset が前進) にする一方、
+        ワイヤには出さない。データがリセットより先に届かない順序を作る
+        RESET_STREAM_AT の検証で使う。1 回の send() は 1 パケットしか返さない
+        ため、データは 1 パケットに収まるサイズを渡すこと。この検証の決定的性
+        は、データストリームより小さい ID のストリーム (CONNECT リクエスト /
+        制御ストリーム) に残留データがないことにも依存する (send() は
+        stream_buffers_ をストリーム ID 昇順で処理するため、残留があると
+        データストリームのパケットが生成されず、データが stream_buffers_ に
+        残ったままリセットで破棄される)
+        """
+        self._h3_session.send_stream_data(stream_id, data)
+        for stream_id_to_send, stream_data, fin in self._h3_session.get_streams_to_send():
+            self._quic_connection.send_stream_data(stream_id_to_send, stream_data, fin)
+        packet = self._quic_connection.send()
+        # パケットが生成されない場合 (cwnd 枯渇等) は、データが stream_buffers_
+        # に残ったままリセットで破棄され、失敗モードが不明瞭になるため
+        # ここで明示的に失敗させる
+        assert packet is not None
+        self._withheld_packets.append(packet)
+
+    async def send_withheld_packets(self) -> None:
+        """保留していたパケットを送信する"""
+        loop = asyncio.get_running_loop()
+        for packet in self._withheld_packets:
+            await loop.sock_sendto(self._socket, packet.data, self._server_addr)
+        self._withheld_packets.clear()
+
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームをリセットする
 
@@ -2101,13 +2136,65 @@ async def test_stream_reset_second_session_id(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_stream_reset_at_recovers_session_id(test_certificates):
+    """書き込み済みデータのあるストリームのリセットでセッション ID が復元される
+
+    データパケットを保留してリセット送出パケットを先に届ける構成で、
+    RESET_STREAM_AT (draft-ietf-webtrans-http3-16 Section 4.4 の MUST) により
+    セッション ID が復元されることを確認する。RESET_STREAM_AT の Reliable Size
+    は書き込み済みオフセット全体に設定されるため、ピアはデータ到着まで
+    リセットを確定しない (draft-ietf-quic-reliable-stream-reset-09 Section 5.3
+    の Size Known → Data Recvd 遷移)。後から届いた WT ヘッダーでストリームが
+    セッションに関連付けられてからリセットが確定し、on_stream_reset に正しい
+    セッション ID が渡る (データ未送信のままリセットした場合は -1 になる。
+    test_stream_reset_before_data_received_minus_one 参照)
+    """
+    server, server_task, info = await _start_reset_test_server(
+        test_certificates, expected_sessions=1
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        session_id = await client.establish_session()
+
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        # データストリームを開いてデータを送信するが、パケットは保留する
+        # (QUIC 層に書き込み済みの状態を作りつつ、データがリセットより先に
+        # 届かない順序にする)
+        stream_id = await client.open_stream(session_id)
+        await client.send_stream_data_withheld(stream_id, b"payload")
+
+        # リセット送出パケットを先に送信する (RESET_STREAM_AT)
+        await client.reset_stream(stream_id)
+
+        # 保留していたデータパケットを送信する。ngtcp2 の writev_stream は
+        # アプリのデータ (vec) を直接パケットに書く設計のため、リセット送出
+        # パケットに未 ACK データは同梱されない。データはこの保留パケット
+        # 経由で配信され、RESET_STREAM_AT の Reliable Size によりピアは
+        # データ到着までリセットを確定しない
+        await client.send_withheld_packets()
+
+        # 後から届いた WT ヘッダーでセッション ID が復元される
+        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        assert info.reset_stream_id == stream_id
+        assert info.reset_session_id == session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
 async def test_stream_reset_before_data_received_minus_one(test_certificates):
     """WT ヘッダー未受信のままリセットされたストリームには -1 が渡ることを確認
 
     open_stream と reset_stream の間に送信処理を挟まない (WT ヘッダーが先に
     届くと stream_info_ に登録され、-1 が決定的にならない)。セッションとの
     関連付けはストリーム先頭のヘッダー経由のみであり (draft-ietf-webtrans-http3-16
-    Section 4.4)、本実装は RESET_STREAM_AT 未対応のためヘッダー未受信のまま
+    Section 4.4)、データ未書き込みのリセットは従来どおり RESET_STREAM が送出
+    される (Reliable Size 0 の RESET_STREAM_AT は RESET_STREAM と等価。
+    draft-ietf-quic-reliable-stream-reset-09 Section 5)。ヘッダー未受信のまま
     リセットされたストリームは復元できない。旧実装では無関係なセッション ID が
     渡っていたケース
     """
