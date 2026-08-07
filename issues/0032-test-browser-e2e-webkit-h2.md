@@ -1,7 +1,7 @@
 # 実ブラウザ (WebKit) を使った WebTransport over HTTP/2 E2E テストを追加する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/add-browser-e2e-webkit-h2
 - Polished: YYYY-MM-DD
 
@@ -29,3 +29,11 @@ webtransport-py が実装する WebTransport over HTTP/2 (draft-ietf-webtrans-ht
 
 - `tests/browser/test_webtransport_webkit_h2.py` のテスト一式が WebKit (Safari) で WebTransport over HTTP/2 サーバーへの接続と送受信を検証できる
 - 既存の h3 ブラウザテスト (Chromium / WebKit) が引き続き通る
+
+## 解決方法
+
+- `tests/browser/test_webtransport_webkit_h2.py` を追加し、WebKit (Safari) の WebTransport over HTTP/2 接続と送受信を検証する 8 テストを実装した。接続オプションのテストは `requireUnreliable` を指定せず、HTTP/2 バッジ (reliability = reliable-only) の表示でプロトコルが HTTP/2 であることを確認する
+- `tests/browser/conftest.py` に共通基盤 (`BrowserWebTransportServerBase`) と h2 echo サーバー (`BrowserWebTransportServerH2`)・`browser_server_h2` フィクスチャを追加した
+- `tests/browser/helpers.py` のイベント展開をプロトコル非依存にし (addr の有無を `*_` で吸収)、h3 / h2 でヘルパーを共通化した
+- 前提となった WebKit 相互運用の修正 (サーバー開始ストリームのデータ未達) は issue 0033 で対応した
+- ブラウザ E2E テスト 24 件 (Chromium h3 8 / WebKit h3 8 / WebKit h2 8) と単体テスト 419 件が通ることを確認した
