@@ -1004,6 +1004,13 @@ std::optional<QuicPacket> QuicConnection::send() {
   ngtcp2_pkt_info pi{};
   ngtcp2_ssize nwrite = 0;
 
+  // MORE フラグを使用してパケットを構築したかどうか。ngtcp2 の契約では
+  // MORE 使用後は writev_stream / writev_datagram を呼び続けて正の値 (確定
+  // パケット) か 0 が返るまで回し、それ以外の ngtcp2 API を呼んではならない
+  // (ngtcp2.h の NGTCP2_WRITE_STREAM_FLAG_MORE の記述)。パケットの確定方法の
+  // 判定に使う。
+  bool more_used = false;
+
   // まずストリームデータを書き込む
   for (auto& [stream_id, buffers] : stream_buffers_) {
     while (!buffers.empty()) {
@@ -1019,6 +1026,7 @@ std::optional<QuicPacket> QuicConnection::send() {
       // 同じストリームに次のバッファがある、または datagram がある場合は MORE を設定
       if (buffers.size() > 1 || !datagram_queue_.empty()) {
         flags |= NGTCP2_WRITE_STREAM_FLAG_MORE;
+        more_used = true;
       }
       ngtcp2_ssize ndatalen = 0;
 
@@ -1089,6 +1097,7 @@ std::optional<QuicPacket> QuicConnection::send() {
       if (nwrite == NGTCP2_ERR_WRITE_MORE) {
         if (accepted) {
           datagram_queue_.pop_front();
+          more_used = true;
           // パケットに空きがあるため同じ呼び出し内で続きを書く
           continue;
         }
@@ -1100,6 +1109,7 @@ std::optional<QuicPacket> QuicConnection::send() {
 
     if (accepted) {
       datagram_queue_.pop_front();
+      more_used = true;
     }
 
     if (nwrite > 0) {
@@ -1112,7 +1122,23 @@ std::optional<QuicPacket> QuicConnection::send() {
     break;
   }
 
-  // 通常のパケット (ACK など)
+  // MORE フラグを使用した場合は、パケットを確定する。ngtcp2 の契約では
+  // MORE 使用後は writev_stream / writev_datagram を呼び続けて正の値か 0 が
+  // 返るまで回し、それ以外の ngtcp2 API を呼んではならない。ストリームデータが
+  // 無くなった場合は stream_id=-1 で確定する (ngtcp2.h の
+  // NGTCP2_WRITE_STREAM_FLAG_MORE の記述)
+  if (more_used) {
+    ngtcp2_ssize ndatalen = 0;
+    nwrite = ngtcp2_conn_writev_stream(conn_, &path, &pi, send_buffer_.data(),
+                                       send_buffer_.size(), &ndatalen, 0, -1,
+                                       nullptr, 0, timestamp_ns_);
+    if (nwrite > 0) {
+      return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
+                         path);
+    }
+  }
+
+  // MORE 未使用の場合のみ通常のパケット (ACK など) を生成する
   nwrite = ngtcp2_conn_write_pkt(conn_, &path, &pi, send_buffer_.data(),
                                  send_buffer_.size(), timestamp_ns_);
   if (nwrite > 0) {

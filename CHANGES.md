@@ -71,6 +71,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のサーバー開始ストリームのデータが WebKit で受信できない問題を修正する
   - @voluntas
+- [FIX] QUIC の `send()` が ngtcp2 の WRITE_MORE 契約に違反し大容量データ転送でデータが壊れる問題を修正する
+  - @voluntas
 
 ### misc
 
