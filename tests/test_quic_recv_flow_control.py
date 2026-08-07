@@ -32,11 +32,11 @@ def exchange_until_all_received(
     MAX_DATA / ACK) を送れるだけ送る。Sans-IO では時間が明示的に進まない
     ため、ACK 遅延等のタイマーは get_timeout() で期限を確認し、
     handle_timeout() で処理する。期限がまだ来ていないタイマー (ACK 遅延等、
-    1 秒未満) は期限まで実時間を進めてから処理する。これは CI 環境のように
+    100ms 未満) は期限まで実時間を進めてから処理する。これは CI 環境のように
     パケット交換ループの実行時間が ACK 遅延 (25ms) を下回る場合、タイマーが
-    満了せず ACK が送出されず、クライアントの送信が cwnd でブロックされて
-    転送が進まないためである。
-    ループ上限 3000 は、1.2 MiB の転送が実測で数十ラウンドで完了することに
+    満了せず ACK が送出されず、クライアントの送信が輻輳ウィンドウ (cwnd) で
+    ブロックされて転送が進まないためである。
+    ループ上限 3000 は、1.2 MiB の転送が実測で 8 ラウンドで完了することに
     対して十分な余裕を持つ。
 
     Returns:
@@ -64,23 +64,27 @@ def exchange_until_all_received(
                 break
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
-        # ACK 遅延等のタイマーを消化する。期限が 1 秒未満のタイマー (ACK 遅延
-        # 等) は期限まで実時間を進めてから handle_timeout() を呼ぶ。これにより
-        # ループの実行速度に関係なくタイマーを確実に満了させ、ACK の送出を
-        # 保証する。
-        for connection, peer, local_addr, remote_addr in (
-            (server, client, SERVER_ADDR, CLIENT_ADDR),
-            (client, server, CLIENT_ADDR, SERVER_ADDR),
+        # ACK 遅延等のタイマーを消化する。期限が短いタイマー (ACK 遅延等、
+        # 100ms 未満) は期限まで実時間を進めてから handle_timeout() を呼ぶ。
+        # ACK 遅延タイマーの期限は受信時刻 + max_ack_delay (RFC 9000
+        # Section 13.2.1、デフォルト 25ms (RFC 9000 Section 18.2)) のため
+        # 100ms 未満に収まり、これによりループの実行速度に関係なくタイマー
+        # を確実に満了させ、ACK の送出を保証する。期限前の handle_timeout()
+        # は ngtcp2 側で no-op のため、PTO 等の長いタイマー (1 秒前後) は
+        # 実時間を進めずに呼ぶだけでよい。
+        for connection, peer, peer_local_addr, peer_remote_addr in (
+            (server, client, CLIENT_ADDR, SERVER_ADDR),
+            (client, server, SERVER_ADDR, CLIENT_ADDR),
         ):
             timeout = connection.get_timeout()
             if timeout is None:
                 continue
-            if timeout > 0 and timeout < 1_000_000_000:
+            if timeout > 0 and timeout < 100_000_000:
                 time.sleep(timeout / 1_000_000_000)
             connection.handle_timeout()
             packet = connection.send()
             if packet is not None:
-                peer.receive(packet.data, local_addr, remote_addr)
+                peer.receive(packet.data, peer_local_addr, peer_remote_addr)
                 # タイマー消化で送信されたデータが運ぶイベントを集計する
                 # (受信側は peer のため、peer のキューを drain する)
                 if peer is server:
