@@ -1,7 +1,7 @@
 # ngtcp2 のストリーム・接続制御 API を公開する
 
 - Created: 2026-08-04
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-07
 - Branch: feature/add-quic-stream-control
 - Polished: 2026-08-07
 
@@ -42,3 +42,10 @@ QUIC のストリーム上限確認・keep-alive・鍵更新・フロー制御�
 - Python から鍵更新を開始できる (成功はクライアント (Handshake Done 受信 + 最初の post-handshake write 後) とサーバー (ハンドシェイク完了後の post-handshake read / write を 1 回経た後。新鍵準備が行われる) の両方で確認する。ハンドシェイク完了前はクライアント・サーバーとも False を返し、クライアントはさらに write 前も False を返す。鍵更新確認前の連続呼び出しは 2 回目が False (RFC 9001 Section 6.1 の MUST。ngtcp2 は鍵更新未確認フラグで実装)。3*PTO の制約 (RFC 9001 Section 6.5 の SHOULD。ngtcp2 はハード制約として実装) は 2 回目以降の鍵更新に適用される。3*PTO 経過後の再成功は ACK 交換と実時間経過に依存するため検証対象外とし、連続呼び出しの False のみを検証する)
 - Python からフロー制御とストリーム上限を拡張できる (効果はピア側で確認する: extend_max_offset はピア側の 0014 の `max_data_left` の増加、extend_max_stream_offset はピア側の 0014 の `max_stream_data_left` の増加、extend_max_streams_bidi はピア側の本 issue の `streams_bidi_left` の増加、extend_max_streams_uni はピア側の本 issue の `streams_uni_left` の増加。フレームの送出条件に注意する: MAX_DATA / MAX_STREAM_DATA は ngtcp2 の流量制御により、未送出の拡張量が window/4 を超えた場合にのみ送出される (既定設定ではコネクション 256 KiB 超 / ストリーム 64 KiB 超。閾値未満の拡張は send() しても送出されない)。MAX_STREAMS は未送出の拡張があれば send() で送出される。テストでは閾値を考慮した拡張量で、ピアが受信した時点で反映されることを確認する。確認に使う 0014 の残量 API は実装済み)
 - モックなしのテストで、各 API が動作することを確認する (コネクションが閉じた後は getter が `None`、setter / mutator が no-op / False になるガード経路も確認する)
+
+## 解決方法
+
+- `src/bindings/quic.cpp` / `src/bindings/quic.h` の `QuicConnection` にストリーム・接続制御 API 8 本を追加した: プロパティ `streams_bidi_left` / `streams_uni_left` (ngtcp2 の 2 系 API `get_streams_bidi_left2` / `get_streams_uni_left2`) と、メソッド `keep_alive_timeout` / `initiate_key_update` / `extend_max_offset` / `extend_max_stream_offset` / `extend_max_streams_bidi` / `extend_max_streams_uni`
+- `initiate_key_update` は ngtcp2 内部の assert (state == NGTCP2_CS_POST_HANDSHAKE) 回避のため両側ガードを設けた: サーバーはハンドシェイク完了のみ、クライアントはハンドシェイク完了 + post-handshake の 1RTT パケット書き出し (新規メンバー `post_handshake_write_done_`) を条件とする。1RTT パケットの検出は、RFC 9000 Section 12.2 のコアレッシング (1 データグラムに複数パケット) を考慮し、QUIC パケットヘッダをパースして short header パケットの有無で判定する (`contains_short_header_packet`)。move コンストラクタ / move 代入演算子にも新規メンバーを反映した
+- 設計方針の「0-RTT 早期データはハンドシェイク完了前に 1RTT パケットとして書き出される」は誤りで、0-RTT パケットは long header で書き出される (RFC 9000 Section 17.2.3)。実装は long header 判定で 0-RTT を対象外にできるため挙動に影響しない
+- テストは `tests/test_quic_stream_control.py` に 9 件を追加した (0014 / 0015 と同じ Sans-IO 実通信構成・モックなし): ストリーム残数 (ハンドシェイク前 0 / 広告値反映 / 開設で減少 / 累積制限)、keep-alive (get_timeout 反映 / PING 送出 / ピアの ping_recv 増加 / UINT64_MAX 無効化)、鍵更新 (ハンドシェイク前 False / write 前 False / 成功 / 連続 2 回目 False)、フロー制御拡張 (window/4 の送出閾値 / ピア側残量の増加 / ローカル単方向 False)、閉じた後のガード (None / no-op / False)
