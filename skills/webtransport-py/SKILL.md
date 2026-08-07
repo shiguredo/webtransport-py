@@ -67,13 +67,23 @@ async def main() -> None:
         port=4433,
         certfile="cert.pem",
         keyfile="key.pem",
+        allowed_origins=["https://example.com"],
     )
     # コールバックのシグネチャ (すべて async)
     # on_session_ready(session_id: int, addr: tuple[str, int])
     # on_session_closed(session_id: int, addr: tuple[str, int])
     # on_stream_data(session_id: int, stream_id: int, data: bytes, addr: tuple[str, int])
     # on_stream_reset(session_id: int, stream_id: int, error_code: int, addr: tuple[str, int])
+    #   on_stream_reset の session_id は WT ヘッダー未受信のままリセットされた
+    #   ストリーム等では -1 になることがある
     # on_datagram(session_id: int, data: bytes, addr: tuple[str, int])
+
+    async def on_session_ready(session_id: int, addr: tuple[str, int]) -> None:
+        # サーバーから単方向ストリームを開いて送信する (デフォルト単方向)
+        # 失敗時は -1 が返るため、送信前にガードする
+        stream_id = await server.open_stream(addr, session_id)
+        if stream_id >= 0:
+            await server.send_stream_data(addr, stream_id, b"Hello from server!")
 
     async def on_stream_data(
         session_id: int, stream_id: int, data: bytes, addr: tuple[str, int]
@@ -84,6 +94,7 @@ async def main() -> None:
     async def on_datagram(session_id: int, data: bytes, addr: tuple[str, int]) -> None:
         await server.send_datagram(addr, session_id, data)
 
+    server.on_session_ready(on_session_ready)
     server.on_stream_data(on_stream_data)
     server.on_datagram(on_datagram)
 
@@ -95,13 +106,22 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`h3.Server.__init__(host, port, certfile=None, keyfile=None, idle_timeout_ns=30_000_000_000)`。セッションはサーバーが自動で accept する。主なメソッド:
+`h3.Server.__init__(host, port, certfile=None, keyfile=None, idle_timeout_ns=30_000_000_000, allowed_origins=None)`。`allowed_origins` は None / 空リストで全オリジンを受理する。セッションはサーバーが自動で accept する。プロパティは `host` / `port` / `actual_port` / `is_running`。主なメソッド:
 
 ```python
 async def send_stream_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(addr: tuple[str, int], session_id: int, data: bytes) -> None
 async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def close_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def open_stream(addr: tuple[str, int], session_id: int, unidirectional: bool = True) -> int
+async def start() -> None
+async def run() -> None
+async def stop() -> None
 ```
+
+`close_stream` は `reset_stream` に委譲する同一実装 (RESET_STREAM 送出)。`open_stream` はデフォルト単方向で、双方向指定 (`unidirectional=False`) は `NotImplementedError`、失敗時は -1 を返す。`session_id` には `on_session_ready` で受け取った有効な値を渡す (サーバー起動の双方向ストリームは draft-ietf-webtrans-http3-16 Section 4.3 の "can" に基づく任意実装のため未実装。双方向ストリーム自体はクライアントから開ける)。起動は `async with server:` でも `start()` / `stop()` の明示呼び出しでも行え、`run()` がメインループである。
+
+送信系メソッドの `addr` は接続ごとのキーであり、コールバックで受け取った `addr` をそのまま渡す。キーに無い `addr` を渡した場合、エラーにならず処理が黙って捨てられる。
 
 クライアント:
 
@@ -115,6 +135,7 @@ async def main() -> None:
     client = h3.Client(
         url="https://localhost:4433/webtransport",
         verify_peer=False,
+        origin="https://example.com",
     )
     # コールバックのシグネチャ (すべて async、サーバーと違い addr は付かない)
     # on_session_ready(session_id: int) / on_session_closed(session_id: int)
@@ -146,7 +167,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`h3.Client.__init__(url, verify_peer=True, idle_timeout_ns=30_000_000_000, ca_file=None, verify_callback=None)`。`url` は `https://host:port/path` 形式 (ポート省略時 443)。主なメソッド:
+`h3.Client.__init__(url, verify_peer=True, origin="", idle_timeout_ns=30_000_000_000, ca_file=None, verify_callback=None)`。`url` は `https://host:port/path` 形式 (ポート省略時 443)。`origin` は Origin ヘッダー値で、空文字なら付与しない。プロパティは `url` / `host` / `port` / `is_connected` / `session_id`。主なメソッド:
 
 ```python
 async def connect() -> bool
@@ -154,7 +175,12 @@ async def open_stream(unidirectional: bool = False) -> int
 async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(data: bytes) -> None
 async def reset_stream(stream_id: int, error_code: int = 0) -> None
+async def close_stream(stream_id: int, error_code: int = 0) -> None
+async def run() -> None
+async def close() -> None
 ```
+
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、Sans I/O の `h3.Session.open_stream` の登録に失敗しても stream_id を返す (失敗を無視する実装上の非対称。サーバー側の `open_stream` は失敗時 -1 を返す)。QUIC 層の `open_stream` が失敗した場合 (未接続時等) は -1 を返す。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
 
 ### WebTransport over HTTP/2 (`webtransport.h2`)
 
@@ -178,7 +204,7 @@ async def reset_stream(stream_id: int, error_code: int = 0) -> None
 async def close_session(error_code: int = 0, error_message: str = "") -> None
 ```
 
-`h2.Client.__init__(url, verify_peer=True, origin="")`。メソッドとコールバックの形は `h3.Client` と同じ。`connect()` は対向の SETTINGS を待ってから Extended CONNECT を送る。
+`h2.Client.__init__(url, verify_peer=True, origin="")`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect()` は対向の SETTINGS を待ってから Extended CONNECT を送る。
 
 ### QUIC (`webtransport.quic`)
 
@@ -342,7 +368,7 @@ if timeout is not None and timeout <= 0:
 
 ### WebTransport over HTTP/3 (`h3.Session`)
 
-QUIC 層を持たないため、`quic.Connection` と結線して使う。
+QUIC 層を持たないため、`quic.Connection` と結線して使う。公開メソッドは次のとおり。
 
 ```python
 Session.create_client(config: Config) -> Session
@@ -353,25 +379,49 @@ def receive_stream_data(stream_id: int, data: bytes, fin: bool = False) -> int
 def receive_datagram(data: bytes) -> None
 def get_streams_to_send() -> list[tuple[int, bytes, bool]]  # (stream_id, data, fin)
 def get_datagrams_to_send() -> list[bytes]
-def get_required_streams() -> list[tuple[str, bool]]
 
 # 制御ストリームの結び付け (QUIC 側で単方向ストリームを 3 本開いて割り当てる)
+def get_required_streams() -> list[tuple[str, bool]]  # (名前, bidirectional)  # false = 単方向
 def bind_control_stream(stream_id: int) -> None
 def bind_qpack_encoder_stream(stream_id: int) -> None
 def bind_qpack_decoder_stream(stream_id: int) -> None
 
 # セッション
-def connect(stream_id: int, url: str) -> bool  # クライアント
+def connect(stream_id: int, url: str, origin: str = "") -> bool  # クライアント
 def accept_session(stream_id: int) -> bool  # サーバー
 def reject_session(stream_id: int, status_code: int) -> None
 def close_session(session_id: int, error_code: int = 0, error_message: str = "") -> None
+def is_closed() -> bool
+def get_session_ids() -> list[int]
+def get_session_streams(session_id: int) -> list[StreamInfo]
 
 # ストリーム / データグラム
 def open_stream(session_id: int, stream_id: int, is_unidirectional: bool) -> bool
 def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 def send_datagram(session_id: int, data: bytes) -> None
+def close_stream(stream_id: int, error_code: int = 0) -> int  # 戻り値はセッション ID (復元不可なら -1)
+def reset_stream(stream_id: int, error_code: int = 0) -> None
+
+# ストリーム状態 (None はコネクションが無いか閉じている場合。0 / 1 はストリームの状態)
+def stream_writable(stream_id: int) -> int | None  # 1 書き込み可 / 0 書き込み不可
+def stream_flushed(stream_id: int) -> int | None  # 1 受け渡し済み / 0 未了 (存在しないストリームは 1)
+def stream_wt_session_id(stream_id: int) -> int | None  # ストリームが存在しない場合・WT データストリームでない場合も None
+
+# フロー制御
+def block_stream(stream_id: int) -> None
+def unblock_stream(stream_id: int) -> bool
+def max_concurrent_streams(n: int) -> None
+def set_max_client_streams_bidi(max_streams: int) -> None  # サーバー (リクエストストリーム受け入れ前)
+
+# イベント
 def next_event() -> Event | None
 ```
+
+`close_stream` は nghttp3 へのストリーム終了通知で、戻り値はリセットされたストリームが属するセッション ID (復元できない場合は -1)。`reset_stream` は `close_stream` を呼ぶだけであり、QUIC RESET_STREAM の送出は asyncio ラッパーの `reset_stream` が QUIC 層への通知と合わせて行う (Sans I/O で直接使う場合は `quic.Connection.reset_stream()` を自分で呼ぶ)。`connect` の `origin` は Origin ヘッダー値で、空文字なら付与しない。
+
+`Config` のプロパティは `max_field_section_size` / `qpack_max_dtable_capacity` / `qpack_blocked_streams` / `is_server` / `allowed_origins`。`allowed_origins` は許可オリジンリストで、空リスト (未設定) なら全オリジンを受理する。
+
+`Event` のフィールドは `type` / `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `is_unidirectional`。`is_unidirectional` は値が設定される経路が無く常に False である (真偽の判定には使わないこと)。`StreamInfo` (セッションに属するストリーム情報) のフィールドは `stream_id` / `session_id` / `is_unidirectional` / `is_incoming` / `is_write_registered`。
 
 結線パターン: `get_streams_to_send()` の結果を `quic.Connection.send_stream_data()` へ、`get_datagrams_to_send()` を `quic.Connection.send_datagram()` へ流す。逆方向は QUIC の `STREAM_DATA` / `DATAGRAM` イベントを `receive_stream_data()` / `receive_datagram()` へ渡す。
 
@@ -385,7 +435,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 
 - `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `enable_early_data=True` / `alpn_protocols=[]` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None`
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
-- `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `is_server=False`
+- `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False`
 - `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`
 
@@ -399,12 +449,12 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason`、`h3.Event` / `h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message`、`http3.Event` / `http2.Event` は `stream_id` / `headers` / `data` / `error_code`。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason`、`h3.Event` / `h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` (h3.Event はさらに `is_unidirectional` を持つが、値が設定される経路が無く常に False)、`http3.Event` / `http2.Event` は `stream_id` / `headers` / `data` / `error_code`。
 
 ## 注意点
 
 - `verify_peer` のデフォルトが層で異なる。asyncio の `Client` は `verify_peer=True`、Sans I/O の `quic.Config` は `verify_peer=False`。Sans I/O API を直接使うときは明示的に有効にすること
-- `open_stream()` の引数名が層で異なる。`quic` は `bidirectional: bool = True`、`h3` / `h2` は `unidirectional: bool = False` (どちらもデフォルトは双方向)
+- `open_stream()` の引数名とデフォルトが層で異なる。`quic` は `bidirectional: bool = True`、asyncio の `h3.Client` / `h2.Client` / `h2.SessionWriter` は `unidirectional: bool = False` (デフォルトは双方向)、asyncio の `h3.Server` は `unidirectional: bool = True` (デフォルトは単方向。双方向指定は `NotImplementedError`)。Sans I/O の `h3.Session` / `h2.Session` の `open_stream` はデフォルト値を持たず `is_unidirectional` を必ず指定する
 - タイマー API (`get_timeout()` / `handle_timeout()`) があるのは `quic.Connection` のみ。`http3` / `h3` / `http2` / `h2` の Sans I/O クラスには無い
 - 独自の例外クラスは定義されていない。生成系ファクトリの失敗は `RuntimeError`、asyncio ラッパーの未接続時操作も `RuntimeError` になる
 - `webtransport.http2.ResponseWriter` はコールバック引数として渡されるが `http2/__init__.py` から再エクスポートされていない。型注釈で import する場合は `from webtransport.http2.server import ResponseWriter` を使う
