@@ -49,6 +49,8 @@
   - @voluntas
 - [ADD] HTTP/3 と WebTransport over HTTP/3 のストリーム・接続制御 API (QUIC フロー制御ブロック / アンブロック / 同時ストリーム数ヒント) を公開する
   - @voluntas
+- [ADD] QUIC のストリーム・接続制御 API (ストリーム上限確認 / keep-alive / 鍵更新 / フロー制御の動的拡張) を公開する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
