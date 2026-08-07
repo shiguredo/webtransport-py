@@ -612,6 +612,106 @@ async def test_server_client_communication(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_large_echo_over_initial_recv_window(test_certificates):
+    """初期受信ウィンドウを超える大容量 echo 転送が完了することを確認
+
+    受信フロー制御の再開放が無ければ、サーバーの初期受信ウィンドウ
+    (ストリーム 256 KiB) でクライアントの送信がブロックされ、512 KiB の
+    echo 転送は完了しない。再開放により MAX_STREAM_DATA が送出され、
+    クライアントの送信が止まらずに全量が往復することを確認する。
+    コネクションレベルの再開放 (MAX_DATA) は 512 KiB がコネクションの
+    初期ウィンドウ (1 MiB) に収まるため、本テストでは検証しない
+    (test_quic_recv_flow_control.py で検証する)
+    """
+    from webtransport.h3 import Client, Server
+
+    payload = b"x" * (512 * 1024)
+    server_received = 0
+    client_received = 0
+    session_ready_event = asyncio.Event()
+    echo_completed = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        session_ready_event.set()
+
+    async def on_stream_data(session_id, stream_id, data, addr):
+        nonlocal server_received
+        server_received += len(data)
+        # 受信した断片をそのままエコーバックする (FIN は付けない)
+        await server.send_stream_data(addr, stream_id, data)
+
+    server.on_session_ready(on_session_ready)
+    server.on_stream_data(on_stream_data)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_client_stream_data(stream_id, data):
+        nonlocal client_received
+        client_received += len(data)
+        if client_received == len(payload):
+            echo_completed.set()
+
+    client.on_stream_data(on_client_stream_data)
+
+    connected = await client.connect()
+    assert connected is True
+
+    # クライアントの受信ループを起動してからセッション確立を待つ。
+    # run() を先に回さないと、クライアントはサーバーの応答 (200 OK や
+    # MAX_STREAM_DATA / MAX_DATA) を受信・処理できず、送信が進まない
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+
+        stream_id = await client.open_stream()
+        assert stream_id >= 0
+
+        # 512 KiB を 1 回の呼び出しで送信する
+        # (送信と受信は client.run() のループが処理する)
+        await client.send_stream_data(stream_id, payload)
+
+        # 再開放が機能しないと echo が完了せずタイムアウトする
+        await asyncio.wait_for(echo_completed.wait(), timeout=60.0)
+
+        assert server_received == len(payload)
+        assert client_received == len(payload)
+    finally:
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_server_client_datagram_communication(test_certificates):
     """Server と Client 間で WebTransport データグラムが送受信できることを確認
 

@@ -220,22 +220,25 @@ def test_extend_max_stream_offset():
     assert perform_handshake(client, server, initial_packet)
 
     # クライアントがストリームを開いてデータを送ると、サーバーがストリームの
-    # 存在を認識する (MAX_STREAM_DATA の送出対象になる)
+    # 存在を認識する (MAX_STREAM_DATA の送出対象になる)。サーバーは受信した
+    # データ量ぶんを自動再開放するため、送信した 1 バイト分も未送出の拡張量に
+    # 含まれる
     stream_id = client.open_stream(True)
     client.send_stream_data(stream_id, b"x")
     exchange_packets(client, server)
 
     # 閾値未満 (window/4 = 64 KiB 以下) の拡張は送出されない
+    # (自動再開放の 1 バイトを含めても閾値未満)
     server.extend_max_stream_offset(stream_id, 10_000)
     exchange_packets(client, server)
     assert client.max_stream_data_left(stream_id) == MAX_STREAM_DATA_DEFAULT - 1
 
     # 閾値を超える拡張 (100,000 > 64 KiB) で送出され、ピア側の残量が増加する。
-    # 閾値判定は未送出の累積拡張量で行われるため、保留中の 10,000 も
-    # 同時に送出される (110,000 ぶんの増加)
+    # 閾値判定は未送出の累積拡張量で行われるため、保留中の 10,000 と
+    # 自動再開放の 1 バイトも同時に送出される (110,001 ぶんの増加)
     server.extend_max_stream_offset(stream_id, 100_000)
     exchange_packets(client, server)
-    assert client.max_stream_data_left(stream_id) == MAX_STREAM_DATA_DEFAULT - 1 + 110_000
+    assert client.max_stream_data_left(stream_id) == MAX_STREAM_DATA_DEFAULT - 1 + 110_001
 
     # 存在しないストリーム ID (ローカル単方向を除く) には 0 (成功) が返る。
     # 9,998 % 4 = 2 (bit 0 = 0 でクライアント発起・bit 1 = 1 で単方向) であり、
