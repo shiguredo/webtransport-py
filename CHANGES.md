@@ -84,6 +84,8 @@
 
 ### misc
 
+- [FIX] QUIC 受信フロー制御テストの ACK 遅延タイマーを実時間に依存しないよう修正する
+  - @voluntas
 - [FIX] ブラウザテストの接続確立フレークをリトライで回避する
   - @voluntas
 - [FIX] CI の wheel テストで `pythonpath=["src"]` が拡張モジュール付き wheel を隠さないようにする

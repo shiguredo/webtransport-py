@@ -5,6 +5,8 @@ recv_stream_data_cb が受信したデータ量ぶんのストリーム・コネ
 完了することを確認する。
 """
 
+import time
+
 from conftest import (
     CLIENT_ADDR,
     SERVER_ADDR,
@@ -26,20 +28,27 @@ def exchange_until_all_received(
 ) -> int:
     """サーバーが expected_bytes を受信するまでパケットを交換する
 
-    Sans-IO では時間が明示的に進まないため、ACK 遅延等のタイマーは
-    get_timeout() で期限を確認し、handle_timeout() で処理する。タイマーを
-    消化しなくても実時間の経過で ACK は送出されるが、消化することで
-    必要なイテレーション数が減る (1.2 MiB 転送の実測で 875 → 727 ラウンド)。
-    ループ上限 3000 は、1.2 MiB の転送が実測で約 730 ラウンドで完了する
-    ことに対して 4 倍以上の余裕を持つ。
+    クライアントは送れるだけ送り、サーバーは受信への応答 (MAX_STREAM_DATA /
+    MAX_DATA / ACK) を送れるだけ送る。Sans-IO では時間が明示的に進まない
+    ため、ACK 遅延等のタイマーは get_timeout() で期限を確認し、
+    handle_timeout() で処理する。期限がまだ来ていないタイマー (ACK 遅延等、
+    1 秒未満) は期限まで実時間を進めてから処理する。これは CI 環境のように
+    パケット交換ループの実行時間が ACK 遅延 (25ms) を下回る場合、タイマーが
+    満了せず ACK が送出されず、クライアントの送信が cwnd でブロックされて
+    転送が進まないためである。
+    ループ上限 3000 は、1.2 MiB の転送が実測で数十ラウンドで完了することに
+    対して十分な余裕を持つ。
 
     Returns:
         サーバーが受信したバイト数
     """
     server_received = 0
     for _ in range(3000):
-        client_packet = client.send()
-        if client_packet is not None:
+        # クライアントは送れるだけ送る (cwnd / 送信ウィンドウが枯渇するまで)
+        while True:
+            client_packet = client.send()
+            if client_packet is None:
+                break
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
             while True:
                 event = server.next_event()
@@ -48,30 +57,39 @@ def exchange_until_all_received(
                 if event.type == quic.EventType.STREAM_DATA:
                     server_received += len(event.data)
 
-        server_packet = server.send()
-        if server_packet is not None:
+        # サーバーは送れるだけ送る (MAX_STREAM_DATA / MAX_DATA / ACK)
+        while True:
+            server_packet = server.send()
+            if server_packet is None:
+                break
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
-        # ACK 遅延等のタイマーを消化する
+        # ACK 遅延等のタイマーを消化する。期限が 1 秒未満のタイマー (ACK 遅延
+        # 等) は期限まで実時間を進めてから handle_timeout() を呼ぶ。これにより
+        # ループの実行速度に関係なくタイマーを確実に満了させ、ACK の送出を
+        # 保証する。
         for connection, peer, local_addr, remote_addr in (
             (server, client, SERVER_ADDR, CLIENT_ADDR),
             (client, server, CLIENT_ADDR, SERVER_ADDR),
         ):
             timeout = connection.get_timeout()
-            if timeout is not None and timeout <= 0:
-                connection.handle_timeout()
-                packet = connection.send()
-                if packet is not None:
-                    peer.receive(packet.data, local_addr, remote_addr)
-                    # タイマー消化で送信されたデータが運ぶイベントを集計する
-                    # (受信側は peer のため、peer のキューを drain する)
-                    if peer is server:
-                        while True:
-                            event = server.next_event()
-                            if event is None:
-                                break
-                            if event.type == quic.EventType.STREAM_DATA:
-                                server_received += len(event.data)
+            if timeout is None:
+                continue
+            if timeout > 0 and timeout < 1_000_000_000:
+                time.sleep(timeout / 1_000_000_000)
+            connection.handle_timeout()
+            packet = connection.send()
+            if packet is not None:
+                peer.receive(packet.data, local_addr, remote_addr)
+                # タイマー消化で送信されたデータが運ぶイベントを集計する
+                # (受信側は peer のため、peer のキューを drain する)
+                if peer is server:
+                    while True:
+                        event = server.next_event()
+                        if event is None:
+                            break
+                        if event.type == quic.EventType.STREAM_DATA:
+                            server_received += len(event.data)
 
         if server_received >= expected_bytes:
             break
