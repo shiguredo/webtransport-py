@@ -1,57 +1,10 @@
 """QUIC ハンドシェイクのデバッグテスト"""
 
-# Sans-IO テスト用の固定パスアドレス
-CLIENT_ADDR = ("127.0.0.1", 50000)
-SERVER_ADDR = ("127.0.0.1", 4433)
-
-
-import datetime
-import tempfile
-from pathlib import Path
-
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
-
-
-def create_test_certificates():
-    """テスト用の自己署名証明書を生成する (シンプル版)"""
-    tmpdir_path = Path(tempfile.mkdtemp())
-    certfile = tmpdir_path / "cert.pem"
-    keyfile = tmpdir_path / "key.pem"
-
-    private_key = ec.generate_private_key(ec.SECP256R1())
-
-    subject = issuer = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
-        ]
-    )
-
-    # シンプルな証明書 (拡張なし)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(private_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.UTC))
-        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
-        .sign(private_key, hashes.SHA256())
-    )
-
-    keyfile.write_bytes(
-        private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-    )
-
-    certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-
-    return str(certfile), str(keyfile)
+from conftest import (
+    CLIENT_ADDR,
+    SERVER_ADDR,
+    create_test_certificates,
+)
 
 
 def test_quic_lowlevel_handshake():
