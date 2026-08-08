@@ -1,7 +1,7 @@
 # CONNECT ストリームのリセット時にセッション終了の後始末が行われないのを修正する
 
 - Created: 2026-08-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-08
 - Branch: feature/fix-connect-stream-session-cleanup
 - Polished: 2026-08-08
 
@@ -36,3 +36,21 @@ draft-ietf-webtrans-http3-16 Section 6 のセッション終了条件の 1 つ�
 - モックなしの e2e テストで検証できる (複数セッションを確立し、1 つの CONNECT ストリームをリセットして、`on_session_closed` が正しいセッション ID で 1 回だけ発火して該当セッションのみが終了扱いになり、他セッションのデータ送受信が継続できることを確認する)
 - 高レベル `Client` 側でも CONNECT ストリームのリセットで `SessionClosed` が発火し `_connected = False` になることを確認する (高レベル `Server` が `server.reset_stream` でクライアントの CONNECT ストリームをリセットする e2e 構成で検証する)
 - 0009 の CONNECT ストリームのフォールバックとテストが本 issue の対応後に整合する (既存テストが引き続き通る)
+
+## 解決方法
+
+`src/bindings/webtransport_h3.cpp` の `H3Session::close_stream` が、CONNECT ストリームのリセット (abrupt) を検知したときにセッション終了の後始末と通知を行うようにした。
+
+- `close_stream` は CONNECT ストリーム (stream_info_ 未登録かつ session_ids_ に含まれる) のリセット時、`nghttp3_conn_close_stream` の同期コールバック (reset_stream_cb / stop_sending_cb / stream_close_cb) の後に `erase_session_streams` でセッションに属するデータストリームの `stream_info_` エントリを清掃し、`session_ids_` から削除して `SessionClosed` イベントを発火するようにした。`SessionClosed` イベントの `error_code` は `close_stream` に渡された QUIC STREAM_RESET のアプリエラーコード、`error_message` は空とした
+- 戻り値の復元は削除より先に行う設計を維持したため、1 回目のリセットでは引き続きセッション ID が返り (0009 の `test_stream_reset_connect_stream_session_id` が維持)、2 回目以降の同一 CONNECT ストリームのリセットでは `session_ids_` から削除済みのため -1 が返る
+- `src/bindings/webtransport_h3.h` の `close_stream` の docstring を更新した (セッション終了の後始末と通知、error_code の意味論、リセット時の on_stream_reset → on_session_closed の発火順、2 回目以降の戻り値 -1)。`erase_session_streams` の呼び出し元コメントも更新した
+- `tests/test_webtransport_h3_stream_buffer_cleanup.py` の stale コメント (「stream_info_ エントリを残す設計の根拠」) を、同期コールバック後に清掃が実行される現行設計に合わせて更新した
+
+テストは `tests/test_e2e_webtransport_h3.py` と `tests/test_webtransport_h3_stream_buffer_cleanup.py` に追加した。モックなしの e2e / Sans-IO 構成で検証する。
+
+- `test_connect_stream_reset_notifies_session_closed`: 同一 QUIC 接続上に 2 セッションを確立し、1 つ目の CONNECT ストリームをリセットすると、サーバー側 `on_session_closed` が正しいセッション ID で 1 回だけ発火し、クライアント側の `SessionClosed` イベントにも `error_code` が伝播し、`session_ids_` から削除され、2 つ目のセッションのデータ送受信が継続できることを確認
+- `test_server_resets_client_connect_stream_closes_session`: 高レベル Server が `server.reset_stream` でクライアントの CONNECT ストリームをリセットすると、クライアント側で `SessionClosed` が発火して `is_connected` が False になることを確認
+- `test_second_connect_stream_reset_returns_minus_one`: 同一 CONNECT ストリームの 2 回目のリセットで -1 が返ることを確認
+- `test_connect_stream_reset_cleans_session_streams`: CONNECT ストリームのリセットでセッションに属するデータストリームの `stream_info_` エントリが清掃され、他セッションのエントリは残ることを確認
+
+なお、新テスト 4 本はいずれも修正前の実装で落ちることを実行確認済み (判別力あり)。
