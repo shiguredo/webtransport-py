@@ -83,6 +83,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 でセッション ID 集合の先頭要素に依存して誤ったセッションへ配送される問題を修正する
   - @voluntas
+- [FIX] CONNECT ストリームのリセット時にセッション終了の後始末と通知が行われないのを修正する
+  - @voluntas
 
 ### misc
 
