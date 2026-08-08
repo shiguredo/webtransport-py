@@ -519,12 +519,13 @@ async def test_multiple_streams_with_more_flag(test_certificates):
 
 @pytest.mark.asyncio
 async def test_cwnd_exhaustion_does_not_hang(test_certificates):
-    """輻輳ウィンドウ枯渇後もストリームデータ送信が停止しないことを確認する
+    """輻輳ウィンドウを超える大容量送信が run() なしで完了することを確認する
 
-    run() を回さずに send_stream_data を連続呼び出しすると ACK を受信しない
-    ため輻輳ウィンドウ (cwnd) が枯渇する。この状態で send() がパケットを
-    書けずに無限ループするとイベントループがブロックして送信が止まるため、
-    その後 run() を開始したときに送信が完了することを確認する。
+    送信量が輻輳ウィンドウ (cwnd) を超えると、一度に送出できる量が制限され
+    ACK を待ってから送信を進める必要がある。バックグラウンド受信タスクが
+    ACK を処理して送信を進めるため、run() を明示起動しなくても大容量転送が
+    完了することを確認する。各 send_stream_data 呼び出しの wait_for により、
+    cwnd 枯渇時に send() が無限ループしてブロックする回帰を検出できる。
     """
     from webtransport.quic import Client, Server
 
@@ -564,21 +565,20 @@ async def test_cwnd_exhaustion_does_not_hang(test_certificates):
     stream_id = await client.open_stream(bidirectional=True)
     assert stream_id >= 0
 
-    # run() を回さずに連続送信して cwnd を枯渇させる
+    # run() を起動せずに連続送信する。バックグラウンド受信タスクが ACK を
+    # 処理して送信を進めるため、各呼び出しはブロックせずに戻る
     for i in range(64):
         await asyncio.wait_for(
             client.send_stream_data(stream_id, b"x" * 1024, fin=(i == 63)),
             timeout=5.0,
         )
 
-    # ここで run() を開始すると、溜まった ACK を処理して残りを送信する
-    client_task = asyncio.create_task(client.run())
+    # バックグラウンドタスクの ACK 処理により全データが届く
     await asyncio.wait_for(server_complete.wait(), timeout=30.0)
     assert len(server_received) == total, "全データが届くべき"
 
-    client_task.cancel()
     server_task.cancel()
-    await asyncio.gather(client_task, server_task, return_exceptions=True)
+    await asyncio.gather(server_task, return_exceptions=True)
     await client.close()
     await server.stop()
 

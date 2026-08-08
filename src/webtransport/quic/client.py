@@ -83,6 +83,21 @@ class Client:
         # SESSION_TICKET イベントで受け取った最新チケット
         self._latest_session_ticket: bytes | None = None
 
+        # バックグラウンド受信タスク。connect() が起動し、close() までの
+        # 受信イベント処理を担う
+        self._recv_task: asyncio.Task[None] | None = None
+        # connect() のハンドシェイク完了待ちに使う Future
+        self._connect_waiter: asyncio.Future[bool] | None = None
+        # 接続終了を待機者へ伝える共有経路 (recv_stream_data 等が待つ)
+        self._connection_closed_event = asyncio.Event()
+        # バックグラウンド受信タスクの異常終了時に保持する元の例外
+        self._task_error: BaseException | None = None
+        # コールバック実行中フラグ。コールバック内 (サブタスク経由を含む)
+        # からの close() がタスク完了待ちでデッドロックしないための再入ガード
+        self._in_callback = False
+        # connect() 実行中フラグ。実行中の early data 登録を拒否する
+        self._connecting = False
+
         self._on_handshake_completed: Callable[[], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, bool], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
@@ -193,7 +208,7 @@ class Client:
         Raises:
             RuntimeError: connect() の呼び出し後に登録しようとした場合
         """
-        if self._connected:
+        if self._recv_task is not None or self._connecting:
             raise RuntimeError("early data must be registered before connect()")
         self._early_data_queue.append((data, fin))
 
@@ -285,81 +300,238 @@ class Client:
         except TimeoutError:
             pass
 
+    def _resolve_connect(self, result: bool) -> None:
+        """connect() の待機者へ結果を通知する
+
+        Args:
+            result: connect() が返す値
+        """
+        waiter = self._connect_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(result)
+
+    def _resolve_connect_error(self, exc: BaseException) -> None:
+        """connect() の待機者へタスク異常終了を通知する
+
+        Args:
+            exc: タスクが保持した元の例外
+        """
+        waiter = self._connect_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_exception(exc)
+
+    async def _run_callback(self, callback: Callable[..., Awaitable[None]], *args: object) -> None:
+        """コールバックを実行中フラグ付きで呼び出す
+
+        コールバックはバックグラウンド受信タスク内で await される。コールバック
+        内 (またはコールバックが起動したサブタスク内) から close() を呼んだ場合、
+        close() がタスク自身の完了を待つとデッドロックするため、実行中フラグを
+        立てて close() の再入ガードとして使う。
+
+        Args:
+            callback: 呼び出すコールバック
+            *args: コールバックへ渡す引数
+        """
+        self._in_callback = True
+        try:
+            await callback(*args)
+        finally:
+            self._in_callback = False
+
+    async def _handle_received_events(self) -> None:
+        """受信イベントを取り込んで処理する
+
+        STREAM_DATA / DATAGRAM はコールバックを発火し、HANDSHAKE_COMPLETED /
+        CONNECTION_CLOSED は接続状態を更新して connect() の待機者を起床する。
+        コールバック内で close() が呼ばれた場合は続きのイベントを処理せず
+        ループを抜ける (クローズ済み socket への送信を避ける)。
+        """
+        if self._connection is None:
+            return
+
+        while True:
+            event = self._connection.next_event()
+            if event is None:
+                break
+
+            if event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
+                self._connected = True
+                if self._on_handshake_completed is not None:
+                    await self._run_callback(self._on_handshake_completed)
+                self._resolve_connect(True)
+
+            elif event.type == quic_low.EventType.STREAM_DATA:
+                if self._on_stream_data is not None:
+                    await self._run_callback(
+                        self._on_stream_data,
+                        event.stream_id,
+                        event.data,
+                        event.fin,
+                    )
+
+            elif event.type == quic_low.EventType.DATAGRAM:
+                if self._on_datagram is not None:
+                    await self._run_callback(self._on_datagram, event.data)
+
+            elif event.type == quic_low.EventType.SESSION_TICKET:
+                await self._handle_session_ticket_event(event)
+
+            elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
+                await self._handle_early_data_rejected_event()
+
+            elif event.type == quic_low.EventType.CONNECTION_CLOSED:
+                # 接続終了時は即座に状態を落とし、待機者へ通知する
+                self._connected = False
+                self._running = False
+                self._connection_closed_event.set()
+                self._resolve_connect(False)
+                if self._on_connection_closed is not None:
+                    await self._run_callback(self._on_connection_closed)
+
+            if not self._running:
+                break
+
+    async def _background_recv(self) -> None:
+        """バックグラウンド受信タスク
+
+        socket の読み取り、イベントの取り込み・処理、ACK / フロー制御 /
+        ハンドシェイク継続パケットの送出、タイマー処理を担う。connect() の
+        ハンドシェイク完了待ちと受信イベント処理、接続終了の検知と待機者
+        への通知を並行に進める。close() までの受信処理を担うため、明示的な
+        run() 起動は不要になる。
+        """
+        # ソケット差し替え (migrate) 由来の一時的な受信 OSError を
+        # 再参照で解消する。再参照しても続く恒久的な受信エラーはタスク
+        # 異常終了として扱う (busy-loop を避けるため)
+        receive_error_count = 0
+        try:
+            while self._running:
+                try:
+                    await self._receive()
+                except OSError:
+                    if not self._running:
+                        break
+                    receive_error_count += 1
+                    if receive_error_count >= 3:
+                        raise
+                    continue
+                receive_error_count = 0
+
+                await self._handle_received_events()
+
+                if not self._running:
+                    break
+
+                await self._send_pending()
+
+                if self._connection is not None:
+                    timeout = self._connection.get_timeout()
+                    if timeout is not None and timeout <= 0:
+                        self._connection.handle_timeout()
+
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            # 外部からのキャンセルでも connect() の待機者を永久待機させない
+            self._resolve_connect(False)
+            raise
+        except BaseException as exc:
+            # タスク異常終了: 元の例外を保持し、connect() の待機者へ伝播する。
+            # 接続終了と同じ共有経路で待機者 (recv_stream_data 等) を起床させる。
+            # 受信パイプラインが死ぬため状態も落とす
+            self._task_error = exc
+            self._running = False
+            self._connected = False
+            self._connection_closed_event.set()
+            self._resolve_connect_error(exc)
+            raise
+        else:
+            # 正常終了 (close() による停止)。connect() 待機中なら False を返す。
+            # close() 後は新たなデータが来ないため、待機者を起床させる
+            self._connection_closed_event.set()
+            self._resolve_connect(False)
+
     async def _handle_session_ticket_event(self, event: quic_low.Event) -> None:
         """SESSION_TICKET イベントを処理する"""
         self._latest_session_ticket = event.data
         if self._on_session_ticket is not None:
-            await self._on_session_ticket(event.data)
+            await self._run_callback(self._on_session_ticket, event.data)
 
     async def _handle_early_data_rejected_event(self) -> None:
         """EARLY_DATA_REJECTED イベントを処理する"""
         if self._on_early_data_rejected is not None:
-            await self._on_early_data_rejected()
+            await self._run_callback(self._on_early_data_rejected)
 
     async def connect(self) -> bool:
         """サーバーに接続する
 
+        接続作成と 0-RTT 送出を行い、バックグラウンド受信タスクを起動して
+        ハンドシェイク完了を待つ。ハンドシェイク完了後も受信タスクは
+        close() まで動作し続けるため、明示的に run() を起動しなくても
+        受信イベントが処理される。
+
         Returns:
             接続に成功した場合は True
         """
-        config = quic_low.Config()
-        config.alpn_protocols = self._alpn_protocols
-        config.idle_timeout_ns = self._idle_timeout_ns
-        config.verify_peer = self._verify_peer
-        config.server_name = self._host
-        config.enable_early_data = self._enable_early_data
-        if self._ca_file is not None:
-            config.ca_file = self._ca_file
-        if self._verify_callback is not None:
-            config.verify_callback = self._verify_callback
-        if self._session_ticket is not None:
-            config.session_ticket = self._session_ticket
-        if self._early_transport_params is not None:
-            config.early_transport_params = self._early_transport_params
+        if self._recv_task is not None or self._connecting:
+            raise RuntimeError("connect() has already been called")
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.setblocking(False)
-        self._socket.bind(("0.0.0.0", 0))
-        self._local_addr = self._normalize_addr(self._socket.getsockname())
+        # connect() 実行中は early data 登録を拒否する (実行中に登録されても
+        # _flush_early_data() は走り終えているため黙って破棄される)
+        self._connecting = True
 
-        self._connection = quic_low.Connection.create_client(
-            config,
-            self._local_addr,
-            (self._host, self._port),
-        )
-        self._flush_early_data()
-        await self._send_pending()
-        self._running = True
+        try:
+            config = quic_low.Config()
+            config.alpn_protocols = self._alpn_protocols
+            config.idle_timeout_ns = self._idle_timeout_ns
+            config.verify_peer = self._verify_peer
+            config.server_name = self._host
+            config.enable_early_data = self._enable_early_data
+            if self._ca_file is not None:
+                config.ca_file = self._ca_file
+            if self._verify_callback is not None:
+                config.verify_callback = self._verify_callback
+            if self._session_ticket is not None:
+                config.session_ticket = self._session_ticket
+            if self._early_transport_params is not None:
+                config.early_transport_params = self._early_transport_params
 
-        while self._running:
-            await self._receive()
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.setblocking(False)
+            self._socket.bind(("0.0.0.0", 0))
+            self._local_addr = self._normalize_addr(self._socket.getsockname())
 
-            while True:
-                event = self._connection.next_event()
-                if event is None:
-                    break
-
-                if event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
-                    self._connected = True
-                    if self._on_handshake_completed is not None:
-                        await self._on_handshake_completed()
-                    await self._send_pending()
-                    return True
-
-                elif event.type == quic_low.EventType.SESSION_TICKET:
-                    await self._handle_session_ticket_event(event)
-
-                elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
-                    await self._handle_early_data_rejected_event()
-
-                elif event.type == quic_low.EventType.CONNECTION_CLOSED:
-                    self._running = False
-                    return False
-
+            self._connection = quic_low.Connection.create_client(
+                config,
+                self._local_addr,
+                (self._host, self._port),
+            )
+            self._flush_early_data()
             await self._send_pending()
-            await asyncio.sleep(0.01)
+            self._running = True
 
-        return False
+            # バックグラウンド受信タスクを起動し、ハンドシェイク完了を待つ
+            self._connect_waiter = asyncio.get_running_loop().create_future()
+            self._recv_task = asyncio.create_task(self._background_recv())
+
+            return await self._connect_waiter
+        except asyncio.CancelledError:
+            # 接続待機がキャンセルされた場合、タスク側の解決を無効化する。
+            # 受信タスクが未作成ならソケットをクローズし、作成済みなら
+            # close() が後始末する
+            if self._connect_waiter is not None:
+                self._connect_waiter.cancel()
+            if self._recv_task is None and self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            raise
+        except BaseException:
+            # 接続確立前に失敗した場合はソケットをクローズして FD リークを防ぐ
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            raise
+        finally:
+            self._connecting = False
 
     async def open_stream(self, bidirectional: bool = True) -> int:
         """ストリームを開く
@@ -475,63 +647,47 @@ class Client:
     async def run(self) -> None:
         """メインループを実行する
 
-        接続が終了するまでブロックする。
+        バックグラウンド受信タスクの完了 (接続終了) まで待つ。受信処理は
+        バックグラウンドタスクが担うため、このメソッドは接続終了待ちで
+        ある。キャンセルされた場合はバックグラウンドタスクへ伝播しない
+        (close() まで受信処理を継続する)。
         """
-        if self._connection is None:
-            raise RuntimeError("クライアントが接続されていません")
+        if self._recv_task is None:
+            raise RuntimeError("client is not connected")
 
-        while self._running:
-            await self._receive()
-
-            while True:
-                event = self._connection.next_event()
-                if event is None:
-                    break
-
-                if event.type == quic_low.EventType.STREAM_DATA:
-                    if self._on_stream_data is not None:
-                        await self._on_stream_data(
-                            event.stream_id,
-                            event.data,
-                            event.fin,
-                        )
-
-                elif event.type == quic_low.EventType.DATAGRAM:
-                    if self._on_datagram is not None:
-                        await self._on_datagram(event.data)
-
-                elif event.type == quic_low.EventType.SESSION_TICKET:
-                    await self._handle_session_ticket_event(event)
-
-                elif event.type == quic_low.EventType.EARLY_DATA_REJECTED:
-                    await self._handle_early_data_rejected_event()
-
-                elif event.type == quic_low.EventType.CONNECTION_CLOSED:
-                    self._running = False
-                    self._connected = False
-                    if self._on_connection_closed is not None:
-                        await self._on_connection_closed()
-
-            await self._send_pending()
-
-            timeout = self._connection.get_timeout()
-            if timeout is not None and timeout <= 0:
-                self._connection.handle_timeout()
-
-            await asyncio.sleep(0.01)
+        # shield() により run() のキャンセルはバックグラウンドタスクへ伝播せず、
+        # 受信タスクは close() まで継続する
+        await asyncio.shield(self._recv_task)
 
     async def close(self) -> None:
         """接続を閉じる"""
         self._running = False
         self._connected = False
 
-        if self._connection is not None:
-            self._connection.close()
-            await self._send_pending()
+        # バックグラウンド受信タスクを終了フラグで停止させ、完了を待つ。
+        # close() 中にタスクが異常終了しても把握するため例外は握る。
+        # コールバック内 (サブタスク経由を含む) からの close() はタスクが
+        # 自分自身の完了を待つとデッドロックするため、完了待ちをスキップする
+        task = self._recv_task
+        if task is not None:
+            if task.done():
+                # タスクが既に終了している場合 (異常終了含む) も例外を回収して
+                # "Task exception was never retrieved" 警告を抑える
+                if not task.cancelled():
+                    task.exception()
+            elif not self._in_callback and asyncio.current_task() is not task:
+                await asyncio.gather(task, return_exceptions=True)
 
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        try:
+            if self._connection is not None:
+                self._connection.close()
+                await self._send_pending()
+        finally:
+            # _send_pending() が OSError を raise しても socket クローズは
+            # 必ず実行する (FD リークを防ぐ)
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
