@@ -1,7 +1,7 @@
 # セッション ID 集合の先頭要素に依存するフォールバックを修正する
 
 - Created: 2026-08-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-08
 - Branch: feature/fix-fallback-session-id
 - Polished: 2026-08-08
 
@@ -30,3 +30,19 @@
 - `send_stream_data`: モックなしのテストで、複数セッションを確立した構成で未登録ストリームへの送信がどのセッションにも配送されないことを確認する (h3.Session 同士の直接受け渡し構成で、送信後に受信側のイベントにデータが現れないことと、送信側の `stream_buffers_` にエントリが残らないこと (`_has_stream_buffer` が None) を確認する。未登録ストリームには未使用のクライアント起動双方向ストリーム ID (%4==0) を使う。旧実装では先頭要素の生存セッションに誤配送され、修正後は無視されるため判別できる)
 - 死んだセッションのストリームへの事後送信が誤ったセッションに配送されないこと (複数セッションを確立し、1 つのセッションで `open_stream` したストリームに対して `close_session` でセッションを終了した後に、そのストリームへ `send_stream_data` してもどのセッションにも配送されないことを、h3.Session 同士の直接受け渡し構成で確認する。バッファ残留がないことの確認も含める。close_session は `erase_session_streams` で `stream_info_` を既に清掃するため、0026 の実装を待たずに本 issue 単体で検証できる。実装時に、このテストが修正前の実装で落ちることを確認する (nghttp3 のストリーム終了状態によっては旧実装でも配送されない可能性があるため、判別力を確認する))
 - DATAGRAM: 正常経路の動作は修正の影響を受けない。フォールバック経路は正常トラフィックで到達不能のため、コード検査でフォールバックが存在しないことを確認する
+
+## 解決方法
+
+`send_stream_data` と DATAGRAM 分岐のフォールバック 2 箇所を削除し、セッション ID 集合 (`session_ids_`) の先頭要素に一切依存しないようにした。
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::send_stream_data` を 3 ケースに整理した。(a) `stream_info_` に未登録のストリームへの送信はセッション ID を復元できないため、登録・バッファ追加・`nghttp3_conn_resume_stream` のすべてを行わず黙って無視する。(b) 書き込み登録済み (`is_write_registered == true`) のストリームは従来どおりバッファ追加と resume を行う。(c) 書き込み未登録のストリーム (受信済みのリモート起動ストリーム等) はエントリのセッション ID で登録を試み、`nghttp3_conn_open_wt_data_stream` が成功した場合のみバッファ追加と resume を行う。旧実装の「登録失敗時にもバッファに残す」挙動も同時に解消した
+- `src/webtransport/h3/server.py` の `_process_webtransport_events` の DATAGRAM 分岐から `get_session_ids()[0]` へのフォールバックを削除し、`receive_datagram` が復元した `session_id` をそのまま `on_datagram` に渡すようにした (負の値は無効なセッション ID としてアプリが扱う。`on_datagram` の docstring に負値の可能性と仕様節番号を追記)。`Server.send_stream_data` の docstring に未登録ストリームへの送信は無視される旨を追記した
+- `src/webtransport/h3/client.py` の `send_stream_data` の docstring に未登録ストリームへの送信は無視される旨を追記した。`src/bindings/webtransport_h3.h` の `send_stream_data` の docstring も同様に更新した
+
+テストは `tests/test_webtransport_h3_stream_buffer_cleanup.py` と `tests/test_e2e_webtransport_h3.py` に追加した。h3.Session 同士の直接受け渡し構成 (モックなし) で検証する。
+
+- `test_send_to_unregistered_stream_is_ignored`: 複数セッション確立後に未登録ストリームへ送信しても受信側にデータが現れず、送信側の送信バッファにエントリが残らないことを確認。旧実装では先頭要素の生存セッションに誤配送されていた
+- `test_send_to_closed_session_stream_is_ignored`: `close_session` で終了したセッションのストリームへの事後送信が無視されることを確認。旧実装では `nghttp3_conn_open_wt_data_stream` がプロセスを abort させていた
+- `test_datagram_negative_session_id_passed_through`: 2^61 以上の Quarter Stream ID (8 バイト varint) を持つデータグラムで負のセッション ID がそのまま `on_datagram` に渡ることを e2e 構成で確認。旧実装ではセッション ID 集合の先頭要素にフォールバックして誤ったセッション ID を渡していた
+
+なお、新テスト 3 本はいずれも修正前の実装で落ちることを実行確認済み (判別力あり)。
