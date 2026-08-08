@@ -162,6 +162,11 @@ class Server:
     ) -> None:
         """データグラム受信時のコールバックを設定する
 
+        session_id はデータグラムの Quarter Stream ID から復元したセッション ID
+        (draft-ietf-webtrans-http3-16 Section 4.5)。仕様逸脱ピアが巨大な
+        Quarter Stream ID を送った場合は負の値になり得る (無効なセッション
+        ID としてアプリが扱うこと)。
+
         Args:
             callback: async def callback(session_id: int, data: bytes, addr: tuple[str, int]) -> None
         """
@@ -395,13 +400,12 @@ class Server:
 
             elif webtransport_event.type == h3_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
-                    # receive_datagram が Quarter Stream ID から session_id を復元する
-                    session_id = webtransport_event.session_id
-                    if session_id < 0:
-                        session_ids = client.webtransport_session.get_session_ids()
-                        session_id = session_ids[0] if session_ids else 0
+                    # receive_datagram が Quarter Stream ID から session_id を
+                    # 復元する (draft-ietf-webtrans-http3-16 Section 4.5)。
+                    # 仕様逸脱ピアが巨大な varint を送った場合は負の値になり得る
+                    # ため、そのまま渡す (無効なセッション ID としてアプリが扱う)
                     await self._on_datagram(
-                        session_id,
+                        webtransport_event.session_id,
                         webtransport_event.data,
                         addr,
                     )
@@ -428,6 +432,9 @@ class Server:
         fin: bool = False,
     ) -> None:
         """ストリームにデータを送信する
+
+        stream_info_ に未登録のストリーム (セッション ID を復元できない)
+        への送信は黙って無視される。
 
         Args:
             addr: クライアントアドレス

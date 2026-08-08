@@ -81,6 +81,8 @@
   - @voluntas
 - [FIX] QUIC の受信フロー制御が初期受信ウィンドウを超えて前進しない問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 でセッション ID 集合の先頭要素に依存して誤ったセッションへ配送される問題を修正する
+  - @voluntas
 
 ### misc
 

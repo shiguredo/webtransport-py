@@ -84,6 +84,20 @@ def _drain_session_ready(client: h3.Session) -> int:
     return session_id
 
 
+def _drain_events(session: h3.Session) -> list[h3.Event]:
+    """セッションのイベントを全て読み出す
+
+    @return 読み出したイベントのリスト
+    """
+    events = []
+    while True:
+        event = session.next_event()
+        if event is None:
+            break
+        events.append(event)
+    return events
+
+
 def _connect_session(
     client: h3.Session,
     server: h3.Session,
@@ -255,3 +269,68 @@ def test_connect_stream_reset_releases_session_send_buffers() -> None:
     for _event_type, event_session_id, event_stream_id in reset_events:
         assert event_session_id == second_session_id
         assert event_stream_id == second_stream_id
+
+
+def test_send_to_unregistered_stream_is_ignored() -> None:
+    """未登録ストリームへの送信がどのセッションにも配送されないことを確認
+
+    複数セッションを確立した構成で、どのセッションにも属さない未登録の
+    クライアント起動双方向ストリーム (%4 == 0) に送信しても、受信側の
+    イベントにデータが現れず、送信側の送信バッファにもエントリが残らない
+    ことを確認する。旧実装ではセッション ID 集合の先頭要素がセッション ID
+    として使われ、生存セッションに誤配送されていた
+    """
+    client, server, _first_session_id, _second_session_id = _establish_two_sessions()
+
+    # どのセッションにも属さない未登録の双方向ストリーム ID を使う
+    # (確立済み CONNECT は 0 と 4、次の双方向ストリームは %4 == 0 の 8)
+    unregistered_stream_id = 8
+
+    # 未登録ストリームへの送信は黙って無視される
+    client.send_stream_data(unregistered_stream_id, b"stray-data")
+    _pump(client, server)
+
+    # 送信側の送信バッファにエントリが残らない
+    assert client._has_stream_buffer(unregistered_stream_id) is None
+
+    # 受信側のイベントにデータが現れない (どのセッションにも配送されない)
+    received = _drain_events(server)
+    assert not any(
+        event.type == h3.EventType.STREAM_DATA and event.data == b"stray-data" for event in received
+    ), "未登録ストリームへのデータが受信側に配送されました"
+
+
+def test_send_to_closed_session_stream_is_ignored() -> None:
+    """終了したセッションのストリームへの事後送信が誤ったセッションに配送されないことを確認
+
+    複数セッションを確立し、あるセッションで open_stream したストリームに
+    対して close_session でセッションを終了した後に send_stream_data しても、
+    どのセッションにも配送されず、送信側の送信バッファにもエントリが残らない
+    ことを確認する。close_session は erase_session_streams で stream_info_
+    を清掃するため、事後送信されたストリームは未登録扱いになる。旧実装では
+    セッション ID 集合の先頭要素 (生存セッション) への誤配送に加え、
+    nghttp3_conn_open_wt_data_stream がプロセスを abort させていた
+    """
+    client, server, first_session_id, _second_session_id = _establish_two_sessions()
+
+    # 1 つ目のセッションでデータストリームを開く
+    dead_stream_id = 8
+    assert client.open_stream(first_session_id, dead_stream_id, False) is True
+
+    # セッションを終了する (WT_CLOSE_SESSION を送出して送信側の後始末を行う)
+    client.close_session(first_session_id)
+    _pump(client, server)
+
+    # 終了したセッションのストリームへの事後送信は黙って無視される
+    client.send_stream_data(dead_stream_id, b"after-death")
+    _pump(client, server)
+
+    # 送信側の送信バッファにエントリが残らない
+    assert client._has_stream_buffer(dead_stream_id) is None
+
+    # 受信側のイベントにデータが現れない (生存セッションにも誤配送されない)
+    received = _drain_events(server)
+    assert not any(
+        event.type == h3.EventType.STREAM_DATA and event.data == b"after-death"
+        for event in received
+    ), "終了したセッションのストリームへのデータが受信側に配送されました"

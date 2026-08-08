@@ -371,6 +371,9 @@ class Client:
     ) -> None:
         """ストリームにデータを送信する
 
+        stream_info_ に未登録のストリーム (セッション ID を復元できない)
+        への送信は黙って無視される。
+
         Args:
             stream_id: ストリーム ID
             data: 送信データ

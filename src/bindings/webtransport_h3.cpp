@@ -604,45 +604,28 @@ void H3Session::send_stream_data(int64_t stream_id,
     return;
   }
 
-  // まだ nghttp3 に書き込み用として登録されていない場合は登録
-  // リモート起動のストリームは recv_wt_data_cb で stream_info_ に追加されるが
-  // 書き込み登録はされていないため、is_write_registered で判定する
+  // stream_info_ に未登録のストリームへの送信はセッション ID を復元できない
+  // ため黙って無視する。セッション ID 集合の先頭要素をフォールバックに使う
+  // と、複数セッション時に誤ったセッションへデータが属し得るため使わない
   auto it = stream_info_.find(stream_id);
-  bool needs_registration =
-      (it == stream_info_.end()) || !it->second.is_write_registered;
+  if (it == stream_info_.end()) {
+    return;
+  }
 
-  if (needs_registration) {
-    // セッション ID を見つける
-    int64_t session_id = -1;
-    if (it != stream_info_.end()) {
-      // 既に stream_info_ にある場合はそのセッション ID を使用
-      session_id = it->second.session_id;
-    } else if (!session_ids_.empty()) {
-      // なければ最初のセッションを使用
-      session_id = *session_ids_.begin();
-    }
-    if (session_id >= 0) {
-      nghttp3_data_reader dr;
-      dr.read_data = wt_data_read_callback;
+  // 書き込み未登録のストリーム (受信済みのリモート起動ストリーム等) は
+  // エントリのセッション ID で登録を試み、成功した場合のみ送信する
+  if (!it->second.is_write_registered) {
+    nghttp3_data_reader dr;
+    dr.read_data = wt_data_read_callback;
 
-      int rv = nghttp3_conn_open_wt_data_stream(conn_, session_id, stream_id,
-                                                &dr, nullptr);
-      if (rv == 0) {
-        if (it != stream_info_.end()) {
-          // 既存エントリの is_write_registered を更新
-          it->second.is_write_registered = true;
-        } else {
-          // 新規エントリを作成
-          StreamInfo info;
-          info.stream_id = stream_id;
-          info.session_id = session_id;
-          info.is_unidirectional = false;
-          info.is_incoming = true;
-          info.is_write_registered = true;
-          stream_info_[stream_id] = info;
-        }
-      }
+    int rv = nghttp3_conn_open_wt_data_stream(conn_, it->second.session_id,
+                                              stream_id, &dr, nullptr);
+    if (rv != 0) {
+      return;
     }
+    // open_wt_data_stream は同期コールバックを呼ばないため、登録成功後も
+    // it は stream_info_ のエントリを指したまま有効である
+    it->second.is_write_registered = true;
   }
 
   // ストリームバッファに追加
