@@ -6,6 +6,7 @@ asyncio と UDP を使用した高レベル QUIC クライアント実装。
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import socket
 from typing import TYPE_CHECKING, Self
@@ -16,6 +17,33 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+# コールバック実行中かどうかを表すコンテキスト変数。コールバックが起動した
+# サブタスクにも伝播するため、コールバック内 (サブタスク経由を含む) からの
+# 再入呼び出しを検出できる。コールバックとは無関係の別タスクには伝播しない
+# ため、誤検出しない
+_in_callback_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "webtransport_quic_in_callback",
+    default=False,
+)
+
+
+class _StreamRecvState:
+    """ストリームごとの受信状態
+
+    recv_stream_data が FIN まで受信するための累積連結と完了判定を管理する。
+    受信データの追加・FIN 受信のたびに event を set し、待機者
+    (recv_stream_data) を起床する。接続終了・タスク異常終了・close() 時には
+    _wake_stream_waiters が全状態の event を set する。
+    """
+
+    def __init__(self) -> None:
+        # 受信データの累積連結
+        self.data = bytearray()
+        # FIN を受信したかどうか
+        self.fin = False
+        # 状態更新を待機者へ通知するイベント
+        self.event = asyncio.Event()
 
 
 class Client:
@@ -92,11 +120,10 @@ class Client:
         self._connection_closed_event = asyncio.Event()
         # バックグラウンド受信タスクの異常終了時に保持する元の例外
         self._task_error: BaseException | None = None
-        # コールバック実行中フラグ。コールバック内 (サブタスク経由を含む)
-        # からの close() がタスク完了待ちでデッドロックしないための再入ガード
-        self._in_callback = False
         # connect() 実行中フラグ。実行中の early data 登録を拒否する
         self._connecting = False
+        # ストリームごとの受信状態 (recv_stream_data 用)
+        self._recv_states: dict[int, _StreamRecvState] = {}
 
         self._on_handshake_completed: Callable[[], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, bool], Awaitable[None]] | None = None
@@ -326,17 +353,62 @@ class Client:
         コールバックはバックグラウンド受信タスク内で await される。コールバック
         内 (またはコールバックが起動したサブタスク内) から close() を呼んだ場合、
         close() がタスク自身の完了を待つとデッドロックするため、実行中フラグを
-        立てて close() の再入ガードとして使う。
+        立てて close() の再入ガードとして使う。フラグはコンテキスト変数で管理し、
+        コールバックが await するサブタスクにも伝播させる。
 
         Args:
             callback: 呼び出すコールバック
             *args: コールバックへ渡す引数
         """
-        self._in_callback = True
+        token = _in_callback_var.set(True)
         try:
             await callback(*args)
         finally:
-            self._in_callback = False
+            _in_callback_var.reset(token)
+
+    def _update_recv_state(self, stream_id: int, data: bytes, fin: bool) -> None:
+        """ストリーム受信状態を更新する
+
+        STREAM_DATA イベントのデータを累積連結し、FIN を受信したら完了を
+        立てて待機者を起床する。ngtcp2 はデータを offset の非減少順・重複
+        なしで連続配送する保証があるため、reorder 再構成 (gap 検出 / 重複
+        セグメントのマージ / final size の整合性検証) は行わない。
+
+        Args:
+            stream_id: ストリーム ID
+            data: 受信データ
+            fin: FIN フラグ
+        """
+        state = self._recv_states.setdefault(stream_id, _StreamRecvState())
+        state.data.extend(data)
+        if fin:
+            state.fin = True
+        state.event.set()
+
+    def _notify_stream_progress(self, stream_id: int) -> None:
+        """ストリームの進捗を待機者へ通知する
+
+        STREAM_RESET 受信時に呼び出し、受信状態を進捗として伝える。
+        STREAM_RESET は idle deadline を 1 回延長し、その後は idle timeout
+        になる (overall_timeout が先に来ればそちらで打ち切られる)。
+
+        Args:
+            stream_id: ストリーム ID
+        """
+        state = self._recv_states.get(stream_id)
+        if state is not None:
+            state.event.set()
+
+    def _wake_stream_waiters(self) -> None:
+        """全ストリームの待機者を起床する
+
+        接続終了・タスク異常終了・close() 時に呼び出し、受信待機中の
+        recv_stream_data へ通知する。待機側は _connection_closed_event と
+        _task_error を確認し、接続終了なら TimeoutError、タスク異常終了なら
+        元の例外を raise する。
+        """
+        for state in self._recv_states.values():
+            state.event.set()
 
     async def _handle_received_events(self) -> None:
         """受信イベントを取り込んで処理する
@@ -361,6 +433,8 @@ class Client:
                 self._resolve_connect(True)
 
             elif event.type == quic_low.EventType.STREAM_DATA:
+                # ストリーム受信状態を更新してからコールバックを発火する
+                self._update_recv_state(event.stream_id, event.data, event.fin)
                 if self._on_stream_data is not None:
                     await self._run_callback(
                         self._on_stream_data,
@@ -368,6 +442,11 @@ class Client:
                         event.data,
                         event.fin,
                     )
+
+            elif event.type == quic_low.EventType.STREAM_RESET:
+                # リセットは受信状態を進捗として通知する (idle deadline が
+                # 1 回延長され、その後は idle timeout になる)
+                self._notify_stream_progress(event.stream_id)
 
             elif event.type == quic_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
@@ -384,6 +463,7 @@ class Client:
                 self._connected = False
                 self._running = False
                 self._connection_closed_event.set()
+                self._wake_stream_waiters()
                 self._resolve_connect(False)
                 if self._on_connection_closed is not None:
                     await self._run_callback(self._on_connection_closed)
@@ -431,7 +511,12 @@ class Client:
 
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
-            # 外部からのキャンセルでも connect() の待機者を永久待機させない
+            # 外部からのキャンセルでも connect() の待機者と受信待機者を
+            # 永久待機させない
+            self._running = False
+            self._connected = False
+            self._connection_closed_event.set()
+            self._wake_stream_waiters()
             self._resolve_connect(False)
             raise
         except BaseException as exc:
@@ -442,12 +527,14 @@ class Client:
             self._running = False
             self._connected = False
             self._connection_closed_event.set()
+            self._wake_stream_waiters()
             self._resolve_connect_error(exc)
             raise
         else:
             # 正常終了 (close() による停止)。connect() 待機中なら False を返す。
             # close() 後は新たなデータが来ないため、待機者を起床させる
             self._connection_closed_event.set()
+            self._wake_stream_waiters()
             self._resolve_connect(False)
 
     async def _handle_session_ticket_event(self, event: quic_low.Event) -> None:
@@ -578,6 +665,163 @@ class Client:
         self._connection.send_datagram(data)
         await self._send_pending()
 
+    def _recv_stream_timeout_error(
+        self,
+        reason: str,
+        stream_id: int,
+        timeout: float,
+        overall_timeout: float,
+        received: int,
+    ) -> TimeoutError:
+        """recv_stream_data のタイムアウトエラーを組み立てる
+
+        Args:
+            reason: タイムアウトの理由 (connection closed / overall timeout /
+                idle timeout)
+            stream_id: ストリーム ID
+            timeout: idle タイムアウト (秒)
+            overall_timeout: 全体タイムアウト (秒)
+            received: 受信済みバイト数
+
+        Returns:
+            組み立てた TimeoutError
+        """
+        return TimeoutError(
+            f"{reason} while waiting for stream data "
+            f"(stream_id={stream_id}, timeout={timeout}, "
+            f"overall_timeout={overall_timeout}, received={received} bytes)"
+        )
+
+    async def recv_stream_data(
+        self,
+        stream_id: int,
+        timeout: float = 10.0,
+        *,
+        overall_timeout: float | None = None,
+    ) -> tuple[bytes, bool]:
+        """ストリームデータを FIN まで受信する
+
+        STREAM_DATA イベントを累積連結し、FIN を受信したら (受信データ, fin)
+        を返す。呼び出し時点で既に FIN 完了済みのストリームは即時 return する。
+        バックグラウンド受信タスクが受信イベントを処理するため、run() を明示
+        起動しなくても動作する。
+
+        タイムアウトは 2 段構え:
+        - timeout (idle deadline): 進捗 (待機中のストリームの STREAM_DATA
+          受信) があるたびに延びる。進捗が無いまま timeout 秒経過で
+          TimeoutError
+        - overall_timeout (absolute deadline): 進捗に関係なく動かない。
+          None なら max(timeout * 6, 30) を使う
+
+        FIN と期限の検出が同時になった場合は FIN を優先する。ゼロ長 FIN
+        (datalen=0, fin=True) も完了として扱う。接続終了 (CONNECTION_CLOSED)
+        を受信した場合も待機を終了し TimeoutError を raise する。コールバック
+        内から呼び出すと受信処理が進まないため RuntimeError を raise する。
+
+        Args:
+            stream_id: ストリーム ID
+            timeout: idle タイムアウト (秒)
+            overall_timeout: 全体タイムアウト (秒)。None なら
+                max(timeout * 6, 30)
+
+        Returns:
+            (受信データ, fin)。正常 return では fin は常に True
+
+        Raises:
+            TimeoutError: idle deadline / overall_timeout に達した場合、
+                または接続終了時
+            RuntimeError: コールバック内から呼び出した場合、または未接続時
+            ValueError: timeout / overall_timeout が 0 以下の場合
+            バックグラウンド受信タスクの異常終了時は、その元の例外を re-raise
+            する
+        """
+        if self._recv_task is not None and _in_callback_var.get():
+            raise RuntimeError("recv_stream_data() cannot be called from within a callback")
+        if self._recv_task is None:
+            raise RuntimeError("client is not connected")
+
+        if overall_timeout is None:
+            overall_timeout = max(timeout * 6, 30)
+
+        if timeout <= 0 or overall_timeout <= 0:
+            raise ValueError("timeout and overall_timeout must be positive")
+
+        state = self._recv_states.setdefault(stream_id, _StreamRecvState())
+
+        if state.fin:
+            return bytes(state.data), True
+
+        loop = asyncio.get_running_loop()
+        overall_deadline = loop.time() + overall_timeout
+
+        while True:
+            if state.fin:
+                return bytes(state.data), True
+            if self._task_error is not None:
+                raise self._task_error
+            if self._connection_closed_event.is_set():
+                raise self._recv_stream_timeout_error(
+                    "connection closed",
+                    stream_id,
+                    timeout,
+                    overall_timeout,
+                    len(state.data),
+                )
+
+            if loop.time() >= overall_deadline:
+                raise self._recv_stream_timeout_error(
+                    "overall timeout",
+                    stream_id,
+                    timeout,
+                    overall_timeout,
+                    len(state.data),
+                )
+
+            try:
+                # idle deadline は進捗があるたびに延びるため、毎回 timeout 秒で
+                # 待つ。absolute deadline (overall_timeout) が先に来る場合は
+                # そちらで待機を打ち切る。STREAM_RESET も進捗として扱う
+                remaining_overall = overall_deadline - loop.time()
+                wait_timeout = min(timeout, remaining_overall)
+                await asyncio.wait_for(state.event.wait(), timeout=wait_timeout)
+            except TimeoutError:
+                # 進捗が無いまま idle deadline に達した。同時に FIN が
+                # 届いていた場合は FIN を優先する
+                if state.fin:
+                    return bytes(state.data), True
+                if self._task_error is not None:
+                    raise self._task_error from None
+                if self._connection_closed_event.is_set():
+                    raise self._recv_stream_timeout_error(
+                        "connection closed",
+                        stream_id,
+                        timeout,
+                        overall_timeout,
+                        len(state.data),
+                    ) from None
+                if loop.time() >= overall_deadline:
+                    raise self._recv_stream_timeout_error(
+                        "overall timeout",
+                        stream_id,
+                        timeout,
+                        overall_timeout,
+                        len(state.data),
+                    ) from None
+                # タイムアウトと同時刻に進捗 (非 FIN データ / STREAM_RESET) が
+                # 届いていた場合は idle timeout とせず待機を継続する
+                if state.event.is_set():
+                    state.event.clear()
+                    continue
+                raise self._recv_stream_timeout_error(
+                    "idle timeout",
+                    stream_id,
+                    timeout,
+                    overall_timeout,
+                    len(state.data),
+                ) from None
+
+            state.event.clear()
+
     def export_session_ticket(self) -> bytes:
         """セッションチケット (DER) を取得する
 
@@ -675,7 +919,7 @@ class Client:
                 # "Task exception was never retrieved" 警告を抑える
                 if not task.cancelled():
                     task.exception()
-            elif not self._in_callback and asyncio.current_task() is not task:
+            elif not _in_callback_var.get() and asyncio.current_task() is not task:
                 await asyncio.gather(task, return_exceptions=True)
 
         try:
