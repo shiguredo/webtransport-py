@@ -2179,7 +2179,7 @@ async def _cleanup_reset_test_server(
     server_task: asyncio.Task,
     client: _LowLevelClient,
 ) -> None:
-    """リセット検証テストの後片付けを行う
+    """_LowLevelClient を使う e2e テストの後片付けを行う
 
     サーバータスクが例外終了していた場合は、テスト本体の失敗を
     覆い隠さないよう元の例外を raise する
@@ -2351,6 +2351,72 @@ async def test_stream_reset_connect_stream_session_id(test_certificates):
         await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
         assert info.reset_stream_id == second_session_id
         assert info.reset_session_id == second_session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+async def test_datagram_negative_session_id_passed_through(test_certificates):
+    """巨大な Quarter Stream ID を持つデータグラムで負のセッション ID が渡ることを確認
+
+    正常トラフィックでは Quarter Stream ID は正当なセッション ID (クライアント
+    起動の双方向ストリーム ID、%4==0) から復元されるため負にならないが、仕様
+    逸脱ピアが 2^61 以上の巨大 varint を送った場合は int64 のラップで負の
+    セッション ID になる (draft-ietf-webtrans-http3-16 Section 4.5)。この場合も
+    セッション ID 集合の先頭要素へのフォールバックは行わず、負の値がそのまま
+    on_datagram に渡ることを確認する。仕様上は不正なセッション ID の受信時に
+    H3_ID_ERROR で接続をクローズする MUST があるが、その受信検証は対象外の
+    ため、本テストは現状の実装の受動的な挙動を固定するものである。MUST を
+    実装する場合は本テストの期待値を合わせて更新すること
+    """
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    datagram_received = asyncio.Event()
+    received_session_ids: list[int] = []
+
+    async def on_datagram(session_id: int, data: bytes, addr: tuple[str, int]) -> None:
+        received_session_ids.append(session_id)
+        datagram_received.set()
+
+    server.on_datagram(on_datagram)
+
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        session_id = await client.establish_session()
+        assert session_id >= 0
+
+        # 負のセッション ID になる最小の Quarter Stream ID (2^61) を
+        # 8 バイト varint でエンコードする (RFC 9000 可変長整数)。
+        # quarter_stream_id * 4 が int64 の範囲を超えて負のセッション ID になる
+        quarter_stream_id = 1 << 61
+        varint = (0xC0 << 56 | quarter_stream_id).to_bytes(8, "big")
+        client._quic_connection.send_datagram(varint + b"huge-quarter-stream-id")
+        # send() はストリームデータの後にデータグラムを書き込む (残留データが
+        # あると ngtcp2 の MORE 契約により同一パケットに同梱される) ため、
+        # 通常は 1 回のフラッシュで届く。残留ストリームデータの掃き出しを
+        # 確実にする防御として複数回フラッシュする
+        for _ in range(8):
+            await client._send_packet()
+
+        # 負のセッション ID がそのまま on_datagram に渡る
+        await asyncio.wait_for(datagram_received.wait(), timeout=5.0)
+        assert received_session_ids == [-(1 << 63)]
     finally:
         await _cleanup_reset_test_server(server, server_task, client)
 
