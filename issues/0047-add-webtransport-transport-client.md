@@ -91,3 +91,7 @@ await client.connect(timeout=10.0)
 - `refs/webtrans/draft-ietf-webtrans-http3-16.txt` §2.1.2 "endpoints SHOULD prefer this protocol when using WebTransport over an HTTP/3 connection"
 - `refs/webtrans/draft-ietf-webtrans-http2-15.txt` §1 "the current most common TCP-based fallback to HTTP/3"
 - `refs/webtrans/draft-ietf-webtrans-http2-15.txt` Appendix A "endpoints SHOULD prefer [version-specific WebTransport protocol] over the capsule-based protocol"
+
+## pending にした理由
+
+本 issue は h2/h3 統一 listen（`webtransport.Server` dual-listen glue）関連の実装群（0044-0047）の一部であり、その実装を一旦後回しにすることにしたため、保留する。実装再開時に reopened にする。
