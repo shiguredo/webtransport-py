@@ -255,9 +255,9 @@ async def test_close_from_subtask_does_not_deadlock(test_certificates):
     """コールバックが起動したサブタスク内から close() を呼んでもデッドロックしないことを確認する
 
     コールバック内で起動したサブタスクから close() を呼ぶと、asyncio.current_task()
-    は受信タスクではなくサブタスクになる。_in_callback フラグにより受信タスクの
-    コールバック実行中と判定し、close() の完了待ちをスキップしてデッドロックを
-    回避する。
+    は受信タスクではなくサブタスクになる。コールバック実行中を示すコンテキスト
+    変数 (_in_callback_var) がサブタスクにも伝播するため、受信タスクのコールバック
+    実行中と判定し、close() の完了待ちをスキップしてデッドロックを回避する。
     """
     server = Server(
         host="127.0.0.1",
