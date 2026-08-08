@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from webtransport import h3
 from webtransport.quic import Config, Connection
 
 
@@ -166,3 +167,130 @@ def perform_handshake(client: Connection, server: Connection, initial_packet: by
             break
 
     return False
+
+
+def _pump(src: h3.Session, dst: h3.Session) -> None:
+    """src の送信データを全て dst に渡す
+
+    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
+    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
+    1 回の呼び出しで全てのデータを返すとは限らない (WT_CLOSE_SESSION 等は
+    他のストリームの書き出し後に返る) ため、データが無くなるまで繰り返す。
+    無限ループ防止のため最大 64 回で打ち切る。receive_stream_data が
+    エラーを返した場合は Error イベントが dst に積まれる
+    """
+    for _ in range(64):
+        sent = False
+        for stream_id, data, fin in src.get_streams_to_send():
+            dst.receive_stream_data(stream_id, data, fin)
+            sent = True
+        if not sent:
+            break
+
+
+def _create_session_pair() -> tuple[h3.Session, h3.Session]:
+    """h3.Session のクライアント・サーバーペアを作成して初期化する
+
+    @return (クライアント Session, サーバー Session)
+    """
+    client = h3.Session.create_client(h3.Config())
+    server_config = h3.Config()
+    server_config.is_server = True
+    server = h3.Session.create_server(server_config)
+
+    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
+    # サーバーは %4 == 3)
+    client.bind_control_stream(2)
+    client.bind_qpack_encoder_stream(6)
+    client.bind_qpack_decoder_stream(10)
+    server.bind_control_stream(3)
+    server.bind_qpack_encoder_stream(7)
+    server.bind_qpack_decoder_stream(11)
+    server.set_max_client_streams_bidi(100)
+
+    # サーバーの SETTINGS をクライアントに送る
+    _pump(server, client)
+
+    return client, server
+
+
+def _accept_session(server: h3.Session) -> int:
+    """サーバー側の SESSION_READY イベントを処理してセッションを受理する
+
+    複数の SESSION_READY が積まれて 1 つの CONNECT に多重発火した場合は
+    累積バグとしてテストを失敗させる (クライアント側の _drain_session_ready
+    と対称)
+
+    @return 受理したセッション ID
+    """
+    session_id = -1
+    count = 0
+    while True:
+        event = server.next_event()
+        if event is None:
+            break
+        if event.type == h3.EventType.SESSION_READY:
+            assert server.accept_session(event.session_id) is True, "セッションの受理に失敗しました"
+            session_id = event.session_id
+            count += 1
+    assert count <= 1, "SESSION_READY が複数回発火しました"
+    assert session_id >= 0, "セッションが確立されませんでした"
+    return session_id
+
+
+def _drain_session_ready(client: h3.Session) -> int:
+    """クライアント側のイベントを全て読み出し、最後の SESSION_READY の
+    セッション ID を返す (無ければ -1)。複数の SESSION_READY が積まれて
+    いた場合は累積バグとしてテストを失敗させる
+    """
+    session_id = -1
+    count = 0
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        if event.type == h3.EventType.SESSION_READY:
+            session_id = event.session_id
+            count += 1
+    assert count <= 1, "SESSION_READY が複数回発火しました"
+    return session_id
+
+
+def _connect_session(
+    client: h3.Session,
+    server: h3.Session,
+    stream_id: int,
+) -> int:
+    """クライアントが CONNECT を送信してセッションを確立する
+
+    @param stream_id CONNECT に使うクライアント起動双方向ストリーム ID
+    @return 確立したセッション ID
+    """
+    assert client.connect(stream_id, "https://localhost/webtransport") is True
+    _pump(client, server)
+    session_id = _accept_session(server)
+    _pump(server, client)
+    assert _drain_session_ready(client) == session_id
+    return session_id
+
+
+def _establish_session() -> tuple[h3.Session, h3.Session, int]:
+    """h3.Session 同士で WebTransport セッションを確立する
+
+    @return (クライアント Session, サーバー Session, セッション ID)
+    """
+    client, server = _create_session_pair()
+    session_id = _connect_session(client, server, 0)
+    return client, server, session_id
+
+
+def _establish_two_sessions() -> tuple[h3.Session, h3.Session, int, int]:
+    """h3.Session 同士で 2 つの WebTransport セッションを確立する
+
+    @return (クライアント Session, サーバー Session, 1 つ目のセッション ID,
+             2 つ目のセッション ID)
+    """
+    client, server = _create_session_pair()
+    first_session_id = _connect_session(client, server, 0)
+    second_session_id = _connect_session(client, server, 4)
+    return client, server, first_session_id, second_session_id

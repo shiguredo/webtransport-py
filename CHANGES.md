@@ -96,3 +96,5 @@
   - @voluntas
 - [UPDATE] skills/webtransport-py/SKILL.md の WebTransport over HTTP/3 の記述を最新化する
   - @voluntas
+- [UPDATE] WebTransport over HTTP/3 テストの接続ヘルパーを conftest.py に集約する
+  - @voluntas
