@@ -251,6 +251,8 @@ async def connect() -> bool  # バックグラウンド受信タスクを起動�
 async def open_stream(bidirectional: bool = True) -> int
 async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def recv_stream_data(stream_id: int, timeout: float = 10.0, *, overall_timeout: float | None = None) -> tuple[bytes, bool]  # FIN まで受信し (データ, fin) を返す
+async def shutdown_stream(stream_id: int, error_code: int = 0) -> None  # RESET_STREAM と STOP_SENDING を送出して中断
+async def wait_for_stream_reset(stream_id: int, timeout: float = 10.0) -> int  # ピアの RESET_STREAM を待ちエラーコードを返す
 async def send_datagram(data: bytes) -> None
 async def migrate() -> bool  # Connection Migration
 async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
@@ -265,6 +267,8 @@ def was_early_data_attempted() -> bool
 `connect()` はバックグラウンド受信タスクを起動するため、`run()` を明示起動しなくても受信イベントが処理されコールバックが発火する。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。
 
 `recv_stream_data()` は呼び出し時点で FIN 完了済みなら即時 return する。タイムアウトは idle deadline (`timeout`) と absolute deadline (`overall_timeout`。None なら `max(timeout * 6, 30)`) の 2 段構えで、どちらかに達すると `TimeoutError` を raise する。接続終了 (CONNECTION_CLOSED) を受信した場合も `TimeoutError` を raise して待機を終了する。STREAM_RESET 受信時は進捗として idle deadline が 1 回延長され、その後は idle timeout になる。コールバック内からは呼べない (`RuntimeError`)。`on_stream_data` コールバックと併用してもデータは両方に配信される。受信データはストリームごとに保持され、`recv_stream_data` の対象外ストリームも保持される (FIN 完了済みの即時 return を実現するため)。
+
+`shutdown_stream()` は低レベル `close_stream` を呼び、RESET_STREAM (RFC 9000 Section 19.4) と STOP_SENDING (Section 19.5) を送出する。双方向ストリームでは両方を送出し、ローカル単方向ストリームでは write 側 (RESET_STREAM) のみを shutdown する。`wait_for_stream_reset()` はピアの RESET_STREAM を待ち、そのアプリケーションエラーコードを返す。呼び出し時点で受信済みなら即時 return し、期限までに受信しない場合・接続終了時は `TimeoutError` を raise する。ngtcp2 は STOP_SENDING を受信すると、ストリームが Ready / Send 状態の場合は自動で RESET_STREAM を返す (RFC 9000 Section 3.5 の MUST。エラーコードは STOP_SENDING から複製する SHOULD。Data Sent 状態では MAY)。`shutdown_stream` はコールバック内から呼べる。`wait_for_stream_reset` はコールバック内からは呼べない (`RuntimeError`)。
 
 ### HTTP/3 (`webtransport.http3`)
 

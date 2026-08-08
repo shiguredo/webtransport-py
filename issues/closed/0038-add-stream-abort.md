@@ -1,7 +1,7 @@
 # 高レベル QUIC クライアントに shutdown_stream と wait_for_stream_reset を追加する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-08
 - Branch: feature/add-stream-abort
 - Polished: 2026-08-07
 - Reporter: @voluntas
@@ -42,4 +42,11 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/webtransport/quic/client.py` に `shutdown_stream(stream_id, error_code=0) -> None` を追加した。低レベル `Connection.close_stream` を呼び、RESET_STREAM (RFC 9000 Section 19.4) と STOP_SENDING (Section 19.5) をスケジュールして `_send_pending()` で送出する。双方向ストリームでは両方を送出し、ローカル単方向ストリームでは write 側 (RESET_STREAM) のみを shutdown する
+- `wait_for_stream_reset(stream_id, timeout=10.0) -> int` を追加した。STREAM_RESET のエラーコードを `_StreamRecvState.reset_error_code` に記録し、その状態を待って返す。呼び出し時点で受信済みなら即時 return し、期限までに受信しない場合・接続終了時は TimeoutError を raise する
+- `_notify_stream_progress` を `_handle_stream_reset` に改名し、STREAM_RESET のエラーコードを受信状態に記録するようにした (recv_stream_data は進捗として idle deadline を 1 回延長する従来挙動を維持)
+- recv_stream_data の「タイムアウトと同時刻の進捗検出」を event 状態ではなく永続状態 (受信バイト数 / エラーコード) の比較に変更した。wait_for_stream_reset と同一ストリームで並行待機しても event の clear 競合で進捗を見失わない
+- コールバック内からの呼び出しは contextvars で検出し、wait_for_stream_reset は RuntimeError を raise する (shutdown_stream はフレームのスケジュールと送出のみで待機しないためコールバック内から呼べる)
+- テストは `tests/test_e2e_quic_stream_abort.py` に 11 件を追加した (エラーコードの複製 / 完結済みストリームのタイムアウト / 接続終了からの TimeoutError / ストリーム中断後の接続生存 / 既に RESET 受信済みの即時 return / ローカル単方向の shutdown 分岐 / STREAM_RESET 受信時の recv_stream_data の挙動維持 / 0 以下の timeout の ValueError / コールバック内からの RuntimeError / コールバック内からの shutdown_stream / Sans-IO ピア観測による close_stream の RESET_STREAM 送出)
+- `skills/webtransport-py/SKILL.md` の `quic.Client` 節に `shutdown_stream` / `wait_for_stream_reset` の説明を追加した
+- `CHANGES.md` の `## develop` セクションに `[ADD]` エントリを追加した

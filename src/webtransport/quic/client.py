@@ -31,10 +31,12 @@ _in_callback_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
 class _StreamRecvState:
     """ストリームごとの受信状態
 
-    recv_stream_data が FIN まで受信するための累積連結と完了判定を管理する。
-    受信データの追加・FIN 受信のたびに event を set し、待機者
-    (recv_stream_data) を起床する。接続終了・タスク異常終了・close() 時には
-    _wake_stream_waiters が全状態の event を set する。
+    recv_stream_data が FIN まで受信するための累積連結と完了判定、および
+    wait_for_stream_reset が待つ STREAM_RESET のエラーコードを管理する。
+    受信データの追加・FIN 受信・STREAM_RESET 受信のたびに event を set し、
+    待機者 (recv_stream_data / wait_for_stream_reset) を起床する。接続終了
+    とタスク異常終了と close() のときは _wake_stream_waiters が全状態の event
+    を set する。
     """
 
     def __init__(self) -> None:
@@ -42,6 +44,8 @@ class _StreamRecvState:
         self.data = bytearray()
         # FIN を受信したかどうか
         self.fin = False
+        # STREAM_RESET 受信時のアプリケーションエラーコード (未受信なら None)
+        self.reset_error_code: int | None = None
         # 状態更新を待機者へ通知するイベント
         self.event = asyncio.Event()
 
@@ -385,19 +389,20 @@ class Client:
             state.fin = True
         state.event.set()
 
-    def _notify_stream_progress(self, stream_id: int) -> None:
-        """ストリームの進捗を待機者へ通知する
+    def _handle_stream_reset(self, stream_id: int, error_code: int) -> None:
+        """STREAM_RESET イベントを処理する
 
-        STREAM_RESET 受信時に呼び出し、受信状態を進捗として伝える。
-        STREAM_RESET は idle deadline を 1 回延長し、その後は idle timeout
-        になる (overall_timeout が先に来ればそちらで打ち切られる)。
+        リセットのアプリケーションエラーコードを受信状態に記録し、待機者
+        へ通知する。recv_stream_data は進捗として idle deadline を 1 回延長し、
+        wait_for_stream_reset はエラーコードを参照する。
 
         Args:
             stream_id: ストリーム ID
+            error_code: ピアが送ったアプリケーションエラーコード
         """
-        state = self._recv_states.get(stream_id)
-        if state is not None:
-            state.event.set()
+        state = self._recv_states.setdefault(stream_id, _StreamRecvState())
+        state.reset_error_code = error_code
+        state.event.set()
 
     def _wake_stream_waiters(self) -> None:
         """全ストリームの待機者を起床する
@@ -444,9 +449,7 @@ class Client:
                     )
 
             elif event.type == quic_low.EventType.STREAM_RESET:
-                # リセットは受信状態を進捗として通知する (idle deadline が
-                # 1 回延長され、その後は idle timeout になる)
-                self._notify_stream_progress(event.stream_id)
+                self._handle_stream_reset(event.stream_id, event.error_code)
 
             elif event.type == quic_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
@@ -777,6 +780,12 @@ class Client:
                     len(state.data),
                 )
 
+            # 待機前に永続状態を記録する。タイムアウトと同時刻に進捗が届いた
+            # 場合の判定に使う (event は他待機者 (wait_for_stream_reset) が
+            # clear する可能性があるため、永続状態の変化で進捗を検出する)
+            received_before = len(state.data)
+            reset_before = state.reset_error_code
+
             try:
                 # idle deadline は進捗があるたびに延びるため、毎回 timeout 秒で
                 # 待つ。absolute deadline (overall_timeout) が先に来る場合は
@@ -809,8 +818,7 @@ class Client:
                     ) from None
                 # タイムアウトと同時刻に進捗 (非 FIN データ / STREAM_RESET) が
                 # 届いていた場合は idle timeout とせず待機を継続する
-                if state.event.is_set():
-                    state.event.clear()
+                if len(state.data) > received_before or state.reset_error_code != reset_before:
                     continue
                 raise self._recv_stream_timeout_error(
                     "idle timeout",
@@ -820,6 +828,105 @@ class Client:
                     len(state.data),
                 ) from None
 
+            state.event.clear()
+
+    async def shutdown_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームを中断する
+
+        低レベル `Connection.close_stream` を呼び、RESET_STREAM
+        (RFC 9000 Section 19.4) と STOP_SENDING (Section 19.5) をスケジュール
+        して送出する。フレームの実際の送出は `_send_pending()` が担う
+        (既存の `send_stream_data` と同じパターン)。双方向ストリームでは
+        両方を送出する。単方向ストリームでは `ngtcp2_conn_shutdown_stream`
+        がローカル単方向なら write 側 (RESET_STREAM) のみ、リモート単方向
+        なら read 側 (STOP_SENDING) のみを shutdown する。
+
+        RESET_STREAM の送出は状態依存である。書き込み側が全データ送信済み +
+        FIN 確認済みの場合は RESET_STREAM を送出しない (書き込み側が既に
+        完了しているため)。
+
+        Args:
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        if self._connection is None:
+            return
+
+        self._connection.close_stream(stream_id, error_code)
+        await self._send_pending()
+
+    async def wait_for_stream_reset(
+        self,
+        stream_id: int,
+        timeout: float = 10.0,
+    ) -> int:
+        """ピアの RESET_STREAM 受信を待ち、そのアプリケーションエラーコードを返す
+
+        STREAM_RESET イベントの処理とストリームごとのエラーコード保持は
+        バックグラウンド受信タスクが担い、このメソッドはその状態を待つ。
+        呼び出し時点で既に RESET_STREAM を受信済みのストリームは即時 return
+        する。待機中に接続終了 (CONNECTION_CLOSED) を受信した場合も
+        TimeoutError を raise して待機を終了する。コールバック内から呼び出すと
+        受信処理が進まないため RuntimeError を raise する。
+
+        ngtcp2 は STOP_SENDING を受信すると、ストリームが Ready / Send 状態
+        の場合は自動で RESET_STREAM を送出する (RFC 9000 Section 3.5 の
+        MUST。エラーコードは STOP_SENDING から複製する SHOULD)。Data Sent
+        状態では MAY であり、送出のタイミングは ngtcp2 実装に依存する。
+        そのため、`shutdown_stream` を呼んだ後は通常すぐにエラーコードを
+        受け取る。
+
+        Args:
+            stream_id: ストリーム ID
+            timeout: 待機のタイムアウト (秒)
+
+        Returns:
+            ピアの RESET_STREAM が運んだアプリケーションエラーコード
+
+        Raises:
+            TimeoutError: 期限までに RESET_STREAM を受信しない場合、
+                または接続終了時
+            RuntimeError: コールバック内から呼び出した場合、または未接続時
+            ValueError: timeout が 0 以下の場合
+        """
+        if self._recv_task is not None and _in_callback_var.get():
+            raise RuntimeError("wait_for_stream_reset() cannot be called from within a callback")
+        if self._recv_task is None:
+            raise RuntimeError("client is not connected")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+        state = self._recv_states.setdefault(stream_id, _StreamRecvState())
+
+        if state.reset_error_code is not None:
+            return state.reset_error_code
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        while True:
+            if state.reset_error_code is not None:
+                return state.reset_error_code
+            if self._task_error is not None:
+                raise self._task_error
+            if self._connection_closed_event.is_set():
+                raise TimeoutError(
+                    f"connection closed while waiting for stream reset "
+                    f"(stream_id={stream_id}, timeout={timeout})"
+                )
+            if loop.time() >= deadline:
+                raise TimeoutError(
+                    f"timeout while waiting for stream reset "
+                    f"(stream_id={stream_id}, timeout={timeout})"
+                )
+
+            try:
+                await asyncio.wait_for(
+                    state.event.wait(),
+                    timeout=deadline - loop.time(),
+                )
+            except TimeoutError:
+                continue
             state.event.clear()
 
     def export_session_ticket(self) -> bytes:
