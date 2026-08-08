@@ -80,3 +80,7 @@
 - `refs/webtrans/draft-ietf-webtrans-http3-16.txt` §2.1.2 "endpoints SHOULD prefer this protocol when using WebTransport over an HTTP/3 connection"
 - `refs/webtrans/draft-ietf-webtrans-http2-15.txt` §1 "the current most common TCP-based fallback to HTTP/3"
 - `refs/webtrans/draft-ietf-webtrans-http2-15.txt` Appendix A "endpoints SHOULD prefer [version-specific WebTransport protocol] over the capsule-based protocol"
+
+## pending にした理由
+
+h2/h3 統一 listen（`webtransport.Server` dual-listen glue）の実装を一旦後回しにすることにしたため、その前提条件である本 issue（Server API の SessionWriter 型統一）も保留する。関連する 0045 / 0046 / 0047 と共に、実装再開時に reopened にする。
