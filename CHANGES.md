@@ -55,6 +55,8 @@
   - @voluntas
 - [ADD] QUIC の STREAM_DATA イベントにストリームオフセットを追加する
   - @voluntas
+- [ADD] QUIC クライアントのバックグラウンド受信タスクを導入し、run() を明示起動しなくても受信イベントを処理できるようにする
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する

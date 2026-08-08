@@ -1,7 +1,7 @@
 # 高レベル QUIC クライアントにバックグラウンド受信タスクを導入する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-08
 - Branch: feature/add-background-recv-task
 - Polished: 2026-08-08
 - Reporter: @voluntas
@@ -41,4 +41,11 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/webtransport/quic/client.py` にバックグラウンド受信タスク (`_background_recv`) を導入した。`connect()` がタスクを起動し、socket の読み取り・イベント処理・ACK / フロー制御 / ハンドシェイク継続パケットの送出・タイマー処理を担う。`connect()` は `_connect_waiter` (asyncio.Future) でハンドシェイク完了を待ち、`run()` は `asyncio.shield()` でタスクの完了 (接続終了) を待つだけの役割に変更した
+- 受信イベント処理は `_handle_received_events` に集約し、コールバックは `_run_callback` を通じて実行中フラグ (`_in_callback`) を立てる。コールバック内 (サブタスク経由を含む) からの `close()` がタスク自身の完了を待ってデッドロックしないよう再入ガードを設けた
+- 接続終了 (CONNECTION_CLOSED) とタスク異常終了は `_connection_closed_event` と `_task_error` で待機者へ通知する共有経路を用意した (待機側の TimeoutError raise は 0037 / 0038 で定義する)
+- `close()` は終了フラグ設定 → タスク完了待ち → `connection.close()` → CONNECTION_CLOSE 送出 → socket クローズの順で行い、`_send_pending()` が OSError を raise しても socket クローズを finally で保証する。`connect()` の例外時もソケットをクローズし、`_connecting` フラグを finally で解除する
+- 既存の `run()` ベースのテストは新設計のまま通るよう維持し、`test_cwnd_exhaustion_does_not_hang` はバックグラウンドタスクが ACK を処理する前提に再設計した
+- テストは `tests/test_e2e_quic_background_recv.py` に 6 件を追加した (run() なしでの受信 / 受信タスクの停止 / ソケット差し替え後の受信継続 / コールバック内からの close() / サブタスク内からの close() / タスク異常終了の connect() への伝播)
+- `skills/webtransport-py/SKILL.md` の `run()` の記述を新役割 (バックグラウンドタスクの完了待ち) に合わせて更新した
+- `CHANGES.md` の `## develop` セクションに `[ADD]` エントリを追加した

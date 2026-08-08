@@ -49,7 +49,7 @@ uv add webtransport-py
 - サーバー: コンストラクタ → `on_*()` でコールバック登録 → `async with server:` → `await server.run()`
 - クライアント: コンストラクタ → `on_*()` でコールバック登録 → `await client.connect()` (成功で `True`) → 送信 → `await client.run()` → `await client.close()`
 - コールバックはすべて async 関数を渡す
-- `run()` は受信ループなので、クライアントでは `asyncio.wait_for(client.run(), timeout=...)` や `asyncio.create_task()` と組み合わせる
+- `run()` は受信ループなので、クライアントでは `asyncio.wait_for(client.run(), timeout=...)` や `asyncio.create_task()` と組み合わせる。例外は `quic.Client` で、`connect()` がバックグラウンド受信タスクを起動するため `run()` は接続終了を待つだけの完了待ちになる (起動しなくても受信イベントは処理される。`asyncio.create_task(client.run())` で接続終了まで待てる)
 
 ### WebTransport over HTTP/3 (`webtransport.h3`)
 
@@ -247,11 +247,12 @@ def __init__(
 # on_datagram(data: bytes)
 # on_session_ticket(ticket: bytes)
 
-async def connect() -> bool
+async def connect() -> bool  # バックグラウンド受信タスクを起動し、ハンドシェイク完了を待つ
 async def open_stream(bidirectional: bool = True) -> int
 async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(data: bytes) -> None
 async def migrate() -> bool  # Connection Migration
+async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
 def export_session_ticket() -> bytes
 def export_0rtt_transport_params() -> bytes
 def is_early_data_accepted() -> bool
@@ -259,6 +260,8 @@ def was_early_data_attempted() -> bool
 ```
 
 0-RTT / Session Resumption は「初回接続で `on_session_ticket` (または `export_session_ticket()` / `export_0rtt_transport_params()`) を保存 → 再接続時に `session_ticket` と `early_transport_params` をコンストラクタへ渡す」という流れで使う。証明書のカスタム検証は `verify_callback` に DER 形式の証明書チェーン (`list[bytes]`) を受け取って `bool` を返す関数を渡す。
+
+`connect()` はバックグラウンド受信タスクを起動するため、`run()` を明示起動しなくても受信イベントが処理されコールバックが発火する。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。
 
 ### HTTP/3 (`webtransport.http3`)
 
