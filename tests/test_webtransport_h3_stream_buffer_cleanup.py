@@ -140,8 +140,10 @@ def test_connect_stream_reset_releases_session_send_buffers() -> None:
     assert client._has_stream_buffer(first_stream_id) is True
 
     # close_stream の同期コールバックで発火する ResetStream / StopSending
-    # イベントのセッション ID が、stream_info_ の残存により正しく復元される
-    # ことを確認する (stream_info_ エントリを残す設計の根拠)
+    # イベントのセッション ID が、nghttp3_conn_close_stream 呼び出し時点の
+    # stream_info_ の残存により正しく復元されることを確認する (セッション
+    # 終了の後始末 (erase_session_streams) は同期コールバックの後に実行
+    # されるため、コールバック時点ではエントリが残っている)
     reset_events = []
     while True:
         event = client.next_event()
@@ -153,6 +155,50 @@ def test_connect_stream_reset_releases_session_send_buffers() -> None:
     for _event_type, event_session_id, event_stream_id in reset_events:
         assert event_session_id == second_session_id
         assert event_stream_id == second_stream_id
+
+
+def test_second_connect_stream_reset_returns_minus_one() -> None:
+    """同一 CONNECT ストリームの 2 回目のリセットで -1 が返ることを確認
+
+    1 回目のリセットでセッションが終了して session_ids_ から削除されるため、
+    2 回目の同一 CONNECT ストリームのリセットではセッション ID を復元できず
+    -1 が返る (データストリームの二重リセットの -1 と対称)
+    """
+    client, _server, _first_session_id, second_session_id = _establish_two_sessions()
+
+    # 1 回目のリセットではセッション ID (= CONNECT ストリーム ID) が返る
+    assert client.close_stream(second_session_id, 0) == second_session_id
+
+    # 2 回目のリセットではセッション終了済みのため復元できず -1 が返る
+    assert client.close_stream(second_session_id, 0) == -1
+
+
+def test_connect_stream_reset_cleans_session_streams() -> None:
+    """CONNECT ストリームのリセットでセッションに属するストリーム情報が清掃されることを確認
+
+    複数セッションを確立し、あるセッションで開いたデータストリームが、
+    CONNECT ストリームのリセットによるセッション終了で stream_info_ から
+    削除されることを確認する。清掃されないと get_session_streams が
+    終了したセッションの stale エントリを返し続ける
+    """
+    client, _server, first_session_id, second_session_id = _establish_two_sessions()
+
+    # 1 つ目のセッションでデータストリームを開く
+    first_stream_id = 8
+    assert client.open_stream(first_session_id, first_stream_id, False) is True
+    assert client.get_session_streams(first_session_id) != []
+    assert client.get_session_streams(second_session_id) == []
+
+    # 1 つ目のセッションの CONNECT ストリームをリセットする
+    assert client.close_stream(first_session_id, 0) == first_session_id
+
+    # 終了したセッションのストリーム情報が清掃される
+    assert client.get_session_streams(first_session_id) == []
+
+    # 他セッションのストリーム情報は清掃されない
+    second_stream_id = 12
+    assert client.open_stream(second_session_id, second_stream_id, False) is True
+    assert client.get_session_streams(second_session_id) != []
 
 
 def test_send_to_unregistered_stream_is_ignored() -> None:

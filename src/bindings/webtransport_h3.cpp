@@ -729,12 +729,15 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
       (it == stream_info_.end() && session_ids_.count(stream_id) > 0);
   if (is_connect_stream) {
     session_id = stream_id;
-    // セッションに属するデータストリームの送信バッファを stream_info_ の走査で
-    // 削除する。stream_info_ エントリ自体は削除しない (nghttp3_conn_close_stream の
-    // 同期コールバックで発火する reset_stream_cb / stop_sending_cb の
-    // セッション ID 取得に必要。エントリの清掃はセッション終了の後始末と
-    // 合わせて別途検討する)。session_ids_ からも削除しない (close_stream の
-    // 戻り値復元フォールバックが session_ids_ の残留に依存しているため)
+    // セッションに属するデータストリームの送信バッファを stream_info_ の
+    // 走査で削除する。nghttp3_conn_close_stream の同期コールバックで
+    // stream_close_cb がエントリごと消すケースに備えた安全網であり、
+    // エントリが残ったままなら後段の erase_session_streams が同じバッファ
+    // を削除する (実質重複だが無害)。stream_info_ エントリ自体の清掃は
+    // nghttp3_conn_close_stream の同期コールバック (reset_stream_cb /
+    // stop_sending_cb / stream_close_cb) の後に erase_session_streams で
+    // 行う (先に削除すると同期コールバック内のセッション ID 復元が
+    // できなくなる)
     for (const auto& pair : stream_info_) {
       if (pair.second.session_id == session_id) {
         stream_buffers_.erase(pair.first);
@@ -751,6 +754,25 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   // 復元したセッション ID (復元できない場合は -1) を返す
   (void)nghttp3_conn_close_stream(conn_, stream_id, error_code);
   stream_info_.erase(stream_id);
+
+  if (is_connect_stream) {
+    // セッション終了の後始末 (draft-ietf-webtrans-http3-16 Section 6 の
+    // セッション終了条件の 1 つ目: CONNECT ストリームの abrupt クローズ)。
+    // セッションに属するデータストリームの stream_info_ エントリを清掃し、
+    // session_ids_ から削除する。清掃は nghttp3_conn_close_stream の同期
+    // コールバック (reset_stream_cb / stop_sending_cb / stream_close_cb) の
+    // 後に行い、コールバック内のセッション ID 復元 (stream_info_ の残存に
+    // 依存) を壊さない
+    erase_session_streams(session_id);
+    session_ids_.erase(session_id);
+
+    // セッション終了イベントを発火する。error_message は空とする
+    H3Event event;
+    event.type = H3EventType::SessionClosed;
+    event.session_id = session_id;
+    event.error_code = error_code;
+    push_event(std::move(event));
+  }
   return session_id;
 }
 
