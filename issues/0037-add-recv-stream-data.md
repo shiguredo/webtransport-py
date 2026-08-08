@@ -1,7 +1,7 @@
 # 高レベル QUIC クライアントに recv_stream_data を追加する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-08
 - Branch: feature/add-recv-stream-data
 - Polished: 2026-08-07
 - Reporter: @voluntas
@@ -39,4 +39,12 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/webtransport/quic/client.py` に `recv_stream_data(stream_id, timeout=10.0, *, overall_timeout=None) -> tuple[bytes, bool]` を追加した。ストリームごとの受信状態 (`_StreamRecvState`) を受信データの累積連結 (`data`) と FIN 検出 (`fin`) と待機者通知イベント (`event`) で管理し、バックグラウンド受信タスクの `_handle_received_events` が STREAM_DATA イベントで `_update_recv_state` を呼んで累積連結する
+- タイムアウトは idle deadline (`timeout`。進捗があるたびに延長) と absolute deadline (`overall_timeout`。None なら `max(timeout * 6, 30)`) の 2 段構えとし、どちらかに達すると受信済みバイト数とタイムアウト値を含むメッセージで `TimeoutError` を raise する。FIN と期限の検出が同時になった場合は FIN を優先する
+- 呼び出し時点で FIN 完了済みのストリームは即時 return する。ゼロ長 FIN (datalen=0, fin=True) も完了として扱う
+- 接続終了 (CONNECTION_CLOSED)・タスク異常終了・close() 時は `_wake_stream_waiters` で全ストリームの待機者を起床し、待機側は `_connection_closed_event` / `_task_error` を確認して TimeoutError または元の例外を raise する
+- STREAM_RESET 受信時は `_notify_stream_progress` で進捗として idle deadline を 1 回延長し、その後は idle timeout になる (overall_timeout が先に来ればそちらで打ち切られる)
+- コールバック内からの再入呼び出しは、コンテキスト変数 (`_in_callback_var`) でコールバック実行中 (サブタスク経由を含む) を検出して `RuntimeError` を raise する。コールバックと `recv_stream_data` は独立に動作し、併用してもデータは両方に配信される
+- テストは `tests/test_e2e_quic_recv_stream_data.py` に 13 件を追加した (正常系 / 複数チャンクの累積連結 / 既に FIN 完了済みストリームの即時 return / ゼロ長 FIN / 接続終了からの TimeoutError / idle タイムアウト / overall_timeout / 複数ストリーム並行 / コールバック内 RuntimeError / idle deadline の延長 / STREAM_RESET による延長 / コールバックと recv の両方配信 / 0 以下のタイムアウトの ValueError)
+- `skills/webtransport-py/SKILL.md` の `quic.Client` 節に `recv_stream_data` の説明を追加した
+- `CHANGES.md` の `## develop` セクションに `[ADD]` エントリを追加した
