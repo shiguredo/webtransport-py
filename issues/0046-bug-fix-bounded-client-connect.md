@@ -86,3 +86,7 @@
 ## 参考
 
 - `refs/h3/rfc9114.txt` §3.1 "Connectivity problems (e.g., blocking UDP) can result in a failure to establish a QUIC connection; clients SHOULD attempt to use TCP-based versions of HTTP in this case"
+
+## pending にした理由
+
+h2/h3 統一 listen（`webtransport.Server` dual-listen glue）関連の実装（0044-0047）を一旦後回しにすることにしたため、その前提群の一部である本 issue も保留する。実装再開時に reopened にする。
