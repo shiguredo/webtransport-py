@@ -14,6 +14,7 @@
 
 - `src/webtransport/quic/client.py` の `_StreamRecvState` はストリームごとの受信データ (`data`)、FIN 検出 (`fin`)、待機者通知イベント (`event`) を保持する
 - `_update_recv_state` は STREAM_DATA 受信のたびに `_recv_states.setdefault(stream_id, ...)` で状態を作成し、`_recv_states` から削除する経路が存在しない
+- `_handle_stream_reset` も STREAM_RESET 受信のたびに `_recv_states.setdefault` で状態を作成するため、データを一度も受信していないストリームでも RESET 受信ごとにエントリが新規作成される
 - 結果として、FIN 完了済みのストリームも含め全ストリームの受信データが接続寿命まで保持され続ける
 - `recv_stream_data` を一度も呼ばないコールバック専用の利用 (`on_stream_data`) でも全ストリームの全受信データが保持されるため、長期間の接続で大量データを扱うとメモリが無制限に増加する
 - 「FIN 完了済みストリームの即時 return」要件 (0037) のため受信データの保持自体は必要だが、破棄手段が無い点が問題
