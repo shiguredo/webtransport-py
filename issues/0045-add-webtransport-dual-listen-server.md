@@ -93,3 +93,7 @@ await server.serve()  # 2 つの内部サーバーを並行起動、両方停止
 - `refs/webtrans/draft-ietf-webtrans-http3-16.txt` §2.1.2 "endpoints SHOULD prefer this protocol when using WebTransport over an HTTP/3 connection"
 - `refs/webtrans/draft-ietf-webtrans-http2-15.txt` §1 "the current most common TCP-based fallback to HTTP/3"
 - `refs/webtrans/draft-ietf-webtrans-http2-15.txt` Appendix A "endpoints SHOULD prefer [version-specific WebTransport protocol] over the capsule-based protocol"
+
+## pending にした理由
+
+本 issue の中心である h2/h3 統一 listen（`webtransport.Server` dual-listen glue）の実装を一旦後回しにすることにしたため、保留する。関連する 0044 / 0046 / 0047 と共に、実装再開時に reopened にする。
