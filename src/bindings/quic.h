@@ -194,6 +194,14 @@ class QuicConnection {
 
   /**
    * 受信したデータを処理
+   *
+   * close() が CONNECTION_CLOSE を生成できた接続 (保持パケットがある状態) では、
+   * closed_ 後も受信パケットを処理し、受信パケットへの応答として CONNECTION_CLOSE
+   * を再送する (RFC 9000 Section 10.2.1)。このとき ConnectionClosed イベントは
+   * push しない (アプリが自ら close() を呼んだため)。close() でパケットを生成
+   * できなかった接続、および受信経路で終了した接続では、受信パケットは処理されず
+   * 0 を返す。再アーム経路でも ngtcp2 が NGTCP2_ERR_CLOSING を返すため 0 を返す
+   * (処理失敗ではなく、受信パケットへの応答として消費した扱い)。
    * @param data 受信した UDP パケット
    * @param local_host ローカルアドレス
    * @param local_port ローカルポート
@@ -210,8 +218,9 @@ class QuicConnection {
   /**
    * 送信すべきデータを取得
    *
-   * close() が生成した CONNECTION_CLOSE がある場合はそれを 1 回だけ返し、
-   * 返した後は nullopt を返す。
+   * close() が生成した CONNECTION_CLOSE がある場合はそれを返す。初回は必ず
+   * 返し、返した後は receive() が受信パケットへの応答 (RFC 9000 Section
+   * 10.2.1) として再アームするまで nullopt を返す。
    * @return 送信すべき UDP パケット (なければ nullopt)
    */
   std::optional<QuicPacket> send();
@@ -815,8 +824,16 @@ class QuicConnection {
   // 完了が必要。遷移後の 1RTT パケット書き出しはその後にしか起こらない)
   bool post_handshake_write_done_ = false;
 
-  // close() が生成した CONNECTION_CLOSE パケット (send() が 1 回だけ返す)
+  // close() が生成した CONNECTION_CLOSE パケット (初回配送後も保持する)
+  // 保持と消費を分離する。close() 時に生成したパケットを保持し続け、
+  // send() が返せる状態 (armed) かどうかを close_packet_armed_ で管理する
   std::optional<QuicPacket> pending_close_packet_;
+
+  // pending_close_packet_ を send() が返せる状態かどうか
+  // close() 時に true、send() が返すと false、receive() が NGTCP2_ERR_CLOSING
+  // を受けると true に戻る (RFC 9000 Section 10.2.1 の closing 状態での応答再送。
+  // 再送は受信パケットごとに 1 回で、受信が無ければ再送しない)
+  bool close_packet_armed_ = false;
 
   // 0-RTT 状態
   bool early_data_attempted_ = false;
