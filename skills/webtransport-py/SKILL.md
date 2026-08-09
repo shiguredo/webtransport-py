@@ -237,6 +237,7 @@ def __init__(
     session_ticket: bytes | None = None,
     early_transport_params: bytes | None = None,
     enable_early_data: bool = True,
+    max_datagram_frame_size: int | None = None,  # None なら既定 65536、0 なら広告しない
 ) -> None
 ```
 
@@ -247,7 +248,7 @@ def __init__(
 # on_datagram(data: bytes)
 # on_session_ticket(ticket: bytes)
 
-async def connect() -> bool  # バックグラウンド受信タスクを起動し、ハンドシェイク完了を待つ
+async def connect(timeout: float = 10.0) -> bool  # バックグラウンド受信タスクを起動し、ハンドシェイク完了を待つ (期限で False)
 async def open_stream(bidirectional: bool = True) -> int
 async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def recv_stream_data(stream_id: int, timeout: float = 10.0, *, overall_timeout: float | None = None) -> tuple[bytes, bool]  # FIN まで受信し (データ, fin) を返す
@@ -264,7 +265,7 @@ def was_early_data_attempted() -> bool
 
 0-RTT / Session Resumption は「初回接続で `on_session_ticket` (または `export_session_ticket()` / `export_0rtt_transport_params()`) を保存 → 再接続時に `session_ticket` と `early_transport_params` をコンストラクタへ渡す」という流れで使う。証明書のカスタム検証は `verify_callback` に DER 形式の証明書チェーン (`list[bytes]`) を受け取って `bool` を返す関数を渡す。
 
-`connect()` はバックグラウンド受信タスクを起動するため、`run()` を明示起動しなくても受信イベントが処理されコールバックが発火する。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。
+`connect()` はバックグラウンド受信タスクを起動し、ハンドシェイク完了を `timeout` (既定 10.0 秒) で打ち切る。期限までに確立できない場合は接続を維持したまま `False` を返す (ハンドシェイクが後で完了する可能性がある。後始末は `close()` が担う)。`timeout <= 0` では接続を開始せず即座に `False` を返す。タイムアウト後は `_recv_task` が存続するため、同じ `Client` で `connect()` を再呼び出しすると `RuntimeError` になる (再試行には新規 `Client` が必要)。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。`max_datagram_frame_size` は DATAGRAM の受信サポート広告 (RFC 9221 Section 3) で、0 なら広告しない (既定 65536)。0 を指定すると低レベル設定の `enable_datagram` が False になり、受信広告だけでなくローカルの `send_datagram()` も無効化される (RFC 9221 は単方向利用を認めるが、本実装では受信と送信が連動する)。
 
 `recv_stream_data()` は呼び出し時点で FIN 完了済みなら即時 return する。タイムアウトは idle deadline (`timeout`) と absolute deadline (`overall_timeout`。None なら `max(timeout * 6, 30)`) の 2 段構えで、どちらかに達すると `TimeoutError` を raise する。接続終了 (CONNECTION_CLOSED) を受信した場合も `TimeoutError` を raise して待機を終了する。STREAM_RESET 受信時は進捗として idle deadline が 1 回延長され、その後は idle timeout になる。コールバック内からは呼べない (`RuntimeError`)。`on_stream_data` コールバックと併用してもデータは両方に配信される。受信データはストリームごとに保持され、`recv_stream_data` の対象外ストリームも保持される (FIN 完了済みの即時 return を実現するため)。
 

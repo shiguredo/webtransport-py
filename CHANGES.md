@@ -61,6 +61,8 @@
   - @voluntas
 - [ADD] QUIC クライアントに shutdown_stream と wait_for_stream_reset を追加する
   - @voluntas
+- [ADD] QUIC クライアントの connect にタイムアウトと max_datagram_frame_size を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する

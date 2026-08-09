@@ -80,6 +80,7 @@ class Client:
         session_ticket: bytes | None = None,
         early_transport_params: bytes | None = None,
         enable_early_data: bool = True,
+        max_datagram_frame_size: int | None = None,
     ) -> None:
         """クライアントを初期化する
 
@@ -94,6 +95,12 @@ class Client:
             session_ticket: 0-RTT 用セッションチケット (DER)
             early_transport_params: 0-RTT トランスポートパラメータ
             enable_early_data: 0-RTT early data を有効にするか
+            max_datagram_frame_size: DATAGRAM の受信サポート広告に使う
+                最大フレームサイズ (RFC 9221 Section 3。将来改訂される可能性が
+                ある)。None (既定) なら低レベル Config の既定値
+                (enable_datagram=true / max_datagram_frame_size=65536) を使う。
+                0 なら DATAGRAM を広告せず、ローカルの send_datagram() も
+                無効化される。範囲外の値は connect() で ValueError
         """
         self._host = host
         self._port = port
@@ -105,6 +112,7 @@ class Client:
         self._session_ticket = session_ticket
         self._early_transport_params = early_transport_params
         self._enable_early_data = enable_early_data
+        self._max_datagram_frame_size = max_datagram_frame_size
 
         self._connection: quic_low.Connection | None = None
         self._socket: socket.socket | None = None
@@ -551,7 +559,7 @@ class Client:
         if self._on_early_data_rejected is not None:
             await self._run_callback(self._on_early_data_rejected)
 
-    async def connect(self) -> bool:
+    async def connect(self, timeout: float = 10.0) -> bool:
         """サーバーに接続する
 
         接続作成と 0-RTT 送出を行い、バックグラウンド受信タスクを起動して
@@ -559,11 +567,25 @@ class Client:
         close() まで動作し続けるため、明示的に run() を起動しなくても
         受信イベントが処理される。
 
+        timeout はハンドシェイク完了までの全体タイムアウトである。期限までに
+        確立できない場合は接続を維持したまま False を返す (ハンドシェイクが
+        後で完了する可能性がある。後始末は close() が担う)。timeout <= 0 の
+        ときは接続を開始せずに即座に False を返す。
+
+        Args:
+            timeout: ハンドシェイク完了までのタイムアウト (秒)
+
         Returns:
-            接続に成功した場合は True
+            接続に成功した場合は True。期限までに確立できない場合・接続
+            失敗時は False
         """
         if self._recv_task is not None or self._connecting:
             raise RuntimeError("connect() has already been called")
+
+        # timeout <= 0 のときは接続を開始せずに即座に False を返す
+        # (ngtcp2-py と同じ挙動)
+        if timeout <= 0:
+            return False
 
         # connect() 実行中は early data 登録を拒否する (実行中に登録されても
         # _flush_early_data() は走り終えているため黙って破棄される)
@@ -584,6 +606,18 @@ class Client:
                 config.session_ticket = self._session_ticket
             if self._early_transport_params is not None:
                 config.early_transport_params = self._early_transport_params
+            if self._max_datagram_frame_size is not None:
+                # RFC 9221 Section 3 の通り、max_datagram_frame_size は受信
+                # サポートの広告であり、DATAGRAM の送信はピアの非ゼロ広告に
+                # 依存する (将来改訂される可能性がある)。値は変長整数
+                # (2^62 - 1 が上限) で表現される (RFC 9000 Section 16)
+                if not 0 <= self._max_datagram_frame_size < 2**62:
+                    raise ValueError(f"max_datagram_frame_size must be in range [0, {2**62 - 1}]")
+                if self._max_datagram_frame_size == 0:
+                    config.enable_datagram = False
+                else:
+                    config.enable_datagram = True
+                    config.max_datagram_frame_size = self._max_datagram_frame_size
 
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.setblocking(False)
@@ -603,7 +637,15 @@ class Client:
             self._connect_waiter = asyncio.get_running_loop().create_future()
             self._recv_task = asyncio.create_task(self._background_recv())
 
-            return await self._connect_waiter
+            try:
+                return await asyncio.wait_for(self._connect_waiter, timeout=timeout)
+            except TimeoutError:
+                # バックグラウンドタスクの異常終了 (元の例外が TimeoutError の
+                # 場合) をタイムアウトと区別する。タスク異常終了時は元の例外を
+                # 伝播し、真のタイムアウトのみ False を返す
+                if self._task_error is not None:
+                    raise self._task_error from None
+                return False
         except asyncio.CancelledError:
             # 接続待機がキャンセルされた場合、タスク側の解決を無効化する。
             # 受信タスクが未作成ならソケットをクローズし、作成済みなら
