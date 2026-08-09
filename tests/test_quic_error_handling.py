@@ -64,21 +64,33 @@ def test_connection_draining_state():
 
 
 def test_receive_after_close():
-    """接続クローズ後にパケットを受信してもクラッシュしない"""
+    """接続クローズ後にパケットを受信すると CONNECTION_CLOSE が再アームされる"""
     client, server, initial_packet = create_client_server_pair()
     assert perform_handshake(client, server, initial_packet)
 
     # サーバーがパケットを生成
     server_packet = server.send()
+    assert server_packet is not None
 
     # クライアントが接続をクローズ
     client.close(0, "client close")
 
+    # 初回の CONNECTION_CLOSE を取り出す
+    close_packet = client.send()
+    assert close_packet is not None
+    assert client.send() is None
+
     # クローズ後にパケットを受信
-    if server_packet:
-        result = client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
-        # クラッシュしないことを確認
-        assert result == 0  # クローズ後は 0 バイト処理
+    result = client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+    # close() で CONNECTION_CLOSE を生成できた場合は受信処理が走り、
+    # NGTCP2_ERR_CLOSING で 0 が返る (クラッシュしない)
+    assert result == 0
+
+    # 受信パケットへの応答として、初回と同じ CONNECTION_CLOSE が再アームされ
+    # て返る (RFC 9000 Section 10.2.1 の同一パケット再送)
+    retransmitted = client.send()
+    assert retransmitted is not None
+    assert retransmitted.data == close_packet.data
 
 
 def test_send_after_close():
@@ -99,6 +111,63 @@ def test_send_after_close():
     # 2 回目以降の send() は None を返す
     result = client.send()
     assert result is None
+
+
+def test_connection_close_retransmission_on_receive():
+    """close() 後の受信パケットに応答して CONNECTION_CLOSE を再送する"""
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet)
+
+    # ハンドシェイク完了イベントを消費しておく (close() 後に新たなイベントが
+    # 積まれないことを検証するため)
+    while client.next_event() is not None:
+        pass
+    while server.next_event() is not None:
+        pass
+
+    # サーバーが close() して CONNECTION_CLOSE を生成・保持する
+    server.close(0x100, "server error")
+    assert server.is_closed()
+
+    # 初回の CONNECTION_CLOSE を取り出すが、ピアには渡さない (UDP ロスを再現)
+    close_packet = server.send()
+    assert close_packet is not None
+
+    # 受信を挟まない 2 回目の send() は None (初回配送の契約維持)
+    assert server.send() is None
+
+    # ピア (クライアント) は接続が生きていると思い、ストリームにデータを積む
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+    client.send_stream_data(stream_id, b"hello", False)
+    client_packet = client.send()
+    assert client_packet is not None
+
+    # サーバーがそのパケットを受信すると CONNECTION_CLOSE が再アームされる
+    result = server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    assert result == 0
+
+    # 受信パケットへの応答として、初回と同じ CONNECTION_CLOSE が再送される
+    # (RFC 9000 Section 10.2.1 の同一パケット再送)
+    retransmitted = server.send()
+    assert retransmitted is not None
+    assert retransmitted.data == close_packet.data
+
+    # 再送後は再び受信を挟まない限り None に戻る (受信データグラムごとに 1 回)
+    assert server.send() is None
+
+    # 2 回目の受信でも同じパケットが再送される (再アームの繰り返し)
+    client.send_stream_data(stream_id, b"world", False)
+    client_packet = client.send()
+    assert client_packet is not None
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    retransmitted_again = server.send()
+    assert retransmitted_again is not None
+    assert retransmitted_again.data == close_packet.data
+
+    # アプリが自ら close() を呼んだため、再アーム経路では終了イベントは
+    # push されない (close() 自体もイベントを push しない)
+    assert server.next_event() is None
 
 
 def test_stream_data_after_fin():

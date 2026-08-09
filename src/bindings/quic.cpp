@@ -174,6 +174,8 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
       handshake_completed_(other.handshake_completed_),
       closed_(other.closed_),
       post_handshake_write_done_(other.post_handshake_write_done_),
+      pending_close_packet_(std::move(other.pending_close_packet_)),
+      close_packet_armed_(other.close_packet_armed_),
       early_data_attempted_(other.early_data_attempted_),
       early_data_rejected_event_pushed_(
           other.early_data_rejected_event_pushed_),
@@ -210,6 +212,8 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     handshake_completed_ = other.handshake_completed_;
     closed_ = other.closed_;
     post_handshake_write_done_ = other.post_handshake_write_done_;
+    pending_close_packet_ = std::move(other.pending_close_packet_);
+    close_packet_armed_ = other.close_packet_armed_;
     early_data_attempted_ = other.early_data_attempted_;
     early_data_rejected_event_pushed_ =
         other.early_data_rejected_event_pushed_;
@@ -1042,7 +1046,36 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                                uint16_t local_port,
                                const std::string& remote_host,
                                uint16_t remote_port) {
-  if (!conn_ || closed_) {
+  // close() で CONNECTION_CLOSE を生成できた場合 (保持パケットが存在する場合)
+  // は、closed_ でも受信パケットを処理する。closing 状態のエンドポイントは
+  // 受信パケットに応答して CONNECTION_CLOSE を再送する (RFC 9000 Section
+  // 10.2.1)。ガードを外すのはこの場合のみで、生成できなかった場合および受信
+  // 経路で終了した接続では従来どおり closed_ ガードを維持する。
+  //
+  // 応答は受信データグラムごとに 1 回 (1:1) で、同じパケット (close() 時に
+  // 生成したもの) を再送する。RFC 9000 Section 10.2.1 のレート制限 (SHOULD)
+  // は、送出レートが受信レートに自然に制限されることで充足する。
+  //
+  // 増幅攻撃に関する 2 つの 3 倍ルール (MUST) は次の理由で増幅にならない:
+  // 1. 鍵破棄エンドポイントの累積 3 倍ルールは、本実装が鍵を保持しているため
+  //    適用されない (RFC 9000 Section 10.2.1)
+  // 2. 未検証アドレスへの 3 倍ルールは、応答先が close() 時に固定された
+  //    アドレスのみで、新規送信元アドレスには一切送出しないため充足する
+  //    (RFC 9000 Section 10.2.1)
+  // なお、再送パケットは ngtcp2 の write 経路を経ないため送信量制限
+  // (server_tx_left) は適用されない。1:1 応答で送出量は受信量に拘束される。
+  // ハンドシェイク途中は Initial パケットが 1200 バイト以上にパディングされる
+  // ため応答サイズ <= 受信サイズが保たれるが、ハンドシェイク完了後の 1RTT では
+  // 応答 (CONNECTION_CLOSE) が最小の ACK のみパケットより大きくなり得る。
+  // いずれもピアの送出量を超える増幅ではなく、またアドレスは検証済みのため
+  // RFC 9000 Section 10.2.1 の 3 倍ルール (未検証アドレス限定) には抵触しない。
+  // 応答サイズを大きく増やす変更は増幅攻撃を誘発し得るため避けること
+  //
+  // パケットの帰属はアプリ層のアドレスベースのルーティングに委ねる (サーバー
+  // はクライアントアドレスで接続を振り分けるため、closing 状態の接続に渡される
+  // パケットは同一ピア由来)。クライアントは ngtcp2 のパス照合が先行し、未知パス
+  // からのパケットには応答しない (破棄される)。
+  if (!conn_ || (closed_ && !pending_close_packet_)) {
     return 0;
   }
 
@@ -1070,9 +1103,22 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     "connection draining"});
         break;
       case NGTCP2_ERR_CLOSING:
-        closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
-                    "connection closing"});
+        // close() 起因の closing (保持パケットが存在する状態) では、受信パケット
+        // への応答として CONNECTION_CLOSE を再送するため再アームする。アプリが
+        // 自ら close() を呼んだため終了イベントは不要 (close() 自体もイベントを
+        // push しない)。DRAINING 状態では再送しない (RFC 9000 Section 10.2.2 の
+        // MUST NOT)。ngtcp2 は CLOSING 状態でパケットを処理しないため、ピアの
+        // CONNECTION_CLOSE を受信しても DRAINING には遷移しない (このガードは
+        // 防御的)。保持パケットが無い場合に NGTCP2_ERR_CLOSING が返るのは実質
+        // 到達しない防御経路であり、その場合のみ従来どおり closed_ を立てて
+        // イベントを push する。
+        if (pending_close_packet_ && !in_draining_period()) {
+          close_packet_armed_ = true;
+        } else {
+          closed_ = true;
+          push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+                      "connection closing"});
+        }
         break;
       case NGTCP2_ERR_DROP_CONN:
         closed_ = true;
@@ -1114,13 +1160,14 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
 }
 
 std::optional<QuicPacket> QuicConnection::send() {
-  // close() が生成した CONNECTION_CLOSE を 1 回だけ返す。closed_ が立って
-  // いても未配送の CONNECTION_CLOSE があれば優先して返し、返した後は
-  // 従来どおり nullopt を返す (Sans-IO 設計と整合)。
-  if (pending_close_packet_) {
-    auto packet = std::move(pending_close_packet_);
-    pending_close_packet_ = std::nullopt;
-    return packet;
+  // close() が生成した CONNECTION_CLOSE を返す。初回は必ず返し、返した後は
+  // receive() が受信パケットへの応答として再アームするまで nullopt を返す
+  // (RFC 9000 Section 10.2.1)。パケットは保持したまま返す (コピー) ため、
+  // 再アーム後は同じパケットが再送される。宛先アドレスは close() 時に固定された
+  // 値のままになる (receive() がパスを更新しても再送先は追従しない)。
+  if (pending_close_packet_ && close_packet_armed_) {
+    close_packet_armed_ = false;
+    return *pending_close_packet_;
   }
 
   if (!conn_ || closed_) {
@@ -1608,8 +1655,8 @@ void QuicConnection::close(uint64_t error_code, const std::string& reason) {
       conn_, &path, &pi, send_buffer_.data(), send_buffer_.size(), &ccerr,
       timestamp_ns_);
 
-  // CONNECTION_CLOSE が生成できた場合はパケットを保持し、send() が 1 回
-  // だけ返すようにする。生成できない場合 (クライアント Initial 未送信の
+  // CONNECTION_CLOSE が生成できた場合はパケットを保持し、send() が返せる
+  // ように armed にする。生成できない場合 (クライアント Initial 未送信の
   // NGTCP2_ERR_INVALID_STATE やサーバー Initial 未受信の送出量上限) は
   // パケット無しで終了する (state 未確立のエンドポイントは closing 状態に
   // 入らない (RFC 9000 Section 10.2.3))。
@@ -1620,6 +1667,7 @@ void QuicConnection::close(uint64_t error_code, const std::string& reason) {
   if (nwrite > 0) {
     pending_close_packet_ =
         make_packet(send_buffer_.data(), static_cast<size_t>(nwrite), path);
+    close_packet_armed_ = true;
   }
 
   closed_ = true;

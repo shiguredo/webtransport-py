@@ -468,6 +468,11 @@ def test_close_before_handshake():
     assert client.in_closing_period is False
     assert client.send() is None
 
+    # 保持パケットが無いため、close() 後の受信は従来どおり closed_ ガードで
+    # 処理されず 0 を返す (再アームも発生しない)
+    assert client.receive(b"\x00" * 10, CLIENT_ADDR, SERVER_ADDR) == 0
+    assert client.send() is None
+
     # サーバー Initial 未受信の close() (accept 直後で receive 前)
     client2 = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
     initial_packet = client2.send()
@@ -477,6 +482,10 @@ def test_close_before_handshake():
     assert server.is_closed() is True
     # accept 直後は ngtcp2 が Initial 鍵を持っていないためパケット無し
     assert server.in_closing_period is False
+    assert server.send() is None
+
+    # サーバー側も保持パケットが無いため、close() 後の受信は 0 を返す
+    assert server.receive(b"\x00" * 10, SERVER_ADDR, CLIENT_ADDR) == 0
     assert server.send() is None
 
 
@@ -521,3 +530,43 @@ def test_close_mid_handshake_replaces_error_code():
     assert client.in_draining_period is True
     assert client.error_code == 0x0C
     assert client.reason == ""
+
+
+def test_close_mid_handshake_retransmits_connection_close():
+    """ハンドシェイク途中の close() 後も受信パケットに応答して CONNECTION_CLOSE を再送する"""
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.verify_peer = False
+    client_config.server_name = "localhost"
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+
+    # クライアントの Initial をサーバーに渡して Initial 交換済みの状態にする
+    first_initial = client.send()
+    assert first_initial is not None
+    server = Connection.accept(server_config, first_initial.data, SERVER_ADDR, CLIENT_ADDR)
+    server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR)
+    second_initial = client.send()
+    if second_initial:
+        server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR)
+
+    # ハンドシェイク途中の close() は CONNECTION_CLOSE を生成する
+    server.close(0x100, "mid handshake close")
+    close_packet = server.send()
+    assert close_packet is not None
+    # 受信を挟まない 2 回目の send() は None (初回配送の契約維持)
+    assert server.send() is None
+
+    # ピア (クライアント) が応答を受け取れず Initial を再送してきた場合、
+    # サーバーは CONNECTION_CLOSE を再送する
+    assert server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0
+
+    # 再送されるパケットは初回と同じもの (同一パケット再送)
+    retransmitted = server.send()
+    assert retransmitted is not None
+    assert retransmitted.data == close_packet.data
