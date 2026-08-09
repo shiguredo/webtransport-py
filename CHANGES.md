@@ -81,6 +81,8 @@
   - @voluntas
 - [FIX] close() 後の受信パケットに応答して CONNECTION_CLOSE を再送する
   - @voluntas
+- [FIX] CONNECTION_CLOSE の再送が CLOSING 期間満了後も無期限に続くのを修正する
+  - @voluntas
 - [FIX] HTTP/3 と WebTransport over HTTP/3 の FIN なしデータ送信で DATA フレームのペイロードが壊れる問題を修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーが終了ハンドシェイクでピアへ応答を送信しない問題を修正する

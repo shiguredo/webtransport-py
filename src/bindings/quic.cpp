@@ -176,6 +176,8 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
       post_handshake_write_done_(other.post_handshake_write_done_),
       pending_close_packet_(std::move(other.pending_close_packet_)),
       close_packet_armed_(other.close_packet_armed_),
+      closing_expiry_ns_(other.closing_expiry_ns_),
+      close_packet_delivered_once_(other.close_packet_delivered_once_),
       early_data_attempted_(other.early_data_attempted_),
       early_data_rejected_event_pushed_(
           other.early_data_rejected_event_pushed_),
@@ -214,6 +216,8 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     post_handshake_write_done_ = other.post_handshake_write_done_;
     pending_close_packet_ = std::move(other.pending_close_packet_);
     close_packet_armed_ = other.close_packet_armed_;
+    closing_expiry_ns_ = other.closing_expiry_ns_;
+    close_packet_delivered_once_ = other.close_packet_delivered_once_;
     early_data_attempted_ = other.early_data_attempted_;
     early_data_rejected_event_pushed_ =
         other.early_data_rejected_event_pushed_;
@@ -1041,6 +1045,15 @@ QuicPacket QuicConnection::make_packet(const uint8_t* data,
   return packet;
 }
 
+bool QuicConnection::closing_period_expired() const {
+  // 保持パケットが存在しない場合は満了管理の対象外 (常に未満了扱い)。
+  // 満了時刻は close() が CONNECTION_CLOSE を生成できた場合のみ設定される。
+  if (!pending_close_packet_ || !closing_expiry_ns_) {
+    return false;
+  }
+  return get_timestamp_ns() >= *closing_expiry_ns_;
+}
+
 size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                                const std::string& local_host,
                                uint16_t local_port,
@@ -1076,6 +1089,15 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
   // パケットは同一ピア由来)。クライアントは ngtcp2 のパス照合が先行し、未知パス
   // からのパケットには応答しない (破棄される)。
   if (!conn_ || (closed_ && !pending_close_packet_)) {
+    return 0;
+  }
+
+  // CLOSING 期間の満了後は、受信パケットを ngtcp2 に渡さず 0 を返して再送を
+  // 停止する。再アームも ConnectionClosed イベントの push も行わない
+  // (「close() 起因の closing ではイベントを push しない」契約を維持する)。
+  // 再送停止は handle_timeout による破棄に依存せず、満了時刻を独立に判定する
+  // (RFC 9000 Section 10.2)。
+  if (closing_period_expired()) {
     return 0;
   }
 
@@ -1160,14 +1182,30 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
 }
 
 std::optional<QuicPacket> QuicConnection::send() {
-  // close() が生成した CONNECTION_CLOSE を返す。初回は必ず返し、返した後は
-  // receive() が受信パケットへの応答として再アームするまで nullopt を返す
-  // (RFC 9000 Section 10.2.1)。パケットは保持したまま返す (コピー) ため、
+  // close() が生成した CONNECTION_CLOSE を返す。初回配送 (close() 直後の最初の
+  // send()) は満了判定の対象外で必ず返し、返した後は receive() が受信パケット
+  // への応答として再アームするまで nullopt を返す (RFC 9000 Section 10.2.1)。
+  // CLOSING 期間 (close() 時刻 + 3×PTO) の満了後は、再アームされていても返さ
+  // ない (RFC 9000 Section 10.2)。パケットは保持したまま返す (コピー) ため、
   // 再アーム後は同じパケットが再送される。宛先アドレスは close() 時に固定された
   // 値のままになる (receive() がパスを更新しても再送先は追従しない)。
-  if (pending_close_packet_ && close_packet_armed_) {
-    close_packet_armed_ = false;
-    return *pending_close_packet_;
+  if (pending_close_packet_) {
+    // 初回配送 (close() 直後の最初の send()) は満了判定の対象外。必ず返す
+    if (!close_packet_delivered_once_) {
+      close_packet_delivered_once_ = true;
+      close_packet_armed_ = false;
+      return *pending_close_packet_;
+    }
+    // 満了後は再アームされていても返さない (再送停止は破棄に依存しない)
+    if (closing_period_expired()) {
+      return std::nullopt;
+    }
+    // 満了前は、receive() が再アームした場合のみ返す
+    if (close_packet_armed_) {
+      close_packet_armed_ = false;
+      return *pending_close_packet_;
+    }
+    return std::nullopt;
   }
 
   if (!conn_ || closed_) {
@@ -1393,6 +1431,18 @@ bool QuicConnection::was_early_data_attempted() const {
 }
 
 std::optional<uint64_t> QuicConnection::get_timeout_ns() const {
+  // 保持パケットが存在する closing 中は、CLOSING 期間の満了時刻のみを返す。
+  // 満了前は残り時間、満了後は 0 を返して handle_timeout の呼び出しを促す。
+  // 破棄後 (保持パケットが無い) は既存の closed_ ガードどおり nullopt に戻す。
+  // ngtcp2 固有の expiry (PTO / idle 等) は返さない (ngtcp2 を駆動しないため)。
+  if (pending_close_packet_ && closing_expiry_ns_) {
+    uint64_t now = get_timestamp_ns();
+    if (now >= *closing_expiry_ns_) {
+      return 0;
+    }
+    return *closing_expiry_ns_ - now;
+  }
+
   if (!conn_ || closed_) {
     return std::nullopt;
   }
@@ -1411,6 +1461,23 @@ std::optional<uint64_t> QuicConnection::get_timeout_ns() const {
 }
 
 void QuicConnection::handle_timeout() {
+  // 保持パケットが存在する closing 中は、CLOSING 期間の満了時刻を過ぎた場合のみ
+  // 保持パケットを破棄して再送を停止する。満了前の呼び出しでは破棄しない。
+  // 破棄は初回配送が完了した後のみ行い、初回配送前の満了では破棄しないで最初の
+  // send() が CONNECTION_CLOSE を返せる状態を保つ。破棄後は armed 判定も初回
+  // 配送判定も参照されない。ngtcp2 は駆動しない (駆動すると idle_timeout が
+  // 3×PTO より短い場合に idle timeout イベントが発生し得る)。破棄するのは
+  // 保持パケットのみで、conn_ は保持したままにする (RFC 9000 Section 10.2 の
+  // 「SHOULD discard all connection state」の完全な実行はスコープ外のため)
+  if (pending_close_packet_) {
+    if (closing_period_expired() && close_packet_delivered_once_) {
+      pending_close_packet_ = std::nullopt;
+      closing_expiry_ns_ = std::nullopt;
+      close_packet_armed_ = false;
+    }
+    return;
+  }
+
   if (!conn_ || closed_) {
     return;
   }
@@ -1668,6 +1735,16 @@ void QuicConnection::close(uint64_t error_code, const std::string& reason) {
     pending_close_packet_ =
         make_packet(send_buffer_.data(), static_cast<size_t>(nwrite), path);
     close_packet_armed_ = true;
+
+    // CLOSING 期間の満了時刻 (close() 時刻 + 3×PTO) を保持する。RFC 9000
+    // Section 10.2 は closing 状態を「at least three times the current PTO
+    // interval」持続すべきと定め、これを下回る満了にしてはならない。PTO は
+    // close() 時点の値を固定する。公開アクセサの pto() は closed_ 後に nullopt
+    // を返すため、closed_ を立てる前に ngtcp2_conn_get_pto2 を直接呼んで
+    // 取得する。
+    uint64_t pto = ngtcp2_conn_get_pto2(conn_);
+    closing_expiry_ns_ = timestamp_ns_ + 3 * pto;
+    close_packet_delivered_once_ = false;
   }
 
   closed_ = true;
