@@ -202,6 +202,11 @@ class QuicConnection {
    * できなかった接続、および受信経路で終了した接続では、受信パケットは処理されず
    * 0 を返す。再アーム経路でも ngtcp2 が NGTCP2_ERR_CLOSING を返すため 0 を返す
    * (処理失敗ではなく、受信パケットへの応答として消費した扱い)。
+   *
+   * CLOSING 期間 (close() 時刻 + 3×PTO、RFC 9000 Section 10.2) の満了後は、
+   * 受信パケットを ngtcp2 に渡さず 0 を返して再送を停止する。再アームも
+   * ConnectionClosed イベントの push も行わない。再送停止は破棄 (handle_timeout)
+   * に依存せず、満了時刻を独立に判定する。
    * @param data 受信した UDP パケット
    * @param local_host ローカルアドレス
    * @param local_port ローカルポート
@@ -219,8 +224,10 @@ class QuicConnection {
    * 送信すべきデータを取得
    *
    * close() が生成した CONNECTION_CLOSE がある場合はそれを返す。初回は必ず
-   * 返し、返した後は receive() が受信パケットへの応答 (RFC 9000 Section
-   * 10.2.1) として再アームするまで nullopt を返す。
+   * 返し (満了判定の対象外)、返した後は receive() が受信パケットへの応答
+   * (RFC 9000 Section 10.2.1) として再アームするまで nullopt を返す。CLOSING
+   * 期間 (close() 時刻 + 3×PTO、RFC 9000 Section 10.2) の満了後は、再アーム
+   * されていても CONNECTION_CLOSE を返さない (再送を停止する)。
    * @return 送信すべき UDP パケット (なければ nullopt)
    */
   std::optional<QuicPacket> send();
@@ -256,12 +263,26 @@ class QuicConnection {
 
   /**
    * 次のタイムアウトまでの時間を取得
+   *
+   * close() が CONNECTION_CLOSE を生成できた接続 (保持パケットがある状態) では、
+   * CLOSING 期間 (close() 時刻 + 3×PTO、RFC 9000 Section 10.2) の満了までの
+   * 残り時間のみを返す。満了後は 0 を返して handle_timeout の呼び出しを促し、
+   * 保持パケットが破棄された後は nullopt を返す。ngtcp2 固有の expiry (PTO /
+   * idle 等) は返さない。
    * @return タイムアウトまでのナノ秒 (タイムアウトがなければ nullopt)
    */
   std::optional<uint64_t> get_timeout_ns() const;
 
   /**
    * タイムアウトを処理
+   *
+   * close() が CONNECTION_CLOSE を生成できた接続 (保持パケットがある状態) では、
+   * CLOSING 期間 (close() 時刻 + 3×PTO、RFC 9000 Section 10.2) の満了時刻を
+   * 過ぎた場合のみ保持パケットを破棄して再送を停止する。満了前の呼び出しでは
+   * 破棄しない。破棄は初回配送 (close() 直後の最初の send()) が完了した後のみ
+   * 行い、初回配送前の満了では破棄しないで最初の send() が CONNECTION_CLOSE を
+   * 返せる状態を保つ。ngtcp2 は駆動しない (駆動すると idle_timeout が 3×PTO
+   * より短い場合に idle timeout イベントが発生し得る)。
    */
   void handle_timeout();
 
@@ -668,6 +689,9 @@ class QuicConnection {
   QuicPacket make_packet(const uint8_t* data, size_t len,
                          const ngtcp2_path& path);
 
+  // CLOSING 期間 (close() 時刻 + 3×PTO) が満了したか
+  bool closing_period_expired() const;
+
   // 接続統計のスナップショットを取得 (コネクションが無いか閉じている場合は nullopt)
   std::optional<ngtcp2_conn_info> get_conn_info() const;
 
@@ -834,6 +858,17 @@ class QuicConnection {
   // を受けると true に戻る (RFC 9000 Section 10.2.1 の closing 状態での応答再送。
   // 再送は受信パケットごとに 1 回で、受信が無ければ再送しない)
   bool close_packet_armed_ = false;
+
+  // CLOSING 期間の満了時刻 (close() 時刻 + 3×PTO)。RFC 9000 Section 10.2 の
+  // 「at least three times the current PTO interval」を満たす。PTO は close()
+  // 時点の値を固定する。満了判定は get_timeout_ns / handle_timeout / receive /
+  // send が共有する。保持パケットが存在する場合のみ設定される
+  std::optional<uint64_t> closing_expiry_ns_;
+
+  // CONNECTION_CLOSE の初回配送 (close() 直後の最初の send()) が完了したか。
+  // 初回配送は満了判定の対象外で、満了前の受信再送とは区別する。保持パケット
+  // の破棄は初回配送完了後のみ行う
+  bool close_packet_delivered_once_ = false;
 
   // 0-RTT 状態
   bool early_data_attempted_ = false;

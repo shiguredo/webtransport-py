@@ -3,6 +3,8 @@
 ngtcp2 API のエラー処理が正しく動作することを確認するテスト
 """
 
+import time
+
 from conftest import (
     CLIENT_ADDR,
     SERVER_ADDR,
@@ -168,6 +170,115 @@ def test_connection_close_retransmission_on_receive():
     # アプリが自ら close() を呼んだため、再アーム経路では終了イベントは
     # push されない (close() 自体もイベントを push しない)
     assert server.next_event() is None
+
+
+def test_connection_close_retransmission_stops_after_closing_period():
+    """CLOSING 期間満了後は CONNECTION_CLOSE の再送が停止する"""
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet)
+
+    # ハンドシェイク完了イベントを消費しておく
+    while client.next_event() is not None:
+        pass
+    while server.next_event() is not None:
+        pass
+
+    # サーバーが close() して CONNECTION_CLOSE を生成・保持する
+    server.close(0x100, "server error")
+    assert server.is_closed()
+
+    # 初回配送 (close() 直後の最初の send()) を完了させる
+    close_packet = server.send()
+    assert close_packet is not None
+
+    # CLOSING 期間の満了前は、受信パケットごとに従来どおり 1 回再送される
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+    client.send_stream_data(stream_id, b"hello", False)
+    client_packet = client.send()
+    assert client_packet is not None
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    retransmitted = server.send()
+    assert retransmitted is not None
+    assert retransmitted.data == close_packet.data
+
+    # 満了前に再アームしておく (満了後も再アーム済みのパケットを返さない
+    # ことを破棄に依存せず確認するため)
+    client.send_stream_data(stream_id, b"world", False)
+    client_packet = client.send()
+    assert client_packet is not None
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+
+    # CLOSING 期間の満了まで実時間待ちする (get_timeout() が残り時間を返す)
+    timeout = server.get_timeout()
+    assert timeout is not None
+    time.sleep((timeout + 50_000_000) / 1_000_000_000)
+
+    # 満了後は get_timeout() が 0 を返し、handle_timeout() の呼び出しを促す
+    assert server.get_timeout() == 0
+
+    # 満了後、handle_timeout() を呼ぶ前 (保持パケット破棄前) でも、満了前に
+    # 再アーム済みの CONNECTION_CLOSE は send() が返さない (再送停止が破棄に
+    # 依存しないことを確認)
+    assert server.send() is None
+
+    # 満了後は受信パケットにも応答しない。receive() は 0 を返し、再アームも
+    # ConnectionClosed イベントの push も行わない
+    client.send_stream_data(stream_id, b"again", False)
+    client_packet = client.send()
+    assert client_packet is not None
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.send() is None
+    assert server.next_event() is None
+
+    # handle_timeout() で保持パケットが破棄され、get_timeout() が None に戻る
+    server.handle_timeout()
+    assert server.get_timeout() is None
+
+
+def test_connection_close_first_send_after_closing_period():
+    """CLOSING 期間満了後でも初回の send() は CONNECTION_CLOSE を返す"""
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet)
+
+    # ハンドシェイク完了イベントを消費しておく
+    while client.next_event() is not None:
+        pass
+    while server.next_event() is not None:
+        pass
+
+    # サーバーが close() して CONNECTION_CLOSE を生成・保持する
+    # close() 前に PTO を取得する (公開アクセサの pto は closed_ 後は None)
+    pto = server.pto
+    assert pto is not None
+    server.close(0x100, "server error")
+    assert server.is_closed()
+
+    # CLOSING 期間の満了まで実時間待ちする (初回配送を満了まで遅延)
+    timeout = server.get_timeout()
+    assert timeout is not None
+    # 満了時刻は close() 時刻 + 3×PTO で、RFC 9000 Section 10.2 の下界
+    # (at least three times the current PTO interval) を下回らない
+    # (close() から get_timeout() までの経過時間ぶんだけ残り時間は減るため
+    # 係数 0.9 で余裕を持って確認する)
+    assert timeout >= 3 * pto * 0.9
+    time.sleep((timeout + 50_000_000) / 1_000_000_000)
+
+    # 満了後、handle_timeout() を呼んでも初回配送前のため破棄されない
+    # (最初の send() が CONNECTION_CLOSE を返せる状態を保つ)
+    server.handle_timeout()
+    assert server.get_timeout() == 0
+
+    # 満了後でも初回配送は CONNECTION_CLOSE を返す (満了判定の対象外)
+    close_packet = server.send()
+    assert close_packet is not None
+
+    # 初回配送後は満了しているため再送しない
+    assert server.send() is None
+
+    # handle_timeout() で保持パケットが破棄され、get_timeout() が None に戻る
+    server.handle_timeout()
+    assert server.get_timeout() is None
 
 
 def test_stream_data_after_fin():
