@@ -1,7 +1,7 @@
 # 高レベル QUIC クライアントに connect のタイムアウトと max_datagram_frame_size を追加する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-08
 - Branch: feature/add-connect-settings
 - Polished: 2026-08-07
 - Reporter: @voluntas
@@ -39,4 +39,8 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/webtransport/quic/client.py` の `connect(timeout: float = 10.0) -> bool` にタイムアウトを追加した。`asyncio.wait_for(self._connect_waiter, timeout=timeout)` でハンドシェイク完了に打ち切りを設け、期限までに確立できない場合は接続を維持したまま `False` を返す (後始末は `close()` が担う)。`timeout <= 0` は接続を開始せず即座に `False` を返す (ngtcp2-py と同じ)。`except TimeoutError` 内で `_task_error` を確認し、バックグラウンドタスクの異常終了 (元の例外が TimeoutError の場合) をタイムアウトと区別して元の例外を伝播する
+- コンストラクタに `max_datagram_frame_size: int | None = None` を追加し、`connect()` で低レベル `Config` へ反映する。None (既定) は低レベル既定 (enable_datagram=true / 65536) を維持し、0 は `enable_datagram = False` (広告しない、ローカルの `send_datagram()` も無効化)、正の値は `enable_datagram = True` + 指定値で広告する。範囲外の値 (負または 2^62 - 1 超) は `ValueError` を raise する (RFC 9221 Section 3 の受信サポート広告の意味づけ、RFC 9000 Section 16 の変長整数上限)
+- テストは `tests/test_e2e_quic_connect_settings.py` に 9 件を追加した (connect のタイムアウト / timeout<=0 / 正常時の True / タイムアウト後の接続存続と後追いハンドシェイク / DATAGRAM 広告の正値・0・既定 / 上限境界値の受理 / 範囲外の ValueError)
+- `skills/webtransport-py/SKILL.md` の `quic.Client` 節に `connect(timeout=...)` / `max_datagram_frame_size` の説明を追加した
+- `CHANGES.md` の `## develop` セクションに `[ADD]` エントリを追加した
