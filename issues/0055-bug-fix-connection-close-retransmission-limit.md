@@ -1,7 +1,7 @@
 # CONNECTION_CLOSE の再送が CLOSING 期間満了後も無期限に続く
 
 - Created: 2026-08-09
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-10
 - Branch: feature/fix-connection-close-retransmission-limit
 - Polished: 2026-08-09
 
@@ -40,3 +40,15 @@ close() 後の受信パケットへの応答として CONNECTION_CLOSE を再送
 - 満了処理後 (保持パケット破棄後) は `get_timeout()` が None に戻る
 - 保持パケットが無い接続 (RETRY 経路等) では「閉じた後は get_timeout() が None」の既存契約が維持される
 - モックなしの Sans-IO テストで確認する (時間は実時間で進むため、CLOSING 期間の経過は get_timeout() の返り値に応じた実時間待ちで再現する。テストはハンドシェイク完了後に close() した接続で行う。ハンドシェイク途中の close() では PTO が初期 PTO 相当になり実時間待ちが大きく伸びるため。手順: close() → 初回 send() で CONNECTION_CLOSE を送出 (初回配送を先に完了) → 満了前にピアのパケットを受信して再アーム → 実時間待ちで満了 → handle_timeout() を呼ぶ前に満了後受信パケットを渡して send() が None を返すこと (満了前に再アーム済みのパケットも含め、満了後の send() が再送しないこと。破棄に依存しないことを確認) → handle_timeout() で破棄され get_timeout() が None に戻る)
+
+## 解決方法
+
+- `src/bindings/quic.h` に CLOSING 期間の満了管理用の状態保持 (`closing_expiry_ns_`: 満了時刻、`close_packet_delivered_once_`: 初回配送完了フラグ) を追加し、`receive` / `send` / `get_timeout_ns` / `handle_timeout` のドキュメントを更新した
+- `src/bindings/quic.cpp` の `close` メソッドは、CONNECTION_CLOSE を生成できた場合に限り、close() 時刻 + 3×PTO (close() 時点の PTO を `ngtcp2_conn_get_pto2` で固定) を満了時刻として保持するようにした (RFC 9000 Section 10.2 の「at least three times the current PTO interval」)
+- `src/bindings/quic.cpp` の `get_timeout_ns` は、維持パケットが存在する closing 中は CLOSING 期間の満了までの残り時間のみを返し、満了後は 0、破棄後は nullopt に戻すようにした
+- `src/bindings/quic.cpp` の `handle_timeout` は、満了時刻を過ぎた場合のみ保持パケットを破棄して再送を停止するようにした。破棄は初回配送完了後のみ行い、初回配送前の満了では破棄しない (最初の send() が CONNECTION_CLOSE を返せる状態を保つ)。closing 中は ngtcp2 を駆動しない
+- `src/bindings/quic.cpp` の `receive` は、満了後は受信パケットを ngtcp2 に渡さず 0 を返して再アームもイベント push も行わないようにした (再送停止が破棄に依存しない)
+- `src/bindings/quic.cpp` の `send` は、初回配送 (close() 直後の最初の send()) は満了判定の対象外で必ず返し、満了後は再アームされていても返さないようにした
+- `src/bindings/quic.cpp` のムーブコンストラクタ・ムーブ代入演算子に新メンバーを追加した
+- `tests/test_quic_error_handling.py` に `test_connection_close_retransmission_stops_after_closing_period` (満了後は再送が停止し、破棄に依存しないこと・満了処理後は get_timeout() が None に戻ることを確認) と `test_connection_close_first_send_after_closing_period` (初回配送は満了判定の対象外・初回配送前の満了では破棄されないことを確認) を追加した
+- `CHANGES.md` の `## develop` セクションに `[FIX]` エントリを追加した
