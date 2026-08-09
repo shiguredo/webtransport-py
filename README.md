@@ -159,6 +159,100 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### WebTransport over HTTP/2
+
+#### サーバー
+
+```python
+import asyncio
+
+from webtransport import h2
+
+
+async def main() -> None:
+    server = h2.Server(
+        host="0.0.0.0",
+        port=8443,
+        certfile="cert.pem",
+        keyfile="key.pem",
+    )
+
+    async def on_session_ready(session_writer: h2.SessionWriter) -> None:
+        print(f"セッション確立: {session_writer.session_id}")
+
+    async def on_stream_data(
+        stream_id: int,
+        data: bytes,
+        session_writer: h2.SessionWriter,
+    ) -> None:
+        print(f"データ受信: {data}")
+        # エコーバック
+        await session_writer.send_stream_data(stream_id, data)
+
+    async def on_datagram(data: bytes, session_writer: h2.SessionWriter) -> None:
+        print(f"データグラム受信: {data}")
+        # エコーバック
+        await session_writer.send_datagram(data)
+
+    server.on_session_ready(on_session_ready)
+    server.on_stream_data(on_stream_data)
+    server.on_datagram(on_datagram)
+
+    async with server:
+        print(f"サーバー開始: {server.host}:{server.actual_port}")
+        await server.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+#### クライアント
+
+```python
+import asyncio
+
+from webtransport import h2
+
+
+async def main() -> None:
+    client = h2.Client(
+        url="https://localhost:8443/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes) -> None:
+        print(f"データ受信: {data}")
+
+    async def on_datagram(data: bytes) -> None:
+        print(f"データグラム受信: {data}")
+
+    client.on_stream_data(on_stream_data)
+    client.on_datagram(on_datagram)
+
+    if not await client.connect():
+        print("接続失敗")
+        return
+
+    # ストリームでデータ送信
+    stream_id = await client.open_stream()
+    await client.send_stream_data(stream_id, b"Hello via stream!")
+
+    # データグラムでデータ送信
+    await client.send_datagram(b"Hello via datagram!")
+
+    try:
+        await asyncio.wait_for(client.run(), timeout=5.0)
+    except TimeoutError:
+        pass
+
+    await client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ### QUIC
 
 #### サーバー
@@ -217,23 +311,20 @@ async def main() -> None:
         verify_peer=False,
     )
 
-    async def on_stream_data(stream_id: int, data: bytes, fin: bool) -> None:
-        print(f"データ受信: {data}")
-
-    client.on_stream_data(on_stream_data)
-
     if not await client.connect():
         print("接続失敗")
         return
 
-    # 双方向ストリームを開いてデータ送信
+    # 双方向ストリームを開いてデータ送信 (FIN でストリームを閉じる)
     stream_id = await client.open_stream(bidirectional=True)
-    await client.send_stream_data(stream_id, b"Hello, QUIC!")
+    await client.send_stream_data(stream_id, b"Hello, QUIC!", fin=True)
 
+    # サーバーからのエコーを FIN まで受信する
     try:
-        await asyncio.wait_for(client.run(), timeout=5.0)
+        data, _ = await client.recv_stream_data(stream_id, timeout=5.0)
+        print(f"データ受信: {data}")
     except TimeoutError:
-        pass
+        print("受信タイムアウト")
 
     await client.close()
 
