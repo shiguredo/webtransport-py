@@ -1,7 +1,7 @@
 # 高レベル QUIC クライアントに NAT rebinding 用のソケット差し替えを追加する
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-09
 - Branch: feature/add-socket-rebind
 - Polished: YYYY-MM-DD
 - Reporter: @voluntas
@@ -30,4 +30,8 @@
 
 ## 解決方法
 
-(実装時に追記する)
+本 issue は実装せず closed にする。polish-issue での検証により前提が反証されたため。
+
+- 素の属性代入 `client._socket = new_socket` で NAT rebinding が成立し、差し替え前後の echo が両方成立することを e2e 実験で確認した (目的はコード変更なしで達成済み)
+- issue が提案していた設計 (「`_local_addr` も更新する」) は、ngtcp2 クライアントの unknown path パケット破棄 (ngtcp2_conn.c の `ngtcp2_conn_read_pkt_versioned`) により接続を破壊するため、実装してはならない
+- 「NAT rebinding。RFC 9000 Section 9.3.1」の引用は誤り (Section 9.3.1 は Peer Address Spoofing。NAT rebinding の記述は Section 9 / 9.3)
