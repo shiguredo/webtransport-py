@@ -1,7 +1,7 @@
 # CONNECTION_CLOSE が UDP ロス時に再送されない
 
 - Created: 2026-08-06
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-09
 - Branch: feature/fix-connection-close-retransmission
 - Polished: 2026-08-08
 
@@ -36,3 +36,12 @@ close() が生成した CONNECTION_CLOSE パケットが UDP ロスでピアに�
 - close() 後に送信した CONNECTION_CLOSE がピアに届かない (UDP ロス) 状態で、ピア (まだ接続が生きていると思っている) がパケットを送ってきた場合、`receive()` → `send()` が CONNECTION_CLOSE を再送する
 - 再送は受信データグラムごとに 1 回で、受信が無ければ再送されない。receive() を挟まない 2 回目の `send()` は従来どおり None を返す (0030 の契約維持)
 - モックなしの Sans-IO テストで確認する (UDP ロスは「CONNECTION_CLOSE パケットをピアに渡さない」ことで再現する。close() → send() で CONNECTION_CLOSE を生成して保持 → パケットをピアに渡さず、ピア (クライアント) が `send_stream_data` で送信データを積んで `send()` で生成したパケットをサーバーの receive() に渡す → send() が CONNECTION_CLOSE を再送することを検証する)
+
+## 解決方法
+
+- `src/bindings/quic.h` に再送用の状態保持 (`pending_close_packet_` の保持継続と `close_packet_armed_` フラグ) を追加し、`send()` のドキュメントを「初回は必ず返し、receive() が再アームするまで nullopt」に更新した
+- `src/bindings/quic.cpp` の `receive` メソッドは、close() で CONNECTION_CLOSE を生成できた場合 (保持パケットが存在する場合) のみ `closed_` ガードを外して `ngtcp2_conn_read_pkt` を呼び、`NGTCP2_ERR_CLOSING` で受信を検知して再アームするようにした。DRAINING 状態では再送しない防御ガードも入れた
+- `src/bindings/quic.cpp` の `send` メソッドは、`close_packet_armed_` が true のときだけ保持パケットのコピーを返し、返した後は受信応答で再アームされるまで nullopt を返すようにした (0030 の初回配送契約を維持)
+- 再送は受信データグラムごとに 1 回 (1:1) で、同一パケットを再送する。増幅攻撃の 3 倍ルール・レート制限・パケット帰属の前提を `receive` のコメントに明記した
+- `tests/test_quic_error_handling.py` に `test_connection_close_retransmission_on_receive` を追加し、`test_receive_after_close` を self.close() 後の再アーム検証に更新した。`tests/test_quic_conn_state.py` に `test_close_mid_handshake_retransmits_connection_close` を追加し、`test_close_before_handshake` に保持パケット無し経路の receive() 検証を追記した
+- `CHANGES.md` の `## develop` セクションに `[FIX]` エントリを追加した
