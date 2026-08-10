@@ -1,7 +1,7 @@
 # 高レベル QUIC クライアントの _send_pending と close が送信パケット数を返すようにする
 
 - Created: 2026-08-07
-- Completed: YYYY-MM-DD
+- Completed: 2026-08-10
 - Branch: feature/add-send-pending-count
 - Polished: 2026-08-09
 - Reporter: @voluntas
@@ -36,4 +36,12 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/webtransport/quic/client.py` の高レベル `Client._send_pending()` が送信したパケット数 (0 または 1) を返すように変更した。`_connection` や `_socket` が None の場合・`send()` が `None` を返す場合は 0 を返す
+- `Client.close()` の戻り値を `int` に変更し、close() 中に `_send_pending()` が送出できたパケット数 (CONNECTION_CLOSE 送出成否に対応する 0 か 1) を返すようにした。`_send_pending()` が OSError を送出した場合は送出できなかったものとして 0 を返し、`logger.warning` で送出失敗を記録する。socket クローズは従来どおり `finally` で必ず実行する
+- `tests/test_e2e_quic.py` に以下のテストを追加した
+  - `_connection.close()` 後に受信タスクを停止して `_send_pending()` を呼び、戻り値が 1 になることと、続けて呼んだ 2 回目の戻り値が 0 になること
+  - 接続確立済みの `Client` に対して `await client.close()` を呼び、戻り値が 1 になること (公開 API のみで CONNECTION_CLOSE 送出を観測できることの検証)
+  - 未接続の `Client` に対して `await client.close()` を呼び、戻り値が 0 になること
+  - ソケットを閉じてから `await client.close()` を呼び、送出失敗時に戻り値が 0 になること
+  - 未接続の `Client` に対して `_send_pending()` を呼び、戻り値が 0 になること
+- `CHANGES.md` の develop セクションに [ADD] エントリを追加した
