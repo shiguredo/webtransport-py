@@ -301,18 +301,21 @@ class Client:
             return (packet.remote_host, packet.remote_port)
         return (self._host, self._port)
 
-    async def _send_pending(self) -> None:
+    async def _send_pending(self) -> int:
         """送信待ちパケットを 1 つ送出する
 
         send() を ACK なしで連続 drain すると、ストリームデータ滞留時に
         戻ってこなくなるため、1 呼び出しあたり 1 パケットに留める。
+
+        Returns:
+            送信したパケット数 (0 または 1。送信しない場合は 0)
         """
         if self._connection is None or self._socket is None:
-            return
+            return 0
 
         packet = self._connection.send()
         if packet is None:
-            return
+            return 0
 
         loop = asyncio.get_running_loop()
         await loop.sock_sendto(
@@ -320,6 +323,7 @@ class Client:
             packet.data,
             self._destination_for_packet(packet),
         )
+        return 1
 
     async def _receive(self) -> None:
         """データを受信する"""
@@ -1052,8 +1056,13 @@ class Client:
         # 受信タスクは close() まで継続する
         await asyncio.shield(self._recv_task)
 
-    async def close(self) -> None:
-        """接続を閉じる"""
+    async def close(self) -> int:
+        """接続を閉じる
+
+        Returns:
+            close() 中に送出できたパケット数。CONNECTION_CLOSE の送出に
+            成功した場合は 1、送出しなかった場合 (未接続時や送信失敗時) は 0
+        """
         self._running = False
         self._connected = False
 
@@ -1071,16 +1080,26 @@ class Client:
             elif not _in_callback_var.get() and asyncio.current_task() is not task:
                 await asyncio.gather(task, return_exceptions=True)
 
+        sent = 0
         try:
             if self._connection is not None:
                 self._connection.close()
-                await self._send_pending()
+                try:
+                    sent += await self._send_pending()
+                except OSError as exc:
+                    # CONNECTION_CLOSE の送出に失敗した場合は送出できなかった
+                    # ものとして 0 を返す
+                    logger.warning("failed to send connection close: %s", exc)
         finally:
-            # _send_pending() が OSError を raise しても socket クローズは
-            # 必ず実行する (FD リークを防ぐ)
+            # 予期しない例外が発生しても socket クローズは必ず実行する
+            # (FD リークを防ぐ)。_send_pending() の OSError は内側の
+            # try で捕捉済みのため、ここに漏れてくるのは _connection.close()
+            # 由来の予期しない例外のみである
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
+
+        return sent
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
