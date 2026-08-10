@@ -1930,6 +1930,8 @@ class _LowLevelClient:
                     quic_event.data,
                     quic_event.fin,
                 )
+            elif quic_event.type == quic.EventType.DATAGRAM:
+                self._h3_session.receive_datagram(quic_event.data)
             elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                 return False
         return True
@@ -2095,6 +2097,27 @@ class _LowLevelClient:
         self._quic_connection.reset_stream(stream_id, error_code)
         self._h3_session.reset_stream(stream_id, error_code)
         await self._send_quic_only()
+
+    async def _receive_datagram(self) -> h3_low.Event | None:
+        """データグラムを受信して Datagram イベントを返す
+
+        最大 5 秒待ち、受信できなかった場合は None を返す。Datagram より
+        先に積まれた h3 イベント (セッション終了通知等) は消費して捨てる
+        """
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while True:
+            await self._receive()
+            if not self._process_quic_events():
+                return None
+            while True:
+                event = self._h3_session.next_event()
+                if event is None:
+                    break
+                if event.type == h3_low.EventType.DATAGRAM:
+                    return event
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.01)
 
 
 @dataclass
@@ -2736,18 +2759,22 @@ async def test_server_fin_closes_client_session(test_certificates):
 
 
 @pytest.mark.asyncio
-async def test_datagram_negative_session_id_passed_through(test_certificates):
-    """巨大な Quarter Stream ID を持つデータグラムで負のセッション ID が渡ることを確認
+@pytest.mark.parametrize(
+    "quarter_stream_id",
+    [1 << 60, 1 << 61],
+    ids=["2^60_positive_overflow", "2^61_negative"],
+)
+async def test_datagram_invalid_session_id_closes_connection(
+    test_certificates,
+    quarter_stream_id,
+):
+    """巨大な Quarter Stream ID を持つデータグラムでサーバーが接続を閉じることを確認する
 
-    正常トラフィックでは Quarter Stream ID は正当なセッション ID (クライアント
-    起動の双方向ストリーム ID、%4==0) から復元されるため負にならないが、仕様
-    逸脱ピアが 2^61 以上の巨大 varint を送った場合は int64 のラップで負の
-    セッション ID になる (draft-ietf-webtrans-http3-16 Section 4.5)。この場合も
-    セッション ID 集合の先頭要素へのフォールバックは行わず、負の値がそのまま
-    on_datagram に渡ることを確認する。仕様上は不正なセッション ID の受信時に
-    H3_ID_ERROR で接続をクローズする MUST があるが、その受信検証は対象外の
-    ため、本テストは現状の実装の受動的な挙動を固定するものである。MUST を
-    実装する場合は本テストの期待値を合わせて更新すること
+    仕様逸脱ピアが巨大な Quarter Stream ID を持つデータグラムを送った場合、
+    サーバーは H3_ID_ERROR (0x0108) で接続を閉じる (draft-ietf-webtrans-http3-16
+    Section 4 の MUST)。負のセッション ID になる 2^61 以上と、正のまま範囲超過に
+    なる 2^60 以上 2^61 未満の両方を検証する。不正なセッション ID は on_datagram
+    に渡らない。
     """
     server = Server(
         host="127.0.0.1",
@@ -2757,10 +2784,8 @@ async def test_datagram_negative_session_id_passed_through(test_certificates):
     )
 
     datagram_received = asyncio.Event()
-    received_session_ids: list[int] = []
 
     async def on_datagram(session_id: int, data: bytes, addr: tuple[str, int]) -> None:
-        received_session_ids.append(session_id)
         datagram_received.set()
 
     server.on_datagram(on_datagram)
@@ -2781,10 +2806,9 @@ async def test_datagram_negative_session_id_passed_through(test_certificates):
         session_id = await client.establish_session()
         assert session_id >= 0
 
-        # 負のセッション ID になる最小の Quarter Stream ID (2^61) を
-        # 8 バイト varint でエンコードする (RFC 9000 可変長整数)。
-        # quarter_stream_id * 4 が int64 の範囲を超えて負のセッション ID になる
-        quarter_stream_id = 1 << 61
+        # 巨大な Quarter Stream ID を 8 バイト varint でエンコードする
+        # (RFC 9000 可変長整数)。2^60 以上 2^61 未満は正のまま範囲超過、
+        # 2^61 以上は int64 のラップで負のセッション ID になる
         varint = (0xC0 << 56 | quarter_stream_id).to_bytes(8, "big")
         client._quic_connection.send_datagram(varint + b"huge-quarter-stream-id")
         # send() はストリームデータの後にデータグラムを書き込む (残留データが
@@ -2794,9 +2818,199 @@ async def test_datagram_negative_session_id_passed_through(test_certificates):
         for _ in range(8):
             await client._send_packet()
 
-        # 負のセッション ID がそのまま on_datagram に渡る
-        await asyncio.wait_for(datagram_received.wait(), timeout=5.0)
-        assert received_session_ids == [-(1 << 63)]
+        # サーバーが H3_ID_ERROR で接続を閉じる。CONNECTION_CLOSE を受信して
+        # error_code() が 0x0108 になるまで待つ
+        connection_closed = False
+        for _ in range(100):
+            await client._receive()
+            if not client._process_quic_events():
+                connection_closed = True
+                break
+            await asyncio.sleep(0.01)
+        assert connection_closed is True
+        assert client._quic_connection.error_code == 0x0108
+        # 不正なセッション ID のデータグラムは on_datagram に渡らない
+        assert datagram_received.is_set() is False
+
+        # エントリ削除後に同一アドレスから追従パケット (非 Initial) が届いても
+        # サーバーは黙って破棄して run() を継続する。未対策だと accept が
+        # RuntimeError を投げてサーバータスクが例外終了する (遠隔 DoS の入口)
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(
+            client._socket,
+            varint + b"huge-quarter-stream-id",
+            ("127.0.0.1", server.actual_port),
+        )
+        await asyncio.sleep(0.05)
+        assert server_task.done() is False
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "quarter_stream_id",
+    [1 << 60, 1 << 61],
+    ids=["2^60_positive_overflow", "2^61_negative"],
+)
+async def test_datagram_invalid_session_id_closes_connection_client(
+    test_certificates,
+    quarter_stream_id,
+):
+    """不正なセッション ID のデータグラムでクライアントが接続を閉じることを確認する
+
+    サーバーが巨大な Quarter Stream ID を持つデータグラムを送った場合、
+    クライアントは H3_ID_ERROR (0x0108) で接続を閉じる
+    (draft-ietf-webtrans-http3-16 Section 4 の MUST)。サーバー側の
+    test_datagram_invalid_session_id_closes_connection と対をなす検証で、
+    C++ の receive_datagram が Error イベントを生成し、高レベル Client の
+    ERROR ハンドラが接続を閉じることを確認する。不正なセッション ID は
+    on_datagram に渡らない。
+    """
+    from webtransport.h3 import Client, Server
+
+    session_ready_event = asyncio.Event()
+    client_addr = None
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        nonlocal client_addr
+        client_addr = addr
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    datagram_received = asyncio.Event()
+
+    async def on_client_datagram(data: bytes) -> None:
+        datagram_received.set()
+
+    client.on_datagram(on_client_datagram)
+
+    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+        assert client_addr is not None
+
+        # サーバーが巨大な Quarter Stream ID を 8 バイト varint でエンコードした
+        # データグラムを送る (RFC 9000 可変長整数)。2^60 以上 2^61 未満は
+        # 正のまま範囲超過、2^61 以上は int64 のラップで負のセッション ID に
+        # なる。h3 層の send_datagram は session_id を 4 で割って Quarter
+        # Stream ID を復元するが、引数が int64 のため 2^61 相当のセッション ID
+        # (2^63) は収まらず送れない。そこで QUIC 層にワイヤ形式のデータグラムを
+        # 直接注入する
+        varint = (0xC0 << 56 | quarter_stream_id).to_bytes(8, "big")
+        server_client = server._clients[client_addr]
+        assert server_client.quic_connection is not None
+        server_client.quic_connection.send_datagram(varint + b"huge-quarter-stream-id")
+        await server._send_to(client_addr, server_client)
+
+        # クライアントが H3_ID_ERROR で接続を閉じる。ERROR ハンドラが
+        # _running を False にするため run() が終了する
+        await asyncio.wait_for(client_task, timeout=5.0)
+        assert client.is_connected is False
+        # 不正なセッション ID のデータグラムは on_datagram に渡らない
+        assert datagram_received.is_set() is False
+
+        # サーバーがクライアントからの CONNECTION_CLOSE (error_code 0x0108) を
+        # 受信するまで待つ。サーバーは受信後に _clients からエントリを削除するが、
+        # error_code は ngtcp2 の ccerr を参照するため、テスト側で保持した
+        # server_client から削除後も取得できる
+        error_code_observed = False
+        for _ in range(100):
+            if server_client.quic_connection.error_code == 0x0108:
+                error_code_observed = True
+                break
+            await asyncio.sleep(0.01)
+        assert error_code_observed is True
+    finally:
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_datagram_closed_session_id_still_delivered(test_certificates):
+    """閉じたセッションの ID 宛てのデータグラムが配送されることを確認
+
+    セッション ID の検証は構造のみで行い、閉じたセッションの ID は検査
+    対象外 (draft-ietf-webtrans-http3-16 Section 4 の "Session IDs that
+    correspond to closed sessions are not considered invalid for the
+    purposes of this check")。不正なセッション ID の時だけ接続クローズと
+    なるため、閉じたセッションの ID を含む正常なセッション ID の
+    データグラムは従来どおり配送される
+    """
+    server, server_task, info = await _start_session_closed_server(
+        test_certificates, expected_sessions=2
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        first_session_id, second_session_id = await client.establish_two_sessions()
+
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        assert info.session_ids == [first_session_id, second_session_id]
+
+        # サーバー側のクライアントアドレスを取得する (接続は 1 つだけ)
+        (client_addr,) = server._clients.keys()
+
+        # 1 つ目のセッションを WT_CLOSE_SESSION で閉じる
+        client._h3_session.close_session(first_session_id)
+        await client._pump()
+
+        # サーバー側のセッション終了を待つ
+        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        assert info.closed_session_ids == [first_session_id]
+
+        # クライアント側でもセッションが閉じたことを確認する
+        assert client._h3_session.get_session_ids() == [second_session_id]
+
+        # 閉じたセッションの ID 宛てのデータグラムが配送される
+        await server.send_datagram(client_addr, first_session_id, b"closed-dg")
+        datagram_event = await client._receive_datagram()
+        assert datagram_event is not None
+        assert datagram_event.session_id == first_session_id
+        assert datagram_event.data == b"closed-dg"
+
+        # 開いているセッションの ID 宛てのデータグラムも従来どおり配送される
+        await server.send_datagram(client_addr, second_session_id, b"open-dg")
+        datagram_event = await client._receive_datagram()
+        assert datagram_event is not None
+        assert datagram_event.session_id == second_session_id
+        assert datagram_event.data == b"open-dg"
     finally:
         await _cleanup_reset_test_server(server, server_task, client)
 

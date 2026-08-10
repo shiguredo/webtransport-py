@@ -1,7 +1,7 @@
 # データグラムの不正なセッション ID 受信時に H3_ID_ERROR で接続を閉じる
 
 - Created: 2026-08-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-h3-id-error-validation
 - Polished: 2026-08-10
 
@@ -33,3 +33,10 @@ draft-ietf-webtrans-http3-16 Section 4 の MUST「endpoint が client-initiated 
 - 正常なセッション ID のデータグラムは従来どおり配送される (閉じたセッションの ID も含む)
 - サーバー/クライアントの両方で、不正なセッション ID のデータグラム受信時に接続が閉じられる (クライアント側はサーバーから不正な Quarter Stream ID を持つデータグラムを送る構成で検証する。クライアント側の検証は高レベル `Client` を使うか、`_LowLevelClient` に DATAGRAM 分岐を追加する必要がある。接続クローズの確認は、0x0108 を検証可能な側 (サーバー側の `error_code()`) で行う)
 - モックなしのテストで検証できる (既存の `test_datagram_negative_session_id_passed_through` の期待値を更新する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `receive_datagram` にセッション ID の範囲検証を追加した。QUIC ストリーム ID 範囲 (RFC 9000 Section 2.1 の 2^62-1) を超えるセッション ID のデータグラムを受信した場合は Datagram イベントを生成せず、H3_ID_ERROR (RFC 9114 の 0x0108) の Error イベントを生成して接続クローズを誘発する。検証は構造のみで行い、閉じたセッションの ID は検査対象外 (draft-ietf-webtrans-http3-16 Section 4)
+- `src/webtransport/h3/server.py` / `src/webtransport/h3/client.py` の `_process_webtransport_events` に ERROR ハンドラを追加し、error_code が 0x0108 の場合のみ `quic_connection.close(0x0108)` で接続をクローズするようにした。サーバーは CONNECTION_CLOSE 送出後に `_clients` からエントリを削除し、クライアントは `_running` / `_connected` を False にして run() を終了する。`receive_stream_data` が生成する nghttp3 エラー (0x0108 以外) は対象外
+- サーバーの `run()` で、接続クローズ後に同一アドレスから届く非 Initial パケットを黙って破棄するようにした (accept の RuntimeError でサーバータスクが落ちる問題の修正)
+- テストを更新・追加した。既存の `test_datagram_negative_session_id_passed_through` をサーバー側の `test_datagram_invalid_session_id_closes_connection` (2^60 / 2^61 の両ケースを parametrize) に置き換え、クライアント側の `test_datagram_invalid_session_id_closes_connection_client` と、閉じたセッション ID のデータグラムが配送される `test_datagram_closed_session_id_still_delivered` を追加した

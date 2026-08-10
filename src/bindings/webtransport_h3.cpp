@@ -188,10 +188,26 @@ void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
   uint64_t quarter_stream_id = 0;
   nghttp3_get_uvarint(&quarter_stream_id, data.data());
 
+  // セッション ID = Quarter Stream ID * 4。セッション ID はクライアント起動
+  // 双方向ストリーム ID に対応する必要があり (draft-ietf-webtrans-http3-16
+  // Section 4)、QUIC ストリーム ID の範囲 (RFC 9000 Section 2.1 の
+  // 2^62-1 まで) を超えるセッション ID は H3_ID_ERROR (RFC 9114 の
+  // アプリケーションエラーコード 0x0108) で接続を閉じる MUST の対象。
+  // 検証は構造のみで行い、閉じたセッションの ID は検査対象外
+  constexpr uint64_t max_session_id = (1ULL << 62) - 1;
+  uint64_t session_id = quarter_stream_id * 4;
+  if (session_id > max_session_id) {
+    H3Event event;
+    event.type = H3EventType::Error;
+    event.error_code = 0x0108;  // H3_ID_ERROR
+    event.error_message = "invalid session ID in datagram";
+    push_event(std::move(event));
+    return;
+  }
+
   H3Event event;
   event.type = H3EventType::Datagram;
-  // Session ID = Quarter Stream ID * 4
-  event.session_id = static_cast<int64_t>(quarter_stream_id * 4);
+  event.session_id = static_cast<int64_t>(session_id);
   event.data.assign(data.begin() + static_cast<std::ptrdiff_t>(varint_len),
                     data.end());
   push_event(std::move(event));
