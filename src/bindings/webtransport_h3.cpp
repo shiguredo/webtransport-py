@@ -656,6 +656,16 @@ void H3Session::send_stream_data(int64_t stream_id,
   // 書き込み未登録のストリーム (受信済みのリモート起動ストリーム等) は
   // エントリのセッション ID で登録を試み、成功した場合のみ送信する
   if (!it->second.is_write_registered) {
+    // 受信済みの単方向ストリーム (クライアント起点 %4==2 / サーバー起点
+    // %4==3) は送信方向が一方向のみ (RFC 9000 Section 2.1) のため、書き込み
+    // 登録すると nghttp3 の方向性の assert がデバッグビルドで発火して
+    // abort し得る。受信済み単方向ストリームへの送信は黙って無視する
+    // (未登録ストリームへの送信が無視されるのと同じ扱い。自側で
+    // open_stream した単方向ストリームは is_write_registered が true のため
+    // この分岐に入らない)
+    if (it->second.is_unidirectional) {
+      return;
+    }
     nghttp3_data_reader dr;
     dr.read_data = wt_data_read_callback;
 

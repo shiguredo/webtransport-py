@@ -103,6 +103,8 @@
   - @voluntas
 - [FIX] データグラムの不正なセッション ID 受信時に H3_ID_ERROR で接続を閉じる
   - @voluntas
+- [FIX] 受信済み単方向ストリームへの書き込み登録で nghttp3 の assert が発火し得るのを修正する
+  - @voluntas
 
 ### misc
 
