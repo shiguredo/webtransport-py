@@ -245,20 +245,30 @@ class H3Session {
   /**
    * WebTransport ストリームを閉じる (nghttp3 にクローズを通知)
    *
-   * QUIC 側で RESET_STREAM を送った後、または対向から RESET_STREAM を
-   * 受信した後に呼び出す。CONNECT ストリーム (セッション ID 自身) の
-   * リセットはセッション終了の正当な経路であり (draft-ietf-webtrans-http3-16
-   * Section 6 のセッション終了条件の 1 つ目)、セッションに属するストリームの
-   * 後始末を行って SessionClosed イベントを発火する。SessionClosed イベントの
-   * error_code は QUIC STREAM_RESET のアプリエラーコードであり、error_message
-   * は空である。高レベル Server ではピア由来の CONNECT ストリームのリセット
-   * 時に on_stream_reset (セッション ID 付き) に続いて on_session_closed が
-   * 発火する (ローカル起因のリセットでは on_session_closed のみ)。
+   * QUIC 側で RESET_STREAM を送った後、対向から RESET_STREAM を受信した
+   * 後、または CONNECT ストリームの FIN 受信後 (受信側のストリームクローズ
+   * の検知) に呼び出す。CONNECT ストリーム (セッション ID 自身) のリセット
+   * とクリーンクローズ (FIN) はセッション終了の正当な経路であり
+   * (draft-ietf-webtrans-http3-16 Section 6 のセッション終了条件の 1 つ目)、
+   * セッションに属するストリームの後始末を行って SessionClosed イベントを
+   * 発火する。SessionClosed イベントの error_code は、リセット経路では QUIC
+   * STREAM_RESET のアプリエラーコード、FIN 経路では 0 (WT_CLOSE_SESSION 無し
+   * のクリーンクローズは error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION
+   * と等価。draft-ietf-webtrans-http3-16 Section 6) であり、error_message は
+   * 空である。高レベル Server ではピア由来の CONNECT ストリームのリセット時に
+   * on_stream_reset (セッション ID 付き) に続いて on_session_closed が発火する
+   * (FIN 経路とローカル起因のリセットでは on_session_closed のみ)。FIN 経路の
+   * 受信時に低レベル API (h3 層) は応答 FIN や RESET_STREAM を送出しない。
+   * 高レベル Client では CONNECT ストリームの送信側が half-closed のままに
+   * なり、ピアが完全クローズを待つ場合の相互運用に影響し得る (既知の制約。
+   * 高レベル Server は SESSION_CLOSED ハンドラで QUIC 直接注入による応答 FIN
+   * を送出する)
    * @param stream_id ストリーム ID
-   * @param error_code エラーコード (QUIC STREAM_RESET のアプリエラーコード)
-   * @return リセットされたストリームが属するセッション ID。
+   * @param error_code エラーコード (QUIC STREAM_RESET のアプリエラーコード。
+   *   FIN 経路では 0 を渡す)
+   * @return クローズされたストリームが属するセッション ID。
    *   CONNECT ストリーム (セッション ID は CONNECT ストリーム ID そのもの。
-   *   draft-ietf-webtrans-http3-16 Section 2.2) の場合は 1 回目のリセットでは
+   *   draft-ietf-webtrans-http3-16 Section 2.2) の場合は 1 回目のクローズでは
    *   ストリーム ID 自身を返す (セッション終了後は session_ids_ から削除される
    *   ため、2 回目以降は -1 を返す)。
    *   セッション ID を復元できない場合 (制御ストリーム・QPACK ストリーム・
@@ -469,6 +479,10 @@ class H3Session {
                             int fin,
                             void* conn_user_data,
                             void* stream_user_data);
+  static int end_stream_cb(nghttp3_conn* conn,
+                           int64_t stream_id,
+                           void* conn_user_data,
+                           void* stream_user_data);
   static int stop_sending_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
@@ -504,7 +518,7 @@ class H3Session {
 
   // セッションに属するストリームの送信バッファとストリーム情報を削除する
   // close_session / recv_wt_close_session_cb / close_stream (CONNECT ストリーム
-  // のリセット経路) から呼ばれる
+  // のクローズ経路。リセットと FIN の両方) から呼ばれる
   void erase_session_streams(int64_t session_id);
   bool is_server_;
   H3SessionConfig config_;
@@ -534,6 +548,13 @@ class H3Session {
 
   // WebTransport セッション管理
   std::set<int64_t> session_ids_;
+
+  // end_stream コールバックで FIN を検知した CONNECT ストリームのセッション
+  // ID (セッション終了の後始末の保留集合)。コールバック内では nghttp3 を
+  // 再度呼ばず (再入防止)、receive_stream_data が nghttp3_conn_read_stream2
+  // から戻った後に close_stream で処理する。1 回の read_stream2 呼び出しで
+  // 処理されるストリームは 1 つだけのため、実際に入るのは高々 1 件
+  std::set<int64_t> pending_fin_session_ids_;
 
   // ストリームとセッションのマッピング
   std::map<int64_t, StreamInfo> stream_info_;

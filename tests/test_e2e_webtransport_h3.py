@@ -2196,7 +2196,7 @@ async def _cleanup_reset_test_server(
 
 @dataclass
 class _SessionClosedServerInfo:
-    """CONNECT ストリームのリセットによるセッション終了検知の観測結果"""
+    """CONNECT ストリームのクローズ (リセット / FIN) によるセッション終了検知の観測結果"""
 
     session_ids: list[int] = field(default_factory=list)
     sessions_ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -2486,6 +2486,84 @@ async def test_connect_stream_reset_notifies_session_closed(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_connect_stream_fin_notifies_session_closed(test_certificates):
+    """CONNECT ストリームの FIN でセッション終了が通知されることを確認
+
+    同一 QUIC 接続上に 2 セッションを確立し、1 つ目のセッションの CONNECT
+    ストリームを空 FIN でクリーンクローズすると、on_session_closed が正しい
+    セッション ID で 1 回だけ発火し、2 つ目のセッションのデータ送受信が
+    継続できることを確認する (draft-ietf-webtrans-http3-16 Section 6 の
+    セッション終了条件の 1 つ目)。旧実装では end_stream コールバックを
+    登録しておらず、CONNECT ストリームの FIN でセッション ID が
+    session_ids_ に残り続け、on_session_closed が発火しなかった
+    """
+    server, server_task, info = await _start_session_closed_server(
+        test_certificates, expected_sessions=2
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        first_session_id, second_session_id = await client.establish_two_sessions()
+
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        assert info.session_ids == [first_session_id, second_session_id]
+
+        # 1 つ目のセッションの CONNECT ストリームに空 FIN を直接注入して
+        # 届ける (高レベル API には CONNECT ストリームへ FIN を送出する
+        # 手段が無いため)
+        client._quic_connection.send_stream_data(first_session_id, b"", fin=True)
+        await client._send_quic_only()
+
+        # on_session_closed が正しいセッション ID で 1 回だけ発火する
+        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        assert info.closed_session_ids == [first_session_id]
+
+        # サーバーからの応答 FIN を受信して、クライアント側の SessionClosed
+        # イベントが発火するまで待つ (最大 5 秒。受信ループは _receive の
+        # 0.1 秒タイムアウトで駆動する)。応答 FIN は server.py の
+        # SESSION_CLOSED ハンドラによる QUIC 直接注入の 1 経路で届く。
+        # error_code は 0 (クリーンクローズ。WT_CLOSE_SESSION 無しの FIN は
+        # error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION と等価。
+        # draft-ietf-webtrans-http3-16 Section 6) で 1 回だけ発火すること
+        # を確認する
+        client_session_closed = None
+        client_session_closed_count = 0
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while client_session_closed is None:
+            await client._receive()
+            if not client._process_quic_events():
+                break
+            while True:
+                event = client._h3_session.next_event()
+                if event is None:
+                    break
+                if event.type == h3_low.EventType.SESSION_CLOSED:
+                    client_session_closed = event
+                    client_session_closed_count += 1
+            if client_session_closed is None and asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert client_session_closed_count == 1
+        assert client_session_closed is not None
+        assert client_session_closed.session_id == first_session_id
+        assert client_session_closed.error_code == 0
+
+        # 終了したセッションが session_ids_ から削除される
+        assert client._h3_session.get_session_ids() == [second_session_id]
+
+        # 2 つ目のセッションのデータ送受信が継続できることを確認する
+        stream_id = await client.open_stream(second_session_id)
+        await client.send_stream_data(stream_id, b"still-alive")
+
+        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        assert info.data_session_id == second_session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
 async def test_server_resets_client_connect_stream_closes_session(test_certificates):
     """サーバーがクライアントの CONNECT ストリームをリセットするとクライアントのセッションが終了することを確認
 
@@ -2553,6 +2631,97 @@ async def test_server_resets_client_connect_stream_closes_session(test_certifica
 
         # サーバーがクライアントの CONNECT ストリームをリセットする
         await server.reset_stream(client_addr, client_session_id, error_code=0x03)
+
+        # クライアント側で SessionClosed が発火して切断状態になる
+        await asyncio.wait_for(client_session_closed_event.wait(), timeout=5.0)
+        assert client.is_connected is False
+    finally:
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_fin_closes_client_session(test_certificates):
+    """サーバーが CONNECT ストリームへ空 FIN を送出するとクライアントのセッションが終了することを確認
+
+    高レベル Server が CONNECT ストリーム (セッション ID) へ空 FIN を
+    送出すると、クライアント側で SessionClosed が発火して is_connected が
+    False になることを確認する。高レベル API には CONNECT ストリームへ FIN
+    を送出する手段が無いため、サーバー内部の quic_connection への直接注入で
+    空 FIN を届ける。クライアントはリセットではなく FIN (クリーンクローズ)
+    でセッション終了を検知する。旧実装では FIN 経路のセッション終了検知が
+    無く、 SessionClosed が発火せず is_connected が True のまま残っていた
+    """
+    from webtransport.h3 import Client, Server
+
+    session_ready_event = asyncio.Event()
+    client_session_closed_event = asyncio.Event()
+    client_addr = None
+    client_session_id = None
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        nonlocal client_addr, client_session_id
+        client_addr = addr
+        client_session_id = session_id
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_client_session_closed(session_id):
+        client_session_closed_event.set()
+
+    client.on_session_closed(on_client_session_closed)
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+        assert client_addr is not None
+        assert client_session_id is not None
+
+        # サーバーが CONNECT ストリームへ空 FIN を直接注入して送出する
+        # (高レベル API には CONNECT ストリームへ FIN を送出する手段が無い)
+        server_client = server._clients[client_addr]
+        server_client.quic_connection.send_stream_data(
+            client_session_id,
+            b"",
+            fin=True,
+        )
+        await server._send_to(client_addr, server_client)
 
         # クライアント側で SessionClosed が発火して切断状態になる
         await asyncio.wait_for(client_session_closed_event.wait(), timeout=5.0)

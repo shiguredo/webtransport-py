@@ -33,6 +33,7 @@ H3Session::H3Session(H3Session&& other) noexcept
       pending_datagrams_(std::move(other.pending_datagrams_)),
       pending_headers_(std::move(other.pending_headers_)),
       session_ids_(std::move(other.session_ids_)),
+      pending_fin_session_ids_(std::move(other.pending_fin_session_ids_)),
       stream_info_(std::move(other.stream_info_)),
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
@@ -55,6 +56,7 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     pending_datagrams_ = std::move(other.pending_datagrams_);
     pending_headers_ = std::move(other.pending_headers_);
     session_ids_ = std::move(other.session_ids_);
+    pending_fin_session_ids_ = std::move(other.pending_fin_session_ids_);
     stream_info_ = std::move(other.stream_info_);
     control_stream_id_ = other.control_stream_id_;
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
@@ -92,6 +94,7 @@ bool H3Session::initialize() {
   callbacks.begin_headers = begin_headers_cb;
   callbacks.recv_header = recv_header_cb;
   callbacks.end_headers = end_headers_cb;
+  callbacks.end_stream = end_stream_cb;
   callbacks.stop_sending = stop_sending_cb;
   callbacks.reset_stream = reset_stream_cb;
   callbacks.shutdown = shutdown_cb;
@@ -142,6 +145,28 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
     event.error_code = static_cast<uint64_t>(-consumed);
     event.error_message = nghttp3_strerror(static_cast<int>(consumed));
     push_event(std::move(event));
+  }
+
+  // end_stream コールバックで検知した CONNECT ストリームの FIN を処理する。
+  // コールバック内で nghttp3 を再度呼ぶと再入になるため、検知したセッション
+  // ID は保留集合への記録だけに留め、nghttp3_conn_read_stream2 から戻った
+  // この時点で close_stream によりセッション終了の後始末を行う (詳細は
+  // end_stream_cb のコメント参照)。read_stream2 がエラーを返した場合も
+  // 保留集合をそのまま処理する (エラー由来の Error イベントと SessionClosed
+  // が並ぶ可能性は許容する)。close_stream の nghttp3_conn_close_stream
+  // 呼び出しは nghttp3 内部でセッションに属するデータストリームを
+  // WT_SESSION_GONE で破棄するため、draft-ietf-webtrans-http3-16 Section 6
+  // の MUST (セッション終了時に属するストリームを WT_SESSION_GONE でリセット
+  // し、新しいデータグラム・ストリームを開かない) が満たされる
+  for (int64_t session_id : pending_fin_session_ids_) {
+    // FIN 経路の error_code は 0 とする (WT_CLOSE_SESSION 無しの
+    // クリーンクローズは error code 0 かつ空のエラー文字列の
+    // WT_CLOSE_SESSION と等価。draft-ietf-webtrans-http3-16 Section 6)
+    close_stream(session_id, 0);
+  }
+  pending_fin_session_ids_.clear();
+
+  if (consumed < 0) {
     return 0;
   }
 
@@ -757,12 +782,12 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
 
   if (is_connect_stream) {
     // セッション終了の後始末 (draft-ietf-webtrans-http3-16 Section 6 の
-    // セッション終了条件の 1 つ目: CONNECT ストリームの abrupt クローズ)。
-    // セッションに属するデータストリームの stream_info_ エントリを清掃し、
-    // session_ids_ から削除する。清掃は nghttp3_conn_close_stream の同期
-    // コールバック (reset_stream_cb / stop_sending_cb / stream_close_cb) の
-    // 後に行い、コールバック内のセッション ID 復元 (stream_info_ の残存に
-    // 依存) を壊さない
+    // セッション終了条件の 1 つ目: CONNECT ストリームのクローズ。リセットと
+    // FIN の両方の経路から呼ばれる)。セッションに属するデータストリームの
+    // stream_info_ エントリを清掃し、session_ids_ から削除する。清掃は
+    // nghttp3_conn_close_stream の同期コールバック (reset_stream_cb /
+    // stop_sending_cb / stream_close_cb) の後に行い、コールバック内の
+    // セッション ID 復元 (stream_info_ の残存に依存) を壊さない
     erase_session_streams(session_id);
     session_ids_.erase(session_id);
 
@@ -1142,6 +1167,31 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
   }
 
   session->pending_headers_.erase(it);
+  return 0;
+}
+
+int H3Session::end_stream_cb(nghttp3_conn* conn,
+                             int64_t stream_id,
+                             void* conn_user_data,
+                             void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
+
+  auto* session = static_cast<H3Session*>(conn_user_data);
+
+  // 受信側のストリームが FIN で閉じられたときに呼ばれる。CONNECT ストリーム
+  // (クライアント起動双方向ストリーム) の FIN はセッション終了の正当な経路
+  // であり (draft-ietf-webtrans-http3-16 Section 6 のセッション終了条件の
+  // 1 つ目)、セッション終了の検知が必要。CONNECT ストリームの判定は
+  // session_ids_ のメンバーシップで行う (データストリームは stream_info_ に
+  // 登録されるだけで session_ids_ には含まれないため誤検知しない)。
+  // このコールバックは nghttp3_conn_read_stream2 の処理中に同期発火するため、
+  // ここで nghttp3 を再度呼ぶと再入による状態破壊の恐れがある。セッション ID
+  // を保留集合に記録するだけに留め、後始末は receive_stream_data が
+  // nghttp3_conn_read_stream2 から戻った後に close_stream で行う
+  if (session->session_ids_.count(stream_id) > 0) {
+    session->pending_fin_session_ids_.insert(stream_id);
+  }
   return 0;
 }
 

@@ -201,6 +201,105 @@ def test_connect_stream_reset_cleans_session_streams() -> None:
     assert client.get_session_streams(second_session_id) != []
 
 
+def test_connect_stream_fin_cleans_session_streams() -> None:
+    """CONNECT ストリームの FIN でセッションに属するストリーム情報が清掃されることを確認
+
+    複数セッションを確立し、あるセッションで開いたデータストリームが、
+    CONNECT ストリームの FIN (クリーンクローズ) によるセッション終了で
+    stream_info_ から削除されることを確認する。清掃されないと
+    get_session_streams が終了したセッションの stale エントリを返し続ける
+    """
+    client, _server, first_session_id, second_session_id = _establish_two_sessions()
+
+    # 1 つ目のセッションでデータストリームを開く
+    first_stream_id = 8
+    assert client.open_stream(first_session_id, first_stream_id, False) is True
+    assert client.get_session_streams(first_session_id) != []
+    assert client.get_session_streams(second_session_id) == []
+
+    # 1 つ目のセッションの CONNECT ストリームに空 FIN を届ける
+    # (Sans-IO 構成のため receive_stream_data で直接渡す)
+    client.receive_stream_data(first_session_id, b"", fin=True)
+
+    # 終了したセッションのストリーム情報が清掃される
+    assert client.get_session_streams(first_session_id) == []
+
+    # 終了したセッションが session_ids_ から削除される
+    assert client.get_session_ids() == [second_session_id]
+
+    # 他セッションのストリーム情報は清掃されない
+    second_stream_id = 12
+    assert client.open_stream(second_session_id, second_stream_id, False) is True
+    assert client.get_session_streams(second_session_id) != []
+
+    # FIN 経路の SessionClosed イベントは 1 回だけ発火し、error_code は 0
+    # (クリーンクローズ。WT_CLOSE_SESSION 無しの FIN は error code 0 かつ
+    # 空のエラー文字列の WT_CLOSE_SESSION と等価。draft-ietf-webtrans-http3-16
+    # Section 6)
+    session_closed = None
+    session_closed_count = 0
+    reset_events = []
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        if event.type == h3.EventType.SESSION_CLOSED:
+            session_closed = event
+            session_closed_count += 1
+        if event.type in (h3.EventType.RESET_STREAM, h3.EventType.STOP_SENDING):
+            reset_events.append((event.type, event.session_id, event.stream_id))
+    assert session_closed_count == 1
+    assert session_closed is not None
+    assert session_closed.session_id == first_session_id
+    assert session_closed.error_code == 0
+
+    # close_stream の同期コールバックで、セッションに属するデータストリームが
+    # WT_SESSION_GONE で破棄され、ResetStream / StopSending イベントが正しい
+    # セッション ID で発火することを確認する (draft-ietf-webtrans-http3-16
+    # Section 6 の MUST。nghttp3_conn_close_stream が nghttp3 内部で破棄する)
+    assert reset_events
+    for _event_type, event_session_id, event_stream_id in reset_events:
+        assert event_session_id == first_session_id
+        assert event_stream_id == first_stream_id
+
+
+def test_fin_then_second_close_returns_minus_one() -> None:
+    """FIN でセッション終了後に close_stream を再度呼ぶと -1 が返ることを確認
+
+    1 回目の FIN でセッションが終了して session_ids_ から削除されるため、
+    2 回目の同一 CONNECT ストリームの close_stream ではセッション ID を
+    復元できず -1 が返り、SessionClosed も追加発火しない (データストリームの
+    二重クローズの -1 と対称)
+    """
+    client, _server, session_id = _establish_session()
+
+    # FIN でセッションを終了する
+    client.receive_stream_data(session_id, b"", fin=True)
+
+    # SessionClosed が 1 回だけ発火する
+    session_closed_count = 0
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        if event.type == h3.EventType.SESSION_CLOSED:
+            session_closed_count += 1
+    assert session_closed_count == 1
+
+    # 2 回目の close_stream ではセッション終了済みのため -1 が返る
+    assert client.close_stream(session_id, 0) == -1
+
+    # 2 回目の close_stream で SessionClosed は追加発火しない
+    session_closed_count = 0
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        if event.type == h3.EventType.SESSION_CLOSED:
+            session_closed_count += 1
+    assert session_closed_count == 0
+
+
 def test_send_to_unregistered_stream_is_ignored() -> None:
     """未登録ストリームへの送信がどのセッションにも配送されないことを確認
 

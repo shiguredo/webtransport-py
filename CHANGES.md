@@ -97,6 +97,8 @@
   - @voluntas
 - [FIX] CONNECT ストリームのリセット時にセッション終了の後始末と通知が行われないのを修正する
   - @voluntas
+- [FIX] CONNECT ストリームのクリーンクローズ (FIN) でセッション終了の後始末が行われないのを修正する
+  - @voluntas
 
 ### misc
 

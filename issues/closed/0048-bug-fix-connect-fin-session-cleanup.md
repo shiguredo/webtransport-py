@@ -1,7 +1,7 @@
 # CONNECT ストリームのクリーンクローズ (FIN) でセッション終了の後始末が行われないのを修正する
 
 - Created: 2026-08-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-connect-fin-session-cleanup
 - Polished: 2026-08-10
 
@@ -34,3 +34,23 @@ draft-ietf-webtrans-http3-16 Section 6 のセッション終了条件の 1 つ�
 - FIN 経路の `SessionClosed` イベントの `error_code` は 0 であること (リセット経路の `error_code` は QUIC STREAM_RESET のエラーコードだが、FIN 経路は該当しない。draft-ietf-webtrans-http3-16 Section 6 のクリーンクローズ相当の扱い)
 - セッションに属するデータストリームの `stream_info_` エントリが清掃されること (0026 の `test_connect_stream_reset_cleans_session_streams` に相当する検証)
 - モックなしのテストで検証できる (0026 のテスト構成を流用する)
+
+## 解決方法
+
+`src/bindings/webtransport_h3.cpp` の `H3Session` に `end_stream` コールバック (`end_stream_cb`) を登録し、CONNECT ストリームの FIN (クリーンクローズ) によるセッション終了の検知と後始末を実装した。
+
+- `initialize` で `callbacks.end_stream = end_stream_cb` を登録した
+- `end_stream_cb` は受信側のストリームが FIN で閉じられたときに呼ばれ、`session_ids_` のメンバーシップで CONNECT ストリームを判定してセッション ID を保留集合 (`pending_fin_session_ids_`) に記録するだけに留める。コールバックは `nghttp3_conn_read_stream2` の処理中に同期発火するため、コールバック内で nghttp3 を再度呼ぶと再入になる
+- `receive_stream_data` は `nghttp3_conn_read_stream2` から戻った後に保留集合のセッション ID に対して `close_stream(session_id, 0)` を実行する。リセット経路と同じ `close_stream` により、`session_ids_` からの削除・セッションに属するデータストリームの `stream_info_` / `stream_buffers_` 清掃・`SessionClosed` イベント発火が行われ、nghttp3 内部でデータストリームが WT_SESSION_GONE で破棄される (draft-ietf-webtrans-http3-16 Section 6 の MUST)。`read_stream2` がエラーを返した場合も保留集合は処理する
+- FIN 経路の `SessionClosed` イベントの `error_code` は 0 とした (WT_CLOSE_SESSION 無しのクリーンクローズは error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION と等価。draft-ietf-webtrans-http3-16 Section 6)
+- `src/bindings/webtransport_h3.h` の `close_stream` の docstring を更新した (FIN 経路からも呼ばれること、FIN 経路の error_code が 0 になる意味論、FIN 経路では低レベル API が応答 FIN を送出しない既知の制約)。ムーブコンストラクタ・ムーブ代入演算子にも `pending_fin_session_ids_` を追加した
+- 設計方針で「受理前 FIN は `end_headers_cb` の後に `end_stream` が発火する」と想定していたが、実挙動は異なることを確認した。リクエストヘッダーと FIN が同一読み取りで到着した場合、nghttp3 は応答送信前のストリームを WT_SESSION_BLOCKED にして空 FIN を処理しないため `end_stream` は発火せず、FIN は喪失する (セッションは確立されるが終了検知が発生せず `session_ids_` に残る)。対応 (accept_session 後の遅延クローズ) は現設計の拡張では実装不能であり、発生条件が異常・悪意系クライアントに限定されること、issue の設計方針が「許容する」と明言していることから、許容の判断とした。クライアント側の 200 レスポンスと FIN の同一読み取りは正常に検知できる
+
+テストは `tests/test_e2e_webtransport_h3.py` と `tests/test_webtransport_h3_stream_buffer_cleanup.py` に追加した。モックなしの e2e / Sans-IO 構成で検証する。
+
+- `test_connect_stream_fin_notifies_session_closed`: 同一 QUIC 接続上に 2 セッションを確立し、1 つ目の CONNECT ストリームに空 FIN を直接注入すると、サーバー側 `on_session_closed` が正しいセッション ID で 1 回だけ発火し、クライアント側の `SessionClosed` イベントにも error_code 0 が伝播し、`session_ids_` から削除され、2 つ目のセッションのデータ送受信が継続できることを確認
+- `test_server_fin_closes_client_session`: 高レベル Server が CONNECT ストリームへ空 FIN を直接注入すると、クライアント側で `SessionClosed` が発火して `is_connected` が False になることを確認
+- `test_connect_stream_fin_cleans_session_streams`: FIN でセッションに属するデータストリームの `stream_info_` エントリが清掃され、ResetStream / StopSending イベントが正しいセッション ID で発火し (WT_SESSION_GONE 破棄)、`SessionClosed` が error_code 0 で 1 回だけ発火することを確認
+- `test_fin_then_second_close_returns_minus_one`: FIN でセッション終了後に `close_stream` を再度呼ぶと -1 が返り、`SessionClosed` が追加発火しないことを確認
+
+なお、新テスト 4 本はいずれも修正前の実装で落ちることを実行確認済み (判別力あり)。
