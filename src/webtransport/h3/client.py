@@ -149,6 +149,10 @@ class Client:
     ) -> None:
         """データグラム受信時のコールバックを設定する
 
+        不正なセッション ID (QUIC ストリーム ID 範囲外) のデータグラムは
+        `on_datagram` に渡らず、接続が H3_ID_ERROR で閉じられる
+        (draft-ietf-webtrans-http3-16 Section 4 の MUST)。
+
         Args:
             callback: async def callback(data: bytes) -> None
         """
@@ -485,6 +489,13 @@ class Client:
 
             elif webtransport_event.type == h3_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
+                    # receive_datagram が Quarter Stream ID から session_id を
+                    # 復元し、セッション ID を検証する
+                    # (draft-ietf-webtrans-http3-16 Section 4.5 / Section 4)。
+                    # 範囲外のセッション ID は接続クローズとなり Datagram イベント
+                    # が生成されないため、ここに到達するのは構造的に有効なセッション
+                    # ID (QUIC ストリーム ID 範囲内。閉じたセッションの ID も含む)
+                    # のデータグラムのみである
                     await self._on_datagram(webtransport_event.data)
 
             elif webtransport_event.type == h3_low.EventType.RESET_STREAM:
@@ -500,6 +511,24 @@ class Client:
                     webtransport_event.stream_id,
                     webtransport_event.error_code,
                 )
+
+            elif webtransport_event.type == h3_low.EventType.ERROR:
+                # データグラムの不正なセッション ID 受信 (H3_ID_ERROR) のみ
+                # 接続クローズを扱う。receive_stream_data が生成する nghttp3
+                # エラー (error_code が 0x0108 でない) は対象外
+                if webtransport_event.error_code != 0x0108:
+                    continue
+                self._quic_connection.close(
+                    webtransport_event.error_code,
+                    webtransport_event.error_message,
+                )
+                await self._send_pending()
+                # ローカル側のクローズ後は接続を終了扱いにして run() を終了させ、
+                # 同一バッチに積まれた残りのイベント (クローズ後に配送される
+                # データグラム等) の処理を打ち切る
+                self._running = False
+                self._connected = False
+                break
 
     async def run(self) -> None:
         """メインループを実行する

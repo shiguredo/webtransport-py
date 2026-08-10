@@ -101,6 +101,8 @@
   - @voluntas
 - [FIX] CONNECT ストリームのクリーンクローズ (FIN) でセッション終了の後始末が行われないのを修正する
   - @voluntas
+- [FIX] データグラムの不正なセッション ID 受信時に H3_ID_ERROR で接続を閉じる
+  - @voluntas
 
 ### misc
 
