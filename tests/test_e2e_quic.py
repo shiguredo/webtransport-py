@@ -732,3 +732,164 @@ async def test_server_client_datagram_communication(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_pending_returns_packet_count_after_connection_close(test_certificates):
+    """_connection.close() 後の _send_pending() が送信パケット数を返すことを確認する
+
+    CONNECTION_CLOSE を生成した直後の _send_pending() は送信パケット数 1 を
+    返し、続けて呼んだ 2 回目は送信するパケットが無く 0 を返す。CONNECTION_CLOSE
+    の再送は受信パケットがある場合のみ行われる (RFC 9000 Section 10.2.1。将来
+    改訂される可能性がある) ため、受信タスクを停止してから 2 回呼ぶと 0 になる。
+    バックグラウンド受信タスクが _send_pending() を呼んで CONNECTION_CLOSE を先に
+    消費してしまう競合を避けるため、受信タスクを停止して完了を待ってから検証する。
+    """
+    from webtransport.quic import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+    # 受信タスクを停止して完了を待つ
+    client._running = False
+    await asyncio.gather(client._recv_task, return_exceptions=True)
+
+    client._connection.close()
+    assert await client._send_pending() == 1
+    # 受信タスク停止後は受信が無いため、CONNECTION_CLOSE の再送は発生しない
+    # (RFC 9000 Section 10.2.1 の応答駆動再送による)
+    assert await client._send_pending() == 0
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_returns_sent_packet_count(test_certificates):
+    """Client.close() が送信したパケット数を返すことを確認する
+
+    接続確立済みのクライアントで close() を呼ぶと CONNECTION_CLOSE が送出され、
+    戻り値として送信パケット数 1 が返る。close() 内でバックグラウンド受信タスクが
+    停止・回収されてから _send_pending() が呼ばれるため、受信タスクとの競合は
+    起きない。
+    """
+    from webtransport.quic import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+    assert await client.close() == 1
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_returns_zero_when_not_connected():
+    """未接続 Client の close() が 0 を返すことを確認する
+
+    _connection が未初期化の場合は CONNECTION_CLOSE を送出できず、close() が
+    0 を返す。公開 API のみで未接続時は送出パケット数 0 になることを検証する。
+    """
+    from webtransport.quic import Client
+
+    client = Client(host="localhost", port=4433)
+    assert await client.close() == 0
+
+
+@pytest.mark.asyncio
+async def test_client_close_returns_zero_when_send_fails(test_certificates):
+    """CONNECTION_CLOSE の送出に失敗した場合に close() が 0 を返すことを確認する
+
+    接続確立済みのクライアントでソケットを先に閉じて close() を呼ぶと、
+    _send_pending() 内の sock_sendto が OSError を送出し、close() は送出でき
+    なかったものとして 0 を返す。送出失敗はログで記録される。
+    """
+    from webtransport.quic import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+    # ソケットを先に閉じ、CONNECTION_CLOSE の sock_sendto を失敗させる
+    client._socket.close()
+
+    assert await client.close() == 0
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_pending_returns_zero_when_not_connected():
+    """未接続時の _send_pending() が 0 を返すことを確認する
+
+    _connection と _socket が未初期化の場合は送信せず 0 を返す。
+    """
+    from webtransport.quic import Client
+
+    client = Client(host="localhost", port=4433)
+    assert await client._send_pending() == 0
