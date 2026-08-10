@@ -363,3 +363,58 @@ def test_send_to_closed_session_stream_is_ignored() -> None:
         event.type == h3.EventType.STREAM_DATA and event.data == b"after-death"
         for event in received
     ), "終了したセッションのストリームへのデータが受信側に配送されました"
+
+
+@pytest.mark.parametrize(
+    "direction",
+    ["client_uni", "server_uni"],
+    ids=["クライアント起点 %4==2 受信", "サーバー起点 %4==3 受信"],
+)
+def test_send_to_received_uni_stream_is_ignored(direction: str) -> None:
+    """受信済み単方向ストリームへの送信が黙って無視されることを確認
+
+    ピアが開いた単方向ストリーム (クライアント起点 %4==2 / サーバー起点
+    %4==3) に受信側が送信すると、nghttp3 の書き込み登録
+    (nghttp3_conn_open_wt_data_stream) がストリームの方向を assert で検査し、
+    デバッグビルドでプロセスが abort し得る (単方向ストリームは送信方向が
+    一方向のみ (RFC 9000 Section 2.1) のため、受信側からの書き込みは不正な
+    利用である)。受信済み単方向ストリームへの送信は黙って無視され、
+    送信バッファにエントリが残らず、書き込み登録も行われないことを確認する。
+    判別は送信側の _has_stream_buffer が None になること (旧実装では
+    True のまま) を送信処理 (_pump) を挟む前のタイミングで確認することで
+    行う。受信側のイベント確認は判別力を持たない (受信側は nghttp3 の
+    SHUT_RD フラグにより受信データを黙って消費するため)
+    """
+    client, server, session_id = _establish_session()
+
+    if direction == "client_uni":
+        # クライアントが単方向ストリーム (%4 == 2) を開いてデータを送る
+        uni_stream_id = 14
+        assert client.open_stream(session_id, uni_stream_id, True) is True
+        client.send_stream_data(uni_stream_id, b"request")
+        _pump(client, server)
+        receiver = server
+    else:
+        # サーバーが単方向ストリーム (%4 == 3) を開いてデータを送る
+        uni_stream_id = 15
+        assert server.open_stream(session_id, uni_stream_id, True) is True
+        server.send_stream_data(uni_stream_id, b"request")
+        _pump(server, client)
+        receiver = client
+
+    # 受信側に受信済み単方向ストリームとして登録されている
+    entry = next(
+        s for s in receiver.get_session_streams(session_id) if s.stream_id == uni_stream_id
+    )
+    assert entry.is_unidirectional is True
+    assert entry.is_incoming is True
+    assert entry.is_write_registered is False
+
+    # 受信済み単方向ストリームへの送信は黙って無視される
+    receiver.send_stream_data(uni_stream_id, b"reply")
+    assert receiver._has_stream_buffer(uni_stream_id) is None
+    # 書き込み登録も行われない (is_write_registered が False のまま)
+    entry = next(
+        s for s in receiver.get_session_streams(session_id) if s.stream_id == uni_stream_id
+    )
+    assert entry.is_write_registered is False

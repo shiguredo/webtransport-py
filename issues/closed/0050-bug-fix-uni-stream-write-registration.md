@@ -1,7 +1,7 @@
 # 受信済み単方向ストリームへの書き込み登録で nghttp3 の assert が発火し得る
 
 - Created: 2026-08-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-uni-stream-write-registration
 - Polished: 2026-08-10
 
@@ -31,3 +31,9 @@
 - 双方向ストリームの既存の送信経路は影響を受けない
 - 自側で `open_stream` した単方向ストリームへの送信は従来どおり送信される (受信済み単方向ストリームへの送信だけが無視される)
 - モックなしのテストで検証できる (判別テストは修正前の実装で落ちることを確認する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `send_stream_data` の書き込み登録分岐 (`is_write_registered == false` の分岐) で、`stream_info_` エントリの `is_unidirectional` を検証し、受信済みの単方向ストリーム (クライアント起点 %4==2 / サーバー起点 %4==3) への書き込み登録を試みないようにした。受信済み単方向ストリームへの送信は黙って無視され、`is_write_registered` の更新・バッファ追加・`nghttp3_conn_resume_stream` のすべてを行わない (未登録ストリームへの送信が無視されるのと同じ扱い)。自側で `open_stream` した単方向ストリームは `is_write_registered == true` のため影響を受けない
+- docstring を更新した (`src/bindings/webtransport_h3.h` と `src/webtransport/h3/server.py` / `src/webtransport/h3/client.py` に「受信済み単方向ストリームへの送信も無視される」旨を追記)
+- テストを追加した。`tests/test_webtransport_h3_stream_buffer_cleanup.py` の `test_send_to_received_uni_stream_is_ignored` で、クライアント起点 (%4==2) とサーバー起点 (%4==3) の両方向について、受信済み単方向ストリームへの送信が黙って無視され、送信バッファにエントリが残らず書き込み登録も行われないことを Sans-IO 構成で検証する
