@@ -661,12 +661,24 @@ bool H3Session::open_stream(int64_t session_id,
   }
 
   // セッション終了を学習したエンドポイントは新しいストリームを開いては
-  // ならない (draft-ietf-webtrans-http3-16 Section 6 の MUST)。受理前 FIN
-  // を検知したセッション (終了を学習済みだが close_stream による後始末前)
-  // は、nghttp3 の CONNECT ストリームが残存するため open_wt_data_stream が
-  // 成功し得るため、ここで明示的に拒否する (close_session /
-  // WT_CLOSE_SESSION 受信経路の open_stream 拒否と統合可能な設計)
-  if (pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
+  // ならない (draft-ietf-webtrans-http3-16 Section 6 の MUST 「it MUST NOT
+  // send any new datagrams or open any new streams」)。close_session
+  // (WT_CLOSE_SESSION 送出) と recv_wt_close_session_cb (WT_CLOSE_SESSION
+  // 受信) は session_ids_ からセッション ID を削除するが、nghttp3 の
+  // CONNECT ストリームはストリームテーブルに残存し wt.session も解放され
+  // ないため、現在の依存 nghttp3 でも close_wt_session 後の
+  // open_wt_data_stream は成功し得る。session_ids_ のメンバーシップ確認で
+  // 終了したセッション ID へのストリーム開放を実効的に拒否する (WT_CLOSE
+  // _SESSION 受信後は nghttp3 側でも拒否されるが、全経路を一貫して拒否
+  // する)。受理前 FIN を検知したセッション (終了を学習済みだが
+  // close_stream による後始末前。この間は session_ids_ に含まれたまま)
+  // も同様に拒否する。close_stream による CONNECT ストリームのクローズ
+  // 経路は、nghttp3 側でも CONNECT ストリームが削除されて
+  // open_wt_data_stream が失敗する。楽観的オープン
+  // (draft-ietf-webtrans-http3-16 Section 4) は妨げない: クライアントは
+  // connect 直後に session_ids_ へ挿入されるため
+  if (session_ids_.count(session_id) == 0 ||
+      pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
       pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
     return false;
   }

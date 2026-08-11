@@ -111,6 +111,8 @@
   - @voluntas
 - [FIX] セッション終了後に終了したセッション ID 宛のデータストリームが配信されるのを修正する
   - @voluntas
+- [FIX] セッション終了後に終了したセッション ID 宛の open_stream が成功するのを修正する
+  - @voluntas
 
 ### misc
 

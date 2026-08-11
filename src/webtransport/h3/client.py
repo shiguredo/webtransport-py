@@ -354,6 +354,11 @@ class Client:
     async def open_stream(self, unidirectional: bool = False) -> int:
         """WebTransport ストリームを開く
 
+        セッション終了後・未確立の場合は h3 層の登録が失敗し、QUIC
+        ストリームだけが開いた無効な stream_id が返り得る。返された
+        stream_id への send_stream_data は無視される (サーバー側の
+        Server.open_stream が -1 を返すのと非対称な既知の挙動)。
+
         Args:
             unidirectional: 単方向ストリームにするかどうか
 
