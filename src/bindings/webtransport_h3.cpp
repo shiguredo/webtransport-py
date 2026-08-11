@@ -34,6 +34,10 @@ H3Session::H3Session(H3Session&& other) noexcept
       pending_headers_(std::move(other.pending_headers_)),
       session_ids_(std::move(other.session_ids_)),
       pending_fin_session_ids_(std::move(other.pending_fin_session_ids_)),
+      pending_pre_accept_fin_session_ids_(
+          std::move(other.pending_pre_accept_fin_session_ids_)),
+      pre_accept_fin_accepted_session_ids_(
+          std::move(other.pre_accept_fin_accepted_session_ids_)),
       stream_info_(std::move(other.stream_info_)),
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
@@ -57,6 +61,10 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     pending_headers_ = std::move(other.pending_headers_);
     session_ids_ = std::move(other.session_ids_);
     pending_fin_session_ids_ = std::move(other.pending_fin_session_ids_);
+    pending_pre_accept_fin_session_ids_ =
+        std::move(other.pending_pre_accept_fin_session_ids_);
+    pre_accept_fin_accepted_session_ids_ =
+        std::move(other.pre_accept_fin_accepted_session_ids_);
     stream_info_ = std::move(other.stream_info_);
     control_stream_id_ = other.control_stream_id_;
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
@@ -145,6 +153,30 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
     event.error_code = static_cast<uint64_t>(-consumed);
     event.error_message = nghttp3_strerror(static_cast<int>(consumed));
     push_event(std::move(event));
+  }
+
+  // 受理前 FIN の検知 (サーバー側の CONNECT ストリームに限定)。
+  // 受理前 FIN (サーバーが応答を送信する前に CONNECT ストリームが FIN で
+  // 閉じられた) では、nghttp3 がストリームを WT_SESSION_BLOCKED にして
+  // 空 FIN を処理しないため end_stream コールバックが発火せず、既存の
+  // FIN 経路 (end_stream コールバックによる検知) では検知できない。
+  // ここでは receive_stream_data に渡る fin 引数で直接検知する。
+  // end_stream が発火した受理後 FIN は pending_fin_session_ids_ に記録済み
+  // のため対象外とし、二重処理を回避する (判定は pending_fin_session_ids_
+  // の clear より前に行う)。判定を read_stream2 の後に置くことで、同一
+  // 読み取り (ヘッダー + FIN) でも end_headers_cb による session_ids_ への
+  // 挿入完了後に検知できる。ヘッダーが QPACK デコードブロック中に fin 付き
+  // データが届いた場合は、ヘッダーは後でデコードされる (session_ids_ に
+  // 挿入され SESSION_READY は発火する) が fin は完全に喪失し、以後どの
+  // 経路でも検知されない (セッションは終了検知されず session_ids_ に
+  // 残り続ける。QPACK ブロックはエンコーダーストリームの到着遅延で発生
+  // し得る既知の制約)。検知したセッションは accept_session による受理と
+  // 2xx レスポンスの書き出し完了後に close_stream で後始末する。検知後は
+  // 終了を学習した状態であり、send_datagram / open_stream の送信を拒否する
+  // (draft-ietf-webtrans-http3-16 Section 6 の MUST)
+  if (fin && is_server_ && session_ids_.count(stream_id) > 0 &&
+      pending_fin_session_ids_.count(stream_id) == 0) {
+    pending_pre_accept_fin_session_ids_.insert(stream_id);
   }
 
   // end_stream コールバックで検知した CONNECT ストリームの FIN を処理する。
@@ -270,6 +302,24 @@ H3Session::get_streams_to_send() {
       // FIN のみの場合も offset 0 を通知する
       nghttp3_conn_add_write_offset(conn_, stream_id, 0);
       nghttp3_conn_add_ack_offset(conn_, stream_id, 0);
+    }
+  }
+
+  // 受理前 FIN を検知して受理済みのセッションを、2xx レスポンスの書き出し
+  // 完了後に close_stream で後始末する。未送信の 2xx を破棄しないため、
+  // stream_flushed で書き出し完了を確認してから実行する (accept_session 直後
+  // は 0、get_streams_to_send で書き出し後に 1 になる。存在しないストリーム
+  // も 1 を返すため、受理済み集合との組み合わせで判定する)。書き出しが
+  // 完了しない間 (フロー制御等) はセッション ID が残るが、送信は
+  // send_datagram / open_stream で拒否済みのため実害はない
+  for (auto it = pre_accept_fin_accepted_session_ids_.begin();
+       it != pre_accept_fin_accepted_session_ids_.end();) {
+    int64_t session_id = *it;
+    if (nghttp3_conn_is_stream_flushed(conn_, session_id) == 1) {
+      it = pre_accept_fin_accepted_session_ids_.erase(it);
+      close_stream(session_id, 0);
+    } else {
+      ++it;
     }
   }
 
@@ -495,6 +545,19 @@ bool H3Session::accept_session(int64_t stream_id) {
   // セッション ID を記録
   session_ids_.insert(stream_id);
 
+  // 受理前 FIN を検知済みのセッションは、2xx レスポンスの書き出し完了後に
+  // close_stream で後始末する (get_streams_to_send 内で stream_flushed を
+  // 確認してから実行)。受理前の close_stream は submit_wt_response が
+  // NGHTTP3_ERR_STREAM_NOT_FOUND になり、クライアントがセッション確立を
+  // 認識できなくなるため、受理後の遅延処理が必要。submit_wt_response /
+  // confirm_wt_session が失敗して false を返す場合は検知エントリが
+  // pending_pre_accept_fin_session_ids_ に残る (接続終了まで。受理されない
+  // 場合の残留と同じ扱い)
+  if (pending_pre_accept_fin_session_ids_.count(stream_id) > 0) {
+    pending_pre_accept_fin_session_ids_.erase(stream_id);
+    pre_accept_fin_accepted_session_ids_.insert(stream_id);
+  }
+
   return true;
 }
 
@@ -594,6 +657,17 @@ bool H3Session::open_stream(int64_t session_id,
     return false;
   }
   if (session_id < 0 || session_id > max_varint) {
+    return false;
+  }
+
+  // セッション終了を学習したエンドポイントは新しいストリームを開いては
+  // ならない (draft-ietf-webtrans-http3-16 Section 6 の MUST)。受理前 FIN
+  // を検知したセッション (終了を学習済みだが close_stream による後始末前)
+  // は、nghttp3 の CONNECT ストリームが残存するため open_wt_data_stream が
+  // 成功し得るため、ここで明示的に拒否する (close_session /
+  // WT_CLOSE_SESSION 受信経路の open_stream 拒否と統合可能な設計)
+  if (pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
+      pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
     return false;
   }
 
@@ -754,10 +828,14 @@ void H3Session::send_datagram(int64_t session_id,
   // 含まれないセッション ID への送信を黙って無視する (open_stream は失敗を
   // false で返すのに対し、本対応は void のまま黙って無視する。機構も
   // 異なる: open_stream は nghttp3 のエラー返却に依存し、本対応は
-  // session_ids_ の直接確認)。楽観的送信 (draft-ietf-webtrans-http3-16
-  // Section 4) は妨げない: クライアントは connect 直後に、サーバーは
-  // CONNECT リクエスト受信時 (end_headers_cb) に session_ids_ へ挿入される
-  if (session_ids_.count(session_id) == 0) {
+  // session_ids_ の直接確認)。受理前 FIN を検知したセッション (終了を
+  // 学習済みだが close_stream による後始末前) も同様に無視する。
+  // 楽観的送信 (draft-ietf-webtrans-http3-16 Section 4) は妨げない:
+  // クライアントは connect 直後に、サーバーは CONNECT リクエスト受信時
+  // (end_headers_cb) に session_ids_ へ挿入される
+  if (session_ids_.count(session_id) == 0 ||
+      pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
+      pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
     return;
   }
 
