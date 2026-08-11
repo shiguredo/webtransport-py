@@ -1,7 +1,7 @@
 # close_session / WT_CLOSE_SESSION 受信後に終了したセッション ID 宛のデータストリームが配信される
 
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Branch: feature/fix-ghost-stream-after-session-close
 - Polished: 2026-08-11
 
@@ -32,3 +32,11 @@ draft-ietf-webtrans-http3-16 Section 6 のセッション終了 (WT_CLOSE_SESSIO
 - 破棄した ghost ストリームの後続 FIN / RESET で、`stream_close_cb` / `reset_stream_cb` / `stop_sending_cb` が `session_id = -1` で発火する (既存の未登録ストリームと同じ挙動)
 - CONNECT ストリームのクローズ経路 (既に正しく動作する経路) の late データストリーム破棄が回帰しない
 - モックなしの Sans-IO テストで検証できる (既存の `tests/conftest.py` の Sans-IO 構成 `_establish_session` / `_pump` を流用する)。ghost ストリームの注入は、セッション終了により `session_ids_` から削除された**受信側**の `receive_stream_data` へ、WT データストリームのワイヤ形式 (セッション ID を含むヘッダー) を直接注入する構成で再現する (例: `client` が `close_session` で送出した場合は `server` が受信側。0060 の実装後は `open_stream` が失敗して API 経由では注入できないため、ワイヤ形式直接注入に依存する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::recv_wt_data_cb` の冒頭で、セッションの終了状態を確認するようにした。`session_ids_` に含まれないセッション ID、および受理前 FIN 検知済みセッション (`pending_pre_accept_fin_session_ids_` / `pre_accept_fin_accepted_session_ids_`) 宛のデータストリーム (ghost ストリーム) は、StreamData イベントを発火せず `stream_info_` への登録もスキップして破棄する (draft-ietf-webtrans-http3-16 Section 6 の MUST「終了を学習したエンドポイントは、属するストリームの受信側の読み取りを中止しなければならない」と Section 4 の「closed session 宛のデータの扱いは Section 6 に従う」)。コールバック内で nghttp3 を再呼び出ししない (再入防止) ためトランスポート側の後始末は行わず、破棄した ghost ストリームはピアの FIN / RESET まで nghttp3 のストリームテーブルに残存する (既知の制約)。本修正はアプリ配信の抑止のみで、トランスポート側の読み取り中止 (STOP_SENDING / RESET_STREAM 送出) は実装しない (スコープ外)
+- `tests/conftest.py` に、ghost ストリーム注入用のワイヤ形式ヘルパー `_encode_wt_stream_data` と、受理前 FIN テストと共有する `_setup_connect` を追加した
+- テスト `tests/test_webtransport_h3_ghost_stream.py` を新規作成した (10 件)。WT_CLOSE_SESSION 受信後・送出後 (サーバー側・クライアント側) の ghost 配信抑止、生存セッションの配信継続 (サーバー側・クライアント側)、受理前 FIN 検知済みセッションへの ghost 抑止、破棄した ghost ストリームの後続 FIN / RESET での `session_id = -1` 発火、複数セッション共存時の分離、CONNECT ストリームのクローズ経路の回帰を Sans-IO 構成で検証する
+- `tests/test_webtransport_h3_pre_accept_fin.py` の `_setup_connect` を conftest.py からの import に変更した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
