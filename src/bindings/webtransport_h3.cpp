@@ -1397,6 +1397,34 @@ int H3Session::recv_wt_data_cb(nghttp3_conn* conn,
 
   auto* session = static_cast<H3Session*>(conn_user_data);
 
+  // 終了したセッション ID 宛のデータストリーム (ghost ストリーム) は
+  // アプリに配信しない。close_session (WT_CLOSE_SESSION 送出) と
+  // recv_wt_close_session_cb (WT_CLOSE_SESSION 受信) は session_ids_ から
+  // セッション ID を削除するが、nghttp3 の CONNECT ストリームはストリーム
+  // テーブルに残存するため、セッション終了後にピアが開いたデータストリーム
+  // は nghttp3 が受容してこのコールバックが呼ばれる。受理前 FIN を検知した
+  // セッション (終了を学習済みだが close_stream による後始末前) も同様に
+  // 配信しない。ここでセッションの終了状態 (session_ids_ に含まれない・
+  // 受理前 FIN 検知済み) を確認し、終了したセッションの場合は StreamData
+  // イベントを発火せず、stream_info_ への登録もスキップして破棄する。
+  // 受理前 (accept_session 前) のデータは nghttp3 が WT_SESSION_BLOCKED
+  // でバッファリングするため recv_wt_data_cb は呼ばれず、pending 集合の
+  // チェックは防御的であり、実効的な判定は受理後 (accepted 集合) で
+  // 行われる。根拠は draft-ietf-webtrans-http3-16 Section 6 の MUST
+  // (終了を学習したエンドポイントは属するストリームの受信側の読み取りを
+  // 中止する) と Section 4 の「closed session 宛のデータの扱いは Section 6
+  // に従う」。本修正はアプリ配信の抑止のみであり、トランスポート側の
+  // 読み取り中止 (STOP_SENDING / RESET_STREAM 送出) は実装しない
+  // (スコープ外)。コールバック内で nghttp3 を再呼び出ししない (再入防止)
+  // ため、トランスポート側の後始末 (close_stream) は行わない。破棄した
+  // ghost ストリームはピアの FIN / RESET まで nghttp3 のストリームテーブル
+  // に残存する (既知の制約)
+  if (session->session_ids_.count(session_id) == 0 ||
+      session->pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
+      session->pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
+    return 0;
+  }
+
   // 受信したストリームを stream_info_ に登録 (まだ登録されていない場合)
   // 書き込み登録はまだなので is_write_registered = false
   if (session->stream_info_.find(stream_id) == session->stream_info_.end()) {

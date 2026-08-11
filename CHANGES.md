@@ -109,6 +109,8 @@
   - @voluntas
 - [FIX] CONNECT ストリームの受理前 FIN でセッション終了が検知されないのを修正する
   - @voluntas
+- [FIX] セッション終了後に終了したセッション ID 宛のデータストリームが配信されるのを修正する
+  - @voluntas
 
 ### misc
 
