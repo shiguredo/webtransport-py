@@ -199,6 +199,14 @@ class H3Session {
 
   /**
    * WebTransport セッションを受理 (サーバー用)
+   *
+   * 受理前に CONNECT ストリームが FIN で閉じられていた場合 (受理前 FIN。
+   * クライアントが CONNECT 直後に FIN を送った場合に発生し得る) は、
+   * 2xx レスポンスの書き出し完了後に自動でセッション終了処理を行い、
+   * SessionClosed イベント (error_code 0) を発火する。2xx の書き出しが
+   * 完了しない間 (フロー制御等) は終了処理が保留され、セッション ID が
+   * session_ids_ に残る (未送信の 2xx を破棄しないための遅延クローズ)。
+   * 保留中も送信は send_datagram / open_stream で拒否される。
    * @param stream_id セッションストリーム ID
    * @return 成功したかどうか
    */
@@ -244,13 +252,15 @@ class H3Session {
    * 検知は session_ids_ のメンバーシップ確認で行い、セッション終了の
    * 3 経路 (close_stream による CONNECT ストリームのクローズ /
    * close_session / recv_wt_close_session_cb) がすべて session_ids_
-   * からセッション ID を削除することに依存する。根拠は
-   * draft-ietf-webtrans-http3-16 Section 6 の MUST 「セッション終了を
-   * 学習したエンドポイントは、新しいデータグラムを送信してはならない
-   * (it MUST NOT send any new datagrams or open any new streams)」。
-   * セッション確立前の楽観的送信 (draft-ietf-webtrans-http3-16 Section 4)
-   * は妨げない: クライアントは connect 直後に、サーバーは CONNECT リクエスト
-   * 受信時 (end_headers_cb) に session_ids_ へ挿入されるため
+   * からセッション ID を削除することに依存する。加えて、受理前 FIN を
+   * 検知したセッション (終了を学習済みだが close_stream による後始末前。
+   * この間は session_ids_ に含まれたまま) への送信も黙って無視する。
+   * 根拠は draft-ietf-webtrans-http3-16 Section 6 の MUST 「セッション
+   * 終了を学習したエンドポイントは、新しいデータグラムを送信しては
+   * ならない (it MUST NOT send any new datagrams or open any new
+   * streams)」。セッション確立前の楽観的送信 (draft-ietf-webtrans-http3-16
+   * Section 4) は妨げない: クライアントは connect 直後に、サーバーは
+   * CONNECT リクエスト受信時 (end_headers_cb) に session_ids_ へ挿入される
    * @param session_id セッション ID
    * @param data データグラムペイロード
    */
@@ -569,6 +579,19 @@ class H3Session {
   // から戻った後に close_stream で処理する。1 回の read_stream2 呼び出しで
   // 処理されるストリームは 1 つだけのため、実際に入るのは高々 1 件
   std::set<int64_t> pending_fin_session_ids_;
+
+  // receive_stream_data の fin 引数で検知した受理前 FIN (サーバーが応答を
+  // 送信する前に CONNECT ストリームが FIN で閉じられた) のセッション ID。
+  // 受理前 FIN では end_stream コールバックが発火しないため fin 引数で
+  // 直接検知する (発生理由の詳細は receive_stream_data の実装コメント)。
+  // accept_session による受理と 2xx レスポンスの書き出し完了後に
+  // close_stream で後始末する
+  std::set<int64_t> pending_pre_accept_fin_session_ids_;
+
+  // 受理前 FIN を検知したセッションのうち、accept_session で受理済みの
+  // セッション ID。2xx レスポンスの書き出し完了 (stream_flushed) を
+  // 確認してから close_stream で後始末する
+  std::set<int64_t> pre_accept_fin_accepted_session_ids_;
 
   // ストリームとセッションのマッピング
   std::map<int64_t, StreamInfo> stream_info_;
