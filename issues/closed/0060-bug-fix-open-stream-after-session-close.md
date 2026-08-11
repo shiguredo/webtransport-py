@@ -1,7 +1,7 @@
 # close_session / WT_CLOSE_SESSION 受信後に終了したセッション ID 宛の open_stream が成功する
 
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Branch: feature/fix-open-stream-after-session-close
 - Polished: 2026-08-11
 
@@ -33,3 +33,11 @@ draft-ietf-webtrans-http3-16 Section 6 の MUST「セッション終了を学習
 - 楽観的オープン (クライアントのセッション確立前の `open_stream` が成功する) が維持される (クライアントの `connect` 直後を Sans-IO 構成で検証する)
 - CONNECT ストリームのクローズ経路 (`close_stream`) では引き続き `open_stream` が失敗する (既に正しく動作する経路の回帰確認)
 - モックなしの Sans-IO テストで検証できる (既存の `tests/conftest.py` の Sans-IO 構成 `_establish_session` / `_pump` を流用する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::open_stream` の冒頭で、セッションの終了状態を確認するようにした。`session_ids_` に含まれないセッション ID (終了した・一度も確立されていないセッションの ID) と、受理前 FIN 検知済みセッション (`pending_pre_accept_fin_session_ids_` / `pre_accept_fin_accepted_session_ids_`。0058 で追加済みの拒否と統合) では false を返してストリームを開かない。コードコメントに draft-ietf-webtrans-http3-16 Section 6 の MUST 文面を引用し、close_session / WT_CLOSE_SESSION 受信後も nghttp3 の CONNECT ストリームが残存して open_wt_data_stream が成功し得ることを根拠として明記した (close_session 送出側は実効的な修正、WT_CLOSE_SESSION 受信側は nghttp3 側でも拒否されるためリグレッション防御)
+- `src/bindings/webtransport_h3.h` の `open_stream` の docstring に、終了したセッション ID で false を返す旨、未確立 ID の false が本ライブラリの意味論である旨、楽観的オープンとサーバー側の受理前制約を追記した
+- `src/webtransport/h3/client.py` の `Client.open_stream` の docstring に、セッション終了後に無効な stream_id が返り得る旨と send_stream_data が無視される旨を追記した (Server.open_stream の -1 との非対称な既知の挙動)
+- テスト `tests/test_webtransport_h3_open_stream.py` を新規作成した (6 件)。close_session 送出後 (送出前・送出後) と WT_CLOSE_SESSION 受信後の拒否、生存セッションの成功、楽観的オープンの維持、CONNECT ストリームのクローズ経路の拒否、未確立 ID の拒否を Sans-IO 構成で検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した

@@ -221,6 +221,19 @@ class H3Session {
 
   /**
    * WebTransport ストリームを開く
+   *
+   * 終了したセッション ID では false を返す (draft-ietf-webtrans-http3-16
+   * Section 6 の MUST 「セッション終了を学習したエンドポイントは、新しい
+   * ストリームも開いてはならない (it MUST NOT send any new datagrams or
+   * open any new streams)」)。セッション終了の検知は session_ids_ の
+   * メンバーシップ確認で行い、受理前 FIN を検知したセッション (終了を
+   * 学習済みだが close_stream による後始末前) も同様に拒否する。一度も
+   * 確立されていないセッション ID でも false を返す (本ライブラリの
+   * 意味論)。セッション確立前の楽観的オープン
+   * (draft-ietf-webtrans-http3-16 Section 4) は妨げない: クライアントは
+   * connect 直後に session_ids_ へ挿入されるため。サーバー側は受理前
+   * (accept_session 前) の open_stream は nghttp3 の wt.session 未設定に
+   * より元々失敗する (既存の制約)
    * @param session_id セッション ID
    * @param stream_id QUIC ストリーム ID
    * @param is_unidirectional 単方向ストリームかどうか
