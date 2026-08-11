@@ -12,36 +12,9 @@ close_stream で後始末する (draft-ietf-webtrans-http3-16 Section 6 の
 from __future__ import annotations
 
 import pytest
-from conftest import _accept_session, _create_session_pair, _pump
+from conftest import _accept_session, _create_session_pair, _pump, _setup_connect
 
 from webtransport import h3
-
-
-def _setup_connect(
-    client: h3.Session,
-    server: h3.Session,
-    connect_stream_id: int,
-) -> bytes:
-    """クライアントの CONNECT ヘッダーを取得し、QPACK/制御ストリームを渡す
-
-    get_streams_to_send は 1 回の呼び出しで全てのデータを返すとは限らない
-    (conftest.py の _pump 参照) ため、データが無くなるまでループで取り出し、
-    CONNECT ストリーム (connect_stream_id) 以外はすべて server に渡す。
-    QPACK エンコーダー (6) のデータを渡し忘れるとサーバー側の QPACK
-    デコードがブロックするため、全ストリームを渡し切る。
-    """
-    headers = None
-    for _ in range(64):
-        streams = client.get_streams_to_send()
-        if not streams:
-            break
-        for stream_id, data, fin in streams:
-            if stream_id == connect_stream_id:
-                headers = data
-            else:
-                server.receive_stream_data(stream_id, data, fin)
-    assert headers is not None, "CONNECT ヘッダーが取得できません"
-    return headers
 
 
 def _drain_events(session: h3.Session) -> list[h3.Event]:

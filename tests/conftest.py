@@ -194,6 +194,46 @@ def _encode_wt_datagram(session_id: int, payload: bytes) -> bytes:
     return _encode_varint(quarter_stream_id) + payload
 
 
+def _encode_wt_stream_data(session_id: int, payload: bytes) -> bytes:
+    """WT データストリーム (双方向) のワイヤ形式を組み立てる
+
+    ワイヤ形式はストリームタイプ 0x41 (WT_STREAM_BIDI。RFC 9000 の
+    可変長整数で 2 バイト 0x4041) + セッション ID (可変長整数) +
+    ペイロード。テストで注入する受信側ストリームはピア起動の双方向
+    ストリームを使う (クライアントなら %4==1、サーバーなら %4==0)。
+    単方向ストリーム (0x54) は受信側のストリーム種別が限定されるため
+    使わない。
+    """
+    return b"\x40\x41" + _encode_varint(session_id) + payload
+
+
+def _setup_connect(
+    client: h3.Session,
+    server: h3.Session,
+    connect_stream_id: int,
+) -> bytes:
+    """クライアントの CONNECT ヘッダーを取得し、QPACK/制御ストリームを渡す
+
+    get_streams_to_send は 1 回の呼び出しで全てのデータを返すとは限らない
+    (下記 _pump 参照) ため、データが無くなるまでループで取り出し、
+    CONNECT ストリーム (connect_stream_id) 以外はすべて server に渡す。
+    QPACK エンコーダー (6) のデータを渡し忘れるとサーバー側の QPACK
+    デコードがブロックするため、全ストリームを渡し切る。
+    """
+    headers = None
+    for _ in range(64):
+        streams = client.get_streams_to_send()
+        if not streams:
+            break
+        for stream_id, data, fin in streams:
+            if stream_id == connect_stream_id:
+                headers = data
+            else:
+                server.receive_stream_data(stream_id, data, fin)
+    assert headers is not None, "CONNECT ヘッダーが取得できません"
+    return headers
+
+
 def _pump(src: h3.Session, dst: h3.Session) -> None:
     """src の送信データを全て dst に渡す
 
