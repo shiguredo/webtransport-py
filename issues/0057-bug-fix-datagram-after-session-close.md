@@ -1,7 +1,7 @@
 # セッション終了後に send_datagram がデータグラムを送出してしまう
 
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Branch: feature/fix-datagram-after-session-close
 - Polished: 2026-08-10
 
@@ -33,3 +33,14 @@ draft-ietf-webtrans-http3-16 Section 6 の MUST「セッション終了を学習
 - セッション終了の 3 経路 (`close_stream` / `close_session` / `recv_wt_close_session_cb`) のすべてで、終了後の `send_datagram` が無視されることを Sans-IO 構成で検証する
 - 既存テスト `tests/test_e2e_webtransport_h3.py` の `test_datagram_closed_session_id_still_delivered` は、サーバーの `send_datagram` 経由で閉じたセッション ID 宛てデータグラムが配送されることを検証しており、本対応で送信側が塞がれて落ちる。受信側の検証 (0049 の意図: 閉じたセッション ID のデータグラムをアプリへ届ける) を維持するため、QUIC 層へのワイヤ形式直接注入 (`quic_connection.send_datagram`) に書き換える
 - モックなしのテストで検証できる (Sans-IO 構成)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::send_datagram` の冒頭で `session_ids_` のメンバーシップ確認を追加し、`session_ids_` に含まれないセッション ID (終了した・一度も確立されていないセッションの ID) への送信を黙って無視するようにした。コードコメントに draft-ietf-webtrans-http3-16 Section 6 の MUST 文面を引用し、セッション終了の 3 経路 (`close_stream` による CONNECT ストリームのクローズ / `close_session` / `recv_wt_close_session_cb`) がすべて `session_ids_` から削除することに依存する旨を明記した
+- `src/bindings/webtransport_h3.h` の `send_datagram` の docstring に、無視される条件と楽観的送信が妨げられない根拠 (Section 4) を追記した
+- `src/webtransport/h3/server.py` / `src/webtransport/h3/client.py` の `send_datagram` の docstring に「終了したセッション ID への送信は無視される」旨を追記した
+- テストを追加・更新した。新規の Sans-IO テスト `tests/test_webtransport_h3_datagram.py` で、セッション終了の 3 経路それぞれでの無視、生存セッションへの送信継続 (2 セッション構成を含む)、楽観的送信 (クライアント側・サーバー側)、未確立 ID の無視、多バイト varint のエンコード (境界値 parametrize) を検証する
+- 既存の e2e テスト `test_datagram_closed_session_id_still_delivered` は、送信側の高レベル `send_datagram` が終了したセッションへの送信を無視するようになったため、受信側の検証を QUIC 層へのワイヤ形式直接注入 (`quic_connection.send_datagram`) に書き換えて維持した
+- `tests/prop_webtransport_h3.py` の `prop_send_datagram_arbitrary` と `tests/prop_isolation_h3.py` の `prop_send_datagram_isolated` をセッション確立済みの構成に書き換え、送出経路の検証と送出の assert を追加した (未確立セッションへの送信が無視される意味変化に対応)
+- `tests/conftest.py` にデータグラムのワイヤ形式ヘルパー `_encode_varint` / `_encode_wt_datagram` を追加した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
