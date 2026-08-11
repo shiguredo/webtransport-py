@@ -1,7 +1,7 @@
 # 終了したセッション宛のデータストリーム受信で nghttp3 がセッションを復活させる
 
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-late-stream-revives-session
 - Polished: {YYYY-MM-DD}
 
@@ -27,3 +27,11 @@
 - 終了したセッション ID 宛のデータストリーム受信でセッションが復活せず、データが破棄される
 - 生存セッションのデータストリーム受信は影響を受けない
 - モックなしのテストで検証できる
+
+## 解決方法
+
+対応不要 (closed) と判断した。`/polish-issue` の必要性判断と反対尋問で、本 issue の前提が反証されたため。
+
+- nghttp3 の `nghttp3_conn_on_wt_stream` (`_deps/nghttp3/webtransport/source/lib/nghttp3_conn.c` の `nghttp3_conn_on_wt_stream`) は、CONNECT ストリーム新規作成の前に `conn_bidi_idtr_open` でセッション ID の idtr チェックを行う。確立済みセッションの ID は CONNECT リクエスト受信時に idtr へ push 済みであり (`nghttp3_conn_read_stream2` の `conn_bidi_idtr_open`)、idtr は一度 push した ID を解放しない (`nghttp3_idtr.c` の `nghttp3_idtr_open` / `nghttp3_gaptr.c` の `nghttp3_gaptr_is_pushed`)。そのためセッション終了後に `nghttp3_idtr_open` は `NGHTTP3_ERR_STREAM_IN_USE` を返し、`nghttp3_conn_on_wt_stream` は `NGHTTP3_ERR_WT_SESSION_GONE` を返してデータストリームを WT_SESSION_GONE で破棄する
+- Sans-IO の実機再現で、FIN / CONNECT リセットで終了したセッション ID 宛の late データストリームは WT_SESSION_GONE (0x170D7B68) で破棄され、セッションの復活は発生しないことを確認した。本 issue の完了条件「終了したセッション ID 宛のデータストリーム受信でセッションが復活せず、データが破棄される」は現実装で既に満たされている
+- 一方、本 issue の調査で **close_session (WT_CLOSE_SESSION 送出) / WT_CLOSE_SESSION 受信経路では nghttp3 の CONNECT ストリームが残存するため、終了したセッション ID 宛のデータストリームが `recv_wt_data_cb` 経由でアプリに配送される (ghost 配信)** という実在する別問題が判明した。これは本 issue の記述シナリオ（CONNECT ストリームのクローズ）とはトリガーが異なるため、別 issue として起票する (open issue 0059)
