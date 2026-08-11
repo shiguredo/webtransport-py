@@ -169,6 +169,31 @@ def perform_handshake(client: Connection, server: Connection, initial_packet: by
     return False
 
 
+def _encode_varint(value: int) -> bytes:
+    """RFC 9000 の可変長整数 (varint) をエンコードする
+
+    先頭 2 ビットで長さを表す (00: 1 バイト / 01: 2 バイト /
+    10: 4 バイト / 11: 8 バイト)。
+    """
+    if value < 0x40:
+        return bytes([value])
+    if value < 0x4000:
+        return bytes([0x40 | (value >> 8), value & 0xFF])
+    if value < 0x40000000:
+        return (0x80000000 | value).to_bytes(4, "big")
+    return (0xC000000000000000 | value).to_bytes(8, "big")
+
+
+def _encode_wt_datagram(session_id: int, payload: bytes) -> bytes:
+    """WebTransport データグラムのワイヤ形式を組み立てる
+
+    ワイヤ形式は Quarter Stream ID (セッション ID / 4) を RFC 9000 の
+    可変長整数でエンコードしたもの + ペイロード。
+    """
+    quarter_stream_id = session_id // 4
+    return _encode_varint(quarter_stream_id) + payload
+
+
 def _pump(src: h3.Session, dst: h3.Session) -> None:
     """src の送信データを全て dst に渡す
 

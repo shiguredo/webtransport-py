@@ -238,6 +238,19 @@ class H3Session {
 
   /**
    * WebTransport データグラムを送信
+   *
+   * session_ids_ に含まれないセッション ID (終了した・一度も確立されて
+   * いないセッションの ID) への送信は黙って無視する。セッション終了の
+   * 検知は session_ids_ のメンバーシップ確認で行い、セッション終了の
+   * 3 経路 (close_stream による CONNECT ストリームのクローズ /
+   * close_session / recv_wt_close_session_cb) がすべて session_ids_
+   * からセッション ID を削除することに依存する。根拠は
+   * draft-ietf-webtrans-http3-16 Section 6 の MUST 「セッション終了を
+   * 学習したエンドポイントは、新しいデータグラムを送信してはならない
+   * (it MUST NOT send any new datagrams or open any new streams)」。
+   * セッション確立前の楽観的送信 (draft-ietf-webtrans-http3-16 Section 4)
+   * は妨げない: クライアントは connect 直後に、サーバーは CONNECT リクエスト
+   * 受信時 (end_headers_cb) に session_ids_ へ挿入されるため
    * @param session_id セッション ID
    * @param data データグラムペイロード
    */

@@ -1,10 +1,10 @@
 """WebTransport over HTTP/3 Sans I/O API の Property-Based Testing"""
 
+from conftest import _encode_wt_datagram, _establish_session
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from webtransport import h3
-
 
 # uint64 の範囲
 UINT64_MAX = 2**64 - 1
@@ -226,10 +226,20 @@ def prop_send_stream_data_arbitrary(stream_id: int, data: bytes, fin: bool):
 @given(st.integers(min_value=0, max_value=2**62 - 1), st.binary(max_size=1200))
 @settings(max_examples=100)
 def prop_send_datagram_arbitrary(session_id: int, data: bytes):
-    """任意のデータグラムを送信してもクラッシュしない"""
-    config = h3.Config()
-    session = h3.Session.create_client(config)
-    session.send_datagram(session_id, data)
+    """任意のセッション ID へのデータグラム送信がクラッシュしないことを確認
+
+    セッション終了の MUST (draft-ietf-webtrans-http3-16 Section 6) により、
+    確立済みセッション ID への送信は送出され、session_ids_ に含まれない
+    セッション ID への送信は黙って無視される。いずれもクラッシュしない
+    """
+    client, _server, established_session_id = _establish_session()
+    # 確立済みセッション ID への送信は送出される (session_id が確立済み
+    # ID と衝突する場合は 2 件分積まれる)
+    client.send_datagram(established_session_id, data)
+    # 任意のセッション ID (未確立・終了済みを含む) への送信もクラッシュしない
+    client.send_datagram(session_id, data)
+    # 確立済み ID への送信がキューに現れることを確認する
+    assert _encode_wt_datagram(established_session_id, data) in client.get_datagrams_to_send()
 
 
 # ========== close_stream の堅牢性テスト ==========

@@ -10,6 +10,7 @@ import socket
 from dataclasses import dataclass, field
 
 import pytest
+from conftest import _encode_wt_datagram
 
 from webtransport import h3 as h3_low
 from webtransport import quic
@@ -2999,7 +3000,19 @@ async def test_datagram_closed_session_id_still_delivered(test_certificates):
         assert client._h3_session.get_session_ids() == [second_session_id]
 
         # 閉じたセッションの ID 宛てのデータグラムが配送される
-        await server.send_datagram(client_addr, first_session_id, b"closed-dg")
+        # (受信側の検証。送信側の高レベル send_datagram は終了した
+        # セッションへの送信を無視するため、QUIC 層へのワイヤ形式
+        # 直接注入で検証する。閉じたセッション ID のデータグラムを
+        # アプリへ届けるのは仕様どおりの受信挙動)
+        server_client = server._clients[client_addr]
+        assert server_client.quic_connection is not None
+        wire_datagram = _encode_wt_datagram(first_session_id, b"closed-dg")
+        server_client.quic_connection.send_datagram(wire_datagram)
+        # send() はストリームデータの後にデータグラムを書き込むため、
+        # 残留ストリームデータがあるとデータグラムが次回のパケットに
+        # 回り得る。確実に送出するため複数回フラッシュする
+        for _ in range(8):
+            await server._send_to(client_addr, server_client)
         datagram_event = await client._receive_datagram()
         assert datagram_event is not None
         assert datagram_event.session_id == first_session_id
