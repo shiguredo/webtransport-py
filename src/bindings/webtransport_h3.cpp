@@ -745,6 +745,22 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
 
 void H3Session::send_datagram(int64_t session_id,
                               const std::vector<uint8_t>& data) {
+  // セッション終了を学習したエンドポイントは新しいデータグラムを送信しては
+  // ならない (draft-ietf-webtrans-http3-16 Section 6 の MUST 「it MUST NOT
+  // send any new datagrams or open any new streams」)。セッション終了の
+  // 3 経路 (close_stream による CONNECT ストリームのクローズ /
+  // close_session / recv_wt_close_session_cb) はすべて session_ids_ から
+  // セッション ID を削除するため、メンバーシップ確認で session_ids_ に
+  // 含まれないセッション ID への送信を黙って無視する (open_stream は失敗を
+  // false で返すのに対し、本対応は void のまま黙って無視する。機構も
+  // 異なる: open_stream は nghttp3 のエラー返却に依存し、本対応は
+  // session_ids_ の直接確認)。楽観的送信 (draft-ietf-webtrans-http3-16
+  // Section 4) は妨げない: クライアントは connect 直後に、サーバーは
+  // CONNECT リクエスト受信時 (end_headers_cb) に session_ids_ へ挿入される
+  if (session_ids_.count(session_id) == 0) {
+    return;
+  }
+
   // Quarter Stream ID = Session ID / 4 を nghttp3 の varint でエンコードする
   uint64_t quarter_stream_id = static_cast<uint64_t>(session_id) / 4;
   size_t varint_len = nghttp3_put_uvarintlen(quarter_stream_id);

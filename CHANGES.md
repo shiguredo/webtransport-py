@@ -105,6 +105,8 @@
   - @voluntas
 - [FIX] 受信済み単方向ストリームへの書き込み登録で nghttp3 の assert が発火し得るのを修正する
   - @voluntas
+- [FIX] セッション終了後に send_datagram がデータグラムを送出してしまうのを修正する
+  - @voluntas
 
 ### misc
 

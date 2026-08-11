@@ -1,10 +1,10 @@
 """WebTransport over HTTP/3 の複数セッション/ストリーム干渉テスト"""
 
+from conftest import _encode_wt_datagram, _establish_two_sessions
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from webtransport import h3
-
 
 # ========== 複数 Session インスタンスの独立性テスト ==========
 
@@ -274,22 +274,28 @@ def prop_bind_qpack_streams_isolated(num_sessions: int, stream_id: int):
 
 
 @given(
-    st.integers(min_value=2, max_value=5),
-    st.integers(min_value=0, max_value=2**62 - 1),
+    st.binary(max_size=1000),
     st.binary(max_size=1000),
 )
 @settings(max_examples=50)
-def prop_send_datagram_isolated(num_sessions: int, session_id: int, data: bytes):
-    """一方のセッションでの send_datagram が他方に影響しない"""
-    config = h3.Config()
-    sessions = [h3.Session.create_client(config) for _ in range(num_sessions)]
+def prop_send_datagram_isolated(data1: bytes, data2: bytes):
+    """一方のセッションへの send_datagram が他方に影響しない
 
-    # 最初のセッションでのみデータグラムを送信
-    sessions[0].send_datagram(session_id, data)
+    同一接続内の 2 セッションそれぞれへの送信が、互いのワイヤ形式を
+    混ぜることなく独立にキューへ現れることを検証する。セッション終了の
+    無視は draft-ietf-webtrans-http3-16 Section 6 による
+    """
+    client, _server, first_session_id, second_session_id = _establish_two_sessions()
 
-    # 他のセッションの datagrams_to_send は空のまま
-    for session in sessions[1:]:
-        assert session.get_datagrams_to_send() == []
+    # 2 つのセッション ID にそれぞれデータグラムを送信する
+    client.send_datagram(first_session_id, data1)
+    client.send_datagram(second_session_id, data2)
+
+    # 各セッションのデータグラムが正しいワイヤ形式で、送信順にキューへ現れる
+    assert client.get_datagrams_to_send() == [
+        _encode_wt_datagram(first_session_id, data1),
+        _encode_wt_datagram(second_session_id, data2),
+    ]
 
 
 # ========== get 系メソッドの独立性テスト ==========

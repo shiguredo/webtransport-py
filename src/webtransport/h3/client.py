@@ -393,6 +393,9 @@ class Client:
     async def send_datagram(self, data: bytes) -> None:
         """データグラムを送信する
 
+        終了したセッション ID への送信は無視される
+        (draft-ietf-webtrans-http3-16 Section 6 の MUST)。
+
         Args:
             data: 送信データ
         """

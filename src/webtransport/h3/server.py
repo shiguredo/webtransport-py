@@ -517,6 +517,9 @@ class Server:
     ) -> None:
         """データグラムを送信する
 
+        終了したセッション ID への送信は無視される
+        (draft-ietf-webtrans-http3-16 Section 6 の MUST)。
+
         Args:
             addr: クライアントアドレス
             session_id: セッション ID
