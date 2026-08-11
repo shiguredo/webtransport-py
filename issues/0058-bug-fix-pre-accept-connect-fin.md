@@ -1,7 +1,7 @@
 # CONNECT ストリームの受理前 FIN でセッション終了が検知されない
 
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Branch: feature/fix-pre-accept-connect-fin
 - Polished: 2026-08-10
 
@@ -33,3 +33,12 @@ draft-ietf-webtrans-http3-16 Section 6 のセッション終了条件の 1 つ�
 - 通常のセッション確立 (FIN なし) は影響を受けない
 - 既存の受理後 FIN 経路 (0048 の実装) は影響を受けず、`SessionClosed` が二重に発火しない
 - モックなしのテストで検証できる (Sans-IO 構成で `receive_stream_data` にヘッダーと FIN を同時に渡すケースと、別々に渡すケース)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::receive_stream_data` に受理前 FIN の検知を追加した。`receive_stream_data` に渡る fin 引数と、サーバー側 (`is_server_`) の CONNECT ストリーム判定 (`session_ids_` のメンバーシップ)、`pending_fin_session_ids_` に未記録 (受理後 FIN の除外) の組み合わせで受理前 FIN を検知し、新メンバー `pending_pre_accept_fin_session_ids_` に記録する。判定は `nghttp3_conn_read_stream2` から戻った後 (`end_headers_cb` による `session_ids_` 挿入完了後) かつ `pending_fin_session_ids_` の clear 前に置き、同一読み取り (ヘッダー + FIN) と別読み取りの両方を検知できる
+- `accept_session` で受理した検知済みセッションを `pre_accept_fin_accepted_session_ids_` に移し、`get_streams_to_send` の書き出しループ後で `nghttp3_conn_is_stream_flushed` による 2xx レスポンスの書き出し完了を確認してから `close_stream(session_id, 0)` で遅延クローズする (未送信の 2xx を破棄せず、クライアントがセッション確立を認識できる)
+- 検知後は終了を学習した状態であるため、`send_datagram` / `open_stream` に受理前 FIN 検知済みセッションの拒否を追加した (draft-ietf-webtrans-http3-16 Section 6 の MUST「新しいデータグラムを送信せず、新しいストリームも開かない」を close_stream までの窓でも満たす)
+- `src/bindings/webtransport_h3.h` に新メンバー 2 つと `accept_session` / `send_datagram` の docstring 更新を追加した (受理前 FIN の自動終了処理と保留条件、第 4 の拒否経路)
+- テスト `tests/test_webtransport_h3_pre_accept_fin.py` を新規作成した (9 件)。同一読み取り・別読み取りの検知、error_code 0、通常確立の非影響、受理後 FIN の二重処理なし、reject_session 経路の残留、複数セッション時の独立、検知後の送信拒否、遅延クローズの保留 (block_stream)、保留中の WT_CLOSE_SESSION 受信を Sans-IO 構成で検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
