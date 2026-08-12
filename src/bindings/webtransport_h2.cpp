@@ -432,6 +432,11 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   auto* wt_session = get_wt_session(session_id);
   if (wt_session) {
     wt_session->is_established = false;
+    // WT_CLOSE_SESSION 受信でセッション終了を学習した状態にする。
+    // draft-15 Section 6.12 の受信者側 MUST (END_STREAM で応答してストリーム
+    // を閉じる) は未実装であり、HTTP/2 ストリームは両ハーフが閉じるまで
+    // 残るため、終了フラグで send_datagram の送出を抑止する
+    wt_session->is_terminated = true;
   }
 }
 
@@ -1139,6 +1144,35 @@ void H2Session::stop_sending(int32_t session_id,
 
 void H2Session::send_datagram(int32_t session_id,
                               const std::vector<uint8_t>& data) {
+  // 終了したセッション ID (WT_CLOSE_SESSION 受信後 / ローカル close_session
+  // 後) と、一度も connect されていないセッション ID への送信を黙って無視
+  // する。セッション終了は draft-15 Section 3.4 の「CONNECT ストリームの
+  // クローズ」で定義され、WT_CLOSE_SESSION (Section 6.12) はその前の終了
+  // 通知である。受信後は終了を学習した状態とみなし、新たなデータグラムを
+  // 送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、本対応
+  // は仕様強制ではなく実装ポリシー)。エントリ不在の ID (未 connect・両
+  // ハーフクローズ後にエントリが削除された ID) も無視する。チェックは
+  // send_capsule ではなくここに置く: send_capsule は close_session
+  // (WT_CLOSE_SESSION) / drain_session / reset_stream / stop_sending /
+  // フロー制御応答の送信にも使われており、そこにチェックを入れると終了後の
+  // 後始末カプセルまで塞がれる。楽観的送信 (draft-15 Section 3.2 の MAY
+  // 「クライアントは応答を待たずに WebTransport カプセルを送信してよい」)
+  // は妨げない: クライアントは connect 直後 (200 応答前)・サーバーは
+  // CONNECT リクエスト受信時に wt_sessions_ へエントリが挿入され、終了
+  // フラグが立っていない (is_established はこの間 false のため、終了状態の
+  // 判定に is_established を使うと楽観的送信がすべて無視される)
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+
+  // クライアントが非 2xx 応答 (拒否) を受けたセッション ID 宛の送信は本
+  // 対応のスコープ外である: 非 2xx 応答では終了フラグも is_established も
+  // 立たず、エントリが残ったままのため従来どおり送出される (h3 側で対応
+  // 済みの類題。別途の検討対象)。同様に、ピアが WT_CLOSE_SESSION なしで
+  // END_STREAM のみを送る終了経路 (draft-15 Section 3.4 の正規の終了経路)
+  // も検知できないためスコープ外である (ストリームの両ハーフが閉じるまで
+  // 送出され続ける。既知の制約)
   send_capsule(session_id, CapsuleType::Datagram, data);
 }
 
@@ -1166,6 +1200,18 @@ void H2Session::close_session(int32_t session_id,
   }
 
   send_capsule(session_id, CapsuleType::WtCloseSession, payload);
+
+  // ローカルの close_session で終了を学習した状態にする。flush のタイミング
+  // に依存せず、以後の send_datagram が WT_CLOSE_SESSION の後ろに積まれる
+  // のを防ぐ (send_capsule にはチェックを入れないため、後始末カプセル
+  // WT_CLOSE_SESSION 自体は塞がれない)。受信側 (handle_wt_close_session) と
+  // 対称に is_established も false にし、get_session_ids からの消滅と
+  // open_stream の失敗 (セッション終了後の新規ストリーム開放の抑止) を
+  // 行う。is_established が false になることで以後の受信カプセル処理
+  // (on_data_chunk_recv_callback のゲート) も停止する (h3 側の close_stream
+  // と同様の終了後後始末)
+  wt_session->is_terminated = true;
+  wt_session->is_established = false;
 
   // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
   // RST_STREAM ではアプリケーション終了を正しく伝えられない

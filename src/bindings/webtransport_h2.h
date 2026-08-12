@@ -195,6 +195,11 @@ struct WtSessionInfo {
   int32_t http2_stream_id;
   bool is_established = false;
 
+  // セッション終了を学習したか (WT_CLOSE_SESSION 受信 / ローカル close_session)。
+  // is_established は connect 直後 (200 応答前) も false のため、楽観的送信
+  // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
+  bool is_terminated = false;
+
   // フロー制御 (送信側)
   uint64_t bytes_sent = 0;
   uint64_t max_data_local = 0;
@@ -354,6 +359,20 @@ class H2Session {
   /**
    * データグラムを送信
    * DATAGRAM capsule を送信
+   *
+   * 終了したセッション ID (WT_CLOSE_SESSION 受信後 / ローカル close_session 後)
+   * と、一度も connect されていないセッション ID への送信は黙って無視する。
+   * セッション終了の検知は wt_sessions_ のエントリと is_terminated フラグで
+   * 行う (draft-15 Section 3.4 のセッション終了 = CONNECT ストリームのクローズ
+   * と Section 6.12 の WT_CLOSE_SESSION による終了通知。本対応は仕様強制では
+   * なく実装ポリシーである)。楽観的送信 (draft-15 Section 3.2 の MAY) は
+   * 妨げない: クライアントは connect 直後 (200 応答前)、サーバーは CONNECT
+   * リクエスト受信時に wt_sessions_ へエントリが挿入され、終了フラグが立って
+   * いないため従来どおり送出される。クライアントが非 2xx 応答 (拒否) を受けた
+   * セッション ID 宛の送信はスコープ外である (エントリが残ったまま終了フラグ
+   * も is_established も立たないため従来どおり送出される)。ピアが
+   * WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
+   * Section 3.4 の正規の終了経路) も検知できずスコープ外である (既知の制約)
    * @param session_id セッション ID
    * @param data データ
    */
