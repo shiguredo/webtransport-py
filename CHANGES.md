@@ -123,6 +123,8 @@
   - @voluntas
 - [FIX] セッション終了後に終了したセッション ID 宛のデータグラムが配信されるのを修正する
   - @voluntas
+- [FIX] クライアントの open_stream が失敗時に無効な stream_id を返す問題を修正する
+  - @voluntas
 
 ### misc
 

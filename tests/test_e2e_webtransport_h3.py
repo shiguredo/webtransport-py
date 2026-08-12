@@ -3106,3 +3106,132 @@ async def test_server_stop_delivers_connection_close(test_certificates):
         if client is not None:
             await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_open_stream_after_session_close_returns_minus_one(test_certificates):
+    """セッション終了後の Client.open_stream が -1 を返し RESET_STREAM を送出することを確認
+
+    セッション終了後に open_stream を呼ぶと、h3 層の登録が失敗するため
+    QUIC ストリームだけが開いた無効な stream_id が返っていた問題の修正。
+    修正後は -1 を返し、開いた QUIC ストリームを RESET_STREAM で解放する
+    (Server.open_stream と対称の挙動)。RESET_STREAM はサーバー側の
+    on_stream_reset で観測する (WT ヘッダー未受信のため session_id は -1、
+    error_code は 0)。
+    """
+    from webtransport.h3 import Client, Server
+
+    client_addr = None
+    client_session_id = None
+    session_ready_event = asyncio.Event()
+    client_session_closed_event = asyncio.Event()
+    server_stream_reset_event = asyncio.Event()
+    server_resets = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        nonlocal client_addr, client_session_id
+        client_addr = addr
+        client_session_id = session_id
+        session_ready_event.set()
+
+    server.on_session_ready(on_session_ready)
+
+    async def on_stream_reset(session_id, stream_id, error_code, addr):
+        server_resets.append((session_id, error_code))
+        if error_code == 0:
+            server_stream_reset_event.set()
+
+    server.on_stream_reset(on_stream_reset)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    client_task = None
+
+    async def on_session_closed(session_id):
+        client_session_closed_event.set()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    client.on_session_closed(on_session_closed)
+
+    try:
+        connected = await client.connect()
+        assert connected is True
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+        assert client_addr is not None
+        assert client_session_id is not None
+
+        # サーバー側の低レベルセッションを閉じ、クライアントに WT_CLOSE_SESSION
+        # を送ってセッション終了を学習させる
+        server_client = server._clients[client_addr]
+        assert server_client.webtransport_session is not None
+        server_client.webtransport_session.close_session(client_session_id, 0)
+        # send() は 1 パケットに留める設計のため、残留データの掃き出しを
+        # 確実にする防御として複数回フラッシュする
+        for _ in range(8):
+            await server._send_to(client_addr, server_client)
+
+        await asyncio.wait_for(client_session_closed_event.wait(), timeout=5.0)
+
+        failed_stream_id = await client.open_stream()
+        assert failed_stream_id == -1
+
+        # 開いた QUIC ストリームの RESET_STREAM (error_code 0) がサーバーに届く
+        await asyncio.wait_for(server_stream_reset_event.wait(), timeout=5.0)
+        zero_code_resets = [r for r in server_resets if r[1] == 0]
+        assert len(zero_code_resets) == 1
+        assert zero_code_resets[0][0] == -1
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(
+            *(t for t in [client_task, server_task] if t is not None),
+            return_exceptions=True,
+        )
+
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_open_stream_before_connect_returns_minus_one():
+    """connect 前 (未確立) の Client.open_stream が -1 を返すことを確認
+
+    接続が確立されていない状態では既存ガード (_quic_connection が None) で
+    -1 を返す。回帰確認。
+    """
+    from webtransport.h3 import Client
+
+    client = Client(
+        url="https://127.0.0.1:4433/webtransport",
+        verify_peer=False,
+    )
+
+    stream_id = await client.open_stream()
+    assert stream_id == -1

@@ -356,22 +356,36 @@ class Client:
     async def open_stream(self, unidirectional: bool = False) -> int:
         """WebTransport ストリームを開く
 
-        セッション終了後・未確立の場合は h3 層の登録が失敗し、QUIC
-        ストリームだけが開いた無効な stream_id が返り得る。返された
-        stream_id への send_stream_data は無視される (サーバー側の
-        Server.open_stream が -1 を返すのと非対称な既知の挙動)。
+        失敗した場合は -1 を返す。失敗条件は、セッション終了後・非 2xx
+        拒否後・未確立 (connect 失敗後)・接続クローズ済みである。h3 層の
+        登録に失敗した場合は、開いた QUIC ストリームを RESET_STREAM で
+        解放してから -1 を返す (RESET_STREAM の送出は run() の送信ループ
+        に委ねられる)。
 
         Args:
             unidirectional: 単方向ストリームにするかどうか
 
         Returns:
-            ストリーム ID
+            ストリーム ID。失敗した場合は -1
         """
         if self._quic_connection is None or self._webtransport_session is None:
             return -1
 
         stream_id = self._quic_connection.open_stream(not unidirectional)
-        self._webtransport_session.open_stream(self._session_id, stream_id, unidirectional)
+        if stream_id < 0:
+            return -1
+
+        # h3 層の登録に失敗した場合は、開いた QUIC ストリームをリセットして
+        # -1 を返す (Server.open_stream と対称)。リセットしないとローカルの
+        # ストリーム状態が接続終了まで open のまま残る。リセットすることで
+        # ストリームを終了状態にし、ピアにもストリーム終了を通知する
+        # (RFC 9000 Section 19.11 のストリーム数制限は接続の寿命全体に対す
+        # る累積数であり、リセットしても回復しない)。h3 層への通知は不要。
+        # ストリームは stream_info_ に未登録のためである
+        if not self._webtransport_session.open_stream(self._session_id, stream_id, unidirectional):
+            self._quic_connection.reset_stream(stream_id, 0)
+            return -1
+
         return stream_id
 
     async def send_stream_data(
