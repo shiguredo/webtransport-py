@@ -161,7 +161,8 @@ class H3Session {
    *
    * 終了したセッション ID (close_stream による CONNECT ストリームのクローズ
    * / close_session / recv_wt_close_session_cb / クライアントでの非 2xx
-   * 応答受信で session_ids_ から削除済み) と、一度も確立されていない
+   * 応答受信 / サーバー側の reject_session による非 2xx 拒否で session_ids_
+   * から削除済み) と、一度も確立されていない
    * セッション ID 宛のデータグラムは破棄して Datagram イベントを発火しない。
    * 根拠は draft-ietf-webtrans-http3-16 Section 4 の「closed session 宛の
    * データの扱いは Section 6 に従う」と、データグラムは再送されず配信保証
@@ -172,9 +173,7 @@ class H3Session {
    * 受信時 (end_headers_cb) に session_ids_ へ挿入される。ただしサーバー側
    * は CONNECT リクエストの処理完了前 (QPACK デコードブロック中を含む) に
    * 届いたデータグラムのみ破棄される (楽観的データグラムの先行到着で喪失
-   * し得る。データグラムは再送されず喪失は無害なため許容)。サーバー側の
-   * reject_session (非 2xx 拒否) は session_ids_ から削除しないため、拒否
-   * されたセッション ID 宛のデータグラムは配信され続ける (既知の制約)
+   * し得る。データグラムは再送されず喪失は無害なため許容)
    */
   void receive_datagram(const std::vector<uint8_t>& data);
 
@@ -235,6 +234,15 @@ class H3Session {
 
   /**
    * WebTransport セッションを拒否 (サーバー用)
+   *
+   * 非 2xx 応答で拒否されたセッションは一度も確立されていない
+   * (draft-ietf-webtrans-http3-16 Section 3.2 の「サーバーの視点では、2xx
+   * 応答を送信した時点でセッションが確立される」) ため、session_ids_ から
+   * セッション ID を削除する (SessionClosed イベントは発火しない。黙って
+   * 削除)。受理前 FIN 検知済みセッション (pending_pre_accept_fin_session_ids_)
+   * のエントリも除去する。2xx を渡した場合は削除しない (2xx 送出は確立
+   * 条件。accept_session は 200 固定のため、2xx 非 200 応答は本 API で生成
+   * する)。accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)。
    * @param stream_id セッションストリーム ID
    * @param status_code HTTP ステータスコード
    */
@@ -286,7 +294,8 @@ class H3Session {
    * 検知は session_ids_ のメンバーシップ確認で行い、セッション ID の
    * 削除経路 (close_stream による CONNECT ストリームのクローズ /
    * close_session / recv_wt_close_session_cb / クライアントでの非 2xx
-   * 応答受信) がすべて session_ids_ からセッション ID を削除することに
+   * 応答受信 / サーバー側の reject_session による非 2xx 拒否) がすべて
+   * session_ids_ からセッション ID を削除することに
    * 依存する。加えて、受理前 FIN を検知したセッション (終了を学習済みだ
    * が close_stream による後始末前。この間は session_ids_ に含まれたまま)
    * への送信も黙って無視する。
@@ -330,7 +339,8 @@ class H3Session {
    *   draft-ietf-webtrans-http3-16 Section 2.2) の場合は 1 回目のクローズでは
    *   ストリーム ID 自身を返す (セッション終了後は session_ids_ から削除される
    *   ため、2 回目以降は -1 を返す)。クライアントが非 2xx 応答を受信した
-   *   セッション (確立されず session_ids_ から削除済み) の CONNECT ストリーム
+   *   セッション (確立されず session_ids_ から削除済み) と、サーバー側の
+   *   reject_session (非 2xx 拒否) で拒否されたセッションの CONNECT ストリーム
    *   は 1 回目から -1 を返す。
    *   セッション ID を復元できない場合 (制御ストリーム・QPACK ストリーム・
    *   WT ヘッダー未受信のままリセットされたストリーム等) は -1 を返す。

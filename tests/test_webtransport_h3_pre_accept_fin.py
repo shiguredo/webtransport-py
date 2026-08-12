@@ -120,14 +120,15 @@ def test_pre_accept_fin_after_accept_no_double_close() -> None:
     assert len(closed_events) == 1
 
 
-def test_pre_accept_fin_not_accepted_keeps_session() -> None:
-    """受理されない場合 (reject_session 経路) は SessionClosed が発火しないことを確認
+def test_pre_accept_fin_not_accepted_removes_session_id() -> None:
+    """受理前 FIN を検知済みのセッションを非 2xx で拒否しても SessionClosed が発火しないことを確認
 
-    受理前 FIN を検知しても accept_session が呼ばれなければ遅延クローズは
-    実行されず、セッション ID は従来どおり session_ids_ に残る (非 200
-    応答時の残留と同じ扱い。現状の挙動を維持する)。検知時点で即クローズ
-    する実装のバグ (未送信の 2xx を破棄してしまう) を防ぐ回帰ピンであり、
-    修正前実装でも通る。
+    受理前 FIN 検知済みセッションの拒否は、受理前 FIN なしの拒否と状態の
+    組み合わせが異なる回帰ピン。非 2xx 拒否で session_ids_ から削除され、
+    SessionClosed は発火しない (黙って削除: 一度も確立されていないセッション
+    の終了通知という意味論が合わない)。受理前 FIN 検知時に即クローズしない
+    (未送信の 2xx を破棄しない) という本質の検証は
+    test_pre_accept_fin_deferred_close_waits_for_2xx が担う。
     """
     client, server = _create_session_pair()
     assert client.connect(0, "https://localhost/webtransport") is True
@@ -138,8 +139,8 @@ def test_pre_accept_fin_not_accepted_keeps_session() -> None:
     server.reject_session(0, 403)
     server.get_streams_to_send()
 
-    # SessionClosed は発火せず、セッション ID は残留する
-    assert server.get_session_ids() == [0]
+    # セッション ID は削除され、SessionClosed は発火しない
+    assert server.get_session_ids() == []
     assert all(e.type != h3.EventType.SESSION_CLOSED for e in _drain_events(server))
 
 

@@ -125,6 +125,8 @@
   - @voluntas
 - [FIX] クライアントの open_stream が失敗時に無効な stream_id を返す問題を修正する
   - @voluntas
+- [FIX] サーバーが reject_session で拒否した後もセッション ID が残る問題を修正する
+  - @voluntas
 
 ### misc
 
