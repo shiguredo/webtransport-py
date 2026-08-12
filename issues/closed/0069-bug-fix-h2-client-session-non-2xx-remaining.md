@@ -1,7 +1,7 @@
 # HTTP/2 でクライアントが非 2xx 応答を受信してもセッション ID が削除されない
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-h2-client-session-non-2xx-remaining
 - Polished: 2026-08-12
 
@@ -35,3 +35,12 @@ WebTransport over HTTP/2 のクライアントがサーバーの拒否 (非 2xx 
 - 通常のセッション確立 (200 応答) と 2xx 非 200 応答 (201 等) のセッションは誤って削除されない (201 は既存のリーク挙動のピン留めとして、実際のセッション ID で `reject_session(session_id, 201)` を呼び、クライアントの `send()` が返すワイヤバイト列に DATAGRAM capsule が含まれ続けることを確認する。サーバー側は `reject_session` が自側エントリを削除するため、ピア側の DATAGRAM イベントでは確認できない)
 - 1xx 中間応答を受信してもエントリが削除されない (1xx は中間応答であり拒否ではない。h2 の公開 API に 1xx 送出手段が存在しないため、1xx HEADERS フレームのワイヤバイト列 (HPACK 圧縮済みヘッダーブロックを含む) をクライアントの `receive()` に直接注入する構成で検証する。`reject_session` は `nghttp2_submit_response` 経由のため 1xx の送出には使えない。注入後はクライアントの HPACK 動的テーブルが実サーバーのエンコーダーと非対称になるため、注入はテスト内の最後の操作にする等の配慮が必要)
 - モックなしの Sans-IO テストで検証できる (0063 で新設した h2 用 Sans-IO ヘルパーを再利用し、サーバー側の `reject_session` による非 2xx 送出 → クライアント受信後の `send()` のワイヤ送出 / イベントを確認する構成)
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `on_frame_recv_callback` のレスポンス処理分岐 (`NGHTTP2_HCAT_RESPONSE`) を変更し、受信した `:status` が 2xx 以外 (1xx を除く) の場合に `wt_sessions_` からエントリを削除した (SessionClosed は発火しない黙って削除)。削除条件は「200 以外」ではなく「2xx 以外」とし、draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport session is established when the server sends a 2xx response」と整合させた
+- 1xx 中間応答は削除対象外とした (1xx は中間応答であり拒否ではない。1xx を挟んだ応答の最終応答は NGHTTP2_HCAT_HEADERS で通知され捕捉されない既知の制約が残る)
+- エントリ削除により、以後の `send_datagram` / `send_stream_data` / `close_session` / `on_stream_close_callback` がエントリ不在で自然に塞がる (`stop_sending` / `drain_session` は対象外)
+- `src/bindings/webtransport_h2.h` の `send_datagram` のドキュメントコメントを更新し、非 2xx 拒否時の送信抑止を明記して「スコープ外」の旧記述を解消した
+- `tests/test_webtransport_h2_reject_session.py` を新規追加した (10 件)。非 2xx (403 / 302 / 500) での削除 (送出抑止で間接検証)・SessionClosed 不発火・拒否後の `close_session` の no-op (WT_CLOSE_SESSION 送出なし)・2xx 非 200 (201) の保持・1xx の中間応答の保持 (HEADERS フレームのワイヤ注入)・1xx を挟んだ拒否の既知の制約・通常の 200 確立への影響なし・複数セッション共存時の他セッション無影響、をモックなしの Sans-IO 構成で検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した (HTTP/2 であることを文言で明記し、h3 の 0061 エントリと区別した)

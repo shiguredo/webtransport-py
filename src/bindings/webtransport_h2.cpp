@@ -1166,13 +1166,12 @@ void H2Session::send_datagram(int32_t session_id,
     return;
   }
 
-  // クライアントが非 2xx 応答 (拒否) を受けたセッション ID 宛の送信は本
-  // 対応のスコープ外である: 非 2xx 応答では終了フラグも is_established も
-  // 立たず、エントリが残ったままのため従来どおり送出される (h3 側で対応
-  // 済みの類題。別途の検討対象)。同様に、ピアが WT_CLOSE_SESSION なしで
-  // END_STREAM のみを送る終了経路 (draft-15 Section 3.4 の正規の終了経路)
-  // も検知できないためスコープ外である (ストリームの両ハーフが閉じるまで
-  // 送出され続ける。既知の制約)
+  // クライアントが非 2xx 応答 (拒否) を受けたセッション ID 宛の送信は、
+  // 応答受信時に wt_sessions_ から削除されるためエントリ確認で塞がれる
+  // (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
+  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路
+  // (draft-15 Section 3.4 の正規の終了経路) は検知できないためスコープ外
+  // である (ストリームの両ハーフが閉じるまで送出され続ける。既知の制約)
   send_capsule(session_id, CapsuleType::Datagram, data);
 }
 
@@ -1426,13 +1425,19 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
         // クライアント側でレスポンスを受信
         auto it = h2_session->pending_headers_.find(stream_id);
         if (it != h2_session->pending_headers_.end()) {
-          // 200 レスポンスかチェック
+          // レスポンスの :status を取得する (1xx 中間応答もこの分岐に通知
+          // される。nghttp2.h の on_begin_headers_callback の docstring と
+          // nghttp2_headers_category enum の docstring)
           bool is_success = false;
+          std::string status_value;
           std::string wt_init_value;
           bool has_wt_init = false;
           for (const auto& [name, value] : it->second) {
-            if (name == ":status" && value == "200") {
-              is_success = true;
+            if (name == ":status") {
+              status_value = value;
+              if (value == "200") {
+                is_success = true;
+              }
             }
             if (name == "webtransport-init") {
               has_wt_init = true;
@@ -1493,6 +1498,26 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
                     h2_session->config_.wt_initial_max_streams_uni);
             h2_session->send_capsule(stream_id, CapsuleType::WtMaxStreamsUni,
                                      max_streams_uni_payload);
+          } else if (wt_session && !status_value.empty() &&
+                     status_value[0] != '1' && status_value[0] != '2') {
+            // 非 2xx 応答 (拒否) を受信したセッションは一度も確立されていない
+            // (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
+            // session is established when the server sends a 2xx
+            // response」)。SessionClosed は発火しない (黙って削除): 一度も
+            // 確立されていないセッションの終了通知という意味論が合わない。
+            // エントリ削除により、以後の send_datagram / send_stream_data /
+            // close_session / on_stream_close_callback がエントリ不在で自然
+            // に塞がる (二重発火の経路も残らない。stop_sending /
+            // drain_session は get_wt_session を確認せずカプセルを送出する
+            // ため塞がれないが、本対応の対象外)。HTTP/2 ストリーム自体は
+            // サーバー側のみが閉じた半開きのまま接続終了まで残る
+            // (RST_STREAM 等の後始末は行わない既知の制約)。1xx 中間応答
+            // (100-199) は削除対象外: 1xx は中間応答であり拒否ではない
+            // (nghttp2 は 1xx で abort せず最終応答を待つ)。1xx を挟んだ
+            // 応答の最終応答は NGHTTP2_HCAT_HEADERS で通知され、本分岐で
+            // 捕捉されないため wt_sessions_ のエントリと pending_headers_
+            // が残る (既知の制約。1xx 後の最終応答の捕捉不能)
+            h2_session->wt_sessions_.erase(stream_id);
           }
           h2_session->pending_headers_.erase(it);
         }
