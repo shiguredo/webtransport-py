@@ -1,7 +1,7 @@
 # QPACK デコードブロック中の受理前 FIN が検知されない
 
 - Created: 2026-08-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-qpack-blocked-pre-accept-fin-loss
 - Polished: 2026-08-12
 
@@ -35,3 +35,14 @@ QPACK デコードブロック中に届いた受理前 FIN (サーバーが応�
 - 通常の受理前 FIN (0058 の対応済み経路) は影響を受けず、SessionClosed が二重に発火しない
 - 通常のセッション確立 (FIN なし) は影響を受けない
 - モックなしの Sans-IO テストで検証できる (QPACK エンコーダーストリームの到着を遅延させ、ブロック中に SESSION_READY が発火しないことを確認したうえで、同一読み取り (ヘッダー + FIN) と別読み取り (ヘッダー → 空 FIN) の両方を検証する。ヘッダー後続データを含む読み取りは nghttp3 側の既知の異常挙動 (クラッシュ / 無限ループ) があるため対象外とする)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.h` に保留集合 `pending_qpack_blocked_fin_stream_ids_` を追加した (QPACK デコードブロック中に fin を検知した CONNECT ストリーム候補のストリーム ID。ヘッダー未処理のためセッション ID に未確定)
+- `src/bindings/webtransport_h3.cpp` の `receive_stream_data` で、`nghttp3_conn_read_stream2` から戻った後に「fin が渡ったが `session_ids_` に未挿入 (ヘッダー未処理) かつ `pending_headers_` に含まれる (begin_headers_cb 発火済み・end_headers_cb 未発火) ストリーム」を保留集合に記録する。記録条件は既存検知 (0058 の fin 引数 + `session_ids_` メンバーシップ) と排他 (`count == 0` vs `count > 0`) であり、QPACK ブロックなしの同一読み取りは既存検知で処理されるため二重検知しない
+- 同じ `receive_stream_data` の後段で、保留集合を走査して `session_ids_` に挿入済みのストリームを `pending_pre_accept_fin_session_ids_` へ移行する。移行は read_stream2 の後 (end_headers_cb による挿入後) に行うため、アプリが SESSION_READY を受けて `accept_session` を呼ぶ時点では移行済みで、`accept_session` 内の既存の移行処理がそのまま機能する
+- `end_headers_cb` で、セッション確定に至らなかったストリーム (Origin 検証失敗の 403 拒否・非 CONNECT リクエスト) の記録を除去する。`close_stream` でも、ブロック中にリセットされたストリームの記録を除去する (無界増加の防止)
+- テスト専用の `_has_pending_qpack_blocked_fin_stream` を追加し、記録・除去を直接検証できるようにした (`_has_stream_buffer` と同じ扱い)
+- `receive_stream_data` の既存コメントの「QPACK ブロックは…既知の制約」記述を、本修正で解消された旨に更新した
+- `tests/test_webtransport_h3_qpack_blocked_pre_accept_fin.py` を新規追加した (6 件)。同一読み取り・別読み取りでのセッション終了検知、複数セッションの同時ブロック解除、Origin 検証失敗での記録除去、ブロック中リセットでの記録除去、FIN なしの通常確立への影響なし、をモックなしの Sans-IO 構成で検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
