@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from webtransport import h3
+from webtransport import h2, h3
 from webtransport.quic import Config, Connection
 
 
@@ -359,3 +359,82 @@ def _establish_two_sessions() -> tuple[h3.Session, h3.Session, int, int]:
     first_session_id = _connect_session(client, server, 0)
     second_session_id = _connect_session(client, server, 4)
     return client, server, first_session_id, second_session_id
+
+
+def _h2_pump(src: h2.Session, dst: h2.Session) -> None:
+    """h2.Session の src の送信データを全て dst に渡す
+
+    QUIC レイヤーを介さず、send() で取り出したデータを receive() で直接
+    渡す (モックなし)。send() は 1 回の呼び出しで送信バッファ全体を返し、
+    空なら None を返すため、None が返るまで繰り返す (防御的に最大 64 回)。
+    """
+    for _ in range(64):
+        sent = False
+        while True:
+            data = src.send()
+            if data is None:
+                break
+            dst.receive(data)
+            sent = True
+        if not sent:
+            break
+
+
+def _create_h2_session_pair() -> tuple[h2.Session, h2.Session]:
+    """h2.Session のクライアント・サーバーペアを作成して初期化する
+
+    HTTP/2 preface + 双方の SETTINGS 交換まで完了させる
+    (draft-15 Section 3.1 の is_webtransport_ready 成立まで)。
+
+    @return (クライアント Session, サーバー Session)
+    """
+    client = h2.Session.create_client(h2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server = h2.Session.create_server(server_config)
+
+    # クライアントの preface + SETTINGS をサーバーへ
+    _h2_pump(client, server)
+    # サーバーの SETTINGS をクライアントへ
+    _h2_pump(server, client)
+
+    return client, server
+
+
+def _connect_h2_session(
+    client: h2.Session,
+    server: h2.Session,
+) -> int:
+    """クライアントが CONNECT を送信して WebTransport セッションを確立する
+
+    @return 確立したセッション ID
+    """
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+
+    # サーバー側で SESSION_READY が発火して受理できる
+    ready_events = []
+    while True:
+        event = server.next_event()
+        if event is None:
+            break
+        if event.type == h2.EventType.SESSION_READY:
+            ready_events.append(event)
+    assert len(ready_events) == 1, "SESSION_READY が 0 回または複数回発火しました"
+    assert ready_events[0].session_id == session_id
+    assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
+    _h2_pump(server, client)
+
+    # クライアント側で SESSION_READY が発火する
+    ready_events = []
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        if event.type == h2.EventType.SESSION_READY:
+            ready_events.append(event)
+    assert len(ready_events) == 1, "SESSION_READY が複数回発火しました"
+    assert ready_events[0].session_id == session_id
+
+    return session_id

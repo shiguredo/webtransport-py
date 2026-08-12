@@ -1,7 +1,7 @@
 # HTTP/2 で WT_CLOSE_SESSION 受信後に send_datagram がデータグラムを送出する
 
 - Created: 2026-08-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-h2-datagram-after-session-close
 - Polished: 2026-08-12
 
@@ -41,3 +41,14 @@ h2 仕様には h3 の Section 6 にある「新しいデータグラムを送�
 - 一度も `connect` されていないセッション ID への送信は従来どおり送出されず、`http2_stream_buffers_` にも残留しない (回帰確認)
 - クライアントの connect 直後 (200 応答前) とサーバーの accept 前の楽観的送信は従来どおり送出される
 - モックなしの Sans-IO テストで検証できる (h2 には Sans-IO 双方向テスト基盤が存在しないため、conftest.py に h3 の `_create_session_pair` 相当の h2 用ヘルパー (preface / SETTINGS 交換 / CONNECT / accept / 200) を新設する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.h` の `WtSessionInfo` に `is_terminated` フラグを追加し、`src/bindings/webtransport_h2.cpp` の `send_datagram` の冒頭でエントリ存在確認 (`get_wt_session`) と終了フラグの確認を行い、終了した・一度も connect されていないセッション ID への送信を黙って無視するようにした
+- 終了フラグは WT_CLOSE_SESSION 受信時 (`handle_wt_close_session`) とローカル `close_session` 時に立てる。`close_session` では受信側と対称に `is_established` も false にし、`get_session_ids` からの消滅と `open_stream` の失敗 (セッション終了後の新規ストリーム開放の抑止) も行う
+- チェックは `send_capsule` ではなく `send_datagram` に置いた (後始末カプセル WT_CLOSE_SESSION 等を塞がないため)
+- 楽観的送信 (draft-15 Section 3.2 の MAY) は妨げない (`is_established` ではなく専用フラグで判定するため、connect 直後・accept 前も送出される)
+- クライアントが非 2xx 応答を受けた ID 宛の送信と、ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路は本 issue のスコープ外 (既知の制約) としてコメントに明記した
+- `src/webtransport/h2/client.py` / `server.py` の `send_datagram` docstring に「終了したセッション ID への送信は無視される」旨を追記した
+- `tests/conftest.py` に h2 用の Sans-IO 双方向ヘルパー (`_h2_pump` / `_create_h2_session_pair` / `_connect_h2_session`) を新設し、`tests/test_webtransport_h2_datagram.py` を新規追加した (9 件)。WT_CLOSE_SESSION 受信後・ローカル close_session 後 (flush 前・後) の送出抑止、close_session 後の open_stream 失敗と get_session_ids からの消滅、生存セッション・複数セッションでの送出継続、未 connect ID の無視、クライアント・サーバーの楽観的送信を検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
