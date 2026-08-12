@@ -1,7 +1,7 @@
 # クライアントの open_stream が失敗時に無効な stream_id を返す
 
 - Created: 2026-08-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-client-open-stream-failure-handling
 - Polished: 2026-08-12
 
@@ -35,3 +35,13 @@
 - 生存セッションの `Client.open_stream` は従来どおり stream_id を返す
 - 未確立 (connect 前) の `Client.open_stream` も -1 を返す (既存ガードで修正前から実現済みの挙動の回帰確認。e2e 構成で connect 前に呼び出して確認する)
 - モックなしの e2e テストで検証できる (セッション終了の注入はテストから `server._clients` のプライベートアクセスで低レベル `close_session` を呼ぶ等の既存テストパターンを使用し、クライアントの `open_stream` の戻り値 (-1) と、サーバー側の `on_stream_reset` による RESET_STREAM の観測 (WT ヘッダー未受信のため session_id は -1、error_code は 0 で届く) で検証する)
+
+## 解決方法
+
+- `src/webtransport/h3/client.py` の `Client.open_stream` を `Server.open_stream` と対称化した:
+  - `quic_connection.open_stream` の戻り値が -1 の場合は -1 を返す (接続クローズ済み等でストリームが開けなかった場合に、開かれていないストリームへ `reset_stream` を呼ばないためのガード)
+  - h3 層の `open_stream` が false の場合、`quic_connection.reset_stream(stream_id, 0)` で開いた QUIC ストリームをリセットして -1 を返す (リセットしないとローカルのストリーム状態が接続終了まで open のまま残るため。error_code は Server.open_stream の前例と整合する 0。h3 層への通知は不要: ストリームは `stream_info_` に未登録のため)
+- RESET_STREAM のワイヤへの送出は run() の送信ループに委ねる (issue の設計方針どおり。docstring に送出タイミングを明記した)
+- `Client.open_stream` の docstring を更新した: 失敗条件 (セッション終了後・非 2xx 拒否後・未確立・接続クローズ済み) と、失敗時に -1 を返し RESET_STREAM で解放すること、送出が run() の送信ループに委ねられることを記載した
+- `tests/test_e2e_webtransport_h3.py` に e2e テスト 2 件を追加した: セッション終了後の `open_stream` が -1 を返し、サーバー側の `on_stream_reset` で RESET_STREAM (session_id -1、error_code 0) が観測されること (セッション終了の注入はサーバーの低レベル `close_session` をプライベートアクセスで呼ぶ既存パターン)、connect 前の `open_stream` が -1 を返すこと。生存セッションの正常系は既存テストが担保する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
