@@ -369,10 +369,11 @@ class H2Session {
    * 妨げない: クライアントは connect 直後 (200 応答前)、サーバーは CONNECT
    * リクエスト受信時に wt_sessions_ へエントリが挿入され、終了フラグが立って
    * いないため従来どおり送出される。クライアントが非 2xx 応答 (拒否) を受けた
-   * セッション ID 宛の送信はスコープ外である (エントリが残ったまま終了フラグ
-   * も is_established も立たないため従来どおり送出される)。ピアが
-   * WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
-   * Section 3.4 の正規の終了経路) も検知できずスコープ外である (既知の制約)
+   * セッション ID 宛の送信は、応答受信時に wt_sessions_ から削除されるため
+   * 塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
+   * ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路
+   * (draft-15 Section 3.4 の正規の終了経路) は検知できずスコープ外である
+   * (既知の制約)
    * @param session_id セッション ID
    * @param data データ
    */

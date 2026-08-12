@@ -127,6 +127,8 @@
   - @voluntas
 - [FIX] サーバーが reject_session で拒否した後もセッション ID が残る問題を修正する
   - @voluntas
+- [FIX] HTTP/2 でクライアントが非 2xx 応答を受信してもセッション ID が残る問題を修正する
+  - @voluntas
 
 ### misc
 
