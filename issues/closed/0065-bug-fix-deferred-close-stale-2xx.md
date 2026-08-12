@@ -1,7 +1,7 @@
 # 遅延クローズ保留中に未送信の 2xx レスポンスが送出される
 
 - Created: 2026-08-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-deferred-close-stale-2xx
 - Polished: 2026-08-12
 
@@ -37,3 +37,13 @@
 - 通常の受理前 FIN の遅延クローズ (2xx 書き出し完了後に `close_stream`) は影響を受けない
 - ローカル `close_session` 送出経路では 2xx が送出される既知の制約をピン留めする (テストでサーバー側の送出 (2xx + カプセルが一体で出ること) と、クライアント側の受信 (2xx を IGN_REST で消費し、WT_CLOSE_SESSION による SessionClosed が発火すること) の現状の挙動を固定する)
 - モックなしの Sans-IO テストで検証できる (block_stream で 2xx の書き出しを止め、WT_CLOSE_SESSION を受信した後に unblock_stream して、`get_streams_to_send` に 2xx が出ないことを確認する構成。既存テスト `test_pre_accept_fin_wt_close_session_during_deferred_close` を拡張する)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.h` に保留集合 `pending_stale_2xx_discard_session_ids_` を追加した (遅延クローズ保留中に WT_CLOSE_SESSION を受信したセッション ID。未送信 2xx の破棄待ち)
+- `src/bindings/webtransport_h3.cpp` の `recv_wt_close_session_cb` で、セッションが `pre_accept_fin_accepted_session_ids_` に含まれる場合に保留集合へ記録する。コールバック内で nghttp3 を呼ぶと再入になるため、`receive_stream_data` が `nghttp3_conn_read_stream2` から戻った後に処理する (`pending_fin_session_ids_` と同じパターン)
+- `receive_stream_data` の後段で、保留集合のセッションについて `pre_accept_fin_accepted_session_ids_` から先に除去してから `close_stream(session_id, 0)` を実行し、未送信 2xx を破棄する (nghttp3 には 2xx のみをキャンセルする API がなく、`close_stream` が送信キュー全体を破棄する唯一の手段)。先に除去するのは、存在しないストリームは `stream_flushed` が 1 を返すため、次の `get_streams_to_send` の遅延クローズループで 2 回目の `close_stream` が実行されるのを防ぐため
+- ローカル `close_session` 送出経路 (WT_CLOSE_SESSION カプセルと 2xx が同一送信キューにある) は、`close_stream` で破棄するとカプセルも失われるため 2xx の送出を許容する (既知の制約)
+- 受理前にバッファされた WT_CLOSE_SESSION カプセルが `accept_session` 中に処理されるケースは、保留記録の条件 (移行処理より前に `recv_wt_close_session_cb` が発火する) を満たさず対象外とする (2xx 送出と SessionClosed の二重発火は別途の検討対象としてコメントに明記)
+- `tests/test_webtransport_h3_pre_accept_fin.py` を拡張した: 既存の `test_pre_accept_fin_wt_close_session_during_deferred_close` に「ブロック解除後に 2xx が出ないこと・STREAM_CLOSED が 1 回だけ発火すること」を追加し、`test_pre_accept_fin_local_close_session_2xx_sent` (ローカル close_session 送出経路の 2xx 送出の固定) と `test_pre_accept_fin_wt_close_session_other_session_unaffected` (複数セッション時の独立性) を新規追加した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した

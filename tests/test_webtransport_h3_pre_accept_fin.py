@@ -242,10 +242,8 @@ def test_pre_accept_fin_wt_close_session_during_deferred_close() -> None:
     2xx の書き出し待ちで遅延クローズが保留されている間に WT_CLOSE_SESSION
     を受信すると、セッション終了は recv_wt_close_session_cb 経路で 1 回だけ
     検知される (遅延クローズとの二重発火はしない)。終了済みセッションの
-    CONNECT ストリームに未送信の 2xx が後から書き出され得ることは既知の
-    制約 (2xx のキャンセル API が無いため)。修正前実装でも通る
-    (recv_wt_close_session_cb は遅延クローズ機構に依存しない完全な終了
-    経路であり、本テストは新機能との相互作用の回帰ピン)。
+    CONNECT ストリームに残った未送信の 2xx は、close_stream による破棄で
+    書き出されない (ブロック解除後の get_streams_to_send に現れない)。
     """
     client, server = _create_session_pair()
     assert client.connect(0, "https://localhost/webtransport") is True
@@ -263,5 +261,110 @@ def test_pre_accept_fin_wt_close_session_during_deferred_close() -> None:
     _pump(client, server)
 
     # サーバー側で SessionClosed が 1 回だけ発火する
-    closed_events = [e for e in _drain_events(server) if e.type == h3.EventType.SESSION_CLOSED]
+    events = _drain_events(server)
+    closed_events = [e for e in events if e.type == h3.EventType.SESSION_CLOSED]
     assert len(closed_events) == 1
+
+    # 破棄の close_stream による STREAM_CLOSED も 1 回だけ発火する。
+    # pre_accept_fin_accepted_session_ids_ からの除去漏れがあっても、現在の
+    # 依存 nghttp3 では 2 回目の close_stream がストリーム未存在で
+    # stream_close_cb を発火しないため検出できないが、nghttp3 の実装変更で
+    # イベント個数が変わり得るため、除去の防衛をピン留めする
+    stream_closed_events = [e for e in events if e.type == h3.EventType.STREAM_CLOSED]
+    assert len(stream_closed_events) == 1
+
+    # ブロック解除しても未送信の 2xx は書き出されない
+    assert server.unblock_stream(0) is True
+    streams = server.get_streams_to_send()
+    assert all(stream_id != 0 for stream_id, _data, _fin in streams)
+
+
+def test_pre_accept_fin_local_close_session_2xx_sent() -> None:
+    """遅延クローズ保留中のローカル close_session では 2xx が送出される既知の制約を確認
+
+    ローカル close_session (WT_CLOSE_SESSION 送出) では、カプセルと未送信の
+    2xx が同一の nghttp3 送信キューにあるため、2xx のみを破棄する手段が
+    ない。close_stream で破棄するとカプセル (error code / message) も失われ、
+    ピアに終了情報が伝わらないため、送出経路は 2xx の送出を許容する
+    (既知の制約)。ピアは 2xx を受信して SESSION_READY が発火した後、
+    WT_CLOSE_SESSION による SessionClosed が発火することを固定する。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, True)  # 受理前 FIN
+    assert server.accept_session(0) is True
+
+    # 2xx の書き出しをブロックして遅延クローズを保留する
+    server.block_stream(0)
+    server.get_streams_to_send()
+
+    # サーバーがローカル close_session を呼ぶ (WT_CLOSE_SESSION 送出)
+    server.close_session(0, 0)
+
+    # ブロック解除すると、2xx + WT_CLOSE_SESSION カプセルが一体で送出される
+    assert server.unblock_stream(0) is True
+    streams = server.get_streams_to_send()
+    assert any(stream_id == 0 for stream_id, _data, _fin in streams)
+
+    # ピア (クライアント) は 2xx をセッション確立として処理して SESSION_READY
+    # が発火し、続く WT_CLOSE_SESSION で SessionClosed が発火する
+    for stream_id, data, fin in streams:
+        client.receive_stream_data(stream_id, data, fin)
+    events = _drain_events(client)
+    ready_events = [e for e in events if e.type == h3.EventType.SESSION_READY]
+    assert len(ready_events) == 1
+    assert ready_events[0].session_id == 0
+    closed_events = [e for e in events if e.type == h3.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == 0
+
+
+def test_pre_accept_fin_wt_close_session_other_session_unaffected() -> None:
+    """遅延クローズ保留中の一方のセッション終了が他方の 2xx 送出に影響しないことを確認
+
+    複数セッションが遅延クローズ保留中の場合、WT_CLOSE_SESSION を受信した
+    セッションの 2xx だけが破棄され、他セッションの 2xx は従来どおり
+    書き出される (保留集合はセッション ID 単位で処理されることの回帰ピン)。
+    両セッションとも遅延クローズの後始末として SessionClosed が発火する
+    (セッション 0 は WT_CLOSE_SESSION 受信経由、セッション 4 は 2xx 書き出し
+    完了後の遅延クローズ経由)。
+    """
+    client, server = _create_session_pair()
+
+    # 2 つのセッションを受理前 FIN 付きで確立し、両方の遅延クローズを保留する
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, True)  # 受理前 FIN
+    assert server.accept_session(0) is True
+
+    assert client.connect(4, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 4)
+    server.receive_stream_data(4, headers, True)  # 受理前 FIN
+    assert server.accept_session(4) is True
+
+    server.block_stream(0)
+    server.block_stream(4)
+    streams = server.get_streams_to_send()
+    assert all(stream_id not in (0, 4) for stream_id, _data, _fin in streams)
+    assert server.get_session_ids() == [0, 4]
+
+    # セッション 0 に WT_CLOSE_SESSION を送り、サーバーが受信する
+    client.close_session(0, 0)
+    _pump(client, server)
+
+    # ブロック解除すると、終了したセッション 0 の 2xx は破棄され、
+    # 生存セッション 4 の 2xx は書き出される
+    assert server.unblock_stream(0) is True
+    assert server.unblock_stream(4) is True
+    streams = server.get_streams_to_send()
+    assert all(stream_id != 0 for stream_id, _data, _fin in streams)
+    assert any(stream_id == 4 for stream_id, _data, _fin in streams)
+
+    # 両セッションで SessionClosed が発火する: セッション 0 は
+    # WT_CLOSE_SESSION 受信経由、セッション 4 は遅延クローズ (2xx 書き出し
+    # 完了後) 経由の正常な後始末
+    events = _drain_events(server)
+    closed_events = [e for e in events if e.type == h3.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 2
+    assert {e.session_id for e in closed_events} == {0, 4}

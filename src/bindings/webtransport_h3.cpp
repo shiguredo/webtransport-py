@@ -40,6 +40,8 @@ H3Session::H3Session(H3Session&& other) noexcept
           std::move(other.pending_qpack_blocked_fin_stream_ids_)),
       pre_accept_fin_accepted_session_ids_(
           std::move(other.pre_accept_fin_accepted_session_ids_)),
+      pending_stale_2xx_discard_session_ids_(
+          std::move(other.pending_stale_2xx_discard_session_ids_)),
       stream_info_(std::move(other.stream_info_)),
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
@@ -69,6 +71,8 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
         std::move(other.pending_qpack_blocked_fin_stream_ids_);
     pre_accept_fin_accepted_session_ids_ =
         std::move(other.pre_accept_fin_accepted_session_ids_);
+    pending_stale_2xx_discard_session_ids_ =
+        std::move(other.pending_stale_2xx_discard_session_ids_);
     stream_info_ = std::move(other.stream_info_);
     control_stream_id_ = other.control_stream_id_;
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
@@ -245,6 +249,28 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
     close_stream(session_id, 0);
   }
   pending_fin_session_ids_.clear();
+
+  // 遅延クローズ保留中に WT_CLOSE_SESSION を受信したセッションの未送信
+  // 2xx を破棄する。nghttp3 には 2xx のみをキャンセルする API が存在せず、
+  // close_stream (nghttp3_conn_close_stream) がストリームの送信キュー全体
+  // (未送信 2xx を含む) を破棄する唯一の手段である。close_stream は
+  // read_stream2 から戻ったこの時点で実行する (コールバック内での再入
+  // 防止。read_stream2 がエラーを返した場合も保留集合をそのまま処理する)。
+  // pre_accept_fin_accepted_session_ids_ からは先に除去する: 除去しないと、
+  // 存在しないストリームは stream_flushed が 1 を返すため、次の
+  // get_streams_to_send の遅延クローズループで 2 回目の close_stream が
+  // 実行される。現在の依存 nghttp3 では存在しないストリームへの
+  // close_stream は NGHTTP3_ERR_STREAM_NOT_FOUND を返して stream_close_cb
+  // を発火しないが、nghttp3 の実装変更でイベント個数が変わり得るため、
+  // 先に除去して防衛する。close_stream の副作用として stream_close_cb が
+  // 発火して STREAM_CLOSED イベント (session_id = -1) が積まれる (既存の
+  // 遅延クローズでも同様)。SessionClosed は発火しない (session_ids_ から
+  // 削除済みのため)
+  for (int64_t session_id : pending_stale_2xx_discard_session_ids_) {
+    pre_accept_fin_accepted_session_ids_.erase(session_id);
+    close_stream(session_id, 0);
+  }
+  pending_stale_2xx_discard_session_ids_.clear();
 
   if (consumed < 0) {
     return 0;
@@ -1575,6 +1601,25 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
   // 当該セッションに属するストリーム情報と送信バッファを削除する
   session->erase_session_streams(session_id);
   session->session_ids_.erase(session_id);
+
+  // 遅延クローズ保留中 (受理済みで 2xx レスポンスが発生し得る) のセッション
+  // は、未送信の 2xx を破棄するため close_stream を実行する必要がある。
+  // recv_wt_close_session_cb は nghttp3_conn_read_stream2 の処理中に同期
+  // 発火するため、コールバック内で nghttp3 を呼ぶと再入になる。セッション
+  // ID を保留集合に記録し、receive_stream_data が nghttp3_conn_read_stream2
+  // から戻った後に破棄する (詳細は receive_stream_data の実装コメント)。
+  // 未受理 (検知のみ。pending_pre_accept_fin_session_ids_ に含まれる) の
+  // セッションは 2xx が未発生のため破棄対象がなく、対象外とする (同集合の
+  // エントリは既存どおり残る)。受理前 FIN なしの通常受理セッションは遅延
+  // クローズ機構の外であり対象外とする (2xx 滞留は別途の検討対象)。
+  // 受理前にバッファされた WT_CLOSE_SESSION カプセルが accept_session の
+  // 処理中に発火するケースも、accept_session による移行処理
+  // (pre_accept_fin_accepted_session_ids_ への挿入) より前に recv_wt_close
+  // _session_cb が呼ばれるため保留記録の条件を満たさず対象外とする
+  // (2xx 送出と SessionClosed の二重発火は別途の検討対象)
+  if (session->pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
+    session->pending_stale_2xx_discard_session_ids_.insert(session_id);
+  }
 
   H3Event event;
   event.type = H3EventType::SessionClosed;

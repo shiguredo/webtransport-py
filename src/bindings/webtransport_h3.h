@@ -629,6 +629,15 @@ class H3Session {
   // 確認してから close_stream で後始末する
   std::set<int64_t> pre_accept_fin_accepted_session_ids_;
 
+  // 遅延クローズ保留中 (pre_accept_fin_accepted_session_ids_ に含まれる)
+  // に WT_CLOSE_SESSION を受信したセッション ID。未送信の 2xx を破棄する
+  // ため close_stream を実行する必要があるが、recv_wt_close_session_cb は
+  // nghttp3_conn_read_stream2 の処理中に同期発火するため、コールバック内で
+  // nghttp3 を呼ぶと再入になる。receive_stream_data が read_stream2 から
+  // 戻った後に close_stream で破棄する (pending_fin_session_ids_ と同じ
+  // パターン)
+  std::set<int64_t> pending_stale_2xx_discard_session_ids_;
+
   // ストリームとセッションのマッピング
   std::map<int64_t, StreamInfo> stream_info_;
 
