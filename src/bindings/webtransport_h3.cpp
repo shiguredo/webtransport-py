@@ -299,7 +299,10 @@ void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
   // Section 4)、QUIC ストリーム ID の範囲 (RFC 9000 Section 2.1 の
   // 2^62-1 まで) を超えるセッション ID は H3_ID_ERROR (RFC 9114 の
   // アプリケーションエラーコード 0x0108) で接続を閉じる MUST の対象。
-  // 検証は構造のみで行い、閉じたセッションの ID は検査対象外
+  // 構造検証は閉じたセッションの ID を検査対象外とする (Section 4 の
+  // "Session IDs that correspond to closed sessions are not considered
+  // invalid for the purposes of this check")。配信の要否は下記の終了状態
+  // 確認が担う
   constexpr uint64_t max_session_id = (1ULL << 62) - 1;
   uint64_t session_id = quarter_stream_id * 4;
   if (session_id > max_session_id) {
@@ -308,6 +311,40 @@ void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
     event.error_code = 0x0108;  // H3_ID_ERROR
     event.error_message = "invalid session ID in datagram";
     push_event(std::move(event));
+    return;
+  }
+
+  // セッション終了を学習したエンドポイントは、終了したセッション ID 宛の
+  // データグラムをアプリに配信しない (実装ポリシー。根拠は
+  // draft-ietf-webtrans-http3-16 Section 4 の「closed session 宛のデータの
+  // 扱いは Section 6 に従う (endpoints handle data for closed sessions as
+  // described in Section 6)」と、データグラムは再送されず配信保証がない
+  // こと (Section 4.1 / RFC 9221))。受信データストリームの破棄
+  // (recv_wt_data_cb) と同じ方針で、session_ids_ のメンバーシップ確認と
+  // 受理前 FIN 検知済み集合 (pending_pre_accept_fin_session_ids_ /
+  // pre_accept_fin_accepted_session_ids_) の確認を行う。受理前 FIN 検知
+  // 済みセッションの確認は、データグラム経路では nghttp3 のバッファリング
+  // が無く 2xx 書き出し完了まで session_ids_ に残るため必須である。
+  // 一度も確立されていないセッション ID 宛も破棄される (send_datagram の
+  // 送信側と同じ意味論)。範囲チェックの後に行う (範囲外 ID は先に
+  // H3_ID_ERROR で接続を閉じる。既存の構造検証の挙動維持)。楽観的送受信
+  // は妨げない: クライアントは connect 直後に、サーバーは CONNECT リクエ
+  // スト受信時 (end_headers_cb) に session_ids_ へ挿入される。ただし
+  // サーバー側は CONNECT リクエストの処理完了前 (QPACK デコードブロック中
+  // を含む。end_headers_cb 未実行) に届いたデータグラムのみ破棄される
+  // (QUIC はデータグラムとストリームデータの到着順序を保証しないため、
+  // クライアントの楽観的データグラムが CONNECT より先行到着した場合に
+  // 喪失し得る。データグラムは再送されず喪失は無害なため、draft
+  // Section 4.6 の SHOULD バッファリングに対する許容された逸脱)。
+  // サーバー側の reject_session (非 2xx 拒否) は session_ids_ から削除
+  // しないため、拒否されたセッション ID 宛のデータグラムは配信され続ける
+  // (既知の制約。Origin 検証失敗の内部 403 経路は session_ids_ への挿入前
+  // のため破棄される)
+  if (session_ids_.count(static_cast<int64_t>(session_id)) == 0 ||
+      pending_pre_accept_fin_session_ids_.count(
+          static_cast<int64_t>(session_id)) > 0 ||
+      pre_accept_fin_accepted_session_ids_.count(
+          static_cast<int64_t>(session_id)) > 0) {
     return;
   }
 

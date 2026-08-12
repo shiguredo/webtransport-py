@@ -1,11 +1,15 @@
-"""WebTransport over HTTP/3 のデータグラム送信テスト
+"""WebTransport over HTTP/3 のデータグラム送信・受信テスト
 
 Sans-IO 構成 (conftest.py の Sans-IO ヘルパー) を使い、セッション終了後の
-send_datagram が無視されることを検証する。セッション終了の 3 経路
+send_datagram が無視されることと、終了したセッション ID 宛の受信
+データグラムが破棄されることを検証する。セッション終了の 3 経路
 (close_stream / close_session / recv_wt_close_session_cb) すべてで検証する
 (draft-ietf-webtrans-http3-16 Section 6 の MUST 「セッション終了を学習した
-エンドポイントは、新しいデータグラムを送信してはならない」)。あわせて、
-生存セッションへの送信と楽観的送信が妨げられないことの回帰防止も行う。
+エンドポイントは、新しいデータグラムを送信してはならない」。受信側の破棄は
+実装ポリシーであり、Section 4 の「closed session 宛のデータの扱いは
+Section 6 に従う」と、データグラムは再送されず配信保証がないこと
+(Section 4.1 / RFC 9221) が根拠)。あわせて、生存セッションへの送受信と
+楽観的送信が妨げられないことの回帰防止も行う。
 """
 
 from __future__ import annotations
@@ -18,9 +22,21 @@ from conftest import (
     _establish_session,
     _establish_two_sessions,
     _pump,
+    _setup_connect,
 )
 
 from webtransport import h3
+
+
+def _drain_events(session: h3.Session) -> list[h3.Event]:
+    """セッションに積まれたイベントを全て取り出す"""
+    events = []
+    while True:
+        event = session.next_event()
+        if event is None:
+            break
+        events.append(event)
+    return events
 
 
 def test_send_datagram_after_close_stream_ignored() -> None:
@@ -240,3 +256,194 @@ def test_send_datagram_server_optimistic_delivered() -> None:
     # 受理前でもデータグラムは送出される
     server.send_datagram(0, b"server-optimistic")
     assert server.get_datagrams_to_send() == [_encode_wt_datagram(0, b"server-optimistic")]
+
+
+# ========== 受信データグラムの破棄テスト ==========
+
+
+def test_recv_datagram_after_close_session_discarded() -> None:
+    """close_session (WT_CLOSE_SESSION 送出) 後に受信データグラムが破棄されることを確認
+
+    終了したセッション ID 宛のデータグラムはアプリに配信されない
+    (draft-ietf-webtrans-http3-16 Section 4 の「closed session 宛のデータの
+    扱いは Section 6 に従う」。実装ポリシー)。本テストは修正前実装では
+    失敗する (Datagram イベントが発火する)。
+    """
+    client, _server, session_id = _establish_session()
+
+    # WT_CLOSE_SESSION を送出してセッションを終了する (SessionClosed が発火する)
+    client.close_session(session_id, 0)
+    assert any(event.type == h3.EventType.SESSION_CLOSED for event in _drain_events(client))
+
+    # 終了後は受信データグラムが破棄され、Datagram イベントが発火しない
+    client.receive_datagram(_encode_wt_datagram(session_id, b"after-close"))
+    assert all(event.type != h3.EventType.DATAGRAM for event in _drain_events(client))
+
+
+def test_recv_datagram_after_recv_wt_close_session_discarded() -> None:
+    """WT_CLOSE_SESSION 受信後に受信データグラムが破棄されることを確認
+
+    受信側 (サーバー) でセッション終了を学習した後のデータグラムは破棄
+    される。本テストは修正前実装では失敗する (Datagram イベントが発火
+    する)。
+    """
+    client, server, session_id = _establish_session()
+
+    # クライアントが WT_CLOSE_SESSION を送出し、サーバーが受信して
+    # セッション終了を検知する
+    client.close_session(session_id, 0)
+    _pump(client, server)
+    assert any(event.type == h3.EventType.SESSION_CLOSED for event in _drain_events(server))
+
+    # 終了後は受信データグラムが破棄され、Datagram イベントが発火しない
+    server.receive_datagram(_encode_wt_datagram(session_id, b"after-recv"))
+    assert all(event.type != h3.EventType.DATAGRAM for event in _drain_events(server))
+
+
+def test_recv_datagram_after_close_stream_discarded() -> None:
+    """CONNECT ストリームのクローズ後に受信データグラムが破棄されることを確認
+
+    close_stream による CONNECT ストリームのクローズはセッション終了の
+    3 経路の 1 つ (draft-ietf-webtrans-http3-16 Section 6 のセッション終了
+    条件の 1 つ目)。クローズ後に session_ids_ から削除されるため、その後の
+    受信データグラムは破棄される。
+    """
+    client, _server, session_id = _establish_session()
+
+    # CONNECT ストリーム (セッション ID そのもの) をクローズしてセッションを終了する
+    assert client.close_stream(session_id, 0) == session_id
+    assert any(event.type == h3.EventType.SESSION_CLOSED for event in _drain_events(client))
+
+    # 終了後は受信データグラムが破棄され、Datagram イベントが発火しない
+    client.receive_datagram(_encode_wt_datagram(session_id, b"after-close-stream"))
+    assert all(event.type != h3.EventType.DATAGRAM for event in _drain_events(client))
+
+
+def test_recv_datagram_pending_pre_accept_fin_discarded() -> None:
+    """受理前 FIN 検知済み・未受理のセッション宛の受信データグラムが破棄されることを確認
+
+    受理前 FIN を検知したセッションは終了を学習済みだが、accept_session に
+    よる受理前 (pending_pre_accept_fin_session_ids_ のみに含まれる状態) でも
+    破棄される。データグラム経路では nghttp3 のバッファリングが無く
+    2xx 書き出し完了まで session_ids_ に残るため、受理前 FIN 検知済み集合
+    の確認が必須である (破棄されないと終了を学習した後に配信され続ける)。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, True)  # 受理前 FIN (accept_session は未実施)
+
+    # 受理前 (pending_pre_accept_fin_session_ids_ のみ) でも破棄される
+    server.receive_datagram(_encode_wt_datagram(0, b"pending-pre-accept-fin"))
+    assert all(event.type != h3.EventType.DATAGRAM for event in _drain_events(server))
+
+
+def test_recv_datagram_accepted_pre_accept_fin_discarded() -> None:
+    """受理前 FIN 検知済み・受理済み (遅延クローズ保留中) のセッション宛の受信データグラムが破棄されることを確認
+
+    accept_session により受理済み (pre_accept_fin_accepted_session_ids_ に
+    含まれる状態。2xx レスポンスの書き出し完了前) でも破棄される。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, True)  # 受理前 FIN
+    assert server.accept_session(0) is True
+
+    # 2xx レスポンスの書き出し前 (遅延クローズ保留中) でも破棄される
+    server.receive_datagram(_encode_wt_datagram(0, b"accepted-pre-accept-fin"))
+    assert all(event.type != h3.EventType.DATAGRAM for event in _drain_events(server))
+
+
+def test_recv_datagram_unestablished_session_id_discarded() -> None:
+    """一度も確立されていないセッション ID 宛の受信データグラムが破棄されることを確認
+
+    メンバーシップ確認は終了したセッション ID に限らず、一度も確立されて
+    いないセッション ID 宛のデータグラムも破棄する (send_datagram の送信側
+    と同じ意味論の変更)。
+    """
+    client, _server, session_id = _establish_session()
+
+    # 確立済み ID とは異なる、一度も確立されていない ID 宛のデータグラムは破棄される
+    unestablished_session_id = session_id + 4
+    client.receive_datagram(_encode_wt_datagram(unestablished_session_id, b"never"))
+    assert all(event.type != h3.EventType.DATAGRAM for event in _drain_events(client))
+
+
+def test_recv_datagram_alive_session_delivered() -> None:
+    """生存セッションのデータグラム受信は従来どおり配信されることを確認
+
+    終了後の破棄は終了を学習したセッションにのみ適用され、生存セッション
+    への配信は影響を受けない。
+    """
+    client, _server, session_id = _establish_session()
+
+    client.receive_datagram(_encode_wt_datagram(session_id, b"alive"))
+    events = _drain_events(client)
+    datagram_events = [e for e in events if e.type == h3.EventType.DATAGRAM]
+    assert len(datagram_events) == 1
+    assert datagram_events[0].session_id == session_id
+    assert datagram_events[0].data == b"alive"
+
+
+def test_recv_datagram_client_optimistic_delivered() -> None:
+    """クライアントの connect 直後 (200 応答前) のデータグラム受信が妨げられないことを確認
+
+    draft-ietf-webtrans-http3-16 Section 4 の楽観的送信: クライアントは
+    CONNECT 送信後・サーバー応答前にデータグラムを受信できる。connect 直後
+    に session_ids_ へ挿入されるため、メンバーシップ確認を通過して配信
+    される。
+    """
+    client, _server = _create_session_pair()
+
+    # CONNECT リクエストを送信する (サーバー応答はまだ)
+    assert client.connect(0, "https://localhost/webtransport") is True
+
+    # サーバー応答前でも受信データグラムは配信される
+    client.receive_datagram(_encode_wt_datagram(0, b"optimistic-recv"))
+    events = _drain_events(client)
+    datagram_events = [e for e in events if e.type == h3.EventType.DATAGRAM]
+    assert len(datagram_events) == 1
+    assert datagram_events[0].data == b"optimistic-recv"
+
+
+def test_recv_datagram_server_pre_accept_delivered() -> None:
+    """サーバーのヘッダー受信後・受理前のデータグラム受信が妨げられないことを確認
+
+    サーバーは CONNECT リクエスト受信時 (end_headers_cb) に session_ids_
+    へ挿入されるため、受理前 (accept_session 前) のデータグラム受信は
+    配信される。ただし、CONNECT リクエストより先に届いたデータグラムは
+    破棄される (到着順序の保証がないため。既知の制約)。
+    """
+    client, server = _create_session_pair()
+
+    # クライアントが CONNECT を送信し、サーバーがリクエストを受信する (受理前)
+    assert client.connect(0, "https://localhost/webtransport") is True
+    _pump(client, server)
+    assert any(event.type == h3.EventType.SESSION_READY for event in _drain_events(server))
+
+    # 受理前でも受信データグラムは配信される
+    server.receive_datagram(_encode_wt_datagram(0, b"server-pre-accept"))
+    events = _drain_events(server)
+    datagram_events = [e for e in events if e.type == h3.EventType.DATAGRAM]
+    assert len(datagram_events) == 1
+    assert datagram_events[0].data == b"server-pre-accept"
+
+
+def test_recv_datagram_invalid_session_id_connection_close() -> None:
+    """範囲外のセッション ID のデータグラムは H3_ID_ERROR で接続が閉じられることを確認
+
+    構造検証 (既存の範囲チェックの挙動) は終了状態の確認と独立に維持される。
+    QUIC ストリーム ID の範囲 (RFC 9000 Section 2.1 の 2^62-1 まで) を
+    超えるセッション ID は Error イベント (H3_ID_ERROR = 0x0108) が発火
+    する。
+    """
+    client, _server, _session_id = _establish_session()
+
+    # 2^62 は QUIC ストリーム ID の範囲 (RFC 9000 Section 2.1 の 2^62-1
+    # まで) を超えるセッション ID になる
+    client.receive_datagram(_encode_wt_datagram(1 << 62, b"invalid"))
+    events = _drain_events(client)
+    error_events = [e for e in events if e.type == h3.EventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == 0x0108

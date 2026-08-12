@@ -151,7 +151,9 @@ class Client:
 
         不正なセッション ID (QUIC ストリーム ID 範囲外) のデータグラムは
         `on_datagram` に渡らず、接続が H3_ID_ERROR で閉じられる
-        (draft-ietf-webtrans-http3-16 Section 4 の MUST)。
+        (draft-ietf-webtrans-http3-16 Section 4 の MUST)。終了した・一度も
+        確立されていないセッション ID 宛のデータグラムは破棄される
+        (実装ポリシー)。
 
         Args:
             callback: async def callback(data: bytes) -> None
@@ -501,10 +503,10 @@ class Client:
                     # receive_datagram が Quarter Stream ID から session_id を
                     # 復元し、セッション ID を検証する
                     # (draft-ietf-webtrans-http3-16 Section 4.5 / Section 4)。
-                    # 範囲外のセッション ID は接続クローズとなり Datagram イベント
-                    # が生成されないため、ここに到達するのは構造的に有効なセッション
-                    # ID (QUIC ストリーム ID 範囲内。閉じたセッションの ID も含む)
-                    # のデータグラムのみである
+                    # 範囲外のセッション ID は接続クローズとなり、終了した・
+                    # 一度も確立されていないセッション ID 宛のデータグラムは
+                    # 破棄されるため、ここに到達するのは生存セッションの
+                    # データグラムのみである
                     await self._on_datagram(webtransport_event.data)
 
             elif webtransport_event.type == h3_low.EventType.RESET_STREAM:
