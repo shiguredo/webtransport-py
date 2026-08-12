@@ -1,7 +1,7 @@
 # サーバーが reject_session で拒否した後も session_ids_ からセッション ID が削除されない
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-server-session-id-reject-remaining
 - Polished: 2026-08-12
 
@@ -39,3 +39,13 @@
 - 拒否されたセッションに対して SessionClosed イベントが発火しない (黙って削除)
 - 既存テスト `test_pre_accept_fin_not_accepted_keeps_session` を書き換え、「受理前 FIN 検知済みセッションの reject では `session_ids_` から削除されるが SessionClosed は発火しない」ことを確認する (受理前 FIN 検知時に即クローズしない = 未送信の 2xx を破棄しない、という本質の検証は既存の遅延クローズテスト `test_pre_accept_fin_deferred_close_waits_for_2xx` が担う)
 - モックなしの Sans-IO テストで検証できる (conftest.py の `_create_session_pair` + `_setup_connect` で SESSION_READY 受信 → `reject_session(0, 403)` → `get_session_ids()` / `get_datagrams_to_send()` / `receive_datagram` の配信 / イベントを確認する構成)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `reject_session` を修正し、`status_code` が 2xx 以外の場合に `session_ids_` と `pending_pre_accept_fin_session_ids_` からセッション ID を削除した (SessionClosed は発火しない黙って削除)。2xx を渡した場合は何も削除しない (2xx 送出 = 確立。draft-ietf-webtrans-http3-16 Section 3.2)
+- 削除により、以後の `send_datagram` / `open_stream` / `receive_datagram` が既存のメンバーシップ確認で塞がれる。`close_stream` は 1 回目から -1 を返す
+- `src/bindings/webtransport_h3.h` の `reject_session` / `send_datagram` / `receive_datagram` / `close_stream` のドキュメントコメントを更新し、サーバー側の非 2xx 拒否をセッション ID の削除経路に加え、「既知の制約」の記述を解消した
+- `src/webtransport/h3/server.py` の受信側コメント 2 箇所を更新し、「既知の制約」を解消した
+- `tests/test_webtransport_h3_server_reject_session.py` を新規追加した (12 件)。非 2xx (403 / 302 / 500) と 1xx (103) での削除・2xx 非 200 (201) の保持と send_datagram 送出・拒否後の send_datagram 送出抑止・キュー済みデータグラムの送出・receive_datagram の配信抑止・SessionClosed 不発火・拒否後の WT_CLOSE_SESSION 受信でのイベント不発火・close_stream の -1 ・複数セッション共存時の他セッション無影響をモックなしの Sans-IO 構成で検証する
+- 既存テスト `test_pre_accept_fin_not_accepted_keeps_session` を `test_pre_accept_fin_not_accepted_removes_session_id` に書き換え、「受理前 FIN 検知済みセッションの reject では `session_ids_` から削除されるが SessionClosed は発火しない」ことを確認する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した

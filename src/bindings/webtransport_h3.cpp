@@ -337,9 +337,8 @@ void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
   // 喪失し得る。データグラムは再送されず喪失は無害なため、draft
   // Section 4.6 の SHOULD バッファリングに対する許容された逸脱)。
   // サーバー側の reject_session (非 2xx 拒否) は session_ids_ から削除
-  // しないため、拒否されたセッション ID 宛のデータグラムは配信され続ける
-  // (既知の制約。Origin 検証失敗の内部 403 経路は session_ids_ への挿入前
-  // のため破棄される)
+  // するため、拒否されたセッション ID 宛のデータグラムは破棄される
+  // (Origin 検証失敗の内部 403 経路は session_ids_ への挿入前のため同様)
   if (session_ids_.count(static_cast<int64_t>(session_id)) == 0 ||
       pending_pre_accept_fin_session_ids_.count(
           static_cast<int64_t>(session_id)) > 0 ||
@@ -695,6 +694,21 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
 
   nghttp3_conn_submit_response(conn_, stream_id, nva.data(), nva.size(),
                                nullptr);
+
+  // 非 2xx 応答で拒否されたセッションは一度も確立されていない
+  // (draft-ietf-webtrans-http3-16 Section 3.2) ため、SessionClosed は発火
+  // しない (黙って削除)。削除により、以後の send_datagram / open_stream /
+  // receive_datagram がメンバーシップ確認で塞がれる。受理前 FIN 検知済み
+  // セッション (pending_pre_accept_fin_session_ids_) のエントリも除去する
+  // (拒否されたセッションは accept_session による移行が発生しないため、
+  // 除去しないと残留する)。2xx を渡した場合は削除しない (2xx 送出は
+  // Section 3.2 の確立条件。受理前 FIN 検知済みセッションに 2xx を渡した
+  // 場合は pending 集合のエントリが残り、送信がブロックされ続ける)。
+  // accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)
+  if (status_code / 100 != 2) {
+    session_ids_.erase(stream_id);
+    pending_pre_accept_fin_session_ids_.erase(stream_id);
+  }
 }
 
 bool H3Session::verify_origin(
@@ -947,7 +961,8 @@ void H3Session::send_datagram(int64_t session_id,
   // send any new datagrams or open any new streams」)。session_ids_ から
   // セッション ID が削除される経路 (close_stream による CONNECT ストリーム
   // のクローズ / close_session / recv_wt_close_session_cb / end_headers_cb
-  // での非 2xx 応答受信) はすべて session_ids_ のメンバーシップ確認に
+  // での非 2xx 応答受信 / サーバー側の reject_session による非 2xx 拒否) は
+  // すべて session_ids_ のメンバーシップ確認に
   // 依存するため、メンバーシップ確認で session_ids_ に含まれないセッション
   // ID への送信を黙って無視する (open_stream は失敗を false で返すのに対し、
   // 本対応は void のまま黙って無視する。機構も異なる: open_stream は
