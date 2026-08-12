@@ -262,12 +262,13 @@ class H3Session {
    *
    * session_ids_ に含まれないセッション ID (終了した・一度も確立されて
    * いないセッションの ID) への送信は黙って無視する。セッション終了の
-   * 検知は session_ids_ のメンバーシップ確認で行い、セッション終了の
-   * 3 経路 (close_stream による CONNECT ストリームのクローズ /
-   * close_session / recv_wt_close_session_cb) がすべて session_ids_
-   * からセッション ID を削除することに依存する。加えて、受理前 FIN を
-   * 検知したセッション (終了を学習済みだが close_stream による後始末前。
-   * この間は session_ids_ に含まれたまま) への送信も黙って無視する。
+   * 検知は session_ids_ のメンバーシップ確認で行い、セッション ID の
+   * 削除経路 (close_stream による CONNECT ストリームのクローズ /
+   * close_session / recv_wt_close_session_cb / クライアントでの非 2xx
+   * 応答受信) がすべて session_ids_ からセッション ID を削除することに
+   * 依存する。加えて、受理前 FIN を検知したセッション (終了を学習済みだ
+   * が close_stream による後始末前。この間は session_ids_ に含まれたまま)
+   * への送信も黙って無視する。
    * 根拠は draft-ietf-webtrans-http3-16 Section 6 の MUST 「セッション
    * 終了を学習したエンドポイントは、新しいデータグラムを送信しては
    * ならない (it MUST NOT send any new datagrams or open any new
@@ -307,7 +308,9 @@ class H3Session {
    *   CONNECT ストリーム (セッション ID は CONNECT ストリーム ID そのもの。
    *   draft-ietf-webtrans-http3-16 Section 2.2) の場合は 1 回目のクローズでは
    *   ストリーム ID 自身を返す (セッション終了後は session_ids_ から削除される
-   *   ため、2 回目以降は -1 を返す)。
+   *   ため、2 回目以降は -1 を返す)。クライアントが非 2xx 応答を受信した
+   *   セッション (確立されず session_ids_ から削除済み) の CONNECT ストリーム
+   *   は 1 回目から -1 を返す。
    *   セッション ID を復元できない場合 (制御ストリーム・QPACK ストリーム・
    *   WT ヘッダー未受信のままリセットされたストリーム等) は -1 を返す。
    *   コネクションが無い場合も -1 を返す。

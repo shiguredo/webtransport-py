@@ -113,6 +113,8 @@
   - @voluntas
 - [FIX] セッション終了後に終了したセッション ID 宛の open_stream が成功するのを修正する
   - @voluntas
+- [FIX] クライアントが非 2xx 応答を受信してもセッション ID が残る問題を修正する
+  - @voluntas
 
 ### misc
 
