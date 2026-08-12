@@ -36,6 +36,8 @@ H3Session::H3Session(H3Session&& other) noexcept
       pending_fin_session_ids_(std::move(other.pending_fin_session_ids_)),
       pending_pre_accept_fin_session_ids_(
           std::move(other.pending_pre_accept_fin_session_ids_)),
+      pending_qpack_blocked_fin_stream_ids_(
+          std::move(other.pending_qpack_blocked_fin_stream_ids_)),
       pre_accept_fin_accepted_session_ids_(
           std::move(other.pre_accept_fin_accepted_session_ids_)),
       stream_info_(std::move(other.stream_info_)),
@@ -63,6 +65,8 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     pending_fin_session_ids_ = std::move(other.pending_fin_session_ids_);
     pending_pre_accept_fin_session_ids_ =
         std::move(other.pending_pre_accept_fin_session_ids_);
+    pending_qpack_blocked_fin_stream_ids_ =
+        std::move(other.pending_qpack_blocked_fin_stream_ids_);
     pre_accept_fin_accepted_session_ids_ =
         std::move(other.pre_accept_fin_accepted_session_ids_);
     stream_info_ = std::move(other.stream_info_);
@@ -165,18 +169,62 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
   // のため対象外とし、二重処理を回避する (判定は pending_fin_session_ids_
   // の clear より前に行う)。判定を read_stream2 の後に置くことで、同一
   // 読み取り (ヘッダー + FIN) でも end_headers_cb による session_ids_ への
-  // 挿入完了後に検知できる。ヘッダーが QPACK デコードブロック中に fin 付き
-  // データが届いた場合は、ヘッダーは後でデコードされる (session_ids_ に
-  // 挿入され SESSION_READY は発火する) が fin は完全に喪失し、以後どの
-  // 経路でも検知されない (セッションは終了検知されず session_ids_ に
-  // 残り続ける。QPACK ブロックはエンコーダーストリームの到着遅延で発生
-  // し得る既知の制約)。検知したセッションは accept_session による受理と
-  // 2xx レスポンスの書き出し完了後に close_stream で後始末する。検知後は
-  // 終了を学習した状態であり、send_datagram / open_stream の送信を拒否する
-  // (draft-ietf-webtrans-http3-16 Section 6 の MUST)
+  // 挿入完了後に検知できる。
   if (fin && is_server_ && session_ids_.count(stream_id) > 0 &&
       pending_fin_session_ids_.count(stream_id) == 0) {
     pending_pre_accept_fin_session_ids_.insert(stream_id);
+  }
+
+  // QPACK デコードブロック中の受理前 FIN の検知 (サーバー側の CONNECT
+  // ストリームに限定)。上記の検知はヘッダー処理完了 (= end_headers_cb
+  // 実行済み) に依存し、ヘッダーが QPACK デコードブロック中に fin 付き
+  // データが届くとヘッダー未処理のため検知が成立しない。
+  //
+  // ブロック中の nghttp3 の挙動: ブロック中のデータは inq にバッファされ、
+  // ブロック解除後の再処理 (process_blocked_stream_data) で inq の最後の
+  // チャンクに READ_EOF が fin として伝播される (フィールドセクションのみ
+  // がバッファされる場合)。しかし read_bidi がヘッダー完了後に「Server has
+  // not submitted response」の分岐で WT_SESSION_BLOCKED を立てて早期
+  // return するため、almost_done の fin 処理 (end_stream コールバック) に
+  // 到達せず fin は喪失する (フィールドセクションに後続データが混在する
+  // 読み取りは nghttp3 側の既知の異常挙動のため対象外)。
+  //
+  // ここでは fin 引数で「fin が渡ったが session_ids_ に未挿入 (ヘッダー未
+  // 処理) かつ pending_headers_ に含まれる (begin_headers_cb 発火済み・
+  // end_headers_cb 未発火) ストリーム」を保留集合に一時記録し、ブロック
+  // 解除後の読み取りで CONNECT 判定 (session_ids_ への挿入) を確認して
+  // pending_pre_accept_fin_session_ids_ へ移行する (下記の移行処理)。
+  // 記録条件は上記の検知条件 (count > 0) と排他 (count == 0) であり、
+  // QPACK ブロックなしの同一読み取り (ヘッダー + FIN) は上記で検知される
+  // ため二重検知しない。pending_headers_ のメンバーシップで CONNECT 以外の
+  // ストリーム (WT データストリーム・ヘッダー処理済みの通常リクエスト・
+  // 制御ストリーム等) の FIN を記録から除外する。セッション確定に至らな
+  // かったストリームの記録は end_headers_cb で、ブロック中にリセットされた
+  // ストリームの記録は close_stream で除去する (どちらも除去できない場合
+  // は接続終了まで残留する既知の制約)。クライアント側 (is_server_ ==
+  // false) は受理前 FIN の概念がないため対象外
+  if (fin && is_server_ && session_ids_.count(stream_id) == 0 &&
+      pending_headers_.count(stream_id) > 0) {
+    pending_qpack_blocked_fin_stream_ids_.insert(stream_id);
+  }
+
+  // QPACK ブロック解除後に CONNECT 判定された保留ストリームを
+  // pending_pre_accept_fin_session_ids_ へ移行する。移行は
+  // nghttp3_conn_read_stream2 から戻った後 (end_headers_cb による
+  // session_ids_ 挿入・pending_headers_ 削除の後) に行うため、アプリが
+  // SESSION_READY を受けて accept_session を呼ぶ時点では既に移行済みで、
+  // accept_session 内の既存の移行処理 (pending_pre_accept_fin_session_ids_
+  // のメンバーシップ確認) がそのまま機能する。session_ids_ に含まれない
+  // 保留ストリーム (まだブロック中・CONNECT 判定されなかった) はそのまま
+  // 残す
+  for (auto it = pending_qpack_blocked_fin_stream_ids_.begin();
+       it != pending_qpack_blocked_fin_stream_ids_.end();) {
+    if (session_ids_.count(*it) > 0) {
+      pending_pre_accept_fin_session_ids_.insert(*it);
+      it = pending_qpack_blocked_fin_stream_ids_.erase(it);
+    } else {
+      ++it;
+    }
   }
 
   // end_stream コールバックで検知した CONNECT ストリームの FIN を処理する。
@@ -868,6 +916,13 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
     return -1;
   }
 
+  // QPACK デコードブロック中 fin を検知した保留記録を除去する。ブロック中
+  // にリセットされたストリームは end_headers_cb が発火せず、移行条件
+  // (session_ids_ への挿入) も成立しないため、そのままでは記録が接続終了
+  // まで残留する。ここで除去する (移行済みのストリームは既に erase 済み
+  // のため no-op)
+  pending_qpack_blocked_fin_stream_ids_.erase(stream_id);
+
   // セッション ID の復元とバッファ削除は nghttp3 呼び出しより前に行う
   // (nghttp3_conn_close_stream は同期実行される stream_close_cb を呼び、
   // stream_close_cb が stream_info_ からエントリを削除するため)
@@ -1054,6 +1109,14 @@ void H3Session::max_concurrent_streams(size_t n) {
 
 std::optional<bool> H3Session::has_stream_buffer(int64_t stream_id) const {
   if (stream_buffers_.find(stream_id) == stream_buffers_.end()) {
+    return std::nullopt;
+  }
+  return true;
+}
+
+std::optional<bool> H3Session::has_pending_qpack_blocked_fin_stream(
+    int64_t stream_id) const {
+  if (pending_qpack_blocked_fin_stream_ids_.count(stream_id) == 0) {
     return std::nullopt;
   }
   return true;
@@ -1277,6 +1340,11 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     // Origin 検証に失敗した場合は 403 で拒否する
     if (!session->verify_origin(headers)) {
       session->reject_session(stream_id, 403);
+      // QPACK デコードブロック中に fin を検知した保留ストリームは、CONNECT
+      // 判定されなかったため記録を除去する (receive_stream_data の移行処理
+      // は session_ids_ への挿入を条件とするため、このストリームは移行され
+      // ない)
+      session->pending_qpack_blocked_fin_stream_ids_.erase(stream_id);
       session->pending_headers_.erase(it);
       return 0;
     }
@@ -1321,6 +1389,14 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
       event.session_id = stream_id;
       session->push_event(std::move(event));
     }
+  }
+
+  // CONNECT 判定されなかったサーバー側ストリーム (通常の HTTP リクエスト等)
+  // の QPACK ブロック中 fin 記録を除去する。CONNECT 判定されたストリームの
+  // 記録は receive_stream_data の後段で pending_pre_accept_fin_session_ids_
+  // へ移行されるため、ここでは除去しない
+  if (session->is_server_ && !(is_connect && is_webtransport)) {
+    session->pending_qpack_blocked_fin_stream_ids_.erase(stream_id);
   }
 
   session->pending_headers_.erase(it);
@@ -1747,6 +1823,12 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::sig("def _has_stream_buffer(self, stream_id: int) -> "
                    "bool | None"),
            "テスト専用: ストリームの送信バッファエントリの有無を確認")
+      .def("_has_pending_qpack_blocked_fin_stream",
+           &H3Session::has_pending_qpack_blocked_fin_stream,
+           nb::arg("stream_id"),
+           nb::sig("def _has_pending_qpack_blocked_fin_stream(self, "
+                   "stream_id: int) -> bool | None"),
+           "テスト専用: QPACK ブロック中 fin の保留記録の有無を確認")
       .def("stream_writable", &H3Session::stream_writable, nb::arg("stream_id"),
            nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
            "ストリームが書き込み可能か確認")

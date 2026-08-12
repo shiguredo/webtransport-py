@@ -417,6 +417,16 @@ class H3Session {
   std::optional<bool> has_stream_buffer(int64_t stream_id) const;
 
   /**
+   * テスト専用: QPACK デコードブロック中 fin の保留記録に含まれるか
+   *
+   * 恒久的な公開 API ではなく、テストでの記録・除去の検証にのみ使う。
+   * @param stream_id ストリーム ID
+   * @return 記録に含まれる場合は true、含まれない場合は nullopt
+   */
+  std::optional<bool> has_pending_qpack_blocked_fin_stream(
+      int64_t stream_id) const;
+
+  /**
    * ストリームが書き込み可能か確認
    *
    * 存在しない・closed・フロー制御ブロック・入力データ待ち・half-closed の
@@ -603,6 +613,16 @@ class H3Session {
   // accept_session による受理と 2xx レスポンスの書き出し完了後に
   // close_stream で後始末する
   std::set<int64_t> pending_pre_accept_fin_session_ids_;
+
+  // QPACK デコードブロック中に fin を検知した CONNECT ストリーム候補の
+  // ストリーム ID。ヘッダー未処理 (begin_headers_cb 発火済み・end_headers_cb
+  // 未発火) のためセッション ID に確定していない。receive_stream_data の
+  // fin 引数で記録し、ブロック解除後の読み取りで CONNECT 判定 (session_ids_
+  // への挿入) を確認して pending_pre_accept_fin_session_ids_ へ移行する
+  // (詳細は receive_stream_data の実装コメント)。セッション確定に至らな
+  // かったストリーム (非 CONNECT・Origin 検証失敗を含む) は end_headers_cb
+  // で、ブロック中にリセットされたストリームは close_stream で除去する
+  std::set<int64_t> pending_qpack_blocked_fin_stream_ids_;
 
   // 受理前 FIN を検知したセッションのうち、accept_session で受理済みの
   // セッション ID。2xx レスポンスの書き出し完了 (stream_flushed) を

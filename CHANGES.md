@@ -117,6 +117,8 @@
   - @voluntas
 - [FIX] HTTP/2 でセッション終了後に send_datagram がデータグラムを送出してしまうのを修正する
   - @voluntas
+- [FIX] QPACK デコードブロック中の受理前 FIN でセッション終了が検知されないのを修正する
+  - @voluntas
 
 ### misc
 
