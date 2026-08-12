@@ -833,18 +833,18 @@ void H3Session::send_datagram(int64_t session_id,
                               const std::vector<uint8_t>& data) {
   // セッション終了を学習したエンドポイントは新しいデータグラムを送信しては
   // ならない (draft-ietf-webtrans-http3-16 Section 6 の MUST 「it MUST NOT
-  // send any new datagrams or open any new streams」)。セッション終了の
-  // 3 経路 (close_stream による CONNECT ストリームのクローズ /
-  // close_session / recv_wt_close_session_cb) はすべて session_ids_ から
-  // セッション ID を削除するため、メンバーシップ確認で session_ids_ に
-  // 含まれないセッション ID への送信を黙って無視する (open_stream は失敗を
-  // false で返すのに対し、本対応は void のまま黙って無視する。機構も
-  // 異なる: open_stream は nghttp3 のエラー返却に依存し、本対応は
-  // session_ids_ の直接確認)。受理前 FIN を検知したセッション (終了を
-  // 学習済みだが close_stream による後始末前) も同様に無視する。
-  // 楽観的送信 (draft-ietf-webtrans-http3-16 Section 4) は妨げない:
-  // クライアントは connect 直後に、サーバーは CONNECT リクエスト受信時
-  // (end_headers_cb) に session_ids_ へ挿入される
+  // send any new datagrams or open any new streams」)。session_ids_ から
+  // セッション ID が削除される経路 (close_stream による CONNECT ストリーム
+  // のクローズ / close_session / recv_wt_close_session_cb / end_headers_cb
+  // での非 2xx 応答受信) はすべて session_ids_ のメンバーシップ確認に
+  // 依存するため、メンバーシップ確認で session_ids_ に含まれないセッション
+  // ID への送信を黙って無視する (open_stream は失敗を false で返すのに対し、
+  // 本対応は void のまま黙って無視する。機構も異なる: open_stream は
+  // nghttp3 のエラー返却に依存し、本対応は session_ids_ の直接確認)。
+  // 受理前 FIN を検知したセッション (終了を学習済みだが close_stream による
+  // 後始末前) も同様に無視する。楽観的送信 (draft-ietf-webtrans-http3-16
+  // Section 4) は妨げない: クライアントは connect 直後に、サーバーは
+  // CONNECT リクエスト受信時 (end_headers_cb) に session_ids_ へ挿入される
   if (session_ids_.count(session_id) == 0 ||
       pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
       pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
@@ -1288,9 +1288,34 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     event.type = H3EventType::SessionReady;
     event.session_id = stream_id;
     session->push_event(std::move(event));
-  } else if (!session->is_server_ && status == "200") {
-    // クライアント: WebTransport セッション確立
-    if (session->session_ids_.count(stream_id) > 0) {
+  } else if (!session->is_server_ && !status.empty()) {
+    // クライアント: WebTransport セッション応答の処理。
+    // 2xx 応答の受信でセッションが確立される (draft-ietf-webtrans-http3-16
+    // Section 3.2 の「クライアントの視点では、2xx 応答を受信したときに
+    // セッションが確立される」)。nghttp3 は 2xx 全般をセッション確立として
+    // 扱う (status_code / 100 == 2 による confirm。201 等の 2xx 非 200
+    // 応答でもセッションが確定する) ため、誤って削除しない。
+    // SESSION_READY は 200 のときのみ発火する (2xx 非 200 応答で
+    // SESSION_READY が発火しないのは既存の制約として残す)
+    if (status[0] != '2') {
+      // 非 2xx 応答 (拒否・リダイレクト) ではセッションは確立されなかった
+      // (draft-ietf-webtrans-http3-16 Section 3.2 では 2xx のみが確立)。
+      // 楽観的送信 (Section 4) は応答受信までの許容であり、拒否後の送信は
+      // 塞がなければならない。nghttp3 は非 2xx 応答を受信した CONNECT
+      // ストリームを reset する (abort_stream。status_code / 100 == 2 が
+      // 成立しないため) ため end_stream コールバックが発火せず、既存の
+      // FIN 経路では session_ids_ から削除されない。ここで session_ids_
+      // から削除して、拒否されたセッション ID 宛の send_datagram /
+      // open_stream を塞ぐ。1xx 中間応答もこの分岐で削除する: 1xx は
+      // 確立応答ではなく (Section 3.2)、現在の依存 nghttp3 は 1xx 受信時
+      // に status_code を -1 へ戻して非 2xx として abort する (nghttp3
+      // が 1xx を中間応答として扱う更新が入った場合はこの削除の見直しが
+      // 必要)。SessionClosed は発火しない (一度も確立されていない
+      // セッションの終了通知という意味論が合わないため、黙って削除する)。
+      // 削除後は close_stream の CONNECT ストリーム判定 (session_ids_ の
+      // メンバーシップ確認) が成立しなくなり、二重発火の経路も残らない
+      session->session_ids_.erase(stream_id);
+    } else if (status == "200" && session->session_ids_.count(stream_id) > 0) {
       H3Event event;
       event.type = H3EventType::SessionReady;
       event.session_id = stream_id;

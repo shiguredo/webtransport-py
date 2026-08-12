@@ -1,7 +1,7 @@
 # クライアントが非 2xx 応答を受信しても session_ids_ からセッション ID が削除されない
 
 - Created: 2026-08-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-client-session-id-non-2xx-remaining
 - Polished: 2026-08-12
 
@@ -32,3 +32,13 @@
 - 拒否されたセッションに対して SessionClosed イベントが発火しない (黙って削除)
 - 通常のセッション確立 (200 応答) と 2xx 非 200 応答 (201 等) のセッションは誤って削除されない (2xx 非 200 は Sans-IO 構成で `reject_session(stream_id, 201)` により 201 応答を生成し (accept_session は 200 固定)、FIN を保留して届けて `session_ids_` に残ること・SESSION_READY が発火しないことを確認する。FIN 到着後は既存の FIN 経路で後始末される)
 - モックなしの Sans-IO テストで検証できる (サーバーが `reject_session` で 403 を送出し、クライアントが受信した後に `get_session_ids()` / `get_datagrams_to_send()` / イベントを確認する構成)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `end_headers_cb` クライアント側分岐を変更し、受信した `:status` が 2xx 以外の場合に `session_ids_` からセッション ID を削除した。削除条件は「200 以外」ではなく「2xx 以外」(`status[0] != '2'`) とし、nghttp3 が 2xx 全般をセッション確立として扱うこと (`status_code / 100 == 2` による confirm) と整合させた
+- SessionClosed イベントは発火しない (黙って削除)。非 2xx 応答ではセッションは一度も確立されていないため終了通知の意味論が合わない。削除後は `close_stream` の CONNECT ストリーム判定が成立しなくなり二重発火の経路も残らない
+- SESSION_READY の発火条件 (`:status == "200"`) は変更していない
+- 1xx 中間応答も同じ分岐で削除する。現在の依存 nghttp3 は 1xx 受信時に `status_code` を -1 へ戻して非 2xx として CONNECT ストリームを abort するため、nghttp3 の状態と矛盾しない (nghttp3 が 1xx を中間応答として扱う更新が入った場合は見直しが必要とコメントに明記した)
+- `src/bindings/webtransport_h3.h` の `send_datagram` / `close_stream` のドキュメントコメントを更新し、非 2xx 応答受信がセッション ID の削除経路であることと、拒否後の `close_stream` が 1 回目から -1 を返すことを明記した
+- `tests/test_webtransport_h3_reject_session.py` を新規追加した (15 件)。非 2xx (403 / 302 / 500) での削除・`send_datagram` 送出抑止・`open_stream` 失敗・SessionClosed 不発火、1xx (103) での削除、2xx 非 200 (201) の保持と FIN 経路での後始末、通常の 200 確立への影響なし、をモックなしの Sans-IO 構成で検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
