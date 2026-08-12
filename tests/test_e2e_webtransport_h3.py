@@ -2962,15 +2962,16 @@ async def test_datagram_invalid_session_id_closes_connection_client(
 
 
 @pytest.mark.asyncio
-async def test_datagram_closed_session_id_still_delivered(test_certificates):
-    """閉じたセッションの ID 宛てのデータグラムが配送されることを確認
+async def test_datagram_closed_session_id_discarded(test_certificates):
+    """閉じたセッションの ID 宛てのデータグラムが破棄されることを確認
 
-    セッション ID の検証は構造のみで行い、閉じたセッションの ID は検査
-    対象外 (draft-ietf-webtrans-http3-16 Section 4 の "Session IDs that
-    correspond to closed sessions are not considered invalid for the
-    purposes of this check")。不正なセッション ID の時だけ接続クローズと
-    なるため、閉じたセッションの ID を含む正常なセッション ID の
-    データグラムは従来どおり配送される
+    終了したセッション ID 宛のデータグラムはアプリに配信されない
+    (実装ポリシー。draft-ietf-webtrans-http3-16 Section 4 の「closed session
+    宛のデータの扱いは Section 6 に従う」と、データグラムは再送されず配信
+    保証がないこと (Section 4.1 / RFC 9221) が根拠)。セッション ID の構造
+    検証 (範囲外 ID の H3_ID_ERROR) は維持され、閉じたセッションの ID を
+    含む正常なセッション ID のデータグラムで接続が閉じないことを併せて
+    確認する。
     """
     server, server_task, info = await _start_session_closed_server(
         test_certificates, expected_sessions=2
@@ -2999,11 +3000,10 @@ async def test_datagram_closed_session_id_still_delivered(test_certificates):
         # クライアント側でもセッションが閉じたことを確認する
         assert client._h3_session.get_session_ids() == [second_session_id]
 
-        # 閉じたセッションの ID 宛てのデータグラムが配送される
+        # 閉じたセッションの ID 宛てのデータグラムは破棄される
         # (受信側の検証。送信側の高レベル send_datagram は終了した
         # セッションへの送信を無視するため、QUIC 層へのワイヤ形式
-        # 直接注入で検証する。閉じたセッション ID のデータグラムを
-        # アプリへ届けるのは仕様どおりの受信挙動)
+        # 直接注入で検証する)
         server_client = server._clients[client_addr]
         assert server_client.quic_connection is not None
         wire_datagram = _encode_wt_datagram(first_session_id, b"closed-dg")
@@ -3013,12 +3013,16 @@ async def test_datagram_closed_session_id_still_delivered(test_certificates):
         # 回り得る。確実に送出するため複数回フラッシュする
         for _ in range(8):
             await server._send_to(client_addr, server_client)
+        # 破棄されるため、タイムアウトしても受信しない
         datagram_event = await client._receive_datagram()
-        assert datagram_event is not None
-        assert datagram_event.session_id == first_session_id
-        assert datagram_event.data == b"closed-dg"
+        assert datagram_event is None
 
-        # 開いているセッションの ID 宛てのデータグラムも従来どおり配送される
+        # 構造検証は維持され、閉じたセッションの ID のデータグラムで
+        # 接続が閉じない
+        assert client._h3_session.is_closed() is False
+        assert server_client.quic_connection.is_closed() is False
+
+        # 開いているセッションの ID 宛てのデータグラムは従来どおり配送される
         await server.send_datagram(client_addr, second_session_id, b"open-dg")
         datagram_event = await client._receive_datagram()
         assert datagram_event is not None

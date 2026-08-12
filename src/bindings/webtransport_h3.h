@@ -154,6 +154,27 @@ class H3Session {
   /**
    * QUIC データグラムを受信
    * @param data データグラムペイロード
+   *
+   * 先頭の Quarter Stream ID からセッション ID を復元する。QUIC ストリーム
+   * ID の範囲を超えるセッション ID は H3_ID_ERROR で接続を閉じる
+   * (draft-ietf-webtrans-http3-16 Section 4 の MUST)。
+   *
+   * 終了したセッション ID (close_stream による CONNECT ストリームのクローズ
+   * / close_session / recv_wt_close_session_cb / クライアントでの非 2xx
+   * 応答受信で session_ids_ から削除済み) と、一度も確立されていない
+   * セッション ID 宛のデータグラムは破棄して Datagram イベントを発火しない。
+   * 根拠は draft-ietf-webtrans-http3-16 Section 4 の「closed session 宛の
+   * データの扱いは Section 6 に従う」と、データグラムは再送されず配信保証
+   * がないこと (Section 4.1 / RFC 9221)。本対応は仕様の MUST 由来ではなく
+   * 実装ポリシーである。受理前 FIN 検知済みセッション (終了を学習済みだが
+   * close_stream による後始末前) 宛も破棄する。楽観的送受信は妨げない:
+   * クライアントは connect 直後 (200 応答前)、サーバーは CONNECT リクエスト
+   * 受信時 (end_headers_cb) に session_ids_ へ挿入される。ただしサーバー側
+   * は CONNECT リクエストの処理完了前 (QPACK デコードブロック中を含む) に
+   * 届いたデータグラムのみ破棄される (楽観的データグラムの先行到着で喪失
+   * し得る。データグラムは再送されず喪失は無害なため許容)。サーバー側の
+   * reject_session (非 2xx 拒否) は session_ids_ から削除しないため、拒否
+   * されたセッション ID 宛のデータグラムは配信され続ける (既知の制約)
    */
   void receive_datagram(const std::vector<uint8_t>& data);
 

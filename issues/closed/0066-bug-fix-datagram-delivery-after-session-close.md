@@ -1,7 +1,7 @@
 # セッション終了後に終了したセッション ID 宛のデータグラムが配信される
 
 - Created: 2026-08-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-datagram-delivery-after-session-close
 - Polished: 2026-08-12
 
@@ -38,3 +38,14 @@ close_session (WT_CLOSE_SESSION 送出) と recv_wt_close_session_cb (WT_CLOSE_S
 - 生存セッションのデータグラム受信は従来どおり配信される
 - 不正なセッション ID (範囲外) のデータグラムは H3_ID_ERROR で接続が閉じられる (0049 の挙動維持)
 - モックなしの Sans-IO テストで検証できる (conftest.py の `_encode_wt_datagram` と `_establish_session` を流用し、セッション終了後に `receive_datagram` へ直接注入する構成)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `receive_datagram` で、構造検証 (範囲チェック。H3_ID_ERROR) の**後**にセッションの終了状態を確認し、終了した・一度も確立されていないセッション ID 宛のデータグラムを破棄して Datagram イベントを発火しないようにした。確認条件は受信データストリームの破棄 (`recv_wt_data_cb`) と同じ方針: `session_ids_` のメンバーシップ + 受理前 FIN 検知済み集合 (`pending_pre_accept_fin_session_ids_` / `pre_accept_fin_accepted_session_ids_`) の確認
+- 受理前 FIN 検知済みセッションの確認は、データグラム経路では nghttp3 のバッファリングが無く 2xx 書き出し完了まで `session_ids_` に残るため必須 (破棄されないと終了を学習した後に配信され続ける)
+- 受信データグラムの破棄は仕様の MUST 由来ではなく実装ポリシーであることをコメントに明記した (根拠: draft-ietf-webtrans-http3-16 Section 4 の「closed session 宛のデータの扱いは Section 6 に従う」、Section 4.1 / RFC 9221 の「データグラムは再送されず配信保証がない」)
+- サーバー側は CONNECT リクエストの処理完了前 (QPACK デコードブロック中を含む) に届いたデータグラムが破棄される (楽観的データグラムの先行到着で喪失し得る。draft Section 4.6 の SHOULD バッファリングに対する許容された逸脱) 旨と、サーバー側の `reject_session` (非 2xx 拒否) は `session_ids_` から削除しないため拒否されたセッション ID 宛のデータグラムは配信され続ける (既知の制約) 旨をコメントに明記した
+- `src/bindings/webtransport_h3.h` の `receive_datagram` docstring と、`src/webtransport/h3/client.py` / `server.py` の DATAGRAM 分岐コメント・`on_datagram` docstring を意味論の変更に合わせて更新した
+- `tests/test_webtransport_h3_datagram.py` に受信テスト 10 件を追加した: close_session 送出後・WT_CLOSE_SESSION 受信後・CONNECT ストリームクローズ後の破棄 (3 経路)、受理前 FIN 検知済み (pending / accepted の 2 状態) の破棄、未確立 ID の破棄、生存セッションの配信、クライアント connect 直後・サーバー受理前の楽観的受信の配信、範囲外 ID の H3_ID_ERROR
+- `tests/test_e2e_webtransport_h3.py` の `test_datagram_closed_session_id_still_delivered` を `test_datagram_closed_session_id_discarded` に書き換えた (期待値の反転と、構造検証が維持されて接続が閉じないこと・生存セッションへの配信継続の検証)
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
