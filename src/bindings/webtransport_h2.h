@@ -371,9 +371,9 @@ class H2Session {
    * いないため従来どおり送出される。クライアントが非 2xx 応答 (拒否) を受けた
    * セッション ID 宛の送信は、応答受信時に wt_sessions_ から削除されるため
    * 塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
-   * ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路
-   * (draft-15 Section 3.4 の正規の終了経路) は検知できずスコープ外である
-   * (既知の制約)
+   * ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
+   * Section 3.4 の正規の終了経路) も END_STREAM 検知でエントリが削除される
+   * ため塞がれる
    * @param session_id セッション ID
    * @param data データ
    */
@@ -470,6 +470,7 @@ class H2Session {
                                const uint8_t* payload,
                                size_t length);
   void handle_wt_drain_session(int32_t session_id);
+  void handle_end_stream(int32_t session_id);
 
   // HTTP/2 DATA フレームとして Capsule を送信
   void send_capsule(int32_t session_id,
