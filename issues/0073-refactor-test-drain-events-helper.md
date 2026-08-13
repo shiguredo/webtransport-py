@@ -7,15 +7,16 @@
 
 ## 目的
 
-同一実装の `_drain_events` (イベントキューを全て取り出すヘルパー) がテストファイル 11 件で重複している。イベントの取り出し仕様 (例: キューが空になるまで取り出す) を変更するときに全ファイルの修正が必要になるため、`tests/conftest.py` に集約して保守性を高める。closed issue 0028 で接続ヘルパー (`_pump` / `_create_session_pair` 等) を conftest.py に集約した流れの継続であり、0028 の対象外だった `_drain_events` が残っている。
+同一実装の `_drain_events` (イベントキューを全て取り出すヘルパー) がテストファイル 12 件で重複している。イベントの取り出し仕様 (例: キューが空になるまで取り出す) を変更するときに全ファイルの修正が必要になるため、`tests/conftest.py` に集約して保守性を高める。closed issue 0028 で接続ヘルパー (`_pump` / `_create_session_pair` 等) を conftest.py に集約した流れの継続であり、0028 の対象外だった `_drain_events` が残っている。
 
 ## 現状
 
-- 以下の 11 ファイルに `_drain_events` が定義されている (いずれも `next_event()` が `None` を返すまで取り出す同一実装。型のみ異なる):
+- 以下の 12 ファイルに `_drain_events` が定義されている (いずれも `next_event()` が `None` を返すまで取り出す同一実装。型のみ異なる):
   - `tests/test_http2_message_ext.py` (`http2.Connection` → `http2.Event`)
   - `tests/test_http2_session_control.py`
   - `tests/test_webtransport_h2_datagram.py` (`h2.Session` → `h2.Event`)
   - `tests/test_webtransport_h2_reject_session.py`
+  - `tests/test_webtransport_h2_end_stream.py`
   - `tests/test_webtransport_h3_datagram.py` (`h3.Session` → `h3.Event`)
   - `tests/test_webtransport_h3_ghost_stream.py`
   - `tests/test_webtransport_h3_pre_accept_fin.py`
@@ -28,11 +29,11 @@
 
 ## 設計方針
 
-- `tests/conftest.py` に `_drain_events` を定義し、上記 11 ファイルの重複定義を削除して import に置き換える (0028 の `_pump` と同じ `from conftest import ...` の流儀)
-- 型アノテーションは 11 ファイル全てで同じ取り出し処理が使える範囲で表現する (例: 戻り値は `list[h3.Event] | list[h2.Event] | list[http2.Event]` か、取り出す対象を抽象化する)
+- `tests/conftest.py` に `_drain_events` を定義し、上記 12 ファイルの重複定義を削除して import に置き換える (0028 の `_pump` と同じ `from conftest import ...` の流儀)
+- 型アノテーションは 12 ファイル全てで同じ取り出し処理が使える範囲で表現する (例: 戻り値は `list[h3.Event] | list[h2.Event] | list[http2.Event]` か、取り出す対象を抽象化する)
 - 各テストファイルの `_drain_events` の docstring の表現差 (「コネクションのイベント」「セッションに積まれたイベント」等) は統一する
 
 ## 完了条件
 
-- 上記 11 ファイルの `_drain_events` の重複定義が削除され、全て conftest.py のヘルパーを使う
+- 上記 12 ファイルの `_drain_events` の重複定義が削除され、全て conftest.py のヘルパーを使う
 - 全テストが通る
