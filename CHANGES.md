@@ -129,6 +129,8 @@
   - @voluntas
 - [FIX] HTTP/2 でクライアントが非 2xx 応答を受信してもセッション ID が残る問題を修正する
   - @voluntas
+- [FIX] HTTP/2 で WT_CLOSE_SESSION なしの END_STREAM のみによるセッション終了が検知されない問題を修正する
+  - @voluntas
 
 ### misc
 

@@ -447,6 +447,49 @@ void H2Session::handle_wt_drain_session(int32_t session_id) {
   push_event(std::move(event));
 }
 
+void H2Session::handle_end_stream(int32_t session_id) {
+  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
+  // を閉じた場合のセッション終了処理 (draft-15 Section 3.4 の正規の終了経路)。
+  // 対象は確立済み (is_established) のセッションに限定する: 非 2xx 拒否、
+  // 201 応答、サーバー側の受理前 FIN は確立されておらず、誤検知しない
+  // (非 2xx 拒否は応答受信時にエントリ削除済み)。既に is_terminated の
+  // セッション (WT_CLOSE_SESSION 受信済み・ローカル close_session 済み) は
+  // スキップする: コンプライアントなピアは WT_CLOSE_SESSION 送出後に必ず
+  // END_STREAM を送る (Section 6.12 の MUST) ため、カプセル処理による
+  // SessionClosed の後に検知が来て二重発火する。is_terminated のセッション
+  // は is_established が false のため確立済み限定の条件でもスキップされる
+  // が、防衛的に両条件を確認する。handle_wt_close_session と並置する
+  // (共通ヘルパー化はしない): 唯一の違いはエントリ削除の有無であり、並置
+  // 時にエントリ削除を欠落させると「エントリ不在で塞がる」前提が崩れる
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session || !wt_session->is_established || wt_session->is_terminated) {
+    return;
+  }
+
+  // WT_CLOSE_SESSION なしのクリーンクローズは error code 0 かつ空のエラー
+  // 文字列の WT_CLOSE_SESSION と等価 (Section 6.12)
+  H2Event event;
+  event.type = H2EventType::SessionClosed;
+  event.session_id = session_id;
+  event.error_code = 0;
+  push_event(std::move(event));
+
+  // エントリを削除して以後の on_stream_close_callback / close_session /
+  // send_datagram / send_stream_data / open_stream / reset_stream をエントリ
+  // 不在で塞ぐ (stop_sending / drain_session は get_wt_session を確認せず
+  // カプセルを送出するため塞がれないが、本対応の対象外)。キュー済みの
+  // カプセル (http2_stream_buffers_) も破棄する: 200 + END_STREAM (受理と
+  // 同時クローズ) では同一 receive() 内で確立処理が初期フロー制御カプセル
+  // をキューしており、セッション終了を学習した後に送出しないため
+  // (on_stream_close_callback のバッファ破棄と対称)。ピアの END_STREAM に
+  // 対する自側の応答 (END_STREAM 送出) は行わない (ストリームは
+  // half-closed (remote) のまま接続終了まで残る既知の制約。Section 6.12 の
+  // 受信者側 MUST は WT_CLOSE_SESSION 受信時の応答についての規定であり、
+  // END_STREAM のみの受信には該当しない)
+  http2_stream_buffers_.erase(session_id);
+  wt_sessions_.erase(session_id);
+}
+
 // ========== Capsule 送信 ==========
 
 void H2Session::send_capsule(int32_t session_id,
@@ -1169,9 +1212,9 @@ void H2Session::send_datagram(int32_t session_id,
   // クライアントが非 2xx 応答 (拒否) を受けたセッション ID 宛の送信は、
   // 応答受信時に wt_sessions_ から削除されるためエントリ確認で塞がれる
   // (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
-  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路
-  // (draft-15 Section 3.4 の正規の終了経路) は検知できないためスコープ外
-  // である (ストリームの両ハーフが閉じるまで送出され続ける。既知の制約)
+  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
+  // Section 3.4 の正規の終了経路) も END_STREAM 検知でエントリが削除される
+  // ため塞がれる
   send_capsule(session_id, CapsuleType::Datagram, data);
 }
 
@@ -1530,6 +1573,21 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
 
     default:
       break;
+  }
+
+  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
+  // を閉じた場合のセッション終了検知 (draft-15 Section 3.4 の正規の終了経路)。
+  // HEADERS フレームの処理分岐の後に置く: 200 + END_STREAM (受理と同時
+  // クローズ) では HCAT_RESPONSE 分岐で is_established が設定された後に検知
+  // する必要がある。フレーム種別 (cat) に依存させない (trailers 等の
+  // HCAT_HEADERS + END_STREAM も捕捉する)。END_STREAM ビット (0x01) は
+  // SETTINGS ACK / PING ACK の ACK ビットと同一の値だが、これらのフレームの
+  // stream_id は 0 であり wt_sessions_ にエントリが存在しないため
+  // handle_end_stream 冒頭で返る。nghttp2 は DATA / HEADERS 以外のフレーム
+  // の未定義フラグをマスクしてから通知するため、0x01 ビットが立って通知
+  // されるのは DATA / HEADERS のみである (nghttp2 の実装前提)
+  if ((frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0) {
+    h2_session->handle_end_stream(stream_id);
   }
 
   return 0;

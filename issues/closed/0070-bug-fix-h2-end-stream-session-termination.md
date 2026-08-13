@@ -1,7 +1,7 @@
 # HTTP/2 で WT_CLOSE_SESSION なしの END_STREAM のみによるセッション終了が検知されない
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/fix-h2-end-stream-session-termination
 - Polished: 2026-08-12
 
@@ -34,3 +34,12 @@ WebTransport over HTTP/2 で、ピアが WT_CLOSE_SESSION カプセルを送ら�
 - エントリ削除が機能していることの間接検証として、END_STREAM 検知後に `close_session` / `send_stream_data` が no-op になることを確認する (エントリの削除自体は公開 API から直接観測できない)
 - 検知対象外の END_STREAM で終了処理が実行されない (誤検知しない): 確立済みでないセッション (非 2xx 拒否・201 応答受信時・サーバー側の受理前 FIN) とエントリ不在のストリーム (通常の HTTP/2 ストリーム) の END_STREAM。WT データストリームの FIN (WT_STREAM_FIN カプセル) がセッション終了として誤検知されないことも確認する
 - モックなしの Sans-IO テストで検証できる (0063 で新設した h2 用 Sans-IO ヘルパーを再利用する。「END_STREAM のみ」のシナリオは END_STREAM フラグ付きの DATA フレームのワイヤバイト列を `receive()` に直接注入する構成で再現する。`close_session` は WT_CLOSE_SESSION も送出するため使えない。HEADERS + END_STREAM (200 + END_STREAM 等) の検知と、エントリ不在の通常 HTTP/2 ストリームの誤検知なしは、HPACK 圧縮済みヘッダーブロックを含む HEADERS フレームのワイヤ注入で再現する (通常ストリームは先に HEADERS 注入で open にしてから DATA 注入する。0069 の 1xx 注入と同じ手法で、注入はテスト内の最後の操作にする等、HPACK 動的テーブルの非対称に配慮する))
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `on_frame_recv_callback` の switch 後に共通の END_STREAM 検知を追加し、END_STREAM フラグ付きの HEADERS / DATA フレームを受信した確立済みセッションの CONNECT ストリームの終了処理 (`handle_end_stream`) を行うようにした: SessionClosed イベント (error_code 0、error_message 空) を発火し、`wt_sessions_` と `http2_stream_buffers_` からエントリを削除する (draft-ietf-webtrans-http2-15 Section 3.4 の正規の終了経路。WT_CLOSE_SESSION なしのクリーンクローズは error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION と等価。Section 6.12)
+- 検知対象は確立済み (`is_established = true`) のセッションに限定し、既に `is_terminated` のセッション (WT_CLOSE_SESSION 受信済み・ローカル `close_session` 済み) はスキップする (コンプライアントなピアの WT_CLOSE_SESSION + END_STREAM による二重発火の防止。`handle_wt_close_session` と並置し、共通ヘルパー化はしない)
+- エントリ削除により、以後の `on_stream_close_callback` / `close_session` / `send_datagram` / `send_stream_data` / `open_stream` / `reset_stream` がエントリ不在で自然に塞がる (`stop_sending` / `drain_session` は対象外)。ピアの END_STREAM に対する自側の応答は行わない (既知の制約)
+- `src/bindings/webtransport_h2.h` の `send_datagram` のドキュメントコメントと `src/bindings/webtransport_h2.cpp` の実装コメントを更新し、END_STREAM 検知による送出抑止を明記して「スコープ外 (既知の制約)」の旧記述を解消した。`src/webtransport/h2/client.py` / `server.py` の `send_datagram` docstring にも END_STREAM 受信後の送出抑止を追記した
+- `tests/test_webtransport_h2_end_stream.py` を新規追加した (8 件)。END_STREAM のみでの終了検知と送出抑止・SessionClosed の 1 回発火 (error_code 0)・WT_CLOSE_SESSION + END_STREAM での二重発火なし・END_STREAM 検知後の `close_session` / `send_stream_data` の no-op・201 応答での誤検知なし・WT_STREAM_FIN での誤検知なし・通常 HTTP/2 ストリームの誤検知なし・200 + END_STREAM (受理と同時クローズ) での SESSION_READY と SessionClosed の連続発火・サーバー側の受理前 FIN での誤検知なし、をモックなしの Sans-IO 構成 (END_STREAM フラグ付き DATA / HEADERS フレームのワイヤ注入) で検証する
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した (END_STREAM のみによる終了検知であることを文言で明記し、0063 のエントリと区別した)

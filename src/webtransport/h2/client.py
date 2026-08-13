@@ -316,9 +316,9 @@ class Client:
         Capsule Protocol の DATAGRAM capsule (RFC 9297) を使う。
         draft-15 Section 6.11
 
-        終了したセッション ID (WT_CLOSE_SESSION 受信後 / close_session 後)
-        への送信は無視される (draft-15 Section 3.4 のセッション終了。
-        仕様強制ではなく実装ポリシー)。
+        終了したセッション ID (WT_CLOSE_SESSION 受信後 / close_session 後 /
+        ピアの END_STREAM 受信後) への送信は無視される (draft-15 Section 3.4
+        のセッション終了。仕様強制ではなく実装ポリシー)。
 
         Args:
             data: 送信データ
