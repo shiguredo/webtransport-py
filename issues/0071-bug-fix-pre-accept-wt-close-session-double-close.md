@@ -1,7 +1,7 @@
 # 受理前の WT_CLOSE_SESSION が accept_session 中に処理されて SessionClosed が二重発火する
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-14
 - Branch: feature/fix-pre-accept-wt-close-session-double-close
 - Polished: 2026-08-12
 
@@ -37,3 +37,13 @@
 - `session_ids_` にセッション ID が残留せず、`send_datagram` / `open_stream` が終了を学習済みのセッション ID で成功しない (受理前 FIN の有無にかかわらず)
 - 通常の受理前 FIN の遅延クローズ (accept_session → 2xx 書き出し完了後に close_stream) は影響を受けない
 - モックなしの Sans-IO テストで検証できる (クライアントが受理前に WT_CLOSE_SESSION を送出する構成。Section 6 の MUST により準拠クライアントは FIN を伴うため、FIN ありの準拠シナリオで構成する (FIN なし変種の窓閉塞・破棄もテストで確認する)。サーバーが accept_session した後に、SessionClosed が 1 回だけ発火すること・STREAM_CLOSED が 1 回だけ発火すること (accept_session 内破棄と receive_stream_data 後段の二重 close_stream の回帰検出)・`get_session_ids()` が空であること・`get_streams_to_send()` の戻り値に 2xx が現れないこと (h3 層の戻り値で判定する)・`send_datagram` / `open_stream` が拒否されることを確認する。カプセルと FIN が別イベントで届く変種 (カプセルのみを先に注入し、accept_session 後に空 FIN を渡す構成) も破棄記録条件の拡大の検証としてテストに含める。テストは tests/test_webtransport_h3_pre_accept_fin.py への追加が自然)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `accept_session` で、受理前 FIN の移行処理 (`pending_pre_accept_fin_session_ids_` → `pre_accept_fin_accepted_session_ids_`) を `nghttp3_conn_server_confirm_wt_session` の前に移動した。confirm の処理中 (process_blocked_wt_stream_data) に発火する `recv_wt_close_session_cb` の時点で移行済みになり、0065 の破棄記録条件 (未送信 2xx の破棄) が成立する。confirm 失敗時は移行済みエントリを `pending_pre_accept_fin_session_ids_` に戻す (除去すると終了学習済みセッションへの送信ブロックが解除され、draft-ietf-webtrans-http3-16 Section 6 の MUST に反する窓が開くため)
+- confirm 後に `session_ids_` へ再挿入していた `insert` を削除した (サーバー側の挿入は `end_headers_cb` が受理前に行っており再挿入は冗長。再挿入があると `recv_wt_close_session_cb` の erase が無効化され、セッション ID 残留・SessionClosed 二重発火・送信窓がすべて残る)
+- 0065 の破棄処理 (`pending_stale_2xx_discard_session_ids_` の処理) を `discard_stale_2xx()` ヘルパーに抽出し、`receive_stream_data` の後段に加えて `accept_session` 内 (confirm 成功後と失敗後の両方) でも実行するようにした。`accept_session` 直後に呼ばれる `get_streams_to_send` が 2xx を先に書き出すのを防ぐ
+- `recv_wt_close_session_cb` の破棄記録条件を「`pre_accept_fin_accepted_session_ids_` に含まれる」に加えて「accept_session の confirm 処理中に発火した (`accepting_session_id_` と一致する)」に拡大した。カプセルと FIN が別の受信イベントで届いた場合 (FIN 検知前に accept_session が実行される) は移行処理が成立しないため、この条件が無いと破棄されない
+- `src/bindings/webtransport_h3.h` に `accepting_session_id_` メンバーを追加し、`accept_session` / `recv_wt_close_session_cb` / `discard_stale_2xx` のコメントと docstring を更新した (0065 由来の「2xx 送出と SessionClosed の二重発火は別途の検討対象」の記述を解消)
+- `tests/test_webtransport_h3_pre_accept_fin.py` に 4 件追加した: `test_pre_accept_wt_close_session_fin_same_read` (FIN と同一読み取り = 準拠シナリオ)、`test_pre_accept_wt_close_session_fin_late` (FIN が別読み取りで遅れて届く変種。破棄記録条件の拡大の検証)、`test_pre_accept_wt_close_session_no_fin` (FIN なし変種の窓閉塞)、`test_pre_accept_wt_close_session_other_session_unaffected` (他セッションの生存への波及なし)
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
