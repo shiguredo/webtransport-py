@@ -7,6 +7,11 @@
 session is established when the server sends a 2xx response」により、非 2xx
 で拒否されたセッションは一度も確立されておらず、終了通知 (SessionClosed)
 の意味論が合わないため黙って削除する。
+
+あわせて、サーバー側 reject_session が 2xx 応答でセッション ID を削除しない
+こと (2xx 送出 = セッション確立) を検証する。2xx 保持エントリの残留は
+両ハーフクローズ時の on_stream_close_callback による SessionClosed 発火で
+間接検証する。
 """
 
 from __future__ import annotations
@@ -49,6 +54,22 @@ def _encode_1xx_headers(session_id: int, status_code: int) -> bytes:
         + header_block
     )
     return frame
+
+
+def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool = False) -> bytes:
+    """DATA フレームのワイヤバイト列を組み立てる
+
+    END_STREAM フラグ (0x01) 付きでピアがストリームを閉じた場合を再現する。
+    h2 の公開 API に END_STREAM のみを送出する手段が存在しないため、
+    ワイヤ注入で再現する。
+    """
+    flags = 0x01 if end_stream else 0x00
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes([0x00, flags])
+        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
+        + payload
+    )
 
 
 @pytest.mark.parametrize(
@@ -278,3 +299,44 @@ def test_client_reject_other_session_unaffected() -> None:
     datagram_events = [e for e in _drain_events(server) if e.type == h2.EventType.DATAGRAM]
     assert len(datagram_events) == 1
     assert datagram_events[0].session_id == first_session_id
+
+
+@pytest.mark.parametrize(
+    "status_code, expected_closed",
+    [(201, True), (403, False)],
+    ids=["2xx_kept", "non_2xx_removed"],
+)
+def test_server_reject_status_code_entry_retention(status_code: int, expected_closed: bool) -> None:
+    """reject_session の 2xx 応答時はサーバーのエントリが残り、両ハーフクローズで SessionClosed が発火することを確認
+
+    draft-15 Section 3.2 の「A WebTransport session is established when
+    the server sends a 2xx response」により、2xx 送出はセッション確立であり、
+    reject_session に 2xx を渡しても wt_sessions_ から削除しない (h3 側の
+    reject_session と対称の意味論)。エントリ残留は公開 API から直接観測
+    できないため、両ハーフクローズ時の on_stream_close_callback の
+    SessionClosed 発火 (エントリ残留時のみ発火) で間接検証する。サーバーは
+    拒否時に既に END_STREAM を送出済みのため、クライアント側のハーフクローズ
+    (END_STREAM 付き DATA フレームのワイヤ注入) で on_stream_close_callback
+    を発火させる。非 2xx (403) ではエントリが削除されるため発火しない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # サーバーが reject_session で応答する
+    server.reject_session(session_id, status_code)
+    _h2_pump(server, client)
+
+    # クライアント側のハーフクローズ (END_STREAM 付き DATA フレーム) を注入する
+    ret = server.receive(_encode_data_frame(session_id, end_stream=True))
+    assert ret > 0, "END_STREAM フレームの注入に失敗しました"
+
+    # 2xx 保持時のみ SessionClosed が発火する
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    if expected_closed:
+        assert len(closed_events) == 1
+        assert closed_events[0].session_id == session_id
+        assert closed_events[0].error_code == 0
+    else:
+        assert len(closed_events) == 0

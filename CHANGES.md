@@ -133,6 +133,8 @@
   - @voluntas
 - [FIX] 受理前の WT_CLOSE_SESSION が accept_session 中に処理されると SessionClosed が二重発火し、未送信の 2xx が送出されてセッション ID が残る問題を修正する
   - @voluntas
+- [FIX] HTTP/2 サーバーの reject_session が 2xx 応答でもセッション ID を削除する問題を修正する
+  - @voluntas
 
 ### misc
 

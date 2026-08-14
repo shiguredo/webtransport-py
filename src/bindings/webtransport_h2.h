@@ -196,6 +196,8 @@ struct WtSessionInfo {
   bool is_established = false;
 
   // セッション終了を学習したか (WT_CLOSE_SESSION 受信 / ローカル close_session)。
+  // reject_session の 2xx 送出 (サーバー側) でも立てる: 応答は END_STREAM 付きで
+  // 送出済みのため以後サーバー側からは送信できず、send_datagram を塞ぐ
   // is_established は connect 直後 (200 応答前) も false のため、楽観的送信
   // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
@@ -305,6 +307,19 @@ class H2Session {
 
   /**
    * WebTransport セッションを拒否 (サーバー用)
+   *
+   * 非 2xx 応答で拒否されたセッションは一度も確立されていない
+   * (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport session
+   * is established when the server sends a 2xx response」) ため、
+   * wt_sessions_ からセッション ID を削除する (SessionClosed イベントは
+   * 発火しない。黙って削除)。2xx を渡した場合は削除しない (2xx 送出は
+   * 確立条件。accept_session は 200 固定のため、2xx 非 200 応答は本 API で
+   * 生成する) が、応答は END_STREAM 付きで送出済みのため以後サーバー側
+   * からは送信できない。is_terminated を立てて send_datagram を塞ぎ
+   * (塞がないとカプセルが滞留してワイヤに送出されない)、is_established は
+   * false のまま確立済みセッションとしては扱わない。エントリは両ハーフ
+   * クローズ時の on_stream_close_callback による SessionClosed 発火のため
+   * に残す。accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)。
    * @param session_id セッション ID
    * @param status_code HTTP ステータスコード
    */
