@@ -227,6 +227,12 @@ class H3Session {
    * 完了しない間 (フロー制御等) は終了処理が保留され、セッション ID が
    * session_ids_ に残る (未送信の 2xx を破棄しないための遅延クローズ)。
    * 保留中も送信は send_datagram / open_stream で拒否される。
+   *
+   * 受理前にピアが送った WT_CLOSE_SESSION カプセル (楽観的送信。
+   * draft-ietf-webtrans-http3-16 Section 3.2) は nghttp3 の inq に
+   * バッファされ、confirm の処理中に同期処理される (nghttp3 の実装順序に
+   * 依存する挙動)。このときセッション終了が検知され、終了済みセッションの
+   * 未送信 2xx は破棄される (SessionClosed は 1 回だけ発火する)。
    * @param stream_id セッションストリーム ID
    * @return 成功したかどうか
    */
@@ -601,6 +607,14 @@ class H3Session {
   // close_session / recv_wt_close_session_cb / close_stream (CONNECT ストリーム
   // のクローズ経路。リセットと FIN の両方) から呼ばれる
   void erase_session_streams(int64_t session_id);
+
+  // 遅延クローズ保留中に WT_CLOSE_SESSION を受信したセッションの未送信
+  // 2xx を破棄する (pending_stale_2xx_discard_session_ids_ の処理)。
+  // receive_stream_data が nghttp3_conn_read_stream2 から戻った後 (再入防止
+  // のためコールバック内では実行できない) と、accept_session が confirm から
+  // 戻った後 (アプリ呼び出しのため直接実行できる) の両方から呼ばれる
+  void discard_stale_2xx();
+
   bool is_server_;
   H3SessionConfig config_;
   nghttp3_conn* conn_ = nullptr;
@@ -661,13 +675,23 @@ class H3Session {
   std::set<int64_t> pre_accept_fin_accepted_session_ids_;
 
   // 遅延クローズ保留中 (pre_accept_fin_accepted_session_ids_ に含まれる)
-  // に WT_CLOSE_SESSION を受信したセッション ID。未送信の 2xx を破棄する
-  // ため close_stream を実行する必要があるが、recv_wt_close_session_cb は
-  // nghttp3_conn_read_stream2 の処理中に同期発火するため、コールバック内で
-  // nghttp3 を呼ぶと再入になる。receive_stream_data が read_stream2 から
-  // 戻った後に close_stream で破棄する (pending_fin_session_ids_ と同じ
-  // パターン)
+  // に WT_CLOSE_SESSION を受信したセッション ID、および accept_session の
+  // confirm 処理中 (accepting_session_id_ と一致) に発火したセッション ID。
+  // どちらも未送信の 2xx を破棄するため close_stream を実行する必要がある
+  // が、recv_wt_close_session_cb は nghttp3_conn_read_stream2 の処理中に
+  // 同期発火するため、コールバック内で nghttp3 を呼ぶと再入になる。
+  // receive_stream_data が read_stream2 から戻った後、または accept_session
+  // が confirm から戻った後 (アプリ呼び出しのため直接実行できる) に
+  // close_stream で破棄する (pending_fin_session_ids_ と同じパターン)
   std::set<int64_t> pending_stale_2xx_discard_session_ids_;
+
+  // accept_session の confirm 処理中のセッション ID (処理中でなければ -1)。
+  // confirm の処理中に発火する recv_wt_close_session_cb (受理前にバッファ
+  // された WT_CLOSE_SESSION カプセルの同期処理) の破棄記録条件の判定に
+  // 使う。受理前 FIN なしのセッションは pre_accept_fin_accepted_session_ids_
+  // に含まれず、かつ 2xx は submit 済みで破棄対象になるため、この記録が
+  // 無いと未送信 2xx が送出されてしまう
+  int64_t accepting_session_id_ = -1;
 
   // ストリームとセッションのマッピング
   std::map<int64_t, StreamInfo> stream_info_;

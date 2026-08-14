@@ -131,6 +131,8 @@
   - @voluntas
 - [FIX] HTTP/2 で WT_CLOSE_SESSION なしの END_STREAM のみによるセッション終了が検知されない問題を修正する
   - @voluntas
+- [FIX] 受理前の WT_CLOSE_SESSION が accept_session 中に処理されると SessionClosed が二重発火し、未送信の 2xx が送出されてセッション ID が残る問題を修正する
+  - @voluntas
 
 ### misc
 
