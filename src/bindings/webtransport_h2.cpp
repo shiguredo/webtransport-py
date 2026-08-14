@@ -1055,7 +1055,33 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
 
   nghttp2_submit_response(session_, session_id, nva,
                           sizeof(nva) / sizeof(nva[0]), nullptr);
-  wt_sessions_.erase(session_id);
+
+  // 非 2xx 応答で拒否されたセッションは一度も確立されていない
+  // (draft-15 Section 3.2 の「A WebTransport session is established when
+  // the server sends a 2xx response」) ため、SessionClosed は発火しない
+  // (黙って削除)。削除により、以後の on_stream_close_callback /
+  // close_session / send_datagram / send_stream_data / open_stream /
+  // reset_stream がエントリ不在で塞がれる。2xx を渡した場合は削除しない
+  // (2xx 送出は Section 3.2 の確立条件) が、応答は END_STREAM 付きで送出
+  // 済みかつデータプロバイダ未登録のため、以後サーバー側からは送信できない。
+  // is_terminated を立てて send_datagram を塞ぐ (塞がないとカプセルが
+  // http2_stream_buffers_ に滞留してワイヤに送出されないまま残る)。
+  // close_session / reset_stream / stop_sending / drain_session は
+  // is_terminated を確認せずカプセルをキューするため滞留し得るが、
+  // データプロバイダ未登録のため送出されず、ピアのストリームクローズ時に
+  // 破棄される (誤用限定の挙動。終了経路の stop_sending / drain_session と
+  // 同じ扱い)。is_established は false のまま残留し、確立済みセッション
+  // としては扱われない。残留の目的は両ハーフクローズ時の
+  // on_stream_close_callback による SessionClosed 発火のためである。
+  // accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)
+  if (status_code / 100 != 2) {
+    wt_sessions_.erase(session_id);
+  } else {
+    auto* wt_session = get_wt_session(session_id);
+    if (wt_session) {
+      wt_session->is_terminated = true;
+    }
+  }
   // mem_recv コールバック中でも安全なよう、ここでは session_send しない
 }
 
@@ -1188,9 +1214,10 @@ void H2Session::stop_sending(int32_t session_id,
 void H2Session::send_datagram(int32_t session_id,
                               const std::vector<uint8_t>& data) {
   // 終了したセッション ID (WT_CLOSE_SESSION 受信後 / ローカル close_session
-  // 後) と、一度も connect されていないセッション ID への送信を黙って無視
-  // する。セッション終了は draft-15 Section 3.4 の「CONNECT ストリームの
-  // クローズ」で定義され、WT_CLOSE_SESSION (Section 6.12) はその前の終了
+  // 後 / サーバー側の reject_session の 2xx 送出) と、一度も connect されて
+  // いないセッション ID への送信を黙って無視する。セッション終了は draft-15
+  // Section 3.4 の「CONNECT ストリームのクローズ」で定義され、WT_CLOSE_SESSION
+  // (Section 6.12) はその前の終了
   // 通知である。受信後は終了を学習した状態とみなし、新たなデータグラムを
   // 送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、本対応
   // は仕様強制ではなく実装ポリシー)。エントリ不在の ID (未 connect・両
