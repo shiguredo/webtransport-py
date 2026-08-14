@@ -15,23 +15,13 @@ import pytest
 from conftest import (
     _connect_session,
     _create_session_pair,
+    _drain_events,
     _encode_wt_datagram,
     _pump,
     _setup_connect,
 )
 
 from webtransport import h3
-
-
-def _drain_events(session: h3.Session) -> list[h3.Event]:
-    """セッションに積まれたイベントを全て取り出す"""
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 def _deliver_connect_request(client: h3.Session, server: h3.Session) -> None:
@@ -131,9 +121,7 @@ def test_server_reject_queued_datagram_still_sent() -> None:
     server.get_streams_to_send()
 
     # キュー済みのデータグラムは送出される
-    assert server.get_datagrams_to_send() == [
-        _encode_wt_datagram(0, b"queued-before-reject")
-    ]
+    assert server.get_datagrams_to_send() == [_encode_wt_datagram(0, b"queued-before-reject")]
 
 
 def test_server_reject_receive_datagram_not_delivered() -> None:
@@ -243,6 +231,4 @@ def test_server_reject_other_session_unaffected() -> None:
     assert len(server.get_datagrams_to_send()) == 1
     server.receive_datagram(_encode_wt_datagram(session_id, b"incoming"))
     events = _drain_events(server)
-    assert any(
-        e.type == h3.EventType.DATAGRAM and e.session_id == session_id for e in events
-    )
+    assert any(e.type == h3.EventType.DATAGRAM and e.session_id == session_id for e in events)

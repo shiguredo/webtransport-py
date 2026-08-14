@@ -18,6 +18,7 @@ import pytest
 from conftest import (
     _connect_session,
     _create_session_pair,
+    _drain_events,
     _encode_wt_datagram,
     _establish_session,
     _establish_two_sessions,
@@ -26,17 +27,6 @@ from conftest import (
 )
 
 from webtransport import h3
-
-
-def _drain_events(session: h3.Session) -> list[h3.Event]:
-    """セッションに積まれたイベントを全て取り出す"""
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 def test_send_datagram_after_close_stream_ignored() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from conftest import _drain_events
+
 from webtransport import http2
 
 
@@ -60,17 +62,6 @@ def _request_headers() -> list[tuple[str, str]]:
     ]
 
 
-def _drain_events(conn: http2.Connection) -> list[http2.Event]:
-    """コネクションのイベントを全て取り出す"""
-    events = []
-    while True:
-        event = conn.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
-
-
 def test_http2_submit_trailer() -> None:
     """サーバーがレスポンスの後にトレーラを送信できることを確認"""
     client, server = _create_connection_pair()
@@ -106,8 +97,7 @@ def test_http2_submit_trailer() -> None:
     trailer_index = next(
         i
         for i, e in enumerate(events)
-        if e.type == http2.EventType.HEADERS
-        and ("x-trailer", "value") in e.headers
+        if e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers
     )
     assert response_index < data_indices[0] < trailer_index
     # トレーラ HEADERS が END_STREAM を担うため、STREAM_END はトレーラの
@@ -138,14 +128,9 @@ def test_http2_submit_trailer_after_flush() -> None:
 
     events = _drain_events(client)
     assert any(
-        e.type == http2.EventType.HEADERS
-        and ("x-trailer", "value") in e.headers
-        for e in events
+        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
     )
-    assert any(
-        e.type == http2.EventType.STREAM_END and e.stream_id == stream_id
-        for e in events
-    )
+    assert any(e.type == http2.EventType.STREAM_END and e.stream_id == stream_id for e in events)
 
 
 def test_http2_submit_trailer_eof_data() -> None:
@@ -166,14 +151,9 @@ def test_http2_submit_trailer_eof_data() -> None:
     _pump(server, client)
     events = _drain_events(client)
     assert not any(
-        e.type == http2.EventType.HEADERS
-        and ("x-trailer", "value") in e.headers
-        for e in events
+        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
     )
-    assert any(
-        e.type == http2.EventType.STREAM_END and e.stream_id == stream_id
-        for e in events
-    )
+    assert any(e.type == http2.EventType.STREAM_END and e.stream_id == stream_id for e in events)
 
     # flush 済み (ローカル側 half-closed) のストリームにも送信できない
     assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is False
@@ -197,9 +177,7 @@ def test_http2_submit_trailer_reset_stream() -> None:
 
     events = _drain_events(client)
     assert not any(
-        e.type == http2.EventType.HEADERS
-        and ("x-trailer", "value") in e.headers
-        for e in events
+        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
     )
     assert any(e.type == http2.EventType.STREAM_RESET for e in events)
 
@@ -224,14 +202,9 @@ def test_http2_submit_trailer_after_eof_data() -> None:
 
     events = _drain_events(client)
     assert any(
-        e.type == http2.EventType.HEADERS
-        and ("x-trailer", "value") in e.headers
-        for e in events
+        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
     )
-    assert any(
-        e.type == http2.EventType.STREAM_END and e.stream_id == stream_id
-        for e in events
-    )
+    assert any(e.type == http2.EventType.STREAM_END and e.stream_id == stream_id for e in events)
 
 
 def test_http2_submit_priority_update() -> None:
@@ -251,9 +224,7 @@ def test_http2_submit_priority_update() -> None:
     # サーバーで PriorityUpdate イベントを受信する (stream_id と
     # priority field value を含む)
     priority_events = [
-        e
-        for e in _drain_events(server)
-        if e.type == http2.EventType.PRIORITY_UPDATE
+        e for e in _drain_events(server) if e.type == http2.EventType.PRIORITY_UPDATE
     ]
     assert len(priority_events) == 2
     assert priority_events[0].stream_id == stream_id
@@ -279,10 +250,7 @@ def test_http2_priority_update_noop_without_no_rfc7540_priorities() -> None:
     # PRIORITY_UPDATE フレームは送出されない
     assert client.submit_priority_update(stream_id, 0, False) is True
     _pump(client, server)
-    assert not any(
-        e.type == http2.EventType.PRIORITY_UPDATE
-        for e in _drain_events(server)
-    )
+    assert not any(e.type == http2.EventType.PRIORITY_UPDATE for e in _drain_events(server))
 
 
 def test_http2_change_extpri_stream_priority() -> None:
@@ -325,9 +293,7 @@ def test_http2_submit_push_promise() -> None:
 
     # クライアントで PushPromise イベントを受信する (promised stream ID と
     # ヘッダーを含む)
-    push_events = [
-        e for e in _drain_events(client) if e.type == http2.EventType.PUSH_PROMISE
-    ]
+    push_events = [e for e in _drain_events(client) if e.type == http2.EventType.PUSH_PROMISE]
     assert len(push_events) == 1
     assert push_events[0].stream_id == stream_id
     assert push_events[0].promised_stream_id == promised_stream_id
@@ -416,8 +382,7 @@ def test_http2_message_ext_guards() -> None:
     assert server.submit_trailer(stream_id, [("x-trailer", "second")]) is False
     _pump(server, client)
     assert any(
-        e.type == http2.EventType.HEADERS
-        and ("x-trailer", "first") in e.headers
+        e.type == http2.EventType.HEADERS and ("x-trailer", "first") in e.headers
         for e in _drain_events(client)
     )
 

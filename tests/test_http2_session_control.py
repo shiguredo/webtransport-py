@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from conftest import _drain_events
+
 from webtransport import http2
 
 
@@ -58,17 +60,6 @@ def _request_headers() -> list[tuple[str, str]]:
         (":scheme", "https"),
         (":authority", "localhost"),
     ]
-
-
-def _drain_events(conn: http2.Connection) -> list[http2.Event]:
-    """コネクションのイベントを全て取り出す"""
-    events = []
-    while True:
-        event = conn.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 def test_http2_terminate_session() -> None:

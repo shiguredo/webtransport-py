@@ -14,20 +14,9 @@ receive_stream_data の fin 引数による保留記録と、ブロック解除�
 from __future__ import annotations
 
 import pytest
-from conftest import _accept_session, _create_session_pair, _pump
+from conftest import _accept_session, _create_session_pair, _drain_events, _pump
 
 from webtransport import h3
-
-
-def _drain_events(session: h3.Session) -> list[h3.Event]:
-    """セッションに積まれたイベントを全て取り出す"""
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 def _create_qpack_blocked_setup() -> tuple[h3.Session, h3.Session, bytes, list[bytes]]:
