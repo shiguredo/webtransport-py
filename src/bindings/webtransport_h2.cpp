@@ -427,17 +427,28 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   event.error_message = error_message;
   push_event(std::move(event));
 
-  // セッション本体の削除は HTTP/2 ストリーム close 時に行う
-  // (process_capsules がまだバッファを参照している可能性がある)
-  auto* wt_session = get_wt_session(session_id);
-  if (wt_session) {
-    wt_session->is_established = false;
-    // WT_CLOSE_SESSION 受信でセッション終了を学習した状態にする。
-    // draft-15 Section 6.12 の受信者側 MUST (END_STREAM で応答してストリーム
-    // を閉じる) は未実装であり、HTTP/2 ストリームは両ハーフが閉じるまで
-    // 残るため、終了フラグで send_datagram の送出を抑止する
-    wt_session->is_terminated = true;
-  }
+  // エントリを削除して以後の on_stream_close_callback / close_session /
+  // send_datagram / send_stream_data / open_stream / reset_stream をエントリ
+  // 不在で塞ぐ (stop_sending / drain_session は get_wt_session を確認せず
+  // カプセルを送出するため塞がれないが、本対応の対象外。handle_end_stream
+  // と同じ扱い)。キュー済みのカプセル (http2_stream_buffers_) も破棄する:
+  // 終了を学習した後にキュー済みの送出を行わないため (handle_end_stream と
+  // 対称)。破棄で失われるのは終了前にキュー済みの未 flush のカプセル (データ
+  // グラム等) であり、応答の END_STREAM は以下で直接送出するため応答カプセル
+  // は発生しない。draft-15 Section 6.12 の受信者 MUST (WT_CLOSE_SESSION
+  // 受信時に END_STREAM フレームで応答してストリームを閉じる) に従い、
+  // 応答の END_STREAM を送出する (end_stream_pending_ による half-close)。
+  // エントリは削除済みのため、両ハーフクローズ時の on_stream_close_callback
+  // は SessionClosed を発火しない (二重発火しない)。コンプライアントなピア
+  // (Section 6.12 の MUST で END_STREAM を送る) なら応答の END_STREAM と
+  // 合わせて両ハーフが閉じてクローズし、同時ストリーム枠を消費し続けない。
+  // END_STREAM を送らないピアでは、自側は応答の END_STREAM で half-closed
+  // (local) になったままピアの END_STREAM 待ちでストリームは閉じない
+  // (handle_end_stream の経路は自側が END_STREAM を送らない点が異なる)
+  http2_stream_buffers_.erase(session_id);
+  wt_sessions_.erase(session_id);
+  end_stream_pending_.insert(session_id);
+  nghttp2_session_resume_data(session_, session_id);
 }
 
 void H2Session::handle_wt_drain_session(int32_t session_id) {
@@ -452,15 +463,15 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // を閉じた場合のセッション終了処理 (draft-15 Section 3.4 の正規の終了経路)。
   // 対象は確立済み (is_established) のセッションに限定する: 非 2xx 拒否、
   // 201 応答、サーバー側の受理前 FIN は確立されておらず、誤検知しない
-  // (非 2xx 拒否は応答受信時にエントリ削除済み)。既に is_terminated の
-  // セッション (WT_CLOSE_SESSION 受信済み・ローカル close_session 済み) は
-  // スキップする: コンプライアントなピアは WT_CLOSE_SESSION 送出後に必ず
-  // END_STREAM を送る (Section 6.12 の MUST) ため、カプセル処理による
-  // SessionClosed の後に検知が来て二重発火する。is_terminated のセッション
-  // は is_established が false のため確立済み限定の条件でもスキップされる
-  // が、防衛的に両条件を確認する。handle_wt_close_session と並置する
-  // (共通ヘルパー化はしない): 唯一の違いはエントリ削除の有無であり、並置
-  // 時にエントリ削除を欠落させると「エントリ不在で塞がる」前提が崩れる
+  // (非 2xx 拒否は応答受信時にエントリ削除済み)。WT_CLOSE_SESSION 受信済み
+  // のセッションは handle_wt_close_session がエントリを削除済みのため、
+  // get_wt_session が失敗してここで返る。ローカル close_session 済みの
+  // セッションは is_terminated のためスキップする: コンプライアントなピアは
+  // WT_CLOSE_SESSION 送出後に必ず END_STREAM を送る (Section 6.12 の MUST)
+  // ため、カプセル処理による SessionClosed の後に検知が来て二重発火する。
+  // handle_wt_close_session と並置する (共通ヘルパー化はしない): 並置時に
+  // エントリ削除・バッファ破棄を欠落させると「エントリ不在で塞がる」前提が
+  // 崩れる
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || !wt_session->is_established || wt_session->is_terminated) {
     return;
@@ -1213,15 +1224,17 @@ void H2Session::stop_sending(int32_t session_id,
 
 void H2Session::send_datagram(int32_t session_id,
                               const std::vector<uint8_t>& data) {
-  // 終了したセッション ID (WT_CLOSE_SESSION 受信後 / ローカル close_session
-  // 後 / サーバー側の reject_session の 2xx 送出) と、一度も connect されて
-  // いないセッション ID への送信を黙って無視する。セッション終了は draft-15
-  // Section 3.4 の「CONNECT ストリームのクローズ」で定義され、WT_CLOSE_SESSION
-  // (Section 6.12) はその前の終了
-  // 通知である。受信後は終了を学習した状態とみなし、新たなデータグラムを
-  // 送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、本対応
-  // は仕様強制ではなく実装ポリシー)。エントリ不在の ID (未 connect・両
-  // ハーフクローズ後にエントリが削除された ID) も無視する。チェックは
+  // 終了したセッション ID と、一度も connect されていないセッション ID への
+  // 送信を黙って無視する。セッション終了は draft-15 Section 3.4 の「CONNECT
+  // ストリームのクローズ」で定義され、WT_CLOSE_SESSION (Section 6.12) はその
+  // 前の終了通知である。受信後は終了を学習した状態とみなし、新たなデータ
+  // グラムを送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、
+  // 本対応は仕様強制ではなく実装ポリシー)。終了の検知はエントリと終了フラグ
+  // で行う: WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後はエントリが
+  // 削除されて塞がり、ローカル close_session 後は is_terminated で塞がる
+  // (サーバー側の reject_session の 2xx 送出も同様)。
+  // エントリ不在の ID (未 connect・両ハーフクローズ後にエントリが削除された
+  // ID) も無視する。チェックは
   // send_capsule ではなくここに置く: send_capsule は close_session
   // (WT_CLOSE_SESSION) / drain_session / reset_stream / stop_sending /
   // フロー制御応答の送信にも使われており、そこにチェックを入れると終了後の
@@ -1273,8 +1286,9 @@ void H2Session::close_session(int32_t session_id,
   // ローカルの close_session で終了を学習した状態にする。flush のタイミング
   // に依存せず、以後の send_datagram が WT_CLOSE_SESSION の後ろに積まれる
   // のを防ぐ (send_capsule にはチェックを入れないため、後始末カプセル
-  // WT_CLOSE_SESSION 自体は塞がれない)。受信側 (handle_wt_close_session) と
-  // 対称に is_established も false にし、get_session_ids からの消滅と
+  // WT_CLOSE_SESSION 自体は塞がれない)。受信側 (handle_wt_close_session) は
+  // エントリ削除で同じ効果 (以後の送受信の遮断) を得る。ここではエントリを
+  // 残したまま is_established も false にし、get_session_ids からの消滅と
   // open_stream の失敗 (セッション終了後の新規ストリーム開放の抑止) を
   // 行う。is_established が false になることで以後の受信カプセル処理
   // (on_data_chunk_recv_callback のゲート) も停止する (h3 側の close_stream
@@ -1660,6 +1674,8 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
   }
 
   h2_session->http2_stream_buffers_.erase(stream_id);
+  // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
+  h2_session->end_stream_pending_.erase(stream_id);
   return 0;
 }
 

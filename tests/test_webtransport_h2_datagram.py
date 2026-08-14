@@ -39,10 +39,11 @@ def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
 def test_send_datagram_after_recv_wt_close_session_ignored() -> None:
     """WT_CLOSE_SESSION 受信後に send_datagram が無視されることを確認
 
-    HTTP/2 ストリームは両ハーフが閉じるまで残るため、受信側の終了フラグが
-    無ければデータグラムカプセルがワイヤへ送出されてしまう (修正前の挙動)。
-    本テストは修正前実装では失敗する (送出されたデータグラムがピアで処理され
-    イベント化する)。送出抑止 (終了フラグ) の回帰検証を担う。
+    HTTP/2 ストリームは両ハーフが閉じるまで残る。WT_CLOSE_SESSION 受信処理
+    (handle_wt_close_session) がエントリを削除するため、受信後の
+    send_datagram はエントリ不在で塞がれる。送出抑止の回帰検証を担う
+    (エントリを削除せず終了フラグのみで抑止していた修正前実装でも成立する
+    設計ピン)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -115,10 +116,10 @@ def test_send_datagram_after_local_close_session_flushed_ignored() -> None:
 def test_open_stream_fails_after_local_close_session() -> None:
     """ローカル close_session 後に open_stream が失敗し、get_session_ids から消えることを確認
 
-    close_session は is_established も false にする (受信側の
-    handle_wt_close_session と対称)。セッション終了後に新規ストリームが
-    開かれず、get_session_ids にも残らない (h3 側の close_stream による
-    session_ids_ からの削除と対称の挙動)。
+    close_session はエントリを残したまま is_established も false にする
+    (受信側の handle_wt_close_session はエントリ削除で同じ効果を得る)。
+    セッション終了後に新規ストリームが開かれず、get_session_ids にも残らない
+    (h3 側の close_stream による session_ids_ からの削除と対称の挙動)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)

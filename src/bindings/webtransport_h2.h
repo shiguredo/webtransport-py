@@ -195,9 +195,8 @@ struct WtSessionInfo {
   int32_t http2_stream_id;
   bool is_established = false;
 
-  // セッション終了を学習したか (WT_CLOSE_SESSION 受信 / ローカル close_session)。
-  // reject_session の 2xx 送出 (サーバー側) でも立てる: 応答は END_STREAM 付きで
-  // 送出済みのため以後サーバー側からは送信できず、send_datagram を塞ぐ
+  // セッション終了を学習したか (ローカル close_session / サーバー側の
+  // reject_session の 2xx 送出。WT_CLOSE_SESSION 受信はエントリ削除で表現する)。
   // is_established は connect 直後 (200 応答前) も false のため、楽観的送信
   // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
@@ -375,20 +374,21 @@ class H2Session {
    * データグラムを送信
    * DATAGRAM capsule を送信
    *
-   * 終了したセッション ID (WT_CLOSE_SESSION 受信後 / ローカル close_session 後)
-   * と、一度も connect されていないセッション ID への送信は黙って無視する。
-   * セッション終了の検知は wt_sessions_ のエントリと is_terminated フラグで
-   * 行う (draft-15 Section 3.4 のセッション終了 = CONNECT ストリームのクローズ
-   * と Section 6.12 の WT_CLOSE_SESSION による終了通知。本対応は仕様強制では
-   * なく実装ポリシーである)。楽観的送信 (draft-15 Section 3.2 の MAY) は
-   * 妨げない: クライアントは connect 直後 (200 応答前)、サーバーは CONNECT
-   * リクエスト受信時に wt_sessions_ へエントリが挿入され、終了フラグが立って
-   * いないため従来どおり送出される。クライアントが非 2xx 応答 (拒否) を受けた
-   * セッション ID 宛の送信は、応答受信時に wt_sessions_ から削除されるため
-   * 塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
-   * ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
-   * Section 3.4 の正規の終了経路) も END_STREAM 検知でエントリが削除される
-   * ため塞がれる
+   * 終了したセッション ID と、一度も connect されていないセッション ID への
+   * 送信は黙って無視する。セッション終了の検知は wt_sessions_ のエントリと
+   * is_terminated フラグで行う: WT_CLOSE_SESSION 受信後・ピアの END_STREAM
+   * 受信後はエントリが削除されて塞がり (draft-15 Section 3.4 のセッション
+   * 終了 = CONNECT ストリームのクローズ)、ローカル close_session 後は終了
+   * フラグで塞ぐ (Section 6.12 の WT_CLOSE_SESSION による終了通知。本対応は
+   * 仕様強制ではなく実装ポリシーである)。楽観的送信 (draft-15 Section 3.2
+   * の MAY) は妨げない: クライアントは connect 直後 (200 応答前)、サーバー
+   * は CONNECT リクエスト受信時に wt_sessions_ へエントリが挿入され、終了
+   * フラグが立っていないため従来どおり送出される。クライアントが非 2xx 応答
+   * (拒否) を受けたセッション ID 宛の送信は、応答受信時に wt_sessions_ から
+   * 削除されるため塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る
+   * 既知の制約)。ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了
+   * 経路 (draft-15 Section 3.4 の正規の終了経路) も END_STREAM 検知でエントリ
+   * が削除されるため塞がれる
    * @param session_id セッション ID
    * @param data データ
    */

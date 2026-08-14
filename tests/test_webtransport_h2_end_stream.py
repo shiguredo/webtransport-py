@@ -5,6 +5,10 @@
 終了経路) にセッション終了を検知する修正を検証する。WT_CLOSE_SESSION なし
 のクリーンクローズは error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION
 と等価 (Section 6.12)。
+
+あわせて、WT_CLOSE_SESSION 受信後の挙動 (Section 6.12 の受信者 MUST である
+END_STREAM 応答の送出と、受信後の close_session / send_stream_data が
+塞がれて SessionClosed が二重発火しないこと) を検証する。
 """
 
 from __future__ import annotations
@@ -88,15 +92,16 @@ def test_end_stream_only_closes_session() -> None:
     assert wire is None or _encode_capsule(0x00, b"after-end-stream") not in wire
 
 
-def test_end_stream_after_wt_close_session_no_double() -> None:
+def test_end_stream_after_recv_wt_close_session_no_double() -> None:
     """WT_CLOSE_SESSION + END_STREAM の両方を送るピアで SessionClosed が 1 回だけ発火することを確認
 
     コンプライアントなピアは WT_CLOSE_SESSION 送出後に必ず END_STREAM を送る
     (draft-15 Section 6.12 の MUST)。close_session は WT_CLOSE_SESSION と
     END_STREAM を同時送出するため、_h2_pump の時点で両方がサーバーに届く。
-    カプセル処理 (handle_wt_close_session による SessionClosed) の後に
-    END_STREAM 検知が来るが、既に is_terminated のため終了処理をスキップし、
-    SessionClosed は 1 回だけ発火する。
+    カプセル処理 (handle_wt_close_session) が SessionClosed を発火してエントリ
+    を削除するため、続く END_STREAM 検知 (handle_end_stream) とストリーム
+    close (on_stream_close_callback) はエントリ不在で何もせず、SessionClosed
+    は 1 回だけ発火する。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -106,6 +111,175 @@ def test_end_stream_after_wt_close_session_no_double() -> None:
     _h2_pump(client, server)
     closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
     assert len(closed_events) == 1
+
+
+def test_end_stream_response_after_recv_wt_close_session() -> None:
+    """WT_CLOSE_SESSION 受信後に受信者 MUST (END_STREAM で応答) に従い END_STREAM を送出することを確認
+
+    draft-15 Section 6.12 の「受信者は WT_CLOSE_SESSION 受信時に END_STREAM
+    フレームで応答してストリームを閉じる MUST」。エントリ削除とセットで行い、
+    ストリームを両ハーフクローズで閉じて同時ストリーム枠を消費し続けない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピア (クライアント) が WT_CLOSE_SESSION を送り、サーバーが受信する
+    client.close_session(session_id, 0)
+    _h2_pump(client, server)
+
+    # サーバーが空ペイロード + END_STREAM フラグの DATA フレームで応答する
+    wire = server.send()
+    assert wire is not None
+    assert _encode_data_frame(session_id, end_stream=True) in wire
+
+
+def test_initiator_session_closed_after_peer_end_stream_response() -> None:
+    """close_session した側 (イニシエーター) もピアの END_STREAM 応答で SessionClosed が 1 回発火することを確認
+
+    受信側 (受信者 MUST の END_STREAM 応答) と合わせて両ハーフが閉じると、
+    イニシエーターの on_stream_close_callback が SessionClosed を発火する
+    (error_code は nghttp2 のクローズ由来で 0)。セッション終了の通知が両側に
+    1 回ずつ届く。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # クライアントが WT_CLOSE_SESSION を送り、サーバーが受信して END_STREAM で応答する
+    client.close_session(session_id, 0)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    # イニシエーター側でも SessionClosed が 1 回発火する
+    closed_events = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == 0
+    assert closed_events[0].error_message == ""
+
+
+def test_recv_wt_close_session_only_no_end_stream_response_and_closed() -> None:
+    """END_STREAM を伴わない WT_CLOSE_SESSION のみでも END_STREAM 応答と SessionClosed 1 回が成立することを確認
+
+    非コンプライアントなピア (WT_CLOSE_SESSION を送るが END_STREAM を送らない)
+    でも、受信者 MUST の END_STREAM 応答は送出され、SessionClosed は 1 回だけ
+    発火する (二重発火しない)。h2 の公開 API に WT_CLOSE_SESSION のみを送出
+    する手段が存在しないため、ワイヤ注入で再現する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # WT_CLOSE_SESSION カプセルのみを DATA フレームで注入する (END_STREAM なし)
+    # 0x6843 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint、0x04 は長さ
+    wt_close_capsule = b"\x68\x43\x04" + (0).to_bytes(4, "big")
+    ret = server.receive(_encode_data_frame(session_id, wt_close_capsule))
+    assert ret > 0, "WT_CLOSE_SESSION カプセルの注入に失敗しました"
+
+    # SessionClosed が 1 回発火する
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == session_id
+
+    # 受信者 MUST の END_STREAM 応答が送出される
+    wire = server.send()
+    assert wire is not None
+    assert _encode_data_frame(session_id, end_stream=True) in wire
+
+
+def test_queued_capsule_discarded_after_recv_wt_close_session() -> None:
+    """WT_CLOSE_SESSION 受信時に終了前にキュー済みの未 flush カプセルが破棄されることを確認
+
+    終了を学習する前にキュー済みの送出は送出され得る (既存の原則) が、受信
+    経路では終了学習時に http2_stream_buffers_ が破棄されるため、flush 前の
+    データグラムはワイヤに送出されない (エントリ削除とセットの設計)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # サーバーがデータグラムをキューする (flush 前)
+    server.send_datagram(session_id, b"pre-close")
+
+    # キューが flush される前にピアの WT_CLOSE_SESSION が届く
+    client.close_session(session_id, 0)
+    _h2_pump(client, server)
+
+    # 受信処理時にキュー済みのカプセルが破棄され、データグラムは送出されない
+    wire = server.send()
+    assert wire is None or _encode_capsule(0x00, b"pre-close") not in wire
+
+
+def test_close_session_after_recv_wt_close_session_no_double() -> None:
+    """WT_CLOSE_SESSION 受信後に close_session で応答しても SessionClosed が 1 回だけ発火することを確認
+
+    受信側アプリが close_session で応答すると自側も END_STREAM を送出し、
+    ピアの END_STREAM と合わせて両ハーフが閉じる。エントリを削除しない
+    修正前実装では、このタイミングの on_stream_close_callback が SessionClosed
+    を 2 回目に発火していた (1 回目は WT_CLOSE_SESSION 受信時の
+    handle_wt_close_session)。エントリ削除により on_stream_close_callback が
+    発火せず、1 回だけになる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピア (クライアント) が WT_CLOSE_SESSION を送り、サーバーが受信する
+    client.close_session(session_id, 0)
+    _h2_pump(client, server)
+
+    # 受信側で SessionClosed が 1 回発火している
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == session_id
+
+    # 受信側アプリが close_session で応答しても SessionClosed は追加発火しない
+    server.close_session(session_id, 0)
+    _h2_pump(server, client)
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 0
+
+
+def test_close_session_after_recv_wt_close_session_noop() -> None:
+    """WT_CLOSE_SESSION 受信後の close_session が no-op (再送出なし) になることを確認
+
+    エントリ削除が機能していることの間接検証。close_session はエントリ不在で
+    WT_CLOSE_SESSION を再送出しない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピア (クライアント) が WT_CLOSE_SESSION を送り、サーバーが受信する
+    client.close_session(session_id, 0)
+    _h2_pump(client, server)
+
+    # 受信後の close_session は no-op (WT_CLOSE_SESSION の再送出なし)
+    server.close_session(session_id, 0)
+    wire = server.send()
+    # 0x6843 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint
+    assert wire is None or b"\x68\x43" not in wire
+
+
+def test_send_stream_data_after_recv_wt_close_session_noop() -> None:
+    """WT_CLOSE_SESSION 受信後の send_stream_data が no-op になることを確認
+
+    ストリームが存在するセッションで WT_CLOSE_SESSION を受信するとエントリが
+    削除されるため、以後の send_stream_data は get_wt_session の失敗でワイヤに
+    送出されない (修正前はエントリが残るため送出され得た)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # クライアントがストリームを開きデータを送って、サーバーが受信する
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+    client.send_stream_data(session_id, stream_id, b"data")
+    _h2_pump(client, server)
+
+    # ピア (クライアント) が WT_CLOSE_SESSION を送り、サーバーが受信する
+    client.close_session(session_id, 0)
+    _h2_pump(client, server)
+
+    # 受信後の send_stream_data は no-op (ワイヤに送出されない)
+    server.send_stream_data(session_id, stream_id, b"after-close")
+    wire = server.send()
+    assert wire is None or b"after-close" not in wire
 
 
 def test_end_stream_close_session_noop() -> None:
