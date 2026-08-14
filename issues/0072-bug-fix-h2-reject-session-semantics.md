@@ -1,7 +1,7 @@
 # HTTP/2 の reject_session が 2xx 応答でもセッション ID を削除する
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-14
 - Branch: feature/fix-h2-reject-session-semantics
 - Polished: 2026-08-14
 
@@ -32,3 +32,15 @@ HTTP/2 側の `reject_session` が status_code に関わらず `wt_sessions_` �
 - `reject_session` の 2xx 応答時の挙動が h3 と揃っている (2xx 送出 = 確立の意味論に基づき、2xx では削除しない)
 - 2xx (例: 201) を渡した場合に `wt_sessions_` のエントリが残り、非 2xx (例: 403) で削除されることをテストで確認できる (エントリ残留は「両ハーフクローズ時の `on_stream_close_callback` の SessionClosed 発火 (残留時のみ発火)」で間接検証する)
 - 既存テストがすべて通る
+
+## 解決方法
+
+HTTP/2 サーバー側の `reject_session` の削除条件を h3 と対称に「非 2xx のときのみ」へ修正した。
+
+- `src/bindings/webtransport_h2.cpp` の `reject_session` を `status_code / 100 != 2` のときのみ `wt_sessions_` から削除するよう変更した (2xx 送出 = セッション確立。draft-ietf-webtrans-http2-15 Section 3.2)
+- 2xx 保持エントリは `is_terminated = true` を立てて `send_datagram` を塞いだ。応答は END_STREAM 付きで送出済みかつデータプロバイダ未登録のため、塞がないとカプセルが `http2_stream_buffers_` に滞留してワイヤに送出されないまま残るため (設計方針の「ガードを通過する」挙動を、レビュー指摘を受けて送信を塞ぐ形に修正した)
+- 2xx 保持エントリは `is_established` が false のまま残留し、両ハーフクローズ時の `on_stream_close_callback` が SessionClosed を発火する。非 2xx ではエントリ削除のため発火しない
+- `src/bindings/webtransport_h2.h` の `reject_session` docstring に 2xx 送出 = 確立の意味論と 2xx 保持エントリの挙動を追記し、h3 側の docstring と対称にした
+- テスト: `tests/test_webtransport_h2_reject_session.py` に `test_server_reject_status_code_entry_retention` を追加した (201 では両ハーフクローズで SessionClosed が 1 回発火、403 では発火しないことを検証。END_STREAM 付き DATA フレームのワイヤ注入でサーバー側の `on_stream_close_callback` を発火させる)
+
+全テスト (615 件) が通ることを確認済み。
