@@ -321,6 +321,162 @@ def test_pre_accept_fin_local_close_session_2xx_sent() -> None:
     assert closed_events[0].session_id == 0
 
 
+def _send_pre_accept_wt_close_session(client: h3.Session) -> bytes:
+    """クライアントが受理前に WT_CLOSE_SESSION を送出する
+
+    クライアントの close_session で WT_CLOSE_SESSION カプセルを送信キューに
+    積み、get_streams_to_send で取り出して返す (サーバーへの注入は呼び出し
+    側が行う)。受理前のカプセルはサーバー側で nghttp3 の inq にバッファされ、
+    accept_session の confirm 処理中に同期処理される (draft-ietf-webtrans
+    -http3-16 Section 3.2 の「A server MUST NOT process these bytes as
+    capsules until it sends a 2xx response accepting the session」)。
+
+    get_streams_to_send が WT_CLOSE_SESSION カプセル 1 件だけを返すことは、
+    _setup_connect が CONNECT ヘッダーを書き出し済みであることに依存する
+    (クライアントの送信キューに残っているのはカプセルのみ)。
+
+    @param client クライアントセッション (connect 済み)
+    @return WT_CLOSE_SESSION カプセルのデータ
+    """
+    client.close_session(0, 0)
+    streams = client.get_streams_to_send()
+    assert len(streams) == 1, "WT_CLOSE_SESSION カプセル以外の送信データがあります"
+    wt_close_stream_id, wt_close_data, wt_close_fin = streams[0]
+    assert wt_close_stream_id == 0, "CONNECT ストリーム以外の送信データがあります"
+    # nghttp3 は WT_CLOSE_SESSION 送出時に FIN も付ける
+    # (draft-ietf-webtrans-http3-16 Section 6 の MUST「準拠クライアントは
+    # WT_CLOSE_SESSION 直後に FIN を送る」を満たす)。サーバーへの注入時に
+    # fin を False にすれば「FIN が別パケットで届く」変種を構成できる
+    assert wt_close_fin is True, "WT_CLOSE_SESSION カプセルには FIN が付きます"
+    return wt_close_data
+
+
+def _assert_wt_close_session_discarded(server: h3.Session) -> None:
+    """受理前 WT_CLOSE_SESSION によるセッション終了の後始末をまとめて検証する
+
+    SessionClosed と STREAM_CLOSED がそれぞれ 1 回だけ発火し (accept_session
+    内の破棄と receive_stream_data 後段の二重 close_stream の回帰検出)、
+    セッション ID が残留せず、未送信の 2xx も送出されないことを確認する。
+    STREAM_CLOSED の個数は nghttp3 の実装順序に依存するピンである (将来の
+    nghttp3 で WT_CLOSE_SESSION 処理時に CONNECT ストリームが内部削除され
+    ると close_stream がストリーム未存在になり 0 回に変わり得る)。
+    """
+    events = _drain_events(server)
+    closed_events = [e for e in events if e.type == h3.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == 0
+    stream_closed_events = [e for e in events if e.type == h3.EventType.STREAM_CLOSED]
+    assert len(stream_closed_events) == 1
+    assert server.get_session_ids() == []
+    streams = server.get_streams_to_send()
+    assert all(stream_id != 0 for stream_id, _data, _fin in streams)
+
+
+def test_pre_accept_wt_close_session_fin_same_read() -> None:
+    """受理前の WT_CLOSE_SESSION が FIN と同一読み取りで届き、accept_session 中に処理されても SessionClosed が 1 回だけ発火することを確認
+
+    準拠クライアントは WT_CLOSE_SESSION 直後に FIN を送る
+    (draft-ietf-webtrans-http3-16 Section 6 の MUST)。FIN と同一読み取りで
+    届くため受理前 FIN 検知が成立し、移行処理 (pre_accept_fin_accepted_
+    session_ids_ への移行) が confirm の前に実行された状態で、confirm の
+    処理中にカプセルが処理される (破棄記録条件 1 の経路)。受理前のカプセル
+    は nghttp3 の inq にバッファされ、accept_session の confirm 処理中に
+    process_blocked_wt_stream_data 経由で同期処理される (nghttp3 の実装
+    順序に依存する経路であり、本テストでピン留めする)。2xx が破棄される
+    ためクライアント側で SESSION_READY は発火しないことも検証する。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, False)
+
+    # クライアントが受理前に WT_CLOSE_SESSION を送出し、FIN と同一読み取り
+    # でサーバーに届く構成 (準拠クライアントの送出順)
+    wt_close_data = _send_pre_accept_wt_close_session(client)
+    server.receive_stream_data(0, wt_close_data, True)
+
+    # 受理する。confirm 処理中にバッファされた WT_CLOSE_SESSION が処理され、
+    # 終了済みセッションの未送信 2xx が破棄される
+    assert server.accept_session(0) is True
+
+    # SessionClosed 1 回 / STREAM_CLOSED 1 回 / ID 残留なし / 2xx 不出力
+    _assert_wt_close_session_discarded(server)
+
+    # 2xx が破棄されたため、クライアントはセッション確立を認識しない
+    # (SESSION_READY が発火しない)
+    ready_events = [e for e in _drain_events(client) if e.type == h3.EventType.SESSION_READY]
+    assert len(ready_events) == 0
+
+    # 終了を学習したセッション ID 宛の送信が拒否される
+    server.send_datagram(0, b"blocked")
+    assert server.get_datagrams_to_send() == []
+    assert server.open_stream(0, 4, False) is False
+
+
+def test_pre_accept_wt_close_session_fin_late() -> None:
+    """受理前の WT_CLOSE_SESSION が FIN より先に届き、accept_session 中に処理されても未送信 2xx が破棄されることを確認
+
+    カプセルと FIN が別の QUIC パケットで届くと、FIN 検知前に accept_session
+    が実行され pre_accept_fin_accepted_session_ids_ のメンバーシップが成立
+    しない。accept_session の confirm 処理中に発火した recv_wt_close_session_cb
+    を破棄記録の対象に加える拡大の検証である (破棄記録条件 2 の経路)。
+    accept_session 後の空 FIN は閉じられたストリームへの読み取りとなり、
+    nghttp3 がエラーを返して Error イベントが積まれ得る (実サーバーでは
+    無視されるため断言しない)。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, False)
+
+    # クライアントが受理前に WT_CLOSE_SESSION のみを送出する (FIN なし)
+    wt_close_data = _send_pre_accept_wt_close_session(client)
+    server.receive_stream_data(0, wt_close_data, False)
+
+    # 受理する。confirm 処理中にバッファされた WT_CLOSE_SESSION が処理され、
+    # 未送信の 2xx が破棄される (破棄記録条件の拡大)
+    assert server.accept_session(0) is True
+
+    # 遅れて届いた空 FIN を渡す (閉じられたストリームへの読み取り)。
+    # 現在の依存 nghttp3 では ERR_H3_FRAME_UNEXPECTED の Error イベントが
+    # 積まれる (閉じられたストリームへの読み取りは nghttp3 の実装依存で
+    # あり、実サーバーでは無視されるため断言しない)
+    server.receive_stream_data(0, b"", True)
+
+    # SessionClosed 1 回 / STREAM_CLOSED 1 回 / ID 残留なし / 2xx 不出力
+    _assert_wt_close_session_discarded(server)
+
+
+def test_pre_accept_wt_close_session_no_fin() -> None:
+    """受理前 FIN を伴わない WT_CLOSE_SESSION のみの変種で送信窓が閉じられ 2xx が破棄されることを確認
+
+    受理前 FIN なしの変種では移行処理 (pre_accept_fin_accepted_session_ids_
+    への挿入) が機能せず、破棄記録は confirm 処理中の発火 (破棄記録条件 2)
+    で成立する。再挿入抑止により session_ids_ に ID が残留せず、
+    draft-ietf-webtrans-http3-16 Section 6 の MUST (終了を学習したセッション
+    ID 宛の新しいデータグラム・ストリームの禁止) の窓が塞がる。fin_late
+    変種との違いは FIN が届かないこと (fin_late は届いた空 FIN の処理後の
+    挙動を確認する) と、窓の閉塞を直接検証することである。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, False)
+
+    # クライアントが受理前に WT_CLOSE_SESSION のみを送出する (FIN なし)
+    wt_close_data = _send_pre_accept_wt_close_session(client)
+    server.receive_stream_data(0, wt_close_data, False)
+    assert server.accept_session(0) is True
+
+    # SessionClosed 1 回 / STREAM_CLOSED 1 回 / ID 残留なし / 2xx 不出力
+    _assert_wt_close_session_discarded(server)
+
+    # 終了を学習したセッション ID 宛の送信が拒否される (窓の閉塞)
+    server.send_datagram(0, b"blocked")
+    assert server.get_datagrams_to_send() == []
+    assert server.open_stream(0, 4, False) is False
+
+
 def test_pre_accept_fin_wt_close_session_other_session_unaffected() -> None:
     """遅延クローズ保留中の一方のセッション終了が他方の 2xx 送出に影響しないことを確認
 
@@ -369,3 +525,43 @@ def test_pre_accept_fin_wt_close_session_other_session_unaffected() -> None:
     closed_events = [e for e in events if e.type == h3.EventType.SESSION_CLOSED]
     assert len(closed_events) == 2
     assert {e.session_id for e in closed_events} == {0, 4}
+
+
+def test_pre_accept_wt_close_session_other_session_unaffected() -> None:
+    """受理前 WT_CLOSE_SESSION の accept 経路で終了したセッションが他セッションの生存に影響しないことを確認
+
+    生存セッション 4 (通常確立済み) が存在する状態で、セッション 0 が
+    受理前 WT_CLOSE_SESSION により accept 経路で終了しても、セッション 4 の
+    session_ids_ エントリは残り send_datagram も成功する。accept_session 内の
+    discard_stale_2xx の全走査 (他セッションの保留エントリも破棄する) が
+    他セッションの送信に波及しないことの回帰ピン。
+    """
+    client, server = _create_session_pair()
+
+    # セッション 4 を通常確立する
+    assert client.connect(4, "https://localhost/webtransport") is True
+    _pump(client, server)
+    _accept_session(server)
+    _pump(server, client)
+    assert server.get_session_ids() == [4]
+
+    # セッション 0 に受理前 WT_CLOSE_SESSION を送る (FIN なし。accept 経路)
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, False)
+    wt_close_data = _send_pre_accept_wt_close_session(client)
+    server.receive_stream_data(0, wt_close_data, False)
+    assert server.accept_session(0) is True
+
+    # セッション 0 だけが終了し、セッション 4 は生存する (ID も送信も維持)
+    events = _drain_events(server)
+    closed_events = [e for e in events if e.type == h3.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == 0
+    assert server.get_session_ids() == [4]
+    server.send_datagram(4, b"alive")
+    assert len(server.get_datagrams_to_send()) == 1
+
+    # 終了したセッション 0 の 2xx は送出されない
+    streams = server.get_streams_to_send()
+    assert all(stream_id != 0 for stream_id, _data, _fin in streams)

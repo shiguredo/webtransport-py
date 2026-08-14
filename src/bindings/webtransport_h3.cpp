@@ -42,6 +42,7 @@ H3Session::H3Session(H3Session&& other) noexcept
           std::move(other.pre_accept_fin_accepted_session_ids_)),
       pending_stale_2xx_discard_session_ids_(
           std::move(other.pending_stale_2xx_discard_session_ids_)),
+      accepting_session_id_(other.accepting_session_id_),
       stream_info_(std::move(other.stream_info_)),
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
@@ -73,6 +74,7 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
         std::move(other.pre_accept_fin_accepted_session_ids_);
     pending_stale_2xx_discard_session_ids_ =
         std::move(other.pending_stale_2xx_discard_session_ids_);
+    accepting_session_id_ = other.accepting_session_id_;
     stream_info_ = std::move(other.stream_info_);
     control_stream_id_ = other.control_stream_id_;
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
@@ -251,26 +253,12 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
   pending_fin_session_ids_.clear();
 
   // 遅延クローズ保留中に WT_CLOSE_SESSION を受信したセッションの未送信
-  // 2xx を破棄する。nghttp3 には 2xx のみをキャンセルする API が存在せず、
-  // close_stream (nghttp3_conn_close_stream) がストリームの送信キュー全体
-  // (未送信 2xx を含む) を破棄する唯一の手段である。close_stream は
-  // read_stream2 から戻ったこの時点で実行する (コールバック内での再入
-  // 防止。read_stream2 がエラーを返した場合も保留集合をそのまま処理する)。
-  // pre_accept_fin_accepted_session_ids_ からは先に除去する: 除去しないと、
-  // 存在しないストリームは stream_flushed が 1 を返すため、次の
-  // get_streams_to_send の遅延クローズループで 2 回目の close_stream が
-  // 実行される。現在の依存 nghttp3 では存在しないストリームへの
-  // close_stream は NGHTTP3_ERR_STREAM_NOT_FOUND を返して stream_close_cb
-  // を発火しないが、nghttp3 の実装変更でイベント個数が変わり得るため、
-  // 先に除去して防衛する。close_stream の副作用として stream_close_cb が
-  // 発火して STREAM_CLOSED イベント (session_id = -1) が積まれる (既存の
-  // 遅延クローズでも同様)。SessionClosed は発火しない (session_ids_ から
-  // 削除済みのため)
-  for (int64_t session_id : pending_stale_2xx_discard_session_ids_) {
-    pre_accept_fin_accepted_session_ids_.erase(session_id);
-    close_stream(session_id, 0);
-  }
-  pending_stale_2xx_discard_session_ids_.clear();
+  // 2xx を破棄する。close_stream は read_stream2 から戻ったこの時点で
+  // 実行する (コールバック内での再入防止。read_stream2 がエラーを返した
+  // 場合も保留集合をそのまま処理する)。詳細は discard_stale_2xx の実装
+  // コメント。accept_session が confirm から戻った直後に同処理を実行済み
+  // の場合は保留集合が空のため何もしない (二重 close_stream は発生しない)
+  discard_stale_2xx();
 
   if (consumed < 0) {
     return 0;
@@ -592,10 +580,9 @@ bool H3Session::connect(int64_t stream_id,
   // draft-ietf-webtrans-http3-16 Section 3.2: 非ブラウザクライアントでは
   // OPTIONAL。将来改訂される可能性がある
   if (!origin.empty()) {
-    nva.push_back(
-        {reinterpret_cast<uint8_t*>(const_cast<char*>(header_origin)),
-         reinterpret_cast<uint8_t*>(const_cast<char*>(origin.data())),
-         strlen(header_origin), origin.size(), NGHTTP3_NV_FLAG_NONE});
+    nva.push_back({reinterpret_cast<uint8_t*>(const_cast<char*>(header_origin)),
+                   reinterpret_cast<uint8_t*>(const_cast<char*>(origin.data())),
+                   strlen(header_origin), origin.size(), NGHTTP3_NV_FLAG_NONE});
   }
 
   // WebTransport 専用の submit 関数を使用
@@ -645,28 +632,68 @@ bool H3Session::accept_session(int64_t stream_id) {
     return false;
   }
 
-  // WebTransport セッションを確認済みとしてマーク
-  // end_headers コールバック外で submit_wt_response を呼んだ場合は必須
-  rv = nghttp3_conn_server_confirm_wt_session(conn_, stream_id, UINT64_MAX);
-  if (rv != 0) {
-    return false;
-  }
-
-  // セッション ID を記録
-  session_ids_.insert(stream_id);
-
   // 受理前 FIN を検知済みのセッションは、2xx レスポンスの書き出し完了後に
   // close_stream で後始末する (get_streams_to_send 内で stream_flushed を
   // 確認してから実行)。受理前の close_stream は submit_wt_response が
   // NGHTTP3_ERR_STREAM_NOT_FOUND になり、クライアントがセッション確立を
-  // 認識できなくなるため、受理後の遅延処理が必要。submit_wt_response /
-  // confirm_wt_session が失敗して false を返す場合は検知エントリが
-  // pending_pre_accept_fin_session_ids_ に残る (接続終了まで。受理されない
-  // 場合の残留と同じ扱い)
+  // 認識できなくなるため、受理後の遅延処理が必要。
+  //
+  // 移行は confirm より前に行う: 受理前にバッファされた WT_CLOSE_SESSION
+  // カプセルは confirm の処理中 (process_blocked_wt_stream_data) に同期
+  // 処理されて recv_wt_close_session_cb が発火する (draft-ietf-webtrans
+  // -http3-16 Section 3.2 の「A server MUST NOT process these bytes as
+  // capsules until it sends a 2xx response accepting the session」)。
+  // その時点で移行済み (pre_accept_fin_accepted_session_ids_ に含まれる) に
+  // しておくと、recv_wt_close_session_cb の破棄記録 (未送信 2xx の破棄)
+  // が成立する (confirm 失敗時の戻しは下記の失敗分岐を参照)
+  bool pre_accept_fin_detected = false;
   if (pending_pre_accept_fin_session_ids_.count(stream_id) > 0) {
+    pre_accept_fin_detected = true;
     pending_pre_accept_fin_session_ids_.erase(stream_id);
     pre_accept_fin_accepted_session_ids_.insert(stream_id);
   }
+
+  // WebTransport セッションを確認済みとしてマーク
+  // end_headers コールバック外で submit_wt_response を呼んだ場合は必須。
+  // 上記のとおり confirm の処理中に recv_wt_close_session_cb が発火し得る。
+  // 発火時の破棄記録条件 (recv_wt_close_session_cb の判定) に使うため、
+  // 処理中のセッション ID を記録しておく (処理後は必ず -1 に戻す)
+  accepting_session_id_ = stream_id;
+  rv = nghttp3_conn_server_confirm_wt_session(conn_, stream_id, UINT64_MAX);
+  accepting_session_id_ = -1;
+  if (rv != 0) {
+    // 移行済みエントリを pending に戻す: 除去すると終了学習済みセッション
+    // への送信ブロック (send_datagram / open_stream のメンバーシップ確認)
+    // が解除され、draft-ietf-webtrans-http3-16 Section 6 の MUST (終了を
+    // 学習したエンドポイントは新しいデータグラム・ストリームを送信しない)
+    // に反する窓が開くため。recv_wt_close_session_cb が発火済みの場合は
+    // 破棄記録もここで処理する (confirm 成功時と同じく 2xx の書き出し前に
+    // 破棄する。未記録なら no-op)
+    if (pre_accept_fin_detected) {
+      pre_accept_fin_accepted_session_ids_.erase(stream_id);
+      pending_pre_accept_fin_session_ids_.insert(stream_id);
+    }
+    discard_stale_2xx();
+    return false;
+  }
+
+  // セッション ID は CONNECT リクエスト受信時 (end_headers_cb) に挿入
+  // 済みのため、ここでは再挿入しない。confirm の処理中に
+  // recv_wt_close_session_cb が発火して session_ids_ から削除された
+  // セッションを再挿入すると、削除済みセッションが復活して
+  // send_datagram / open_stream の窓が開き、遅延クローズとの SessionClosed
+  // 二重発火も残る
+
+  // confirm の処理中に受理前バッファの WT_CLOSE_SESSION が処理されて破棄
+  // 記録されたセッションの未送信 2xx を破棄する。receive_stream_data の
+  // 後段の破棄処理は read_stream2 からの復帰後にしか実行されないため、
+  // そのままでは accept_session 直後に呼ばれる get_streams_to_send が 2xx
+  // を先に書き出してしまう。accept_session はアプリ呼び出しであり nghttp3
+  // コールバック内ではないため、ここで直接 close_stream できる。ここで
+  // 処理されるのは confirm 経由の記録のみであり、遅延クローズ経由の記録
+  // (receive_stream_data の後段) は read_stream2 からの復帰時に処理済みの
+  // ため、二重の close_stream は発生しない
+  discard_stale_2xx();
 
   return true;
 }
@@ -938,8 +965,7 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
       continue;
     }
 
-    vec[0].base =
-        const_cast<uint8_t*>(front.data.data() + front.offset);
+    vec[0].base = const_cast<uint8_t*>(front.data.data() + front.offset);
     vec[0].len = remaining;
     front.offset = front.data.size();
 
@@ -1085,6 +1111,29 @@ void H3Session::erase_session_streams(int64_t session_id) {
     stream_buffers_.erase(stream_id);
     stream_info_.erase(stream_id);
   }
+}
+
+void H3Session::discard_stale_2xx() {
+  // 遅延クローズ保留中に WT_CLOSE_SESSION を受信したセッションの未送信
+  // 2xx を破棄する。nghttp3 には 2xx のみをキャンセルする API が存在せず、
+  // close_stream (nghttp3_conn_close_stream) がストリームの送信キュー全体
+  // (未送信 2xx を含む) を破棄する唯一の手段である。
+  // pre_accept_fin_accepted_session_ids_ からは先に除去する: 除去しないと、
+  // 存在しないストリームは stream_flushed が 1 を返すため、次の
+  // get_streams_to_send の遅延クローズループで 2 回目の close_stream が
+  // 実行される。現在の依存 nghttp3 では存在しないストリームへの
+  // close_stream は NGHTTP3_ERR_STREAM_NOT_FOUND を返して stream_close_cb
+  // を発火しないが、nghttp3 の実装変更でイベント個数が変わり得るため、
+  // 先に除去して防衛する。close_stream の副作用として stream_close_cb が
+  // 発火して STREAM_CLOSED イベント (session_id = -1) が積まれる (既存の
+  // 遅延クローズでも同様)。SessionClosed は発火しない (session_ids_ から
+  // 削除済みのため)。全走査でよい: 他セッションの保留エントリも破棄対象
+  // であり、全走査で破棄されるのが正しい
+  for (int64_t session_id : pending_stale_2xx_discard_session_ids_) {
+    pre_accept_fin_accepted_session_ids_.erase(session_id);
+    close_stream(session_id, 0);
+  }
+  pending_stale_2xx_discard_session_ids_.clear();
 }
 
 void H3Session::close_session(int64_t session_id,
@@ -1404,9 +1453,8 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     if (header.first == ":method" && header.second == "CONNECT") {
       is_connect = true;
     }
-    if (header.first == ":protocol" &&
-        (header.second == "webtransport-h3" ||
-         header.second == "webtransport")) {
+    if (header.first == ":protocol" && (header.second == "webtransport-h3" ||
+                                        header.second == "webtransport")) {
       is_webtransport = true;
     }
     if (header.first == ":status") {
@@ -1659,17 +1707,28 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
   // recv_wt_close_session_cb は nghttp3_conn_read_stream2 の処理中に同期
   // 発火するため、コールバック内で nghttp3 を呼ぶと再入になる。セッション
   // ID を保留集合に記録し、receive_stream_data が nghttp3_conn_read_stream2
-  // から戻った後に破棄する (詳細は receive_stream_data の実装コメント)。
+  // から戻った後に破棄する (詳細は discard_stale_2xx の実装コメント。
+  // accept_session の confirm 処理中に発火した場合は accept_session 内で
+  // 破棄する)。
+  // 破棄記録の条件は次のいずれかとする:
+  // - pre_accept_fin_accepted_session_ids_ に含まれる (遅延クローズ保留中。
+  //   WT_CLOSE_SESSION 受信時に 2xx が未送信のため破棄対象になる)
+  // - accept_session の confirm 処理中に発火した (accepting_session_id_ と
+  //   一致する)。受理前にバッファされた WT_CLOSE_SESSION カプセルが confirm
+  //   の処理中 (process_blocked_wt_stream_data) に同期処理される経路であり、
+  //   2xx は submit 済みのため破棄対象になる。受理前 FIN がカプセルより先
+  //   に届いていない (FIN 検知前に accept_session が実行される) 場合は移行
+  //   処理が成立しないため、この条件が無いと破棄されない。confirm が失敗
+  //   する場合は process_blocked_wt_stream_data が呼ばれず本コールバックも
+  //   発火しない (万一発火済みで confirm が失敗した場合も、accept_session
+  //   の失敗分岐で記録済みエントリが処理される。close_stream の CONNECT
+  //   ストリーム判定は session_ids_ のメンバーシップに依存するため、
+  //   SessionClosed は発火しない)
   // 未受理 (検知のみ。pending_pre_accept_fin_session_ids_ に含まれる) の
   // セッションは 2xx が未発生のため破棄対象がなく、対象外とする (同集合の
-  // エントリは既存どおり残る)。受理前 FIN なしの通常受理セッションは遅延
-  // クローズ機構の外であり対象外とする (2xx 滞留は別途の検討対象)。
-  // 受理前にバッファされた WT_CLOSE_SESSION カプセルが accept_session の
-  // 処理中に発火するケースも、accept_session による移行処理
-  // (pre_accept_fin_accepted_session_ids_ への挿入) より前に recv_wt_close
-  // _session_cb が呼ばれるため保留記録の条件を満たさず対象外とする
-  // (2xx 送出と SessionClosed の二重発火は別途の検討対象)
-  if (session->pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
+  // エントリは既存どおり残る)
+  if (session->pre_accept_fin_accepted_session_ids_.count(session_id) > 0 ||
+      session->accepting_session_id_ == session_id) {
     session->pending_stale_2xx_discard_session_ids_.insert(session_id);
   }
 
@@ -1678,7 +1737,8 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
   event.session_id = session_id;
   event.error_code = wt_error_code;
   if (msg != nullptr && msglen > 0) {
-    event.error_message = std::string(reinterpret_cast<const char*>(msg), msglen);
+    event.error_message =
+        std::string(reinterpret_cast<const char*>(msg), msglen);
   }
   session->push_event(std::move(event));
 
