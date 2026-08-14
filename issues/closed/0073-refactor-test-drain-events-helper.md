@@ -1,7 +1,7 @@
 # テストのイベント取り出しヘルパー _drain_events を conftest.py に集約する
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-14
 - Branch: feature/refactor-test-drain-events-helper
 - Polished: 2026-08-14
 
@@ -61,3 +61,13 @@
 
 - 上記 12 ファイルの `_drain_events` の重複定義が削除され、全て conftest.py のヘルパーを使う
 - 全テストが通る
+
+## 解決方法
+
+テストのイベント取り出しヘルパー `_drain_events` を `tests/conftest.py` に集約した。
+
+- `tests/conftest.py` に `_drain_events` を追加した。型アノテーションは PEP 695 の型パラメータと `Protocol` による構造的部分型で抽象化し、`h3.Session` / `h2.Session` / `http2.Connection` のいずれも 1 つのヘルパーで扱えるようにした
+- 重複定義を持つ 12 テストファイル (`tests/test_http2_message_ext.py` / `tests/test_http2_session_control.py` / `tests/test_webtransport_h2_datagram.py` / `tests/test_webtransport_h2_end_stream.py` / `tests/test_webtransport_h2_reject_session.py` / `tests/test_webtransport_h3_datagram.py` / `tests/test_webtransport_h3_ghost_stream.py` / `tests/test_webtransport_h3_pre_accept_fin.py` / `tests/test_webtransport_h3_qpack_blocked_pre_accept_fin.py` / `tests/test_webtransport_h3_reject_session.py` / `tests/test_webtransport_h3_server_reject_session.py` / `tests/test_webtransport_h3_stream_buffer_cleanup.py`) の重複定義を削除し、`from conftest import _drain_events` に置き換えた。conftest から import していなかった http2 系の 2 ファイルにも import を追加した
+- docstring の表現差 (「コネクションのイベント」「セッションに積まれたイベント」等) は「イベントを全て取り出す (`next_event()` が `None` を返すまで)」に統一した
+
+テスト本体 (各テスト関数のロジックとアサーション) は変更していない。全テスト (613 件) が通ることを確認済み。

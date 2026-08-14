@@ -12,20 +12,9 @@ session is established when the server sends a 2xx response」により、非 2x
 from __future__ import annotations
 
 import pytest
-from conftest import _create_h2_session_pair, _h2_pump
+from conftest import _create_h2_session_pair, _drain_events, _h2_pump
 
 from webtransport import h2
-
-
-def _drain_events(session: h2.Session) -> list[h2.Event]:
-    """セッションに積まれたイベントを全て取り出す"""
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:

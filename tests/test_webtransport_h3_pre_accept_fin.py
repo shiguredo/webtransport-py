@@ -12,20 +12,9 @@ close_stream で後始末する (draft-ietf-webtrans-http3-16 Section 6 の
 from __future__ import annotations
 
 import pytest
-from conftest import _accept_session, _create_session_pair, _pump, _setup_connect
+from conftest import _accept_session, _create_session_pair, _drain_events, _pump, _setup_connect
 
 from webtransport import h3
-
-
-def _drain_events(session: h3.Session) -> list[h3.Event]:
-    """セッションに積まれたイベントを全て取り出す"""
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 @pytest.mark.parametrize(

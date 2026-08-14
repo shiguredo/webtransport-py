@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from conftest import (
     _create_session_pair,
+    _drain_events,
     _encode_wt_stream_data,
     _establish_session,
     _establish_two_sessions,
@@ -22,17 +23,6 @@ from conftest import (
 )
 
 from webtransport import h3
-
-
-def _drain_events(session: h3.Session) -> list[h3.Event]:
-    """セッションに積まれたイベントを全て取り出す"""
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 def test_ghost_stream_after_recv_wt_close_session_ignored() -> None:

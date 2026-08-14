@@ -148,3 +148,5 @@
   - @voluntas
 - [UPDATE] WebTransport over HTTP/3 テストの接続ヘルパーを conftest.py に集約する
   - @voluntas
+- [UPDATE] テストのイベント取り出しヘルパー _drain_events を conftest.py に集約する
+  - @voluntas

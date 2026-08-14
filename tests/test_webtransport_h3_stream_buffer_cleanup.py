@@ -3,23 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from conftest import _establish_session, _establish_two_sessions, _pump
+from conftest import _drain_events, _establish_session, _establish_two_sessions, _pump
 
 from webtransport import h3
-
-
-def _drain_events(session: h3.Session) -> list[h3.Event]:
-    """セッションのイベントを全て読み出す
-
-    @return 読み出したイベントのリスト
-    """
-    events = []
-    while True:
-        event = session.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
 
 
 @pytest.mark.parametrize(

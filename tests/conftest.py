@@ -4,6 +4,7 @@ import datetime
 import ipaddress
 import tempfile
 from pathlib import Path
+from typing import Protocol
 
 import pytest
 from cryptography import x509
@@ -438,3 +439,24 @@ def _connect_h2_session(
     assert ready_events[0].session_id == session_id
 
     return session_id
+
+
+class _EventSource[E](Protocol):
+    """next_event() でイベントを 1 件ずつ取り出せるオブジェクト
+
+    h3.Session / h2.Session / http2.Connection など、next_event() を
+    持つオブジェクトが対象
+    """
+
+    def next_event(self) -> E | None: ...
+
+
+def _drain_events[E](source: _EventSource[E]) -> list[E]:
+    """イベントを全て取り出す (next_event() が None を返すまで)"""
+    events = []
+    while True:
+        event = source.next_event()
+        if event is None:
+            break
+        events.append(event)
+    return events
