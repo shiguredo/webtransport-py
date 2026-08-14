@@ -1,7 +1,7 @@
 # HTTP/2 で WT_CLOSE_SESSION 受信後に close_session で応答すると SessionClosed が二重発火する
 
 - Created: 2026-08-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-14
 - Branch: feature/fix-h2-wt-close-session-double-close
 - Polished: 2026-08-14
 
@@ -34,3 +34,15 @@ WebTransport over HTTP/2 で、ピアが WT_CLOSE_SESSION カプセルを送っ�
 - WT_CLOSE_SESSION 受信後の `close_session` / `send_stream_data` が no-op になる (エントリ削除による新規の挙動)
 - エントリ削除が機能していることの間接検証として、WT_CLOSE_SESSION 受信後に `close_session` が no-op (WT_CLOSE_SESSION の再送出なし) になることを確認する
 - モックなしの Sans-IO テストで検証できる (0063 で新設した h2 用 Sans-IO ヘルパーを再利用する)
+
+## 解決方法
+
+`handle_wt_close_session` で `wt_sessions_` からエントリを削除し、`http2_stream_buffers_` を破棄するようにした (0070 の `handle_end_stream` と同じ「エントリ不在で塞がる」論理)。
+
+- エントリ削除により、以後の `on_stream_close_callback` / `close_session` / `send_datagram` / `send_stream_data` / `open_stream` / `reset_stream` がエントリ不在で塞がれ、WT_CLOSE_SESSION 受信 (1 回目) + 両ハーフクローズ時の `on_stream_close_callback` (2 回目) による SessionClosed の二重発火が解消された
+- draft-15 Section 6.12 の受信者 MUST (WT_CLOSE_SESSION 受信時に END_STREAM フレームで応答してストリームを閉じる) を実装した。設計方針では「未実装のまま残る」としていたが、ユーザー指示により実装した。`end_stream_pending_` + `nghttp2_session_resume_data` で応答の END_STREAM を送出し、コンプライアントなピアとの間でストリームが両ハーフクローズで閉じる (同時ストリーム枠を消費し続けない)。`on_stream_close_callback` でも `end_stream_pending_` を消去するようにした (ストリームクローズ後の stale エントリ防止)
+- 設計方針の「削除後もフラグ更新は維持する (close_session との対称性)」は、レビューで削除直前のフラグ書き込みが観測不能な死に書き込みであると指摘されたため削除した (`handle_end_stream` と同じくフラグを書かない)
+- `send_datagram` の実装コメントと h の docstring、`close_session` のコメント、`WtSessionInfo::is_terminated` のコメントを新挙動に合わせて更新した (WT_CLOSE_SESSION 受信はエントリ削除で表現し、`is_terminated` を立てる経路はローカル close_session / reject_session の 2xx 送出のみ)
+- テスト: `tests/test_webtransport_h2_end_stream.py` に 7 件追加した (END_STREAM 応答の送出 / イニシエーター側の SessionClosed 1 回 / 終了前キュー済みカプセルの破棄 / close_session 応答時の二重発火なし / close_session の no-op / send_stream_data の no-op / 非コンプライアントピアへの END_STREAM 応答)。既存テストの docstring (test_webtransport_h2_datagram.py / test_webtransport_h2_end_stream.py) を新挙動に合わせて更新した
+
+全テスト (622 件) が通ることを確認済み。
