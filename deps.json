@@ -1,6 +1,6 @@
 {
   "ngtcp2": {
-    "branch": "webtransport",
+    "branch": "reliable-stream-reset",
     "url": "https://github.com/ngtcp2/ngtcp2"
   },
   "nghttp3": {
