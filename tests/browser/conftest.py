@@ -130,7 +130,7 @@ class BrowserWebTransportServerBase(ABC):
         stop_task = asyncio.create_task(self._monitor_stop())
         try:
             await self._run_server()
-        except (OSError, asyncio.CancelledError):
+        except OSError, asyncio.CancelledError:
             # Server.stop() がソケットを閉じることで run() が OSError で終了する
             # (h3 サーバーの UDP ソケットを閉じたとき)。h2 サーバーは
             # serve_forever() が Python 3.14 で CancelledError を送出して終了する。

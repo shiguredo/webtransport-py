@@ -160,3 +160,5 @@
   - @voluntas
 - [UPDATE] テストのイベント取り出しヘルパー _drain_events を conftest.py に集約する
   - @voluntas
+- [FIX] ブラウザテストの conftest.py を ruff format の整形に適合させる
+  - @voluntas
