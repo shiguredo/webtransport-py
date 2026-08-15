@@ -137,6 +137,8 @@
   - @voluntas
 - [FIX] HTTP/2 で WT_CLOSE_SESSION 受信時の END_STREAM 応答 (Section 6.12 の受信者 MUST) を実装し、close_session 応答で SessionClosed が二重発火する問題を修正する
   - @voluntas
+- [FIX] HTTP/2 でセッション終了後に stop_sending / drain_session がカプセルを送出してしまうのを修正する
+  - @voluntas
 
 ### misc
 

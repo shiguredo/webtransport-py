@@ -314,8 +314,9 @@ class H2Session {
    * 発火しない。黙って削除)。2xx を渡した場合は削除しない (2xx 送出は
    * 確立条件。accept_session は 200 固定のため、2xx 非 200 応答は本 API で
    * 生成する) が、応答は END_STREAM 付きで送出済みのため以後サーバー側
-   * からは送信できない。is_terminated を立てて send_datagram を塞ぎ
-   * (塞がないとカプセルが滞留してワイヤに送出されない)、is_established は
+   * からは送信できない。is_terminated を立てて send_datagram /
+   * stop_sending / drain_session を塞ぎ (塞がないとカプセルが滞留して
+   * ワイヤに送出されない)、is_established は
    * false のまま確立済みセッションとしては扱わない。エントリは両ハーフ
    * クローズ時の on_stream_close_callback による SessionClosed 発火のため
    * に残す。accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)。
@@ -362,6 +363,9 @@ class H2Session {
   /**
    * 送信停止を要求
    * WT_STOP_SENDING capsule を送信
+   *
+   * 終了したセッション ID と、一度も connect されていないセッション ID への
+   * 送信は黙って無視する (send_datagram と同じガード)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
@@ -408,6 +412,9 @@ class H2Session {
   /**
    * セッションのドレインを開始
    * WT_DRAIN_SESSION capsule を送信
+   *
+   * 終了したセッション ID と、一度も connect されていないセッション ID への
+   * 送信は黙って無視する (send_datagram と同じガード)。
    * @param session_id セッション ID
    */
   void drain_session(int32_t session_id);
