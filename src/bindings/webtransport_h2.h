@@ -315,7 +315,8 @@ class H2Session {
    * 確立条件。accept_session は 200 固定のため、2xx 非 200 応答は本 API で
    * 生成する) が、応答は END_STREAM 付きで送出済みのため以後サーバー側
    * からは送信できない。is_terminated を立てて send_datagram /
-   * send_stream_data / reset_stream / stop_sending / drain_session を塞ぎ
+   * send_stream_data / reset_stream / stop_sending / drain_session /
+   * close_session を塞ぎ
    * (塞がないとカプセルが滞留してワイヤに送出されない)、is_established は
    * false のまま確立済みセッションとしては扱わない。エントリは両ハーフ
    * クローズ時の on_stream_close_callback による SessionClosed 発火のため
@@ -407,6 +408,12 @@ class H2Session {
   /**
    * WebTransport セッションを閉じる
    * WT_CLOSE_SESSION capsule を送信
+   *
+   * 終了したセッション ID への呼び出しは黙って無視する (send_datagram と
+   * 同じガード構成。ローカル close_session 後は is_terminated で塞がり、
+   * 2 回目以降の呼び出しは WT_CLOSE_SESSION を送出しない。WT_CLOSE_SESSION
+   * 受信後・ピアの END_STREAM 受信後・非 2xx 拒否受信後はエントリが削除
+   * されて塞がる)。
    * @param session_id セッション ID
    * @param error_code エラーコード
    * @param error_message エラーメッセージ

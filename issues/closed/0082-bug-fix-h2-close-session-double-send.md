@@ -1,7 +1,7 @@
 # HTTP/2 の close_session を二重に呼ぶと WT_CLOSE_SESSION capsule が二重送出される問題を修正する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/fix-h2-close-session-double-send
 - Polished: 2026-08-15
 
@@ -34,3 +34,11 @@
 - 生存セッションの 1 回の `close_session` は従来どおり送出される
 - `send_stream_data` のフロー制御違反時の内部 `close_session` 呼び出しは従来どおり動作する (フロー制御超過を発生させるテストで確認する)
 - 全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `close_session` 冒頭に `get_wt_session` + `is_terminated` の確認を追加し、終了済み時は no-op にした (`send_datagram` / `send_stream_data` / `reset_stream` / `stop_sending` / `drain_session` と同一のガード構成)。2 回目以降の呼び出しはここで返り、WT_CLOSE_SESSION capsule の二重送出・`http2_stream_buffers_` への残留が防がれる。`send_stream_data` のフロー制御違反時 (FLOW_CONTROL_ERROR) の内部呼び出しは is_terminated が立つ前のため塞がれないことを確認した
+- `reject_session` の実装コメント・`send_datagram` の実装コメント・`close_session` 自身のコメントを「close_session も is_terminated で塞がれる」内容に更新した。`src/bindings/webtransport_h2.h` の `reject_session` docstring の API 列挙に `close_session` を加え、`close_session` docstring に「終了したセッション ID への呼び出しは黙って無視する」旨を追記した
+- `tests/test_webtransport_h2_close_session.py` を新規作成し、テスト 4 本を追加した (二重呼び出しで 1 個のみ送出 + END_STREAM 維持のピン、flush 後の再呼び出しの送出なしピン、生存セッションの回帰ピン、フロー制御違反時の内部呼び出しの回帰ピン)。ガード無効化ビルドで二重呼び出しテストが失敗 (ワイヤ上 2 個) することを確認し、修正の検証として機能することを実証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (647 本) が通ることを確認した
