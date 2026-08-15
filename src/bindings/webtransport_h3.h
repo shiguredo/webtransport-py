@@ -233,6 +233,15 @@ class H3Session {
    * バッファされ、confirm の処理中に同期処理される (nghttp3 の実装順序に
    * 依存する挙動)。このときセッション終了が検知され、終了済みセッションの
    * 未送信 2xx は破棄される (SessionClosed は 1 回だけ発火する)。
+   *
+   * reject_session (非 2xx 拒否) で session_ids_ から削除済みのセッション
+   * に対して呼んだ場合は false を返す (受理不可能の明示)。非 2xx で拒否
+   * されたセッションは一度も確立されていない (draft-ietf-webtrans-http3-16
+   * Section 3.2 の「サーバーの視点では、2xx 応答を送信した時点でセッション
+   * が確立される」) ため、誤用経路で submit / confirm に進むと受理前に
+   * バッファされた WT_CLOSE_SESSION カプセルが処理されて SessionClosed が
+   * 発火し、終了通知の意味論に反する。false を返すことで誤用経路は
+   * submit / confirm に進まず、安全側で失敗する。
    * @param stream_id セッションストリーム ID
    * @return 成功したかどうか
    */
@@ -249,6 +258,9 @@ class H3Session {
    * のエントリも除去する。2xx を渡した場合は削除しない (2xx 送出は確立
    * 条件。accept_session は 200 固定のため、2xx 非 200 応答は本 API で生成
    * する)。accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)。
+   * 非 2xx 拒否後に accept_session を呼んだ場合 (もう一つの誤用経路) は
+   * false を返す (受理不可能の明示。詳細は accept_session の docstring を
+   * 参照)。
    * @param stream_id セッションストリーム ID
    * @param status_code HTTP ステータスコード
    */
