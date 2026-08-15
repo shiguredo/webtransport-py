@@ -1,7 +1,7 @@
 # HTTP/2 の stop_sending / drain_session が終了済みセッション宛にカプセルを送出・残留させる問題を修正する
 
 - Created: 2026-08-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/fix-h2-send-apis-after-close-guard
 - Polished: 2026-08-15
 
@@ -35,3 +35,12 @@ HTTP/2 の `stop_sending` / `drain_session` は `get_wt_session` を確認せず
 
 - セッション終了後 (WT_CLOSE_SESSION 受信 / ピアの END_STREAM 受信 / ローカル `close_session` 後) に `stop_sending` / `drain_session` を呼んでもカプセルがワイヤに送出されない (no-op)
 - 全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `stop_sending` / `drain_session` の冒頭に `get_wt_session` + `is_terminated` の確認を追加し、エントリ不在時・終了済み時は no-op にした (`send_datagram` と同一のガード構成)
+- 終了処理ハンドラ (`handle_wt_close_session` / `handle_end_stream`)・クライアント側の非 2xx 応答処理 (`on_frame_recv_callback`)・`reject_session` のコメントを「stop_sending / drain_session もエントリ不在・終了済みで塞がれる」内容に更新した。`send_datagram` の実装コメントも自前ガードを持つ点を反映して見直した
+- `src/bindings/webtransport_h2.h` の `stop_sending` / `drain_session` / `reject_session` の docstring に「終了済みセッション ID への送信は無視される」旨を追記した
+- `tests/test_webtransport_h2_stop_sending_drain_session.py` を新規作成し、テスト 12 本を追加した (ピアの END_STREAM 受信後・ローカル `close_session` 後 (flush 前)・クライアントの非 2xx 拒否受信後に送出されないことの検証 6 本、WT_CLOSE_SESSION 受信後の送出なしピン 2 本、生存セッションの回帰ピン 2 本、未 connect ID の無害性確認 2 本)。ガード無効化ビルドで 6 本失敗することを確認し、修正の検証として機能することを実証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (634 本) が通ることを確認した
