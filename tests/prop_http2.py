@@ -5,7 +5,6 @@ from hypothesis import strategies as st
 
 from webtransport import http2
 
-
 # uint32 の範囲
 UINT32_MAX = 2**32 - 1
 
