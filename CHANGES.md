@@ -143,6 +143,8 @@
   - @voluntas
 - [FIX] HTTP/2 でローカル close_session 後に send_stream_data / reset_stream がカプセルを送出してしまうのを修正する
   - @voluntas
+- [FIX] HTTP/2 で close_session を二重に呼ぶと WT_CLOSE_SESSION capsule が二重送出される問題を修正する
+  - @voluntas
 
 ### misc
 
