@@ -139,6 +139,8 @@
   - @voluntas
 - [FIX] HTTP/2 でセッション終了後に stop_sending / drain_session がカプセルを送出してしまうのを修正する
   - @voluntas
+- [FIX] reject_session で拒否した後に accept_session を呼ぶと SessionClosed が発火する問題を修正する
+  - @voluntas
 
 ### misc
 

@@ -608,6 +608,26 @@ bool H3Session::accept_session(int64_t stream_id) {
     return false;
   }
 
+  // session_ids_ に含まれないセッション (reject_session の非 2xx 拒否で
+  // 削除済み・close_session / WT_CLOSE_SESSION 受信で終了済み・存在しない
+  // ID 等) は受理不可能のため false を返す (誤用の明示)。サーバー側の
+  // session_ids_ への挿入は end_headers_cb が SESSION_READY の発火より前
+  // に行うため、正常フロー (SESSION_READY 受信 → accept_session) の
+  // セッションは必ず含まれ、影響しない。非 2xx で拒否されたセッションは
+  // 一度も確立されていない (draft-ietf-webtrans-http3-16 Section 3.2 の
+  // 「サーバーの視点では、2xx 応答を送信した時点でセッションが確立される」)
+  // ため、誤用経路で submit / confirm に進むと受理前にバッファされた
+  // WT_CLOSE_SESSION カプセルが処理されて SessionClosed が発火し、終了通知
+  // の意味論に反する (バッファされたカプセルの処理は confirm 時のみ。
+  // 下記の confirm 処理の説明を参照)。ガードにより submit / confirm に
+  // 進まないため、カプセルは処理されず SessionClosed も積まれず、拒否時に
+  // reject_session が submit した非 2xx 応答はそのまま送出される (誤用時も
+  // 拒否の通知が失われない。draft-ietf-webtrans-http3-16 Section 3.2 の
+  // 「受理前に届いたカプセルは受理されれば処理され、拒否されれば破棄される」)
+  if (session_ids_.count(stream_id) == 0) {
+    return false;
+  }
+
   // 200 OK レスポンス
   // ヘッダー名と値は静的文字列リテラルを使用
   static const char* header_status = ":status";
