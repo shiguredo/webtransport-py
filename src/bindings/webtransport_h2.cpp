@@ -1074,14 +1074,15 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   // 2xx を渡した場合は削除しない
   // (2xx 送出は Section 3.2 の確立条件) が、応答は END_STREAM 付きで送出
   // 済みかつデータプロバイダ未登録のため、以後サーバー側からは送信できない。
-  // is_terminated を立てて send_datagram / stop_sending / drain_session を
-  // 塞ぐ (塞がないとカプセルが http2_stream_buffers_ に滞留してワイヤに
-  // 送出されないまま残る)。close_session / reset_stream は is_terminated を
-  // 確認せずカプセルをキューするため滞留し得るが、データプロバイダ未登録の
-  // ため送出されず、ピアのストリームクローズ時に破棄される (誤用限定の
-  // 挙動)。is_established は false のまま残留し、確立済みセッション
-  // としては扱われない。残留の目的は両ハーフクローズ時の
-  // on_stream_close_callback による SessionClosed 発火のためである。
+  // is_terminated を立てて send_datagram / send_stream_data / reset_stream /
+  // stop_sending / drain_session を塞ぐ (塞がないとカプセルが
+  // http2_stream_buffers_ に滞留してワイヤに送出されないまま残る)。
+  // close_session は is_terminated を確認せずカプセルをキューするため滞留
+  // し得るが、データプロバイダ未登録のため送出されず、ピアのストリーム
+  // クローズ時に破棄される (誤用限定の挙動)。is_established は false のまま
+  // 残留し、確立済みセッションとしては扱われない。残留の目的は両ハーフ
+  // クローズ時の on_stream_close_callback による SessionClosed 発火のため
+  // である。
   // accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)
   if (status_code / 100 != 2) {
     wt_sessions_.erase(session_id);
@@ -1140,8 +1141,17 @@ void H2Session::send_stream_data(int32_t session_id,
                                  uint64_t stream_id,
                                  const std::vector<uint8_t>& data,
                                  bool fin) {
+  // 終了したセッション ID への送信を黙って無視する (send_datagram と同じ
+  // ガード構成。チェックを send_capsule に置かない理由は send_datagram の
+  // コメントを参照)。終了の検知はエントリと終了フラグで行う:
+  // WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアントの
+  // 非 2xx 拒否受信後はエントリが削除されて塞がり、ローカル close_session
+  // 後は is_terminated で塞がる (サーバー側の reject_session の 2xx 送出も
+  // 同様)。塞がないと WT_STREAM / WT_STREAM_FIN capsule が
+  // WT_CLOSE_SESSION の後ろに積まれてワイヤへ送出され得る (flush 前) か、
+  // http2_stream_buffers_ に残留する (flush 後)
   auto* wt_session = get_wt_session(session_id);
-  if (!wt_session) {
+  if (!wt_session || wt_session->is_terminated) {
     return;
   }
 
@@ -1177,8 +1187,13 @@ void H2Session::reset_stream(int32_t session_id,
                              uint64_t stream_id,
                              uint32_t error_code,
                              uint64_t reliable_size) {
+  // 終了したセッション ID への送信を黙って無視する (send_stream_data と同じ
+  // ガード構成。チェックを send_capsule に置かない理由は send_datagram の
+  // コメントを参照)。塞がないと WT_RESET_STREAM capsule が
+  // WT_CLOSE_SESSION の後ろに積まれてワイヤへ送出され得る (flush 前) か、
+  // http2_stream_buffers_ に残留する (flush 後)
   auto* wt_session = get_wt_session(session_id);
-  if (!wt_session) {
+  if (!wt_session || wt_session->is_terminated) {
     return;
   }
 
@@ -1251,7 +1266,8 @@ void H2Session::send_datagram(int32_t session_id,
   // send_capsule ではなくここに置く: send_capsule は close_session
   // (WT_CLOSE_SESSION) / reset_stream / フロー制御応答の送信にも使われて
   // おり、そこにチェックを入れると終了後の後始末カプセルまで塞がれる
-  // (stop_sending / drain_session はここと同じガードを自前で持つ)。
+  // (send_stream_data / reset_stream / stop_sending / drain_session は
+  // ここと同じガードを自前で持つ)。
   // 楽観的送信 (draft-15 Section 3.2 の MAY
   // 「クライアントは応答を待たずに WebTransport カプセルを送信してよい」)
   // は妨げない: クライアントは connect 直後 (200 応答前)・サーバーは

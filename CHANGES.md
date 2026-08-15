@@ -141,6 +141,8 @@
   - @voluntas
 - [FIX] reject_session で拒否した後に accept_session を呼ぶと SessionClosed が発火する問題を修正する
   - @voluntas
+- [FIX] HTTP/2 でローカル close_session 後に send_stream_data / reset_stream がカプセルを送出してしまうのを修正する
+  - @voluntas
 
 ### misc
 
