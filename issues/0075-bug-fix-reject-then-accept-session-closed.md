@@ -1,7 +1,7 @@
 # reject_session で拒否した後に accept_session を呼ぶと SessionClosed が発火する
 
 - Created: 2026-08-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/fix-reject-then-accept-session-closed
 - Polished: 2026-08-15
 
@@ -40,3 +40,14 @@
 - 正常フロー (SESSION_READY 受信 → `accept_session`) は影響を受けない
 - モックなしの Sans-IO テストで検証できる (conftest.py の `_create_session_pair` + `_setup_connect` で、受理前 WT_CLOSE_SESSION の注入 → `reject_session(0, 403)` → `accept_session(0)` の構成。false の返却・SessionClosed 不発火・非 2xx 応答の送出を確認する。カプセルの注入は `tests/test_webtransport_h3_pre_accept_fin.py` の既存ヘルパー相当で行う。テストは `tests/test_webtransport_h3_server_reject_session.py` への追加が自然)
 - `reject_session` / `accept_session` のコメントと docstring が実挙動と整合する
+
+## 解決方法
+
+設計方針 (b) を採用し、`accept_session` の既存ガード (conn_ / is_server_ / QPACK ストリーム未バインド) に続けて `session_ids_` のメンバーシップ確認を追加した。含まれない場合は false を返す (受理不可能の明示)。サーバー側の挿入は `end_headers_cb` が SESSION_READY の発火より前に行うため、正常フロー (SESSION_READY 受信 → accept_session) のセッションは必ず含まれ、影響しない。誤用経路では submit / confirm に進まないため、受理前にバッファされた WT_CLOSE_SESSION カプセルは処理されず `recv_wt_close_session_cb` も発火せず、SessionClosed は積まれない。reject_session が submit した非 2xx 応答はそのまま送出される (誤用時も拒否の通知が失われない)。
+
+変更ファイル:
+
+- `src/bindings/webtransport_h3.cpp`: `accept_session` にガードを追加し、ガードの根拠 (draft-ietf-webtrans-http3-16 Section 3.2) をコメントで明記
+- `src/bindings/webtransport_h3.h`: `accept_session` / `reject_session` の docstring に誤用経路の挙動を追記
+- `tests/test_webtransport_h3_server_reject_session.py`: 誤用経路のテストを 3 本追加 (カプセル未到着構成 / 受理前 WT_CLOSE_SESSION の fin 有無 parametrize / 他セッションの正常フローへの影響なし)
+- `CHANGES.md`: `## develop` セクションに [FIX] エントリを追加
