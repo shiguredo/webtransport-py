@@ -1,7 +1,7 @@
 # HTTP/2 の send_stream_data / reset_stream がローカル close_session 後に終了済みセッション宛にカプセルを送出・残留させる問題を修正する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/fix-h2-stream-apis-after-close-guard
 - Polished: 2026-08-15
 
@@ -31,3 +31,12 @@ HTTP/2 の `send_stream_data` / `reset_stream` は `get_wt_session` の確認の
 - ローカル `close_session` 後 (flush 前) に `send_stream_data` / `reset_stream` を呼んでもカプセルがワイヤに送出されない (no-op)。flush 後も no-op となり、カプセルを `http2_stream_buffers_` に残留させない
 - 生存セッションの `send_stream_data` / `reset_stream` は従来どおり送出される
 - 全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `send_stream_data` / `reset_stream` の冒頭に `get_wt_session` + `is_terminated` の確認を追加し、終了済み時は no-op にした (`send_datagram` / `stop_sending` / `drain_session` と同一のガード構成)
+- `reject_session` の実装コメントと `send_datagram` の実装コメントを「`send_stream_data` / `reset_stream` も is_terminated で塞がれる」内容に更新した
+- `src/bindings/webtransport_h2.h` の `send_stream_data` / `reset_stream` の docstring に「終了済みセッション ID への送信は無視される」旨を追記し、`reject_session` の docstring の列挙に `send_stream_data` / `reset_stream` を加えた
+- `tests/test_webtransport_h2_send_stream_data_reset_stream.py` を新規作成し、テスト 5 本を追加した (ローカル `close_session` 後 (flush 前) の `send_stream_data` / `reset_stream` (fin 有無) がワイヤへ送出されないことの検証 3 本、生存セッションの回帰ピン 2 本)。ガード無効化ビルドで送出抑止テスト 2 本が失敗することを確認し、修正の検証として機能することを実証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (643 本) が通ることを確認した
