@@ -1,7 +1,7 @@
 # ruff の lint エラー 10 件を修正する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/refactor-fix-ruff-lint-errors
 - Polished: 2026-08-15
 
@@ -30,3 +30,10 @@
 - `uv run ruff check src/ tests/ examples/` がエラー 0 件で通る
 - `uv run pytest tests/ -v --timeout=30` が通る
 - `CHANGES.md` の `### misc` に [UPDATE] エントリが追加されている
+
+## 解決方法
+
+- I001 / RUF022 の 8 件は `uv run ruff check --fix` で自動修正した (import ブロックの並べ替え・1 行化・空行調整・`__all__` のソート。実行時挙動は変わらないことを全テストで確認)
+- PYI034 の 2 件は `src/webtransport/http2/client.py` / `server.py` の `__aenter__` の戻り値型を `Self` に手動で書き換え、`from typing import TYPE_CHECKING, Self` の形式に import を揃えた (h2 / h3 / http3 / quic の先例と一致。挙動は変わらない)
+- `CHANGES.md` の `### misc` に [UPDATE] エントリを追加した
+- `uv run ruff check src/ tests/ examples/` がエラー 0 件、`uv run ty check src` がパス、全テスト (647 本) が通ることを確認した
