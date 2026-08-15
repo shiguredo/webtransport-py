@@ -162,5 +162,7 @@
   - @voluntas
 - [UPDATE] テストのイベント取り出しヘルパー _drain_events を conftest.py に集約する
   - @voluntas
+- [UPDATE] ruff の lint エラー (I001 / RUF022 / PYI034) を修正する
+  - @voluntas
 - [FIX] ブラウザテストの conftest.py を ruff format の整形に適合させる
   - @voluntas

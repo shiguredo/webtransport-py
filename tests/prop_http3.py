@@ -5,7 +5,6 @@ from hypothesis import strategies as st
 
 from webtransport import http3
 
-
 # uint64 の範囲
 UINT64_MAX = 2**64 - 1
 

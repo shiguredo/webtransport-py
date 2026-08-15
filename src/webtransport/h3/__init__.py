@@ -21,6 +21,8 @@ Usage:
     from webtransport.h3 import Server, Client
 """
 
+from webtransport.h3.client import Client
+from webtransport.h3.server import Server
 from webtransport.webtransport_ext.h3 import (
     Config,
     Event,
@@ -28,15 +30,13 @@ from webtransport.webtransport_ext.h3 import (
     Session,
     StreamInfo,
 )
-from webtransport.h3.server import Server
-from webtransport.h3.client import Client
 
 __all__ = [
+    "Client",
     "Config",
     "Event",
     "EventType",
+    "Server",
     "Session",
     "StreamInfo",
-    "Server",
-    "Client",
 ]

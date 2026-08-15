@@ -5,7 +5,6 @@ from hypothesis import strategies as st
 
 from webtransport import h2
 
-
 # uint32 の範囲 (HTTP/2 では多くのフィールドが uint32)
 UINT32_MAX = 2**32 - 1
 UINT64_MAX = 2**64 - 1

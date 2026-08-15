@@ -26,16 +26,12 @@ Usage:
     from webtransport.h2 import Server, Client
 """
 
-from webtransport import quic
-from webtransport import http2
-from webtransport import http3
-from webtransport import h3
-from webtransport import h2
+from webtransport import h2, h3, http2, http3, quic
 
 __all__ = [
-    "quic",
+    "h2",
+    "h3",
     "http2",
     "http3",
-    "h3",
-    "h2",
+    "quic",
 ]

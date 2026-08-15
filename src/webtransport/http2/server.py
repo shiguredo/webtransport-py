@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from webtransport.webtransport_ext import http2 as http2_low
 
@@ -160,7 +160,7 @@ class Server:
             self._server.close()
             await self._server.wait_closed()
 
-    async def __aenter__(self) -> Server:
+    async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""
         await self.start()
         return self
