@@ -168,5 +168,7 @@
   - @voluntas
 - [UPDATE] ruff の lint エラー (I001 / RUF022 / PYI034) を修正する
   - @voluntas
+- [UPDATE] CI に ruff check / ty check の実行ステップを追加する
+  - @voluntas
 - [FIX] ブラウザテストの conftest.py を ruff format の整形に適合させる
   - @voluntas
