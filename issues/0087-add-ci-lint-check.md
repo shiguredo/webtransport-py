@@ -17,17 +17,19 @@ CI に ruff check / ty check の実行ステップを追加し、lint エラー�
 
 ## 設計方針
 
-- 専用ワークフロー `lint.yml` を新設し、push 無条件で実行する (ubuntu-slim runner)。既存ワークフローへの追加は以下の理由で不適切:
-  - test.yml は workflow_call / workflow_dispatch 専用で、push では単独実行されない
-  - wheel.yml は paths-ignore で tests/** を無視するため、tests/ のみの変更では実行されない (lint は tests/ も対象)
-  - e2e-test.yml は macOS のみで、lint 実行に macOS runner は非効率
+- 既存の test.yml のテストジョブに lint ステップを追加する (テストと一緒に実行)。専用ワークフロー・独立した lint ジョブは新設しない (専用の仕組みはメンテナンスコストが高くなるため)
+- 追加位置: 各テストジョブの Run tests ステップの前に Run lint ステップを追加する
+- lint の実行は pyproject.toml の設定に従う: ruff / ty は dependency-groups の lint グループ (`lint = ["ruff", "ty"]`) にあり、テストグループ (`test`) とは分離済み。lint ステップでは lint グループをインストールして実行する (例: `uv sync --only-group test` に `--group lint` を追加、または lint ステップで `uv run --group lint` を使う)
 - 実行コマンドは `uv run ruff check src/ tests/ examples/` と `uv run ty check src` (ruff は make lint と、ty は prek と同一)。select の明示は行わず、ローカルと CI で同じデフォルトルールを使う (select の明示的な固定は open issue 0090 のスコープ)。リポジトリルートの dev.py は prek の対象に含まれるが make lint / CI のコマンドの対象外という既存の差異は維持する
+- 既知の制約:
+  - test.yml は workflow_call / workflow_dispatch 専用のため、push 時は wheel.yml 経由で実行される
+  - wheel.yml の paths-ignore (tests/**) のため、tests/ のみの変更では lint も実行されない (lint の主対象は src/ のため許容)
 - setup-uv は python-version 3.14 を明示する (既存ワークフローと同じ。未指定だと uv が最新 managed Python を選択し、ローカルと CI で挙動が非決定的になる)
 - action は GitHub 公式 (`actions/checkout`) と許可済みの `astral-sh/setup-uv` のみを使う (shiguredo-github-actions の規約)
-- 変更対象: `.github/workflows/lint.yml` (新規) / `CHANGES.md` (## develop の `### misc` への [UPDATE] エントリ)
+- 変更対象: `.github/workflows/test.yml` / `CHANGES.md` (## develop の `### misc` への [UPDATE] エントリ)
 
 ## 完了条件
 
-- push 時に lint ジョブが実行され、`uv run ruff check src/ tests/ examples/` と `uv run ty check src` のいずれかがエラーを返すとジョブが失敗する
+- テストジョブで `uv run ruff check src/ tests/ examples/` と `uv run ty check src` が実行され、いずれかがエラーを返すとジョブが失敗する (tests/ のみの変更など、wheel.yml が実行されないケースでは lint も実行されない既知の制約)
 - lint エラーを混入した一時コミットで CI が失敗することを確認し、確認後に revert して CI が通ることを確認する (型チェックの検知限界 (公開型の解決) は open issue 0077 のスコープ)
 - ローカルの `uv run pytest tests/ -v --timeout=30` が通る
