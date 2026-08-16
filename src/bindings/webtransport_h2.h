@@ -158,7 +158,8 @@ enum class StreamState {
   DataSent,
   ResetSent,
 
-  // 受信側状態
+  // 受信側状態 (本実装の recv_state は受信側の状態のみを表す。DataRead /
+  // ResetRead はアプリのイベント消費追跡を要するため使わない)
   Recv,
   SizeKnown,
   DataRecvd,
@@ -340,7 +341,8 @@ class H2Session {
    * WT_STREAM capsule を送信
    *
    * 終了したセッション ID への送信は黙って無視する (send_datagram と同じ
-   * ガード構成)。
+   * ガード構成)。リセット済み (send_state が ResetSent) のストリームへの
+   * 送信も無視する (draft-15 Section 6.4)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param data 送信データ
@@ -356,7 +358,9 @@ class H2Session {
    * WT_RESET_STREAM capsule を送信
    *
    * 終了したセッション ID への送信は黙って無視する (send_datagram と同じ
-   * ガード構成)。
+   * ガード構成)。送信リセットは送信側の終了のみであり受信側は継続するため
+   * (draft-15 Section 5.2 の QUIC 状態ミラー)、エントリは保持され、以後の
+   * send_stream_data は塞がれる (受信側の追跡は維持される)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
@@ -485,6 +489,10 @@ class H2Session {
   void handle_wt_reset_stream(int32_t session_id,
                               const uint8_t* payload,
                               size_t length);
+  // WT_STREAM_STATE_ERROR を検知したときにアプリへ通知してセッションを閉じる
+  void report_stream_state_error(int32_t session_id,
+                                 uint64_t stream_id,
+                                 const std::string& error_message);
   void handle_wt_stop_sending(int32_t session_id,
                               const uint8_t* payload,
                               size_t length);

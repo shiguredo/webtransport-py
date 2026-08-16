@@ -1,7 +1,7 @@
 # HTTP/2 で不正なストリーム状態への WT_STREAM / WT_RESET_STREAM 受信を検知しない問題を修正する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/fix-h2-stream-state-error
 - Polished: 2026-08-15
 
@@ -43,3 +43,14 @@ draft-ietf-webtrans-http2-15 の MUST 違反を修正する:
 - Reliable Size 不一致の WT_RESET_STREAM 受信で WT_STREAM_STATE_ERROR が送出される (ストリーム不在時は受信済みバイト数 0 として比較)
 - 正常系 (暗黙作成・Reliable Size 一致・自側 reset 後のピアからの受信・ストリーム不在の WT_RESET_STREAM の Reliable Size = 0 での受け入れ) は従来どおり動作する
 - 全テストが通る
+
+## 解決方法
+
+- `handle_wt_stream` に受信側終端状態 (DataRecvd / ResetRecvd) のストリームへの WT_STREAM 受信の検知を追加し (フロー制御チェックより前に置き 0x50 と区別)、FIN 受信で `recv_state` を DataRecvd に遷移させた
+- `handle_wt_reset_stream` を実装した: ストリーム不在時は Reliable Size を受信済みバイト数 0 と比較 (0 ならエントリ作成 + ResetRecvd 遷移、> 0 なら session error)、終端状態への受信は stream error、Reliable Size と `bytes_received` の一致検証 (不一致は session error)、一致時に ResetRecvd へ遷移。エラー検知時は StreamReset イベントを push しない
+- エラー検知は `report_stream_state_error` に集約した: Error イベント (0x51) を push してから close_session (WT_CLOSE_SESSION 送出 + END_STREAM) を呼ぶ。`process_capsules` のループ冒頭で is_terminated を確認して同一 receive() 内の後続カプセルを遮断し、バッファ残留分も破棄する
+- 自側 `reset_stream` はエントリを erase せず `send_state` を ResetSent に更新する (受信側の追跡維持)。`send_stream_data` は ResetSent 状態への送信を塞ぐ
+- 0x51 は WT_STREAM_STATE_ERROR (0xTBD) のプレースホルダとしてコメントで明記した
+- `tests/test_webtransport_h2_stream_state_error.py` を新規作成し、テスト 16 本を追加した (終端状態への両カプセル受信・Reliable Size 不一致・未知ストリームの受入/拒否・後続カプセル遮断・ピア側 SessionClosed・フロー制御超過優先・正常系 5 本)。ガード無効化ビルドで 8 本失敗すること、is_terminated 遮断無効化で遮断テストが失敗することを確認し、修正の検証として機能することを実証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (663 本) が通ることを確認した

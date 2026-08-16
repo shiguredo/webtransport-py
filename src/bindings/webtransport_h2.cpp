@@ -99,7 +99,19 @@ void H2Session::process_capsules(int32_t session_id,
   // Capsule をパース
   while (true) {
     wt_session = get_wt_session(session_id);
-    if (!wt_session || wt_session->capsule_buffer.empty()) {
+    if (!wt_session) {
+      break;
+    }
+    // 受信ハンドラ内で close_session が呼ばれた場合 (WT_STREAM_STATE_ERROR
+    // 等のエラー検知) は is_terminated が立つため、同一 receive() 内の
+    // 後続カプセルを処理しない (終了済みセッションへの処理を防ぐ。
+    // WT_CLOSE_SESSION の二重キュー自体は close_session 冒頭のガードで
+    // 防がれる)。バッファに残った後続カプセルも破棄する
+    if (wt_session->is_terminated) {
+      wt_session->capsule_buffer.clear();
+      break;
+    }
+    if (wt_session->capsule_buffer.empty()) {
       break;
     }
 
@@ -216,8 +228,9 @@ void H2Session::handle_wt_stream(int32_t session_id,
     return;
   }
 
-  // ストリームが存在しない場合は作成
-  if (wt_session->streams.find(stream_id) == wt_session->streams.end()) {
+  // ストリームが存在しない場合は作成 (draft-15 Section 6.4 の暗黙作成)
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it == wt_session->streams.end()) {
     WtStreamInfo info;
     info.stream_id = stream_id;
     info.is_local = false;
@@ -225,7 +238,22 @@ void H2Session::handle_wt_stream(int32_t session_id,
     info.max_stream_data_local =
         peer_send_credit_for_stream(*wt_session, info.is_unidirectional, false);
     info.max_stream_data_remote = config_.wt_initial_max_stream_data;
-    wt_session->streams[stream_id] = info;
+    stream_it = wt_session->streams.emplace(stream_id, std::move(info)).first;
+  }
+
+  auto& stream_info = stream_it->second;
+
+  // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへの WT_STREAM 受信は
+  // stream error (draft-15 Section 6.4 の「A WT_STREAM capsule MUST NOT be
+  // sent after a stream is closed or reset... A stream error (Section 3.4)
+  // of type WT_STREAM_STATE_ERROR MUST be sent」)。状態検知はフロー制御
+  // チェックより前に置く (フロー制御違反の error code 0x50 と区別するため)。
+  // エラー検知の実装は report_stream_state_error に集約する
+  if (stream_info.recv_state == StreamState::DataRecvd ||
+      stream_info.recv_state == StreamState::ResetRecvd) {
+    report_stream_state_error(session_id, stream_id,
+                              "WT_STREAM received for stream in terminal state");
+    return;
   }
 
   // データ部分
@@ -235,7 +263,6 @@ void H2Session::handle_wt_stream(int32_t session_id,
   // draft-15 Section 6.5 / 6.6: 受信超過はセッション閉鎖
   // mem_recv コールバック中に nghttp2_session_send 相当を走らせないよう、
   // 閉鎖処理はイベント化して外側で close_session する。
-  auto& stream_info = wt_session->streams[stream_id];
   if (wt_session->bytes_received + data_len > wt_session->max_data_remote ||
       stream_info.bytes_received + data_len >
           stream_info.max_stream_data_remote) {
@@ -263,6 +290,13 @@ void H2Session::handle_wt_stream(int32_t session_id,
   // フロー制御更新
   stream_info.bytes_received += data_len;
   wt_session->bytes_received += data_len;
+
+  // FIN 受信で受信側を DataRecvd に遷移させる (draft-15 Section 5.2 の
+  // QUIC 状態ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は冒頭の状態
+  // 検証で stream error になる)
+  if (fin) {
+    stream_info.recv_state = StreamState::DataRecvd;
+  }
 }
 
 void H2Session::handle_wt_reset_stream(int32_t session_id,
@@ -286,7 +320,80 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   auto [error_code, error_code_len] = *error_code_result;
   offset += error_code_len;
 
-  // Reliable Size (無視)
+  // Reliable Size
+  auto reliable_size_result = decode_varint(payload + offset, length - offset);
+  if (!reliable_size_result) {
+    return;
+  }
+  auto [reliable_size, reliable_size_len] = *reliable_size_result;
+
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session) {
+    return;
+  }
+
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it == wt_session->streams.end()) {
+    // 真に未知のストリームへの WT_RESET_STREAM。受信済みバイト数は 0 として
+    // Reliable Size と比較する (draft-15 Section 6.2 の MUST)。> 0 は
+    // 届かないはずのデータを約束するため session error でセッションを閉じる。
+    // = 0 は受け入れ、暗黙作成と同様の初期化でエントリを作成して受信側を
+    // ResetRecvd へ遷移させる (以後の WT_STREAM は冒頭の状態検証で stream
+    // error になる)。エラー検知時は StreamReset イベントを push しない
+    if (reliable_size > 0) {
+      report_stream_state_error(
+          session_id, stream_id,
+          "WT_RESET_STREAM non-zero reliable size, unknown stream");
+      return;
+    }
+    WtStreamInfo info;
+    info.stream_id = stream_id;
+    info.is_local = false;
+    info.is_unidirectional = (stream_id & 0x02) != 0;
+    info.max_stream_data_local =
+        peer_send_credit_for_stream(*wt_session, info.is_unidirectional, false);
+    info.max_stream_data_remote = config_.wt_initial_max_stream_data;
+    info.recv_state = StreamState::ResetRecvd;
+    wt_session->streams[stream_id] = std::move(info);
+
+    H2Event event;
+    event.type = H2EventType::StreamReset;
+    event.session_id = session_id;
+    event.stream_id = stream_id;
+    event.error_code = static_cast<uint32_t>(error_code);
+    push_event(std::move(event));
+    return;
+  }
+
+  auto& stream_info = stream_it->second;
+
+  // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへの WT_RESET_STREAM
+  // 受信は stream error (draft-15 Section 6.2 の「A WT_RESET_STREAM capsule
+  // MUST NOT be sent after a stream is closed or reset... A stream error
+  // (Section 3.4) of type WT_STREAM_STATE_ERROR MUST be sent」)
+  if (stream_info.recv_state == StreamState::DataRecvd ||
+      stream_info.recv_state == StreamState::ResetRecvd) {
+    report_stream_state_error(session_id, stream_id,
+                              "WT_RESET_STREAM received for stream in terminal state");
+    return;
+  }
+
+  // Reliable Size と受信済みバイト数の一致を検証する (draft-15 Section 6.2
+  // の「A receiver MUST close the WebTransport session with a
+  // WT_STREAM_STATE_ERROR session error if the Reliable Size in a
+  // WT_RESET_STREAM capsule does not equal the number of bytes received on
+  // that stream: ...」)。
+  // 不一致時は StreamReset イベントを push せず session error でセッション
+  // を閉じる
+  if (reliable_size != stream_info.bytes_received) {
+    report_stream_state_error(session_id, stream_id,
+                              "WT_RESET_STREAM reliable size mismatch");
+    return;
+  }
+
+  // 受信側を ResetRecvd に遷移させる (draft-15 Section 5.2 の QUIC 状態
+  // ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は stream error になる)
+  stream_info.recv_state = StreamState::ResetRecvd;
 
   H2Event event;
   event.type = H2EventType::StreamReset;
@@ -294,6 +401,29 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   event.stream_id = stream_id;
   event.error_code = static_cast<uint32_t>(error_code);
   push_event(std::move(event));
+}
+
+void H2Session::report_stream_state_error(int32_t session_id,
+                                          uint64_t stream_id,
+                                          const std::string& error_message) {
+  // 0x51 は WT_STREAM_STATE_ERROR (draft-15 Section 3.4 の 0xTBD) の
+  // プレースホルダ。draft で値が確定したら更新する
+  constexpr uint32_t kWtStreamStateError = 0x51;
+  // 検知した WT_STREAM_STATE_ERROR をアプリに通知してからセッションを閉じる。
+  // Error イベントの push は
+  // 受信フロー制御違反 (0x50) と同じ方式で、高レベル層では処理されない
+  // 既知の制約がある。close_session は送信をキューするのみで
+  // nghttp2_session_send を呼ばないため mem_recv コールバック中でも安全であり、
+  // 即座に is_terminated を立てて同一 receive() 内の後続カプセルを遮断する
+  // (フロー制御超過のイベント化とは異なり、エラー検知後の即時遮断が必要)
+  H2Event event;
+  event.type = H2EventType::Error;
+  event.session_id = session_id;
+  event.stream_id = stream_id;
+  event.error_code = kWtStreamStateError;
+  event.error_message = error_message;
+  push_event(std::move(event));
+  close_session(session_id, kWtStreamStateError, error_message);
 }
 
 void H2Session::handle_wt_stop_sending(int32_t session_id,
@@ -1163,6 +1293,14 @@ void H2Session::send_stream_data(int32_t session_id,
 
   auto& stream_info = stream_it->second;
 
+  // リセット済みストリームへの送信は塞ぐ (draft-15 Section 6.4 の
+  // 「A WT_STREAM capsule MUST NOT be sent after a stream is closed or
+  // reset」)。塞ぐのは ResetSent のみとし、FIN 送信後の DataSent 遷移・
+  // FIN 後の再送信の塞ぎ・reset_stream の再呼び出しの扱いはスコープ外
+  if (stream_info.send_state == StreamState::ResetSent) {
+    return;
+  }
+
   // draft-15 Section 6.5 / 6.6: フロー制御超過はセッション閉鎖
   if (wt_session->bytes_sent + data.size() > wt_session->max_data_local ||
       stream_info.bytes_sent + data.size() > stream_info.max_stream_data_local) {
@@ -1217,7 +1355,17 @@ void H2Session::reset_stream(int32_t session_id,
 
   send_capsule(session_id, CapsuleType::WtResetStream, payload);
 
-  wt_session->streams.erase(stream_id);
+  // 送信リセットは送信側の終了のみであり、受信側は継続する
+  // (draft-15 Section 5.2 の QUIC 状態ミラー)。エントリを erase せず
+  // send_state を ResetSent に更新して、受信側の追跡 (bytes_received /
+  // recv_state) を維持する (erase すると以後のピアからの WT_STREAM が
+  // 新規作成として扱われ、受信追跡が失われる)。エントリは両ハーフ終端後も
+  // セッション終了まで保持する (get_stream_ids にはリセット済みストリーム
+  // も含まれるようになる)。以後の send_stream_data は send_state の確認で
+  // 塞がれる (draft-15 Section 6.4)
+  if (stream_it != wt_session->streams.end()) {
+    stream_it->second.send_state = StreamState::ResetSent;
+  }
 }
 
 void H2Session::stop_sending(int32_t session_id,
