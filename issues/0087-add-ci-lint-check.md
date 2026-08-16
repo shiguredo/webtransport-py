@@ -1,7 +1,7 @@
 # CI に ruff / ty の実行ステップを追加する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Branch: feature/add-ci-lint-check
 - Polished: 2026-08-15
 
@@ -33,3 +33,12 @@ CI に ruff check / ty check の実行ステップを追加し、lint エラー�
 - テストジョブで `uv run ruff check src/ tests/ examples/` と `uv run ty check src` が実行され、いずれかがエラーを返すとジョブが失敗する (tests/ のみの変更など、wheel.yml が実行されないケースでは lint も実行されない既知の制約)
 - lint エラーを混入した一時コミットで CI が失敗することを確認し、確認後に revert して CI が通ることを確認する (型チェックの検知限界 (公開型の解決) は open issue 0077 のスコープ)
 - ローカルの `uv run pytest tests/ -v --timeout=30` が通る
+
+## 解決方法
+
+- `.github/workflows/test.yml` のテストジョブ (test_ubuntu / test_macos) に Run lint ステップを追加した。専用ワークフローは新設せず、テストと一緒に lint を実行する形とした (専用の仕組みはメンテナンスコストが高くなるため)
+- lint の実行は pyproject.toml の設定に従う: `uv sync --only-group test` を `uv sync --only-group test --group lint` に変更して ruff / ty (dependency-groups の lint グループ) をインストールし、`uv run ruff check src/ tests/ examples/` と `uv run ty check src` を実行する
+- `ty check src` はチェックアウト (拡張モジュール・.pyi 無し) でもエラーなしで通ることを確認した (拡張モジュールの型は Unknown として扱われる)
+- `CHANGES.md` の `### misc` に [UPDATE] エントリを追加した
+- lint エラーを混入した一時ブランチで CI が失敗することを確認し、一時ブランチを削除した (一時コミットの revert は不要な構成で検証)
+- 全テスト (664 本) が通ることを確認した
