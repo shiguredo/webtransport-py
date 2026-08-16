@@ -162,6 +162,33 @@ def test_wt_stream_after_fin_sends_state_error() -> None:
     assert error_events[0].error_code == 0x51
 
 
+def test_empty_wt_stream_fin_after_fin_ignored() -> None:
+    """FIN 受信済み (DataRecvd) のストリームへの空の WT_STREAM_FIN が無視されることを確認
+
+    空の WT_STREAM capsule は「ストリームを閉じる」操作として許容される
+    (draft-15 Section 6.4 の「Empty WT_STREAM capsules MUST NOT be used
+    unless they open or close a stream」)。実ブラウザ (WebKit) は FIN 送信後
+    に空の WT_STREAM_FIN を送ることがあるため、終端状態への受信でもエラーに
+    しない (データ付きの WT_STREAM は終端状態へのデータ送信を意味するため
+    検知する)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピアが WT_STREAM_FIN を送信する (DataRecvd に遷移させる)
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"fin", fin=True))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+
+    # 終端状態への空の WT_STREAM_FIN は無視され、エラーは送出されない
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"", fin=True))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+    _assert_no_state_error_sent(server)
+
+
 def test_wt_reset_stream_after_fin_sends_state_error() -> None:
     """FIN 受信済み (DataRecvd) ストリームへの WT_RESET_STREAM 受信で WT_STREAM_STATE_ERROR が送出されることを確認
 

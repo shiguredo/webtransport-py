@@ -243,22 +243,29 @@ void H2Session::handle_wt_stream(int32_t session_id,
 
   auto& stream_info = stream_it->second;
 
-  // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへの WT_STREAM 受信は
-  // stream error (draft-15 Section 6.4 の「A WT_STREAM capsule MUST NOT be
-  // sent after a stream is closed or reset... A stream error (Section 3.4)
-  // of type WT_STREAM_STATE_ERROR MUST be sent」)。状態検知はフロー制御
-  // チェックより前に置く (フロー制御違反の error code 0x50 と区別するため)。
-  // エラー検知の実装は report_stream_state_error に集約する
-  if (stream_info.recv_state == StreamState::DataRecvd ||
-      stream_info.recv_state == StreamState::ResetRecvd) {
+  // データ部分
+  const uint8_t* stream_data = payload + stream_id_len;
+  size_t data_len = length - stream_id_len;
+
+  // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへのデータ付き
+  // WT_STREAM 受信は stream error (draft-15 Section 6.4 の「A WT_STREAM
+  // capsule MUST NOT be sent after a stream is closed or reset... A stream
+  // error (Section 3.4) of type WT_STREAM_STATE_ERROR MUST be sent」)。
+  // データを含まない WT_STREAM (FIN のみ) は「ストリームを閉じる」操作として
+  // 許容される (Section 6.4 の「Empty WT_STREAM capsules MUST NOT be used
+  // unless they open or close a stream」)。実ブラウザ (WebKit) は FIN 送信後
+  // に空の WT_STREAM_FIN を送ることがあるため、相互運用性の観点から無視する
+  // (データ付きの受信は終端状態へのデータ送信を意味するため検知する)。
+  // 状態検知はフロー制御チェックより前に置く (フロー制御違反の error code
+  // 0x50 と区別するため)。エラー検知の実装は report_stream_state_error に
+  // 集約する
+  if (data_len > 0 &&
+      (stream_info.recv_state == StreamState::DataRecvd ||
+       stream_info.recv_state == StreamState::ResetRecvd)) {
     report_stream_state_error(session_id, stream_id,
                               "WT_STREAM received for stream in terminal state");
     return;
   }
-
-  // データ部分
-  const uint8_t* stream_data = payload + stream_id_len;
-  size_t data_len = length - stream_id_len;
 
   // draft-15 Section 6.5 / 6.6: 受信超過はセッション閉鎖
   // mem_recv コールバック中に nghttp2_session_send 相当を走らせないよう、
