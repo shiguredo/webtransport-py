@@ -147,6 +147,8 @@
   - @voluntas
 - [FIX] HTTP/2 で不正なストリーム状態への WT_STREAM / WT_RESET_STREAM 受信を検知しない問題を修正する (リセット済みストリームは受信追跡のため保持され、get_stream_ids に含まれるようになる)
   - @voluntas
+- [FIX] HTTP/2 で終端状態のストリームへの空の WT_STREAM capsule がセッションエラーになる問題を修正する
+  - @voluntas
 
 ### misc
 
