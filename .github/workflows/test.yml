@@ -55,7 +55,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv sync --only-group test --group lint
+          uv sync --only-group test --only-group lint
           uv pip install wheelhouse/*.whl
 
       - name: Run lint
@@ -115,7 +115,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv sync --only-group test --group lint
+          uv sync --only-group test --only-group lint
           uv pip install wheelhouse/*.whl
 
       - name: Run lint
