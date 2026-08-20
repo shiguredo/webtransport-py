@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の受信フロー制御違反でセッションが閉じない問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-h2-recv-flow-control-session-close
 - Polished: 2026-08-18
 
@@ -31,3 +31,13 @@ draft-ietf-webtrans-http2-15 Section 6.5 / 6.6 の MUST「受信データが広�
 - 高レベル層で受信超過の 0x50 のエラーがアプリへ通知される (新規コールバック `on_error`。0097 のカプセル値減少経路の 0x50 は通知対象外)
 - ピアが制限超過データを送り続けられない
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `H2Session::handle_wt_stream` の受信超過検知で Error イベント (0x50) の push を継続したうえで、`report_recv_flow_control_error` 経由で `close_session` する。カプセル値減少の検知は従来どおり Error を push せず `report_flow_control_error` のみ
+- 0x50 は `kWtFlowControlError` にまとめ、draft-15 Section 3.4 の 0xTBD プレースホルダである旨を注記した
+- 高レベル `Client` / `Server` に `on_error` を追加し、Error イベントのうち error_code 0x50 だけを渡す。HTTP/2 接続は閉じない。あわせて任意の `Config` を渡せるようにした (C++ が値コピーするため呼び出し元は書き換えない)
+- `tests/test_webtransport_h2_recv_flow_control.py` で WT_MAX_DATA / WT_MAX_STREAM_DATA 超過・累積超過・上限ちょうど・後続カプセル遮断を検証した
+- `tests/test_e2e_webtransport_h2.py` で高レベルの 0x50 通知と 0x51 非通知を Client / Server 双方で検証した
+- `CHANGES.md` の `## develop` セクションに [ADD] (Config) と [FIX] エントリを追加した
+- 全テスト (698 本) が通ることを確認した
