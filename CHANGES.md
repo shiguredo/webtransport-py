@@ -161,6 +161,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の WT_CLOSE_SESSION 受信で 1024 バイト超・不正 UTF-8 のメッセージを検知せずセッションエラーにしない問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の WT_RESET_STREAM / WT_STOP_SENDING 受信で 0xffffffff 超の error_code を検知せずセッションエラーにしない問題を修正する
+  - @voluntas
 
 ### misc
 

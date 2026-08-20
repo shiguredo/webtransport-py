@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の WT_RESET_STREAM / WT_STOP_SENDING 受信時の error_code 範囲検証を実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-h2-error-code-range
 - Polished: 2026-08-18
 
@@ -30,3 +30,11 @@ draft-ietf-webtrans-http2-15 Section 6.2 / 6.3 の MUST「Application Protocol E
 - 0xffffffff 超の error_code を含む WT_RESET_STREAM / WT_STOP_SENDING 受信で WT_ERROR セッションエラーが発生する (ワイヤ上に WT_CLOSE_SESSION (プレースホルダ値) が送出される)
 - 0xffffffff ちょうどの error_code はエラーにならない
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `H2Session::handle_wt_reset_stream` / `handle_wt_stop_sending` で error_code を varint デコードした直後に範囲を検証する。0xffffffff 超なら既存の `report_wt_error` 経由で Error イベント (0x52) を push し、`close_session` する
+- 範囲検証は終端状態・Reliable Size 不一致・未知ストリームの non-zero Reliable Size・二重受信 (0x51) より先に行う。0xffffffff ちょうどは従来どおり StreamReset / StopSending に渡す
+- `tests/test_webtransport_h2_error_code_range.py` で超過・上限ちょうど・他 MUST との同時成立を検証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (710 本) が通ることを確認した
