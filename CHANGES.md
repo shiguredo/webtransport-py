@@ -159,6 +159,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の受信フロー制御違反でセッションを閉じずアプリへ通知しない問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の WT_CLOSE_SESSION 受信で 1024 バイト超・不正 UTF-8 のメッセージを検知せずセッションエラーにしない問題を修正する
+  - @voluntas
 
 ### misc
 

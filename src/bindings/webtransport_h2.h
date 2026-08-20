@@ -628,6 +628,9 @@ class H2Session {
                                       uint64_t stream_id,
                                       const std::string& error_message);
 
+  // 検知した WT_ERROR をアプリへ通知してからセッションを閉じる
+  void report_wt_error(int32_t session_id, const std::string& error_message);
+
   bool is_server_;
   H2SessionConfig config_;
   nghttp2_session* session_ = nullptr;

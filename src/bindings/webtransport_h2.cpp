@@ -32,6 +32,60 @@ constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
 // プレースホルダ。draft で値が確定したら更新する
 constexpr uint32_t kWtFlowControlError = 0x50;
 
+// 0x52 は WT_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
+// draft で値が確定したら更新する
+constexpr uint32_t kWtError = 0x52;
+
+// draft-15 Section 6.12 の Application Error Message 上限 (バイト)
+constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
+
+// draft-15 Section 6.12 の "valid UTF-8" を RFC 3629 の well-formed UTF-8
+// として検査する。
+// overlong 符号化、サロゲート (U+D800..U+DFFF)、 U+10FFFF 超、
+// 不完全シーケンス、非先頭バイトを拒否する
+bool is_valid_utf8(const uint8_t* data, size_t length) {
+  size_t offset = 0;
+  while (offset < length) {
+    if (data[offset] <= 0x7F) {
+      offset += 1;
+      continue;
+    }
+    size_t extra = 0;
+    uint32_t min_codepoint = 0;
+    uint32_t codepoint = 0;
+    if ((data[offset] & 0xE0) == 0xC0) {
+      extra = 1;
+      min_codepoint = 0x80;
+      codepoint = data[offset] & 0x1F;
+    } else if ((data[offset] & 0xF0) == 0xE0) {
+      extra = 2;
+      min_codepoint = 0x800;
+      codepoint = data[offset] & 0x0F;
+    } else if ((data[offset] & 0xF8) == 0xF0) {
+      extra = 3;
+      min_codepoint = 0x10000;
+      codepoint = data[offset] & 0x07;
+    } else {
+      return false;
+    }
+    if (offset + 1 + extra > length) {
+      return false;
+    }
+    for (size_t index = 1; index <= extra; ++index) {
+      if ((data[offset + index] & 0xC0) != 0x80) {
+        return false;
+      }
+      codepoint = (codepoint << 6) | (data[offset + index] & 0x3F);
+    }
+    if (codepoint < min_codepoint || codepoint > 0x10FFFF ||
+        (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+      return false;
+    }
+    offset += 1 + extra;
+  }
+  return true;
+}
+
 }  // namespace
 
 // ========== Varint エンコード/デコード (QUIC 形式) ==========
@@ -641,7 +695,8 @@ void H2Session::handle_wt_close_session(int32_t session_id,
                                         const uint8_t* payload,
                                         size_t length) {
   uint32_t error_code = 0;
-  std::string error_message;
+  const uint8_t* message_bytes = nullptr;
+  size_t message_len = 0;
 
   if (length >= 4) {
     error_code = (static_cast<uint32_t>(payload[0]) << 24) |
@@ -649,9 +704,28 @@ void H2Session::handle_wt_close_session(int32_t session_id,
                  (static_cast<uint32_t>(payload[2]) << 8) |
                  static_cast<uint32_t>(payload[3]);
     if (length > 4) {
-      error_message.assign(reinterpret_cast<const char*>(payload + 4),
-                           length - 4);
+      message_bytes = payload + 4;
+      message_len = length - 4;
     }
+  }
+
+  // draft-15 Section 6.12: Application Error Message は 1024 バイト以下の
+  // 正しい UTF-8 である。超過または不正な UTF-8 は WT_ERROR セッションエラー。
+  // 受信した不正メッセージは close_session へ渡さない (再送出と、送信側の
+  // 1024 切り詰めが文字境界を無視して新たな不正 UTF-8 を作るのを防ぐ)
+  if (message_len > kMaxApplicationErrorMessageBytes) {
+    report_wt_error(session_id, "WT_CLOSE_SESSION message exceeds 1024 bytes");
+    return;
+  }
+  if (message_len > 0 && !is_valid_utf8(message_bytes, message_len)) {
+    report_wt_error(session_id, "WT_CLOSE_SESSION message is not valid UTF-8");
+    return;
+  }
+
+  std::string error_message;
+  if (message_len > 0) {
+    error_message.assign(reinterpret_cast<const char*>(message_bytes),
+                         message_len);
   }
 
   H2Event event;
@@ -1000,6 +1074,21 @@ void H2Session::report_recv_flow_control_error(
   event.error_message = error_message;
   push_event(std::move(event));
   report_flow_control_error(session_id, error_message);
+}
+
+void H2Session::report_wt_error(int32_t session_id,
+                                const std::string& error_message) {
+  // 検知した WT_ERROR をアプリへ通知してからセッションを閉じる。
+  // close_session は送信をキューするのみで nghttp2_session_send を呼ばない
+  // ため mem_recv コールバック中でも安全であり、即座に is_terminated を
+  // 立てて同一 receive() 内の後続カプセルを遮断する
+  H2Event event;
+  event.type = H2EventType::Error;
+  event.session_id = session_id;
+  event.error_code = kWtError;
+  event.error_message = error_message;
+  push_event(std::move(event));
+  close_session(session_id, kWtError, error_message);
 }
 
 // ========== H2Session 実装 ==========
@@ -1634,7 +1723,8 @@ void H2Session::close_session(int32_t session_id,
   payload.push_back(static_cast<uint8_t>(error_code & 0xFF));
 
   if (!error_message.empty()) {
-    size_t message_len = std::min(error_message.size(), static_cast<size_t>(1024));
+    size_t message_len =
+        std::min(error_message.size(), kMaxApplicationErrorMessageBytes);
     payload.insert(payload.end(), error_message.begin(),
                    error_message.begin() +
                        static_cast<std::ptrdiff_t>(message_len));
