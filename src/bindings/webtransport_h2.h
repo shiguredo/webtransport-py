@@ -223,6 +223,8 @@ struct WtSessionInfo {
   // WT_MAX_STREAMS)。未受信は nullopt (draft-15 Section 6.7)
   std::optional<uint64_t> received_max_streams_bidi;
   std::optional<uint64_t> received_max_streams_uni;
+  // 自側が SETTINGS / WT_MAX_STREAMS で広告した受信上限
+  // (draft-15 Section 6.7。対向が開いてよい累積本数)
   uint64_t max_streams_bidi_remote = 0;
   uint64_t max_streams_uni_remote = 0;
   uint64_t streams_bidi_opened = 0;

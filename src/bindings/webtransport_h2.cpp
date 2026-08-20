@@ -43,6 +43,17 @@ constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 // [WEBTRANSPORT-H3] Section 4.4 の unsigned 32-bit 範囲
 constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
 
+// draft-15 Section 6.7: 同一タイプ・方向のより低い ID も暗黙オープン。
+// 閉じたストリームを含む累積数は (stream_id >> 2) + 1
+bool incoming_stream_exceeds_limit(const WtSessionInfo& wt_session,
+                                   uint64_t stream_id) {
+  const bool is_unidirectional = (stream_id & 0x02) != 0;
+  const uint64_t max_streams = is_unidirectional
+                                   ? wt_session.max_streams_uni_remote
+                                   : wt_session.max_streams_bidi_remote;
+  return (stream_id >> 2) + 1 > max_streams;
+}
+
 // draft-15 Section 6.12 の "valid UTF-8" を RFC 3629 の well-formed UTF-8
 // として検査する。
 // overlong 符号化、サロゲート (U+D800..U+DFFF)、 U+10FFFF 超、
@@ -310,6 +321,13 @@ void H2Session::handle_wt_stream(int32_t session_id,
   // ストリームが存在しない場合は作成 (draft-15 Section 6.4 の暗黙作成)
   auto stream_it = wt_session->streams.find(stream_id);
   if (stream_it == wt_session->streams.end()) {
+    // draft-15 Section 6.7: 広告した Maximum Streams を超える受信は
+    // WT_FLOW_CONTROL_ERROR。同一タイプ・方向の低い ID も累積カウントする
+    if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
+      report_recv_flow_control_error(
+          session_id, stream_id, "peer exceeded Maximum Streams limit");
+      return;
+    }
     WtStreamInfo info;
     info.stream_id = stream_id;
     info.is_local = false;
@@ -434,6 +452,14 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
       report_stream_state_error(
           session_id, stream_id,
           "WT_RESET_STREAM non-zero reliable size, unknown stream");
+      return;
+    }
+    // draft-15 Section 6.7: 未知ストリームの暗黙作成も Maximum Streams
+    // 制限の対象。 error_code 範囲 (WT_ERROR) と Reliable Size の
+    // WT_STREAM_STATE_ERROR のあと、エントリ作成前に検証する
+    if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
+      report_recv_flow_control_error(
+          session_id, stream_id, "peer exceeded Maximum Streams limit");
       return;
     }
     WtStreamInfo info;
