@@ -1,7 +1,7 @@
 # HTTP/2 クライアントのリクエストボディがワイヤに送出されない問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-http2-request-body-not-sent
 - Polished: 2026-08-18
 
@@ -36,3 +36,16 @@ HTTP/2 クライアント (`http2.Connection`) で `submit_request` の後に `s
 - `Client.request` でボディ付きリクエスト (POST) が送出される
 - 既存テスト (ボディなしリクエストの状態遷移を含む) が更新され通る
 - 変更内容を CHANGES.md の `## develop` に記載する ([CHANGE] でリクエスト API の契約変更を明記)
+
+## 解決方法
+
+- `Http2Connection::submit_request` で `nghttp2_submit_request` に `data_source_read_callback` を data provider として常時渡すようにした。未設定だと nghttp2 が HEADERS に END_STREAM を付け、後続の `send_data` が DATA を送出できなかった
+- リクエストの終端は `send_data(..., eof=True)` で行う。`data_source_read_callback` 自体は変更していない (サーバー側 `submit_response` と共有しているため)
+- 高レベル層 `Client.request` に `body: bytes | None = None` を追加し、`submit_request` の直後に `send_data(..., eof=True)` へ委譲してリクエストを完結させる。 `body is None` のときは空ボディで終端する。既存の `request()` 後に同じストリームへ `send_data` する分離フローは届かなくなる
+- `Client._send_pending` は `send()` が空になるまで drain するようにした (フロー制御で保留なら `send()` が None で止まる)
+- `tests/test_http2.py` に `test_http2_request_body_reaches_server` を追加し、低レベル層で POST ボディと STREAM_END がサーバーに届くことを確認した
+- `tests/test_e2e_http2.py` に `test_server_client_post_with_body` を追加し、高レベル `Client.request(..., body=...)` でエコーが届くことを確認した
+- `tests/test_http2_session_state.py` の `test_http2_stream_close` を明示 eof 終端に更新した
+- `tests/prop_http2_roundtrip.py` のリクエストボディ系プロパティテストを到達検証に強化した
+- `CHANGES.md` の `## develop` に [CHANGE] エントリを追加した
+- 全テスト (666 本) が通ることを確認した
