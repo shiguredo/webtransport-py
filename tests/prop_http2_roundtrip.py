@@ -161,8 +161,8 @@ def prop_http2_custom_headers_roundtrip(custom_headers: list[tuple[str, str]]):
 
 @given(st.binary(min_size=1, max_size=16384))
 @settings(max_examples=50)
-def prop_http2_send_data_no_crash(body: bytes):
-    """任意のボディデータを send_data に渡してもクラッシュしない"""
+def prop_http2_request_body_roundtrip(body: bytes):
+    """任意のボディデータが DATA フレームとしてサーバーに届く"""
     client, server = create_client_server_pair()
     exchange_settings(client, server)
 
@@ -176,10 +176,10 @@ def prop_http2_send_data_no_crash(body: bytes):
     stream_id = client.submit_request(headers)
     assert stream_id > 0
 
-    # send_data を呼び出してもクラッシュしない
-    # 注: 現在の実装ではデータプロバイダーが未設定のため、
-    #     実際の DATA フレームは送信されない
-    client.send_data(stream_id, body, True)
+    client.send_data(stream_id, body, eof=True)
+    events = exchange_data_after_request(client, server)
+    received = b"".join(event.data for event in events if event.type == http2.EventType.DATA)
+    assert received == body
 
 
 @given(st.integers(min_value=1, max_value=10))
@@ -216,8 +216,8 @@ def prop_http2_multiple_streams(num_streams: int):
     )
 )
 @settings(max_examples=30)
-def prop_http2_chunked_send_data_no_crash(chunks: list[bytes]):
-    """分割されたデータを send_data に渡してもクラッシュしない"""
+def prop_http2_chunked_request_body_roundtrip(chunks: list[bytes]):
+    """分割したボディデータが結合されてサーバーに届く"""
     client, server = create_client_server_pair()
     exchange_settings(client, server)
 
@@ -231,10 +231,13 @@ def prop_http2_chunked_send_data_no_crash(chunks: list[bytes]):
     stream_id = client.submit_request(headers)
     assert stream_id > 0
 
-    # 複数回 send_data を呼び出してもクラッシュしない
     for i, chunk in enumerate(chunks):
         is_last = i == len(chunks) - 1
-        client.send_data(stream_id, chunk, is_last)
+        client.send_data(stream_id, chunk, eof=is_last)
+
+    events = exchange_data_after_request(client, server)
+    received = b"".join(event.data for event in events if event.type == http2.EventType.DATA)
+    assert received == b"".join(chunks)
 
 
 @given(st.integers(min_value=0, max_value=2**32 - 1))

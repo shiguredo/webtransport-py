@@ -209,8 +209,15 @@ int32_t Http2Connection::submit_request(
     nva.push_back(nv);
   }
 
+  // データプロバイダを常に渡す。未設定だと nghttp2 が HEADERS に
+  // END_STREAM を付け、後続の send_data が DATA を送出できなくなる。
+  // リクエストの終端は send_data(..., eof=True) で行う
+  nghttp2_data_provider data_prd;
+  data_prd.source.ptr = this;
+  data_prd.read_callback = data_source_read_callback;
+
   int32_t stream_id = nghttp2_submit_request(session_, nullptr, nva.data(),
-                                             nva.size(), nullptr, nullptr);
+                                             nva.size(), &data_prd, nullptr);
 
   if (stream_id < 0) {
     return -1;
@@ -1061,7 +1068,7 @@ void bind_http2(nb::module_& m) {
            nb::arg("headers"),
            nb::sig("def submit_request(self, headers: list[tuple[str, str]]) "
                    "-> int"),
-           "リクエストを送信")
+           "リクエストを送信 (終端は send_data の eof=True で行う)")
       .def("submit_response", &Http2Connection::submit_response,
            nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_response(self, stream_id: int, headers: "

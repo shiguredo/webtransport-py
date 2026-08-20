@@ -279,8 +279,8 @@ def test_http2_stream_close() -> None:
     assert client.stream_local_close(3) is None
     assert client.stream_remote_close(3) is None
 
-    # リクエストを送信する (データプロバイダーが無いためリクエスト
-    # HEADERS に END_STREAM が付く)
+    # リクエストを送信する。データプロバイダを渡すため HEADERS には
+    # END_STREAM が付かず、 send_data(..., eof=True) で終端する
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
 
@@ -288,7 +288,8 @@ def test_http2_stream_close() -> None:
     # (nghttp2 は HEADERS の送出時にストリームを開く)
     assert client.stream_local_close(stream_id) is None
 
-    # HEADERS が送出されるとローカル側が half-closed になる
+    # eof=True の DATA を送出するとローカル側が half-closed になる
+    client.send_data(stream_id, b"", eof=True)
     _pump(client, server)
     assert client.stream_local_close(stream_id) is True
 
@@ -300,8 +301,8 @@ def test_http2_stream_close() -> None:
     # (完了条件の send_data 経由の検証)。サーバーは既にリクエストの
     # END_STREAM を受信しているため、 DATA 送出と同時に両方向が閉じて
     # ストリームが nghttp2 の管理から外れ、 stream_local_close は True では
-    # なく None になる (half-closed の True はクライアント側の HEADERS
-    # END_STREAM 送出で検証済み)
+    # なく None になる (half-closed の True はクライアント側の eof=True
+    # DATA 送出で検証済み)
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"response", True)
     _pump(server, client)

@@ -109,12 +109,18 @@ class Client:
         self._on_stream_end = callback
 
     async def _send_pending(self) -> None:
-        """送信待ちデータを送信する"""
+        """送信待ちデータを送信する
+
+        send() は 1 フレームずつ返す。フロー制御で保留中のデータは
+        send() が空を返すので、送出可能なフレームが尽きた時点で止まる。
+        """
         if self._connection is None or self._writer is None:
             return
 
-        data = self._connection.send()
-        if data:
+        while True:
+            data = self._connection.send()
+            if not data:
+                return
             self._writer.write(data)
             await self._writer.drain()
 
@@ -167,13 +173,19 @@ class Client:
         method: str,
         path: str,
         headers: list[tuple[str, str]] | None = None,
+        body: bytes | None = None,
     ) -> int:
         """HTTP リクエストを送信する
+
+        ヘッダー送信からリクエスト終端までを一連で行う。ボディの有無に
+        かかわらず send_data(..., eof=True) でストリームを終端するため、
+        呼び出し後に同じストリームへ send_data しても送出されない。
 
         Args:
             method: HTTP メソッド
             path: リクエストパス
             headers: 追加のヘッダー
+            body: リクエストボディ。 None のときは空ボディで終端する
 
         Returns:
             ストリーム ID
@@ -191,11 +203,19 @@ class Client:
             request_headers.extend(headers)
 
         stream_id = self._connection.submit_request(request_headers)
-        await self._send_pending()
+        if stream_id < 0:
+            return stream_id
+
+        payload = b"" if body is None else body
+        await self.send_data(stream_id, payload, eof=True)
         return stream_id
 
     async def send_data(self, stream_id: int, data: bytes, eof: bool = False) -> None:
         """ストリームにデータを送信する
+
+        Client.request は呼び出し時にストリームを終端するため、 request が
+        返した stream_id への追加送信は送出されない。チャンク送信が必要な
+        場合は低レベル Connection.submit_request / send_data を使う。
 
         Args:
             stream_id: ストリーム ID

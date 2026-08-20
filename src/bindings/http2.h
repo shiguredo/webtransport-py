@@ -148,6 +148,9 @@ class Http2Connection {
 
   /**
    * リクエストを送信 (クライアント用)
+   *
+   * データプロバイダを常に登録するため、 HEADERS に END_STREAM は付かない。
+   * リクエストの終端は send_data(stream_id, data, eof=True) で行う
    * @param headers リクエストヘッダー
    * @return ストリーム ID (失敗時は -1)
    */
