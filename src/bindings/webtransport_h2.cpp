@@ -28,6 +28,10 @@ void record_received_limit(std::optional<uint64_t>& received, uint64_t value) {
 // draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
 constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
 
+// 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+// プレースホルダ。draft で値が確定したら更新する
+constexpr uint32_t kWtFlowControlError = 0x50;
+
 }  // namespace
 
 // ========== Varint エンコード/デコード (QUIC 形式) ==========
@@ -283,18 +287,14 @@ void H2Session::handle_wt_stream(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.5 / 6.6: 受信超過はセッション閉鎖
-  // mem_recv コールバック中に nghttp2_session_send 相当を走らせないよう、
-  // 閉鎖処理はイベント化して外側で close_session する。
+  // draft-15 Section 6.5 / 6.6: 受信超過は WT_FLOW_CONTROL_ERROR で
+  // セッションを閉じる。Error イベントの push と close_session は
+  // report_recv_flow_control_error に集約する
   if (wt_session->bytes_received + data_len > wt_session->max_data_remote ||
       stream_info.bytes_received + data_len >
           stream_info.max_stream_data_remote) {
-    H2Event event;
-    event.type = H2EventType::Error;
-    event.session_id = session_id;
-    event.error_code = 0x50;
-    event.error_message = "peer exceeded flow control limit";
-    push_event(std::move(event));
+    report_recv_flow_control_error(session_id, stream_id,
+                                   "peer exceeded flow control limit");
     return;
   }
 
@@ -432,12 +432,9 @@ void H2Session::report_stream_state_error(int32_t session_id,
   // プレースホルダ。draft で値が確定したら更新する
   constexpr uint32_t kWtStreamStateError = 0x51;
   // 検知した WT_STREAM_STATE_ERROR をアプリに通知してからセッションを閉じる。
-  // Error イベントの push は
-  // 受信フロー制御違反 (0x50) と同じ方式で、高レベル層では処理されない
-  // 既知の制約がある。close_session は送信をキューするのみで
-  // nghttp2_session_send を呼ばないため mem_recv コールバック中でも安全であり、
-  // 即座に is_terminated を立てて同一 receive() 内の後続カプセルを遮断する
-  // (フロー制御超過のイベント化とは異なり、エラー検知後の即時遮断が必要)
+  // close_session は送信をキューするのみで nghttp2_session_send を呼ばないため
+  // mem_recv コールバック中でも安全であり、即座に is_terminated を立てて同一
+  // receive() 内の後続カプセルを遮断する
   H2Event event;
   event.type = H2EventType::Error;
   event.session_id = session_id;
@@ -985,10 +982,24 @@ void H2Session::initialize_stream_send_credit(const WtSessionInfo& wt_session,
 
 void H2Session::report_flow_control_error(int32_t session_id,
                                           const std::string& error_message) {
-  // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
-  // プレースホルダ。draft で値が確定したら更新する
-  constexpr uint32_t kWtFlowControlError = 0x50;
   close_session(session_id, kWtFlowControlError, error_message);
+}
+
+void H2Session::report_recv_flow_control_error(
+    int32_t session_id,
+    uint64_t stream_id,
+    const std::string& error_message) {
+  // 受信超過は高レベル層への通知のため Error イベントを push してから
+  // セッションを閉じる (カプセル値減少の検知は Error を push せず
+  // close_session のみ)
+  H2Event event;
+  event.type = H2EventType::Error;
+  event.session_id = session_id;
+  event.stream_id = stream_id;
+  event.error_code = kWtFlowControlError;
+  event.error_message = error_message;
+  push_event(std::move(event));
+  report_flow_control_error(session_id, error_message);
 }
 
 // ========== H2Session 実装 ==========

@@ -5,6 +5,20 @@ import asyncio
 import pytest
 
 
+def _encode_h2_wt_stream_data_frame(http2_stream_id: int, wt_stream_id: int, data: bytes) -> bytes:
+    """CONNECT ストリームへ載せる WT_STREAM (FIN なし) の DATA フレームを組み立てる"""
+    from conftest import _encode_varint
+
+    payload = _encode_varint(wt_stream_id) + data
+    capsule = _encode_varint(0x190B4D3C) + _encode_varint(len(payload)) + payload
+    return (
+        len(capsule).to_bytes(3, "big")
+        + bytes([0x00, 0x00])
+        + (http2_stream_id & 0x7FFFFFFF).to_bytes(4, "big")
+        + capsule
+    )
+
+
 def test_import_server_client():
     """Server と Client がインポートできることを確認"""
     from webtransport.h2 import Client, Server
@@ -121,13 +135,18 @@ def test_server_callbacks():
     async def on_stream_data(stream_id, data, session_writer):
         pass
 
+    async def on_error(error_code, error_message, session_writer):
+        pass
+
     server.on_session_ready(on_session_ready)
     server.on_session_closed(on_session_closed)
     server.on_stream_data(on_stream_data)
+    server.on_error(on_error)
 
     assert server._on_session_ready is not None
     assert server._on_session_closed is not None
     assert server._on_stream_data is not None
+    assert server._on_error is not None
 
 
 def test_client_callbacks():
@@ -145,13 +164,18 @@ def test_client_callbacks():
     async def on_stream_data(stream_id, data):
         pass
 
+    async def on_error(error_code, error_message):
+        pass
+
     client.on_session_ready(on_session_ready)
     client.on_session_closed(on_session_closed)
     client.on_stream_data(on_stream_data)
+    client.on_error(on_error)
 
     assert client._on_session_ready is not None
     assert client._on_session_closed is not None
     assert client._on_stream_data is not None
+    assert client._on_error is not None
 
 
 def test_client_properties():
@@ -188,6 +212,7 @@ def test_event_type_values():
     assert hasattr(EventType, "STREAM_RESET")
     assert hasattr(EventType, "DATAGRAM")
     assert hasattr(EventType, "SESSION_DRAINING")
+    assert hasattr(EventType, "ERROR")
 
 
 def test_client_datagram_and_reset_callbacks():
@@ -637,5 +662,299 @@ async def test_is_webtransport_ready_after_settings(test_certificates):
     assert client._session is not None
     assert client._session.is_webtransport_ready() is True
 
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_recv_flow_control_violation_notifies_on_error(test_certificates):
+    """受信フロー制御違反がサーバーの on_error に届くことを確認
+
+    公開 API の send_stream_data は送信側クレジットで塞がれるため、クライアント
+    の TLS ソケットへ WT_STREAM カプセルを直接書き込んで超過を再現する。
+    サーバーのストリーム受信上限を 4 バイトにし、5 バイトを注入する。
+    0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+    プレースホルダ。draft で値が確定したら更新する。
+    """
+    from webtransport.h2 import Client, Config, Server
+
+    error_codes: list[int] = []
+    error_messages: list[str] = []
+    stream_payloads: list[bytes] = []
+    session_ready = asyncio.Event()
+    error_received = asyncio.Event()
+
+    config = Config()
+    config.is_server = False
+    config.wt_initial_max_stream_data = 4
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        config=config,
+    )
+
+    async def on_session_ready(session_writer) -> None:
+        session_ready.set()
+
+    async def on_stream_data(stream_id: int, data: bytes, session_writer) -> None:
+        if data:
+            stream_payloads.append(data)
+
+    async def on_error(error_code: int, error_message: str, session_writer) -> None:
+        error_codes.append(error_code)
+        error_messages.append(error_message)
+        error_received.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_stream_data(on_stream_data)
+    server.on_error(on_error)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    assert await client.connect() is True
+    await asyncio.wait_for(session_ready.wait(), timeout=5.0)
+
+    assert client._writer is not None
+    client._writer.write(_encode_h2_wt_stream_data_frame(client.session_id, 0, b"12345"))
+    await client._writer.drain()
+
+    await asyncio.wait_for(error_received.wait(), timeout=5.0)
+    assert error_codes == [0x50]
+    assert error_messages == ["peer exceeded flow control limit"]
+    assert stream_payloads == []
+    assert config.is_server is False
+    assert config.wt_initial_max_stream_data == 4
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_recv_flow_control_violation_notifies_on_error(test_certificates):
+    """受信フロー制御違反がクライアントの on_error に届くことを確認
+
+    公開 API の send_stream_data は送信側クレジットで塞がれるため、サーバー
+    の TLS ソケットへ WT_STREAM カプセルを直接書き込んで超過を再現する。
+    クライアントのストリーム受信上限を 4 バイトにし、5 バイトを注入する。
+    0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+    プレースホルダ。draft で値が確定したら更新する。
+    """
+    from webtransport.h2 import Client, Config, Server, SessionWriter
+
+    error_codes: list[int] = []
+    error_messages: list[str] = []
+    stream_payloads: list[bytes] = []
+    session_writers: list[SessionWriter] = []
+    session_ready = asyncio.Event()
+    error_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_writer: SessionWriter) -> None:
+        session_writers.append(session_writer)
+        session_ready.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    client_config = Config()
+    client_config.wt_initial_max_stream_data = 4
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        config=client_config,
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes) -> None:
+        if data:
+            stream_payloads.append(data)
+
+    async def on_error(error_code: int, error_message: str) -> None:
+        error_codes.append(error_code)
+        error_messages.append(error_message)
+        error_received.set()
+
+    client.on_stream_data(on_stream_data)
+    client.on_error(on_error)
+    assert await client.connect() is True
+    await asyncio.wait_for(session_ready.wait(), timeout=5.0)
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    session_writers[0]._writer.write(
+        _encode_h2_wt_stream_data_frame(session_writers[0].session_id, 0, b"12345")
+    )
+    await session_writers[0]._writer.drain()
+
+    await asyncio.wait_for(error_received.wait(), timeout=5.0)
+    assert error_codes == [0x50]
+    assert error_messages == ["peer exceeded flow control limit"]
+    assert stream_payloads == []
+    assert client_config.is_server is False
+    assert client_config.wt_initial_max_stream_data == 4
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_stream_state_error_does_not_notify_on_error(test_certificates):
+    """WT_STREAM_STATE_ERROR (0x51) はサーバーの on_error に届かないことを確認
+
+    FIN 後の終端ストリームへデータ付き WT_STREAM を注入すると C++ は
+    Error 0x51 を push してセッションを閉じる。高レベルは 0x50 のみを
+    on_error に渡すため、コールバックは発火しない。クライアントが
+    WT_CLOSE_SESSION を受けてセッション終了することをもって 0x51 経路を
+    確認する。
+    """
+    from webtransport.h2 import Client, Server
+
+    error_codes: list[int] = []
+    stream_ready = asyncio.Event()
+    session_closed = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes, session_writer) -> None:
+        if data:
+            stream_ready.set()
+
+    async def on_error(error_code: int, error_message: str, session_writer) -> None:
+        error_codes.append(error_code)
+
+    server.on_stream_data(on_stream_data)
+    server.on_error(on_error)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_session_closed(session_id: int) -> None:
+        session_closed.set()
+
+    client.on_session_closed(on_session_closed)
+    assert await client.connect() is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    stream_id = await client.open_stream()
+    await client.send_stream_data(stream_id, b"fin", fin=True)
+    await asyncio.wait_for(stream_ready.wait(), timeout=5.0)
+
+    assert client._writer is not None
+    client._writer.write(_encode_h2_wt_stream_data_frame(client.session_id, stream_id, b"x"))
+    await client._writer.drain()
+
+    await asyncio.wait_for(session_closed.wait(), timeout=5.0)
+    assert error_codes == []
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_stream_state_error_does_not_notify_on_error(test_certificates):
+    """WT_STREAM_STATE_ERROR (0x51) はクライアントの on_error に届かないことを確認
+
+    サーバーが FIN 後の終端ストリームへデータ付き WT_STREAM を注入する。
+    クライアントは 0x51 でセッションを閉じるが on_error は発火しない。
+    サーバーが WT_CLOSE_SESSION を受けてセッション終了することをもって
+    0x51 経路を確認する。
+    """
+    from webtransport.h2 import Client, Server, SessionWriter
+
+    error_codes: list[int] = []
+    session_writers: list[SessionWriter] = []
+    session_ready = asyncio.Event()
+    stream_ready = asyncio.Event()
+    session_closed = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_writer: SessionWriter) -> None:
+        session_writers.append(session_writer)
+        session_ready.set()
+
+    async def on_session_closed(session_writer: SessionWriter) -> None:
+        session_closed.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_session_closed(on_session_closed)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes) -> None:
+        if data:
+            stream_ready.set()
+
+    async def on_error(error_code: int, error_message: str) -> None:
+        error_codes.append(error_code)
+
+    client.on_stream_data(on_stream_data)
+    client.on_error(on_error)
+    assert await client.connect() is True
+    await asyncio.wait_for(session_ready.wait(), timeout=5.0)
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    stream_id = await session_writers[0].open_stream()
+    await session_writers[0].send_stream_data(stream_id, b"fin", fin=True)
+    await asyncio.wait_for(stream_ready.wait(), timeout=5.0)
+
+    session_writers[0]._writer.write(
+        _encode_h2_wt_stream_data_frame(session_writers[0].session_id, stream_id, b"x")
+    )
+    await session_writers[0]._writer.drain()
+
+    await asyncio.wait_for(session_closed.wait(), timeout=5.0)
+    assert error_codes == []
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
     await client.close()
     await server.stop()

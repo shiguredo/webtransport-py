@@ -42,6 +42,7 @@ class Client:
         url: str,
         verify_peer: bool = True,
         origin: str = "",
+        config: h2_low.Config | None = None,
     ) -> None:
         """クライアントを初期化する
 
@@ -49,11 +50,14 @@ class Client:
             url: WebTransport エンドポイント URL
             verify_peer: サーバー証明書を検証するかどうか
             origin: Origin ヘッダー値 (空なら付与しない)
+            config: HTTP/2 / WebTransport セッション設定。省略時は既定値。
+                呼び出し元のオブジェクトは書き換えない
         """
         self._url = url
         self._host, self._port, self._path = self._parse_url(url)
         self._verify_peer = verify_peer
         self._origin = origin
+        self._user_config = config
 
         self._session: h2_low.Session | None = None
         self._reader: asyncio.StreamReader | None = None
@@ -67,6 +71,7 @@ class Client:
         self._on_stream_data: Callable[[int, bytes], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
+        self._on_error: Callable[[int, str], Awaitable[None]] | None = None
 
     @property
     def url(self) -> str:
@@ -147,6 +152,23 @@ class Client:
             callback: async def callback(data: bytes) -> None
         """
         self._on_datagram = callback
+
+    def on_error(
+        self,
+        callback: Callable[[int, str], Awaitable[None]],
+    ) -> None:
+        """受信フロー制御違反のコールバックを設定する
+
+        WT_FLOW_CONTROL_ERROR (error_code 0x50) のみを渡す。0x50 は
+        draft-15 Section 3.4 の 0xTBD のプレースホルダであり、draft で値が
+        確定したら更新する。WT_STREAM_STATE_ERROR (0x51) や nghttp2 /
+        SETTINGS 違反の Error イベントは対象外。セッションエラーは HTTP/2
+        接続を終了しない (draft-15 Section 3.4)。
+
+        Args:
+            callback: async def callback(error_code: int, error_message: str) -> None
+        """
+        self._on_error = callback
 
     def _parse_url(self, url: str) -> tuple[str, int, str]:
         """URL をパースする"""
@@ -229,8 +251,9 @@ class Client:
             ssl=ssl_context,
         )
 
-        config = h2_low.Config()
-        config.is_server = False
+        # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
+        # 書き換えない。役割 (クライアント) は create_client が決める
+        config = self._user_config if self._user_config is not None else h2_low.Config()
         self._session = h2_low.Session.create_client(config)
 
         await self._send_pending()
@@ -383,6 +406,14 @@ class Client:
 
                 elif event.type == h2_low.EventType.DATAGRAM and self._on_datagram is not None:
                     await self._on_datagram(event.data)
+
+                # 0x50 (WT_FLOW_CONTROL_ERROR) のみ on_error へ渡す
+                elif (
+                    event.type == h2_low.EventType.ERROR
+                    and event.error_code == 0x50
+                    and self._on_error is not None
+                ):
+                    await self._on_error(event.error_code, event.error_message)
 
             if self._session.is_closed():
                 self._running = False

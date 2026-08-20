@@ -622,6 +622,12 @@ class H2Session {
   void report_flow_control_error(int32_t session_id,
                                  const std::string& error_message);
 
+  // 受信フロー制御違反をアプリへ通知してから WT_FLOW_CONTROL_ERROR で
+  // セッションを閉じる
+  void report_recv_flow_control_error(int32_t session_id,
+                                      uint64_t stream_id,
+                                      const std::string& error_message);
+
   bool is_server_;
   H2SessionConfig config_;
   nghttp2_session* session_ = nullptr;

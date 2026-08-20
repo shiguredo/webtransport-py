@@ -134,6 +134,7 @@ class Server:
         port: int,
         certfile: str,
         keyfile: str,
+        config: h2_low.Config | None = None,
     ) -> None:
         """サーバーを初期化する
 
@@ -142,11 +143,14 @@ class Server:
             port: バインドするポート番号 (0 で自動割り当て)
             certfile: 証明書ファイルパス
             keyfile: 秘密鍵ファイルパス
+            config: HTTP/2 / WebTransport セッション設定。省略時は既定値。
+                呼び出し元のオブジェクトは書き換えない
         """
         self._host = host
         self._port = port
         self._certfile = certfile
         self._keyfile = keyfile
+        self._user_config = config
 
         self._server: asyncio.Server | None = None
         self._running = False
@@ -157,6 +161,7 @@ class Server:
         self._on_stream_data: Callable[[int, bytes, SessionWriter], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int, SessionWriter], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes, SessionWriter], Awaitable[None]] | None = None
+        self._on_error: Callable[[int, str, SessionWriter], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -233,6 +238,23 @@ class Server:
         """
         self._on_datagram = callback
 
+    def on_error(
+        self,
+        callback: Callable[[int, str, SessionWriter], Awaitable[None]],
+    ) -> None:
+        """受信フロー制御違反のコールバックを設定する
+
+        WT_FLOW_CONTROL_ERROR (error_code 0x50) のみを渡す。0x50 は
+        draft-15 Section 3.4 の 0xTBD のプレースホルダであり、draft で値が
+        確定したら更新する。WT_STREAM_STATE_ERROR (0x51) や nghttp2 /
+        SETTINGS 違反の Error イベントは対象外。セッションエラーは HTTP/2
+        接続を終了しない (draft-15 Section 3.4)。
+
+        Args:
+            callback: async def callback(error_code: int, error_message: str, session_writer: SessionWriter) -> None
+        """
+        self._on_error = callback
+
     async def start(self) -> None:
         """サーバーを開始する"""
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -274,8 +296,9 @@ class Server:
         writer: asyncio.StreamWriter,
     ) -> None:
         """クライアント接続を処理する"""
-        config = h2_low.Config()
-        config.is_server = True
+        # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
+        # 書き換えない。役割 (サーバー) は create_server が決める
+        config = self._user_config if self._user_config is not None else h2_low.Config()
         session = h2_low.Session.create_server(config)
 
         session_writers: dict[int, SessionWriter] = {}
@@ -336,6 +359,20 @@ class Server:
                         session_writer = session_writers.get(event.session_id)
                         if session_writer is not None and self._on_datagram is not None:
                             await self._on_datagram(event.data, session_writer)
+
+                    elif event.type == h2_low.EventType.ERROR:
+                        # 0x50 (WT_FLOW_CONTROL_ERROR) のみ on_error へ渡す
+                        session_writer = session_writers.get(event.session_id)
+                        if (
+                            event.error_code == 0x50
+                            and session_writer is not None
+                            and self._on_error is not None
+                        ):
+                            await self._on_error(
+                                event.error_code,
+                                event.error_message,
+                                session_writer,
+                            )
 
                 data = session.send()
                 if data:
