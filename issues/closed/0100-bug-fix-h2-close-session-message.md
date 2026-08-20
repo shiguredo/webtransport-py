@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の WT_CLOSE_SESSION 受信時のメッセージ検証 (1024 バイト・UTF-8) を実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-h2-close-session-message
 - Polished: 2026-08-18
 
@@ -32,3 +32,12 @@ draft-ietf-webtrans-http2-15 Section 6.12 の MUST「Application Error Message �
 - 不正な UTF-8 のメッセージを含む WT_CLOSE_SESSION 受信で WT_ERROR セッションエラーが発生する (ワイヤ上に WT_CLOSE_SESSION (プレースホルダ値) が送出される)
 - 1024 バイトちょうど・正しい UTF-8 のメッセージはセッションエラーにならない
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `H2Session::handle_wt_close_session` で Application Error Message のバイト長と UTF-8 妥当性を検証する。1024 バイト超または RFC 3629 として不正な UTF-8 なら `report_wt_error` 経由で Error イベント (0x52) を push し、`close_session` する
+- 0x52 は `kWtError` にまとめ、draft-15 Section 3.4 の WT_ERROR (0xTBD) プレースホルダである旨を注記した。draft で値が確定したら更新する
+- 受信した不正メッセージは `close_session` に渡さず、固定の英語メッセージを Error と WT_CLOSE_SESSION の両方に使う。エラー時は SessionClosed push / エントリ削除 / 受信者側 END_STREAM 応答を行わない
+- `tests/test_webtransport_h2_close_session_message.py` で 1024 バイト超・不正 UTF-8 (孤立 continuation / overlong)・1024 バイトちょうど・短い合法 UTF-8 を検証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (703 本) が通ることを確認した
