@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の受信ストリーム数上限検知を実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-h2-recv-stream-limit
 - Polished: 2026-08-18
 
@@ -33,3 +33,11 @@ draft-ietf-webtrans-http2-15 Section 6.7 の MUST「広告した Maximum Streams
 - 広告した Maximum Streams を超えるストリーム受信 (WT_STREAM / WT_RESET_STREAM の両経路) で WT_FLOW_CONTROL_ERROR (0x50) によるセッション閉鎖が発生する
 - 暗黙オープン規則 (同じタイプ・方向の低い ID もカウント・閉じたストリームの累積) を考慮した検知が機能する
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `handle_wt_stream` と `handle_wt_reset_stream` の暗黙作成の直前で、`(stream_id >> 2) + 1` を `max_streams_*_remote` と比較する。超過時は既存の `report_recv_flow_control_error` で Error (0x50) を push してから `close_session` する
+- 検証順は error_code 範囲 (0x52) → Reliable Size (0x51) → ストリーム数制限 (0x50)。超過時はエントリを作らず StreamReset も出さない
+- `tests/test_webtransport_h2_recv_stream_limit.py` で上限ちょうど・暗黙オープン・閉じたストリームの累積・RESET 経路・他 MUST との同時成立を検証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (720 本) が通ることを確認した
