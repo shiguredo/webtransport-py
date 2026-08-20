@@ -255,3 +255,82 @@ async def test_server_client_communication(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_client_post_with_body(test_certificates):
+    """POST のリクエストボディがサーバーに届き、エコーが返ることを確認
+
+    Client.request に body を渡すとリクエストが終端され、サーバーの
+    on_data でボディを受信できる。
+    """
+    from webtransport.http2 import Client, Server
+
+    server_received_bodies: list[bytes] = []
+    client_received_data: list[bytes] = []
+    server_body_received = asyncio.Event()
+    client_data_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, response_writer):
+        # ヘッダー受信時点ではボディ待ち。応答は on_data で返す
+        pass
+
+    async def on_data(stream_id, data, response_writer):
+        server_received_bodies.append(data)
+        server_body_received.set()
+        response_headers = [
+            (":status", "200"),
+            ("content-type", "application/octet-stream"),
+        ]
+        await response_writer.send_headers(stream_id, response_headers)
+        await response_writer.send_data(stream_id, b"echo:" + data, end_stream=True)
+
+    server.on_request(on_request)
+    server.on_data(on_data)
+
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_data(stream_id, data):
+        client_received_data.append(data)
+        client_data_received.set()
+
+    client.on_data(on_client_data)
+
+    await client.connect()
+    assert client.is_connected is True
+
+    stream_id = await client.request("POST", "/echo", body=b"payload")
+    assert stream_id >= 0
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(server_body_received.wait(), timeout=5.0)
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+
+    assert server_received_bodies == [b"payload"]
+    assert client_received_data == [b"echo:payload"]
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()

@@ -13,6 +13,8 @@
 
 - [CHANGE] Windows 対応を終了する
   - @voluntas
+- [CHANGE] HTTP/2 のリクエスト終端を `send_data(..., eof=True)` に変更し、`Client.request` に `body` を追加する
+  - @voluntas
 - [CHANGE] QUIC の `receive` / `send` / `create_client` / `accept` に実アドレスを必須化する
   - @voluntas
 - [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
