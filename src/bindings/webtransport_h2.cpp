@@ -39,6 +39,10 @@ constexpr uint32_t kWtError = 0x52;
 // draft-15 Section 6.12 の Application Error Message 上限 (バイト)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 
+// draft-15 Section 6.2 / 6.3 の Application Protocol Error Code 上限。
+// [WEBTRANSPORT-H3] Section 4.4 の unsigned 32-bit 範囲
+constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
+
 // draft-15 Section 6.12 の "valid UTF-8" を RFC 3629 の well-formed UTF-8
 // として検査する。
 // overlong 符号化、サロゲート (U+D800..U+DFFF)、 U+10FFFF 超、
@@ -397,6 +401,15 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   auto [error_code, error_code_len] = *error_code_result;
   offset += error_code_len;
 
+  // draft-15 Section 6.2: Application Protocol Error Code は 0xffffffff
+  // 以下。超過は WT_ERROR セッションエラー。終端状態・ reliable_size より
+  // 先に検証する
+  if (error_code > kMaxApplicationErrorCode) {
+    report_wt_error(session_id,
+                    "WT_RESET_STREAM error code exceeds 0xffffffff");
+    return;
+  }
+
   // Reliable Size
   auto reliable_size_result = decode_varint(payload + offset, length - offset);
   if (!reliable_size_result) {
@@ -518,6 +531,14 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
     return;
   }
   auto [error_code, error_code_len] = *error_code_result;
+
+  // draft-15 Section 6.3: Application Protocol Error Code は 0xffffffff
+  // 以下。超過は WT_ERROR セッションエラー。二重受信検出より先に検証する
+  if (error_code > kMaxApplicationErrorCode) {
+    report_wt_error(session_id,
+                    "WT_STOP_SENDING error code exceeds 0xffffffff");
+    return;
+  }
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
