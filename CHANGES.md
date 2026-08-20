@@ -151,6 +151,8 @@
   - @voluntas
 - [FIX] HTTP/2 で終端状態のストリームへの空の WT_STREAM capsule がセッションエラーになる問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 のフロー制御カプセルで減少値・ 2^60 超過を検知せずセッションを閉じない問題を修正する
+  - @voluntas
 
 ### misc
 
