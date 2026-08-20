@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の WT_STOP_SENDING 二重受信検出を実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-h2-stop-sending-duplicate
 - Polished: 2026-08-18
 
@@ -33,3 +33,12 @@ draft-ietf-webtrans-http2-15 Section 6.3 の MUST「同一ストリームへの 
 - 同一ストリームへの 2 回目の WT_STOP_SENDING 受信で WT_STREAM_STATE_ERROR (0x51) が送出されセッションが閉じる
 - 1 回目の WT_STOP_SENDING 受信では従来どおり StopSending イベントが届く
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `WtSessionInfo` に受信済み WT_STOP_SENDING の Stream ID 集合 `received_stop_sending_stream_ids` を追加した。未知ストリームでも 2 回目を検出するため `WtStreamInfo` のフラグにはせず、暗黙のストリーム作成もしない
+- `H2Session::handle_wt_stop_sending` で 1 回目は従来どおり StopSending イベントを push して集合に記録し、2 回目はイベントを push せず `report_stream_state_error` (error code 0x51) で Error イベント push と `close_session` を行う
+- 集合の寿命はセッション破棄までとし、ストリーム単位では消さない
+- `tests/test_webtransport_h2_stream_state_error.py` に 1 回目イベント・2 回目のセッション閉鎖・未知ストリーム・別ストリーム・同一 receive() 内の連結カプセルのテストを追加した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (686 本) が通ることを確認した
