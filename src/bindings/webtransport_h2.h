@@ -250,6 +250,10 @@ struct WtSessionInfo {
   // (draft-15 Section 6.6 の「previously received value」)。
   // セッション破棄まで残し、ストリーム単位では消さない
   std::map<uint64_t, uint64_t> received_max_stream_data_by_id;
+  // 受信済み WT_STOP_SENDING の Stream ID (draft-15 Section 6.3)。
+  // 未知ストリームでも検出するため WtStreamInfo ではなくセッション単位の
+  // 集合で持つ。セッション破棄まで残し、ストリーム単位では消さない
+  std::set<uint64_t> received_stop_sending_stream_ids;
 };
 
 /**
