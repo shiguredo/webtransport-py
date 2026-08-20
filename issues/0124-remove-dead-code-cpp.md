@@ -17,13 +17,13 @@ C++ バインディング層に残る死にコード (機能していない設�
 - **機能していない設定項目**: `Http2Config::send_preface` (`src/bindings/http2.h`) は `Http2Connection::initialize` が一切参照しない。`send_preface=False` でも nghttp2 がクライアントプリフェイスを自動送信し、設定が機能しない
 - **死にフィールド**: `H2Session::goaway_sent_` (`src/bindings/webtransport_h2.h`) はムーブコンストラクタ以外で読み書きされない (h2 層に goaway() 自体がない)
 - **未使用の StreamState 値**: `src/bindings/webtransport_h2.h` の `StreamState` の Ready / Send / DataSent / DataRead / ResetRead は定義のみで使用されない
-- **設定のみで読み出しがないフィールド**: `WtSessionInfo::max_streams_bidi_remote` / `max_streams_uni_remote` (`src/bindings/webtransport_h2.h`)
 - **空実装コールバック**: `QuicConnection::acked_stream_data_offset_cb` (`src/bindings/quic.cpp`) は return 0 のみで、コメントと実装が食い違う
 
 ## 設計方針
 
 - 上記をすべて削除する (enum 値の削除は Python 側・テスト側で参照がないことを確認してから行う)
 - 意図的に残すもの (後方互換の Reset 等) は利用者を明記したコメントを付けて残す判断も可
+- `WtSessionInfo::max_streams_bidi_remote` / `max_streams_uni_remote` は受信ストリーム数上限の検証で読み出すため対象外とする
 
 ## 完了条件
 
