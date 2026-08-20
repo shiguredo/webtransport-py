@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のフロー制御カプセルの受信値検証 (減少値・2^60 上限) を実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-20
 - Branch: feature/fix-h2-flow-control-capsule-decrease
 - Polished: 2026-08-18
 
@@ -35,3 +35,14 @@ draft-ietf-webtrans-http2-15 Section 6.5 / 6.6 / 6.7 の MUST「前回受信値�
 - 2^60 超の Maximum Streams (WT_MAX_STREAMS / WT_STREAMS_BLOCKED) 受信で WT_FLOW_CONTROL_ERROR によるセッション閉鎖が発生する
 - WT_STREAMS_BLOCKED の減少値はエラーにしない (仕様に受信側 MUST がなく、advisory な通知のため検証対象外)
 - テストが追加され通る
+
+## 解決方法
+
+- `H2Session::handle_wt_max_data` / `handle_wt_max_stream_data` / `handle_wt_max_streams` で前回受信値より小さいカプセルを検知し、`report_flow_control_error` 経由で `close_session` (error code 0x50) を直接呼ぶようにした。Error イベントは push しない
+- 比較基準は受信値のみ (SETTINGS 非 0 ・カプセル・WebTransport-Init)。自側 config へのフォールバックは減少判定に使わない
+- WT_MAX_STREAM_DATA の直近値はセッション側の `received_max_stream_data_by_id` に保持し、ストリーム未作成時の増加後の減少も落とさない。ストリーム作成時と既存ストリーム受信時は、カプセル値が送信クレジットより大きければ `max_stream_data_local` を上げる
+- `handle_wt_streams_blocked` を追加し、WT_STREAMS_BLOCKED (bidi / uni) の Maximum Streams が 2^60 を超えたら同じく閉じる。減少値は仕様に受信側 MUST が無く、 advisory な通知のため状態更新もエラーにもしない
+- 0x50 は WT_FLOW_CONTROL_ERROR (0xTBD) のプレースホルダとしてコメントで明記した
+- `tests/test_webtransport_h2_flow_control_capsule.py` を新規作成し、減少・ 2^60 超過・STREAMS_BLOCKED 減少の非エラー・Error 非 push・フォールバックより小さい最初の更新・送信クレジットへの反映を検証した
+- `CHANGES.md` の `## develop` セクションに [FIX] エントリを追加した
+- 全テスト (681 本) が通ることを確認した
