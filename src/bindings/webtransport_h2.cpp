@@ -468,6 +468,20 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   }
   auto [error_code, error_code_len] = *error_code_result;
 
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session) {
+    return;
+  }
+
+  // draft-15 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING は
+  // WT_STREAM_STATE_ERROR
+  if (wt_session->received_stop_sending_stream_ids.contains(stream_id)) {
+    report_stream_state_error(session_id, stream_id,
+                              "WT_STOP_SENDING received twice");
+    return;
+  }
+  wt_session->received_stop_sending_stream_ids.insert(stream_id);
+
   H2Event event;
   event.type = H2EventType::StopSending;
   event.session_id = session_id;

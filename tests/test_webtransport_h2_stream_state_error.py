@@ -1,7 +1,8 @@
 """WebTransport over HTTP/2 のストリーム状態検証テスト
 
-不正な状態のストリームへの WT_STREAM / WT_RESET_STREAM capsule 受信を
-検知して WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
+不正な状態のストリームへの WT_STREAM / WT_RESET_STREAM capsule 受信と、
+同一ストリームへの 2 回目の WT_STOP_SENDING 受信を検知して
+WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
 MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ注入で再現する
 (公開 API では非コンプライアントなカプセルを送出する手段が存在しないため)。
 エラー送出は close_session 経由の WT_CLOSE_SESSION (error code 0x51) で
@@ -47,6 +48,18 @@ def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_si
     return bytes([0x99, 0x0B, 0x4D, 0x39, len(payload)]) + payload
 
 
+def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
+    """WT_STOP_SENDING capsule のワイヤバイト列を組み立てる
+
+    Type 0x190B4D3A (4 バイト varint) + Length + Stream ID (varint) +
+    Error Code (varint)。Length は 1 バイト varint のみ対応する (テストで
+    使う小さい値のみ。64 バイト未満のペイロード前提)。
+    """
+    payload = _encode_varint(stream_id) + _encode_varint(error_code)
+    assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
+    return bytes([0x99, 0x0B, 0x4D, 0x3A, len(payload)]) + payload
+
+
 def _encode_data_frame(session_id: int, payload: bytes = b"") -> bytes:
     """DATA フレームのワイヤバイト列を組み立てる
 
@@ -79,6 +92,7 @@ _WT_STREAM_TERMINAL = "WT_STREAM received for stream in terminal state"
 _WT_RESET_TERMINAL = "WT_RESET_STREAM received for stream in terminal state"
 _WT_RESET_MISMATCH = "WT_RESET_STREAM reliable size mismatch"
 _WT_RESET_UNKNOWN = "WT_RESET_STREAM non-zero reliable size, unknown stream"
+_WT_STOP_SENDING_DUPLICATE = "WT_STOP_SENDING received twice"
 
 
 def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
@@ -568,3 +582,135 @@ def test_wt_stream_flow_control_excess_on_terminal_stream_sends_state_error() ->
     error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
     assert error_events[0].error_code == 0x51
+
+
+def test_wt_stop_sending_first_delivers_event() -> None:
+    """1 回目の WT_STOP_SENDING 受信で StopSending イベントが届くことを確認
+
+    Section 6.3 の MUST は 2 回目にだけ WT_STREAM_STATE_ERROR を要求する。
+    1 回目は従来どおりイベントを push し、セッションは閉じない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 42)))
+    assert ret > 0, "WT_STOP_SENDING カプセルの注入に失敗しました"
+    stop_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
+    ]
+    assert len(stop_events) == 1
+    assert stop_events[0].session_id == session_id
+    assert stop_events[0].stream_id == 0
+    assert stop_events[0].error_code == 42
+    _assert_no_state_error_sent(server)
+
+
+def test_wt_stop_sending_second_sends_state_error() -> None:
+    """同一ストリームへの 2 回目の WT_STOP_SENDING で WT_STREAM_STATE_ERROR になることを確認
+
+    HTTP/2 は順序保証があるため冗長な STOP_SENDING は不要で、2 回目は
+    Section 6.3 の MUST 違反になる。修正前は毎回 StopSending を push する
+    だけで検知しなかった。2 回目はイベントを push せずセッションを閉じる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 42)))
+    assert ret > 0, "1 回目の WT_STOP_SENDING カプセルの注入に失敗しました"
+    stop_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
+    ]
+    assert len(stop_events) == 1
+
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 43)))
+    assert ret > 0, "2 回目の WT_STOP_SENDING カプセルの注入に失敗しました"
+    events = _drain_events(server)
+    stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
+    error_events = [event for event in events if event.type == h2.EventType.ERROR]
+    assert stop_events == []
+    assert len(error_events) == 1
+    assert error_events[0].error_code == 0x51
+    assert error_events[0].stream_id == 0
+    _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
+
+
+def test_wt_stop_sending_duplicate_in_same_receive_sends_state_error() -> None:
+    """同一 receive() 内の 2 個目の WT_STOP_SENDING でも WT_STREAM_STATE_ERROR になることを確認
+
+    HTTP/2 の順序保証では同一 DATA に隣接カプセルが載る。1 回目は
+    StopSending を push し、2 回目でセッションを閉じる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    capsules = _encode_wt_stop_sending_capsule(0, 1) + _encode_wt_stop_sending_capsule(0, 2)
+    ret = server.receive(_encode_data_frame(session_id, capsules))
+    assert ret > 0, "連結した WT_STOP_SENDING カプセルの注入に失敗しました"
+    events = _drain_events(server)
+    stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
+    error_events = [event for event in events if event.type == h2.EventType.ERROR]
+    assert len(stop_events) == 1
+    assert stop_events[0].error_code == 1
+    assert len(error_events) == 1
+    assert error_events[0].error_code == 0x51
+    assert error_events[0].stream_id == 0
+    _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
+
+
+def test_wt_stop_sending_unknown_stream_second_sends_state_error() -> None:
+    """未作成ストリームへの 2 回目の WT_STOP_SENDING でも WT_STREAM_STATE_ERROR になることを確認
+
+    仕様違反ピアは未知の Stream ID 宛に送れる。WtStreamInfo のフラグでは
+    エントリが無い ID の 2 回目を検出できないため、セッション単位の集合で
+    追跡する。暗黙のストリーム作成は get_stream_ids に偽のストリームを
+    露出させるため行わない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    unknown_stream_id = 99
+
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stop_sending_capsule(unknown_stream_id, 1))
+    )
+    assert ret > 0, "1 回目の WT_STOP_SENDING カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == []
+    stop_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
+    ]
+    assert len(stop_events) == 1
+    assert stop_events[0].stream_id == unknown_stream_id
+
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stop_sending_capsule(unknown_stream_id, 1))
+    )
+    assert ret > 0, "2 回目の WT_STOP_SENDING カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == []
+    events = _drain_events(server)
+    stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
+    error_events = [event for event in events if event.type == h2.EventType.ERROR]
+    assert stop_events == []
+    assert len(error_events) == 1
+    assert error_events[0].error_code == 0x51
+    assert error_events[0].stream_id == unknown_stream_id
+    _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
+
+
+def test_wt_stop_sending_different_streams_each_deliver_once() -> None:
+    """異なるストリームへの 1 回目の WT_STOP_SENDING はどちらもイベントになることを確認
+
+    二重受信の判定は Stream ID ごとであり、別ストリームの 1 回目を 2 回目と
+    誤検出しない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 1)))
+    assert ret > 0, "ストリーム 0 の WT_STOP_SENDING カプセルの注入に失敗しました"
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(4, 2)))
+    assert ret > 0, "ストリーム 4 の WT_STOP_SENDING カプセルの注入に失敗しました"
+
+    stop_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
+    ]
+    assert [(event.stream_id, event.error_code) for event in stop_events] == [(0, 1), (4, 2)]
+    _assert_no_state_error_sent(server)

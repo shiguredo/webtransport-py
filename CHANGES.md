@@ -153,6 +153,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のフロー制御カプセルで減少値・ 2^60 超過を検知せずセッションを閉じない問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 で同一ストリームへの 2 回目の WT_STOP_SENDING を検知せずセッションを閉じない問題を修正する
+  - @voluntas
 
 ### misc
 
