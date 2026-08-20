@@ -205,6 +205,10 @@ struct WtSessionInfo {
   // フロー制御 (送信側)
   uint64_t bytes_sent = 0;
   uint64_t max_data_local = 0;
+  // 対向から受信した直近の Maximum Data (SETTINGS 非 0 または
+  // WT_MAX_DATA)。未受信は nullopt で、自側 config へのフォールバック
+  // は減少値判定の基準にしない (draft-15 Section 6.5)
+  std::optional<uint64_t> received_max_data;
 
   // フロー制御 (受信側)
   uint64_t bytes_received = 0;
@@ -215,6 +219,10 @@ struct WtSessionInfo {
   uint64_t next_uni_stream_id = 0;
   uint64_t max_streams_bidi_local = 0;
   uint64_t max_streams_uni_local = 0;
+  // 対向から受信した直近の Maximum Streams (SETTINGS 非 0 または
+  // WT_MAX_STREAMS)。未受信は nullopt (draft-15 Section 6.7)
+  std::optional<uint64_t> received_max_streams_bidi;
+  std::optional<uint64_t> received_max_streams_uni;
   uint64_t max_streams_bidi_remote = 0;
   uint64_t max_streams_uni_remote = 0;
   uint64_t streams_bidi_opened = 0;
@@ -233,6 +241,15 @@ struct WtSessionInfo {
   uint64_t peer_max_stream_data_bidi_local = 0;
   // 対向が開いた双方向ストリーム向け (対向の BIDI_LOCAL)
   uint64_t peer_max_stream_data_bidi_remote = 0;
+  // ストリーム種別ごとの初期 Maximum Stream Data 受信値
+  // (SETTINGS 非 0 / WebTransport-Init)
+  std::optional<uint64_t> received_initial_max_stream_data_uni;
+  std::optional<uint64_t> received_initial_max_stream_data_bidi_local;
+  std::optional<uint64_t> received_initial_max_stream_data_bidi_remote;
+  // ストリーム未作成時も含め、 WT_MAX_STREAM_DATA で受信した直近値
+  // (draft-15 Section 6.6 の「previously received value」)。
+  // セッション破棄まで残し、ストリーム単位では消さない
+  std::map<uint64_t, uint64_t> received_max_stream_data_by_id;
 };
 
 /**
@@ -506,6 +523,9 @@ class H2Session {
                              bool is_bidi,
                              const uint8_t* payload,
                              size_t length);
+  void handle_wt_streams_blocked(int32_t session_id,
+                                 const uint8_t* payload,
+                                 size_t length);
   void handle_datagram(int32_t session_id,
                        const uint8_t* payload,
                        size_t length);
@@ -582,6 +602,21 @@ class H2Session {
   uint64_t peer_send_credit_for_stream(const WtSessionInfo& wt_session,
                                        bool is_unidirectional,
                                        bool is_local) const;
+
+  // SETTINGS / WebTransport-Init で受信した初期 Maximum Stream Data
+  std::optional<uint64_t> advertised_stream_send_credit(
+      const WtSessionInfo& wt_session,
+      bool is_unidirectional,
+      bool is_local) const;
+
+  // ストリーム作成時に送信クレジットを初期化する。未作成時に受けた
+  // WT_MAX_STREAM_DATA があればそれを優先する
+  void initialize_stream_send_credit(const WtSessionInfo& wt_session,
+                                     WtStreamInfo& info) const;
+
+  // WT_FLOW_CONTROL_ERROR でセッションを閉じる (Error イベントは push しない)
+  void report_flow_control_error(int32_t session_id,
+                                 const std::string& error_message);
 
   bool is_server_;
   H2SessionConfig config_;

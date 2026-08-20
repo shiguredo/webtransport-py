@@ -15,6 +15,21 @@
 namespace webtransport {
 namespace h2 {
 
+namespace {
+
+// 対向から受信した上限を記録する。未受信ならそのまま格納し、受信済みなら
+// 大きい方を残す (SETTINGS と WebTransport-Init の大きい方を採用する)
+void record_received_limit(std::optional<uint64_t>& received, uint64_t value) {
+  if (!received.has_value() || value > *received) {
+    received = value;
+  }
+}
+
+// draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
+constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
+
+}  // namespace
+
 // ========== Varint エンコード/デコード (QUIC 形式) ==========
 
 std::vector<uint8_t> H2Session::encode_varint(uint64_t value) {
@@ -196,11 +211,13 @@ void H2Session::process_capsule(int32_t session_id,
     case CapsuleType::WtDrainSession:
       handle_wt_drain_session(session_id);
       break;
+    case CapsuleType::WtStreamsBlockedBidi:
+    case CapsuleType::WtStreamsBlockedUni:
+      handle_wt_streams_blocked(session_id, payload, length);
+      break;
     case CapsuleType::Padding:
     case CapsuleType::WtDataBlocked:
     case CapsuleType::WtStreamDataBlocked:
-    case CapsuleType::WtStreamsBlockedBidi:
-    case CapsuleType::WtStreamsBlockedUni:
       // フロー制御通知・PADDING は現時点では状態更新のみ不要
       break;
   }
@@ -235,8 +252,7 @@ void H2Session::handle_wt_stream(int32_t session_id,
     info.stream_id = stream_id;
     info.is_local = false;
     info.is_unidirectional = (stream_id & 0x02) != 0;
-    info.max_stream_data_local =
-        peer_send_credit_for_stream(*wt_session, info.is_unidirectional, false);
+    initialize_stream_send_credit(*wt_session, info);
     info.max_stream_data_remote = config_.wt_initial_max_stream_data;
     stream_it = wt_session->streams.emplace(stream_id, std::move(info)).first;
   }
@@ -357,8 +373,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     info.stream_id = stream_id;
     info.is_local = false;
     info.is_unidirectional = (stream_id & 0x02) != 0;
-    info.max_stream_data_local =
-        peer_send_credit_for_stream(*wt_session, info.is_unidirectional, false);
+    initialize_stream_send_credit(*wt_session, info);
     info.max_stream_data_remote = config_.wt_initial_max_stream_data;
     info.recv_state = StreamState::ResetRecvd;
     wt_session->streams[stream_id] = std::move(info);
@@ -471,7 +486,19 @@ void H2Session::handle_wt_max_data(int32_t session_id,
   auto [max_data, max_data_len] = *max_data_result;
 
   auto* wt_session = get_wt_session(session_id);
-  if (wt_session && max_data > wt_session->max_data_local) {
+  if (!wt_session) {
+    return;
+  }
+
+  // draft-15 Section 6.5: 前回受信値より小さい WT_MAX_DATA は
+  // WT_FLOW_CONTROL_ERROR。比較対象は受信値のみ (フォールバックしない)
+  if (wt_session->received_max_data.has_value() &&
+      max_data < *wt_session->received_max_data) {
+    report_flow_control_error(session_id, "WT_MAX_DATA decreased");
+    return;
+  }
+  wt_session->received_max_data = max_data;
+  if (max_data > wt_session->max_data_local) {
     wt_session->max_data_local = max_data;
   }
 }
@@ -497,11 +524,35 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   auto [max_data, max_data_len] = *max_data_result;
 
   auto* wt_session = get_wt_session(session_id);
-  if (wt_session) {
-    auto it = wt_session->streams.find(stream_id);
-    if (it != wt_session->streams.end() &&
-        max_data > it->second.max_stream_data_local) {
-      it->second.max_stream_data_local = max_data;
+  if (!wt_session) {
+    return;
+  }
+
+  auto stream_it = wt_session->streams.find(stream_id);
+  std::optional<uint64_t> previous;
+  auto capsule_it = wt_session->received_max_stream_data_by_id.find(stream_id);
+  if (capsule_it != wt_session->received_max_stream_data_by_id.end()) {
+    previous = capsule_it->second;
+  } else {
+    // カプセル未受信なら SETTINGS / WebTransport-Init の初期値が
+    // 「前回受信値」 (draft-15 Section 6.6)
+    // Bit 0: initiator (0 = client, 1 = server)
+    // Bit 1: directionality (0 = bidi, 1 = uni)
+    bool is_unidirectional = (stream_id & 0x02) != 0;
+    bool is_local = ((stream_id & 0x01) != 0) == is_server_;
+    previous = advertised_stream_send_credit(*wt_session, is_unidirectional,
+                                             is_local);
+  }
+
+  if (previous.has_value() && max_data < *previous) {
+    report_flow_control_error(session_id, "WT_MAX_STREAM_DATA decreased");
+    return;
+  }
+
+  wt_session->received_max_stream_data_by_id[stream_id] = max_data;
+  if (stream_it != wt_session->streams.end()) {
+    if (max_data > stream_it->second.max_stream_data_local) {
+      stream_it->second.max_stream_data_local = max_data;
     }
   }
 }
@@ -517,16 +568,51 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
   auto [max_streams, max_streams_len] = *max_streams_result;
 
   auto* wt_session = get_wt_session(session_id);
-  if (wt_session) {
-    if (is_bidi) {
-      if (max_streams > wt_session->max_streams_bidi_local) {
-        wt_session->max_streams_bidi_local = max_streams;
-      }
-    } else {
-      if (max_streams > wt_session->max_streams_uni_local) {
-        wt_session->max_streams_uni_local = max_streams;
-      }
-    }
+  if (!wt_session) {
+    return;
+  }
+
+  // draft-15 Section 6.7: Maximum Streams は 2^60 を超えてはならない
+  if (max_streams > kMaxStreamsLimit) {
+    report_flow_control_error(session_id, "WT_MAX_STREAMS exceeds 2^60");
+    return;
+  }
+
+  auto& received = is_bidi ? wt_session->received_max_streams_bidi
+                           : wt_session->received_max_streams_uni;
+  auto& credit = is_bidi ? wt_session->max_streams_bidi_local
+                         : wt_session->max_streams_uni_local;
+
+  // 前回受信値より小さい WT_MAX_STREAMS は WT_FLOW_CONTROL_ERROR
+  if (received.has_value() && max_streams < *received) {
+    report_flow_control_error(session_id, "WT_MAX_STREAMS decreased");
+    return;
+  }
+  received = max_streams;
+  if (max_streams > credit) {
+    credit = max_streams;
+  }
+}
+
+void H2Session::handle_wt_streams_blocked(int32_t session_id,
+                                          const uint8_t* payload,
+                                          size_t length) {
+  auto max_streams_result = decode_varint(payload, length);
+  if (!max_streams_result) {
+    return;
+  }
+  auto [max_streams, max_streams_len] = *max_streams_result;
+
+  if (!get_wt_session(session_id)) {
+    return;
+  }
+
+  // draft-15 Section 6.10: Maximum Streams が 2^60 を超える値は
+  // WT_FLOW_CONTROL_ERROR。減少値の受信側 MUST は無く、 advisory な通知
+  // のため状態は更新しない
+  if (max_streams > kMaxStreamsLimit) {
+    report_flow_control_error(session_id, "WT_STREAMS_BLOCKED exceeds 2^60");
+    return;
   }
 }
 
@@ -697,6 +783,9 @@ void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const
       peer_wt_initial_max_data_ > 0 ? peer_wt_initial_max_data_
                                     : config_.wt_initial_max_data;
   wt_session.max_data_remote = config_.wt_initial_max_data;
+  if (peer_wt_initial_max_data_ > 0) {
+    wt_session.received_max_data = peer_wt_initial_max_data_;
+  }
   wt_session.max_streams_bidi_local =
       peer_wt_initial_max_streams_bidi_ > 0
           ? peer_wt_initial_max_streams_bidi_
@@ -705,6 +794,12 @@ void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const
       peer_wt_initial_max_streams_uni_ > 0
           ? peer_wt_initial_max_streams_uni_
           : config_.wt_initial_max_streams_uni;
+  if (peer_wt_initial_max_streams_bidi_ > 0) {
+    wt_session.received_max_streams_bidi = peer_wt_initial_max_streams_bidi_;
+  }
+  if (peer_wt_initial_max_streams_uni_ > 0) {
+    wt_session.received_max_streams_uni = peer_wt_initial_max_streams_uni_;
+  }
   wt_session.max_streams_bidi_remote = config_.wt_initial_max_streams_bidi;
   wt_session.max_streams_uni_remote = config_.wt_initial_max_streams_uni;
 
@@ -712,16 +807,28 @@ void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const
       peer_wt_initial_max_stream_data_uni_ > 0
           ? peer_wt_initial_max_stream_data_uni_
           : config_.wt_initial_max_stream_data;
+  if (peer_wt_initial_max_stream_data_uni_ > 0) {
+    wt_session.received_initial_max_stream_data_uni =
+        peer_wt_initial_max_stream_data_uni_;
+  }
   // 自側開始 bidi: 対向の BIDI_REMOTE
   wt_session.peer_max_stream_data_bidi_local =
       peer_wt_initial_max_stream_data_bidi_remote_ > 0
           ? peer_wt_initial_max_stream_data_bidi_remote_
           : config_.wt_initial_max_stream_data;
+  if (peer_wt_initial_max_stream_data_bidi_remote_ > 0) {
+    wt_session.received_initial_max_stream_data_bidi_local =
+        peer_wt_initial_max_stream_data_bidi_remote_;
+  }
   // 対向開始 bidi: 対向の BIDI_LOCAL
   wt_session.peer_max_stream_data_bidi_remote =
       peer_wt_initial_max_stream_data_bidi_local_ > 0
           ? peer_wt_initial_max_stream_data_bidi_local_
           : config_.wt_initial_max_stream_data;
+  if (peer_wt_initial_max_stream_data_bidi_local_ > 0) {
+    wt_session.received_initial_max_stream_data_bidi_remote =
+        peer_wt_initial_max_stream_data_bidi_local_;
+  }
 }
 
 std::string H2Session::encode_webtransport_init() const {
@@ -835,6 +942,39 @@ uint64_t H2Session::peer_send_credit_for_stream(const WtSessionInfo& wt_session,
     return wt_session.peer_max_stream_data_bidi_local;
   }
   return wt_session.peer_max_stream_data_bidi_remote;
+}
+
+std::optional<uint64_t> H2Session::advertised_stream_send_credit(
+    const WtSessionInfo& wt_session,
+    bool is_unidirectional,
+    bool is_local) const {
+  if (is_unidirectional) {
+    return wt_session.received_initial_max_stream_data_uni;
+  }
+  if (is_local) {
+    return wt_session.received_initial_max_stream_data_bidi_local;
+  }
+  return wt_session.received_initial_max_stream_data_bidi_remote;
+}
+
+void H2Session::initialize_stream_send_credit(const WtSessionInfo& wt_session,
+                                              WtStreamInfo& info) const {
+  info.max_stream_data_local = peer_send_credit_for_stream(
+      wt_session, info.is_unidirectional, info.is_local);
+  auto capsule_it =
+      wt_session.received_max_stream_data_by_id.find(info.stream_id);
+  if (capsule_it != wt_session.received_max_stream_data_by_id.end() &&
+      capsule_it->second > info.max_stream_data_local) {
+    info.max_stream_data_local = capsule_it->second;
+  }
+}
+
+void H2Session::report_flow_control_error(int32_t session_id,
+                                          const std::string& error_message) {
+  // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+  // プレースホルダ。draft で値が確定したら更新する
+  constexpr uint32_t kWtFlowControlError = 0x50;
+  close_session(session_id, kWtFlowControlError, error_message);
 }
 
 // ========== H2Session 実装 ==========
@@ -1260,8 +1400,7 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   info.stream_id = stream_id;
   info.is_local = true;
   info.is_unidirectional = is_unidirectional;
-  info.max_stream_data_local =
-      peer_send_credit_for_stream(*wt_session, is_unidirectional, true);
+  initialize_stream_send_credit(*wt_session, info);
   info.max_stream_data_remote = config_.wt_initial_max_stream_data;
   wt_session->streams[stream_id] = info;
 
@@ -1311,8 +1450,7 @@ void H2Session::send_stream_data(int32_t session_id,
   // draft-15 Section 6.5 / 6.6: フロー制御超過はセッション閉鎖
   if (wt_session->bytes_sent + data.size() > wt_session->max_data_local ||
       stream_info.bytes_sent + data.size() > stream_info.max_stream_data_local) {
-    close_session(session_id, 0x50 /* FLOW_CONTROL_ERROR */,
-                  "flow control limit exceeded");
+    report_flow_control_error(session_id, "flow control limit exceeded");
     return;
   }
 
@@ -1689,16 +1827,24 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
               if (has_u) {
                 wt_session.peer_max_stream_data_uni =
                     std::max(wt_session.peer_max_stream_data_uni, init_u);
+                record_received_limit(
+                    wt_session.received_initial_max_stream_data_uni, init_u);
               }
               if (has_bl) {
                 wt_session.peer_max_stream_data_bidi_remote =
                     std::max(wt_session.peer_max_stream_data_bidi_remote,
                              init_bl);
+                record_received_limit(
+                    wt_session.received_initial_max_stream_data_bidi_remote,
+                    init_bl);
               }
               if (has_br) {
                 wt_session.peer_max_stream_data_bidi_local =
                     std::max(wt_session.peer_max_stream_data_bidi_local,
                              init_br);
+                record_received_limit(
+                    wt_session.received_initial_max_stream_data_bidi_local,
+                    init_br);
               }
             }
 
@@ -1753,14 +1899,22 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
                 if (has_u) {
                   wt_session->peer_max_stream_data_uni =
                       std::max(wt_session->peer_max_stream_data_uni, init_u);
+                  record_received_limit(
+                      wt_session->received_initial_max_stream_data_uni, init_u);
                 }
                 if (has_bl) {
                   wt_session->peer_max_stream_data_bidi_remote = std::max(
                       wt_session->peer_max_stream_data_bidi_remote, init_bl);
+                  record_received_limit(
+                      wt_session->received_initial_max_stream_data_bidi_remote,
+                      init_bl);
                 }
                 if (has_br) {
                   wt_session->peer_max_stream_data_bidi_local = std::max(
                       wt_session->peer_max_stream_data_bidi_local, init_br);
+                  record_received_limit(
+                      wt_session->received_initial_max_stream_data_bidi_local,
+                      init_br);
                 }
               }
             }
