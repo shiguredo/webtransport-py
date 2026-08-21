@@ -1,43 +1,50 @@
-# WebTransport over HTTP/3 の SETTINGS / transport parameter 検証が no-op のままな問題を修正する
+# WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
 
 - Created: 2026-08-18
 - Completed: {YYYY-MM-DD}
-- Branch: feature/fix-h3-settings-validation
+- Branch: feature/fix-h3-transport-param-validation
 - Polished: 2026-08-18
 
-## pending にした理由
+## reopened にした理由
 
-- 2026-08-21 の polish 過程で、`SETTINGS_WT_ENABLED > 1` のクライアント側検証 (draft-ietf-webtrans-http3-16 §3.1 MUST) を実装するには nghttp3 (webtransport branch) 側の対応が必要と判明
-- nghttp3 は `nghttp3_conn_on_settings_entry_received` (`lib/nghttp3_conn.c` line 2377-2384) で受信値を boolean 正規化してから `recv_settings2_cb` に渡すため、Python バインディング側の callback 単独では raw value を観測できない
-- 上流 (`github.com/ngtcp2/nghttp3` の `webtransport` branch、確認時点の HEAD は `ffc6cdb`) に対して、`SETTINGS_WT_ENABLED` の case を分離してクライアント時に値検証する PR を送るか、shiguredo fork の nghttp3 に patch を当てて `deps.json` の参照先を固定するかの判断待ち
-- 併せて、サーバー側の SETTINGS / transport parameter 検証の実装方針も、上流 nghttp3 の `conn_wt_enabled` (`lib/nghttp3_conn.c` line 66-88) にある interop TODO (「server は remote の `SETTINGS_WT_ENABLED` を要求しない」) の扱いを上流と相談する必要がある
-- 上記の外部依存判断が確定するまで実装着手できないため pending に移動
+- 2026-08-21 に nghttp3 上流 (webtransport branch のメンテナ) から、SETTINGS_WT_ENABLED > 1 のクライアント側検証 (draft-ietf-webtrans-http3-16 §3.1 MUST) について「厳密化したいのでなければ現状維持で問題ない (このあたりは常に変更があるため)」との回答を受領した
+- SETTINGS_WT_ENABLED > 1 検証を実現するには nghttp3 fork + patch + `deps.json` の参照先固定が必要になるが、上流方針を踏まえるとメンテナンスコストに見合わないため、本 issue のスコープから当該検証を除外する
+- 加えて、上流 nghttp3 の `conn_wt_enabled` (`lib/nghttp3_conn.c`) にある interop 目的の緩和 (サーバーがクライアントの `SETTINGS_WT_ENABLED` を要求しない) の理由が「webtransport-go が `SETTINGS_WT_ENABLED` を送ってこないため」であることも上流から共有されたため、本 issue のサーバー側実装はこの緩和方針に追随する
+- 残る 2 項目 (クライアント側の transport parameter 検証、サーバー側の transport parameter 検証) は nghttp3 依存がなく、本リポジトリ単独で実装可能なため reopened にしてスコープを絞り直す
 
 ## 目的
 
-draft-ietf-webtrans-http3-16 Section 3.1 の SETTINGS / transport parameter 検証 MUST が未実装のままである問題を修正する。現在はピアの SETTINGS / transport parameter を検証しないため、要件を満たさないピアとの間で WebTransport セッションを確立し得る。
+draft-ietf-webtrans-http3-16 Section 3.1 の QUIC transport parameter 検証 MUST が未実装のままである問題を修正する。現在はピアの transport parameter を検証しないため、要件を満たさないピア (`max_datagram_frame_size` が未設定または 0、`reset_stream_at` が未設定など) との間で WebTransport セッションを確立し得る。
+
+## 対応範囲
+
+- クライアント側で、サーバーの QUIC transport parameter (`max_datagram_frame_size > 0`、`reset_stream_at`) を検証し、要件未達ならセッションを確立しない
+- サーバー側で、クライアントの QUIC transport parameter を検証し、要件未達なら確立済み・新規の全 WebTransport セッションを malformed として扱う
+
+## スコープ外 (見送り or 別扱い)
+
+- **SETTINGS_WT_ENABLED > 1 検証 (見送り)**: 上流 nghttp3 メンテナが「現状維持で OK」と表明していること、および nghttp3 が受信値を boolean 正規化 (`nghttp3_conn_on_settings_entry_received` 内で `dest->wt_enabled = ent->value != 0`) してから `recv_settings2_cb` に渡すためバインディング側の callback では raw value を観測できないこと、の 2 点から本 issue では対応しない。将来的に nghttp3 側の設計が変わったときに再検討する
+- **サーバー側の SETTINGS_WT_ENABLED 未受信の許容 (上流方針を維持)**: 上流の `conn_wt_enabled` は webtransport-go との interop 目的でクライアントの `SETTINGS_WT_ENABLED` を要求しない設計になっている。本 issue はこの方針に追随する
+- **SETTINGS 単体の値検証**: `SETTINGS_H3_DATAGRAM` の値 > 1 検証は nghttp3 側で実施済み。`SETTINGS_ENABLE_CONNECT_PROTOCOL` / `SETTINGS_H3_DATAGRAM` / `SETTINGS_WT_ENABLED` の要件充足の判断も nghttp3 の `nghttp3_conn_submit_wt_request` が `conn_wt_enabled` を通じて担保しているため、本 issue では扱わない
+- **draft §3.1 MAY の `WT_REQUIREMENTS_NOT_MET` による接続クローズ**: 要件未達時の接続クローズ手段は MAY であり、上記のとおり要件充足の判断は nghttp3 側で担保されているため、本 issue では扱わない
 
 ## 現状
 
-- `src/bindings/webtransport_h3.cpp` の `H3Session::recv_settings2_cb` は完全な no-op で、受信 SETTINGS を一切検証しない
+- QUIC transport parameter の getter は `src/bindings/quic.cpp` に `remote_max_datagram_frame_size()` が存在するが、`reset_stream_at` の remote 値を取得する getter は未実装
+- WebTransport セッションを受理・確立する経路 (クライアント側は `H3Session` の CONNECT 送出前後、サーバー側は CONNECT 受信時) では transport parameter の検証を行っていない
 - 未達の MUST:
-  - 「クライアントは SETTINGS_WT_ENABLED が 1 より大きい値を受信したら H3_SETTINGS_ERROR で接続を閉じる MUST」(draft Section 3.1。MUST の主体は **クライアントのみ**)。nghttp3 は受信時に `dest->wt_enabled = ent->value != 0` と boolean 正規化してからコールバックへ渡すため、`recv_settings2_cb` では値 2 を観測できない
-  - 「サーバーの SETTINGS / transport parameter が要件を満たさない場合、クライアントはセッションを確立しない MUST」(transport parameter の max_datagram_frame_size > 0・reset_stream_at はどこでも検証されない)
-  - 「クライアントの SETTINGS / transport parameter が要件を満たさない場合、サーバーは確立済み・新規の全セッションを malformed として扱う MUST」
-- nghttp3 のサーバー分岐は remote の SETTINGS_WT_ENABLED / enable_connect_protocol を要求しない (interop 目的のコメントあり。remote の SETTINGS_H3_DATAGRAM は要求する)
-- なお、SETTINGS_H3_DATAGRAM の値検証 (1 超は H3_SETTINGS_ERROR) は nghttp3 側で実施済み
+  - クライアント: サーバーの transport parameter (`max_datagram_frame_size > 0` と `reset_stream_at`) を検証してセッション確立を判断すること
+  - サーバー: クライアントの transport parameter を検証して、要件未達なら全セッションを malformed として扱うこと
 
 ## 設計方針
 
-- **SETTINGS_WT_ENABLED > 1 の検出は nghttp3 側の変更が必要**。nghttp3 が受信時に値を boolean 正規化するため、`recv_settings2_cb` だけでは値 2 を検出できない。nghttp3 の webtransport ブランチ (deps.json で `branch: "webtransport"` 指定) の `nghttp3_conn_on_settings_entry_received` (SETTINGS_WT_ENABLED の処理分岐。互換用 ID の WT_MAX_SESSIONS / WT_MAX_SESSIONS_DRAFT7 / ENABLE_WEBTRANSPORT_DRAFT2 と case を共有している) で、**draft 版の SETTINGS_WT_ENABLED (0x2c7cf000) の値 > 1** を `NGHTTP3_ERR_H3_SETTINGS_ERROR` にする変更を加える。適用範囲は **クライアント側の受信時のみ** とする (draft の「値 > 1 は H3_SETTINGS_ERROR」MUST の主体はクライアントのみであり、サーバーが値 2 を受信した場合の正しい挙動は「全セッションを malformed として扱う」MUST のため、サーバー側は boolean 正規化を維持して malformed 扱いと整合させる)。互換用 ID は従来どおり受理するかは実装時に判断。受け渡し経路は open 中の issue 0092 と同様 (上流 PR、間に合わなければ deps.json の参照先固定) とする。本 issue の実装は 0092 と並行し得るが、両者が `recv_settings2_cb` と nghttp3 依存に触れるため、実装順序と変更の衝突を考慮する
-- `recv_settings2_cb` では、nghttp3 から通知される検証済みの SETTINGS 状態を基に、クライアント側で「サーバーの SETTINGS が要件を満たすか」を検証する。クライアント側の検証項目は draft Section 3.1 の 3 項目 (SETTINGS_WT_ENABLED = 1 / SETTINGS_ENABLE_CONNECT_PROTOCOL = 1 / SETTINGS_H3_DATAGRAM = 1)。なお、クライアントはサーバーの SETTINGS 受信まで CONNECT を送らない MUST と 3 項目未達ならセッションを確立しない MUST は nghttp3 の `nghttp3_conn_submit_wt_request` が `conn_wt_enabled` で担保済みのため、本 issue のクライアント側 SETTINGS 検証は、要件未達時に接続を閉じる場合の手段 (draft の MAY である WT_REQUIREMENTS_NOT_MET で接続を閉じる) を実装する用途に限定する
-- **クライアント側**でサーバーの transport parameter 要件を検証する: max_datagram_frame_size > 0 は既存の `remote_max_datagram_frame_size()` (src/bindings/quic.cpp) で取得できる。reset_stream_at の remote 値は getter が存在しないため、ngtcp2 の `ngtcp2_transport_params` の `reset_stream_at` を参照する getter を追加して検証する
-- **サーバー側**でクライアントの SETTINGS / transport parameter を検証し、要件未達なら「確立済み・新規の全セッションを malformed として扱う」を実行する。なお、サーバー側の SETTINGS 検証 (remote の h3_datagram 要求・確立済みセッションの abort・新規 CONNECT 拒否) は nghttp3 の `conn_wt_enabled` / `abort_wt_session` が既に実施済みのため、本 issue のサーバー側実装対象は主に **transport parameter 検証と、要件未達時の malformed 扱いの整合** とする (nghttp3 の既存挙動との重複実装を避ける)。具体挙動 (確立済みセッションの終了方法・受理前リクエストの拒否方法) は実装時に RFC 9114 Section 4.1.2 を参照して決める。draft のとおり、サーバーはクライアントの SETTINGS 受信前に CONNECT が届き得るため、SETTINGS 未受信時の扱い (保留 or 無効扱い) も決定する
-- テストはモック不使用の規約に従い、実 QUIC / HTTP/3 スタックで不正な SETTINGS を送る構成にする。nghttp3 の送信側は SETTINGS_WT_ENABLED の値を 1 に固定している (`nghttp3_stream.c` の SETTINGS 書き出し) ため、値 2 の SETTINGS を送出する手段 (送信コードのテスト用変更 or テスト専用の送出経路) を用意する
+- **transport parameter の getter 追加**: ngtcp2 の `ngtcp2_transport_params.reset_stream_at` を参照する getter を `src/bindings/quic.cpp` に追加する (既存の `remote_max_datagram_frame_size()` と同様のパターン)
+- **クライアント側検証**: WebTransport セッション確立前のタイミング (CONNECT 送出前ないし応答受領前) にサーバーの transport parameter を検証する。要件未達なら CONNECT を送らずセッションを閉じる。既存の `remote_max_datagram_frame_size()` と新規追加の `reset_stream_at` getter を利用する
+- **サーバー側検証**: WebTransport セッションを受理する経路 (CONNECT 受信時) にクライアントの transport parameter を検証する。要件未達なら受理せず、確立済みセッションがあれば malformed 扱いで終了する。具体挙動は RFC 9114 Section 4.1.2 を参照して決める
+- **テスト**: モック不使用の規約に従い、実 QUIC / HTTP/3 スタックで transport parameter を意図的に欠落させたピア (`max_datagram_frame_size = 0` / `reset_stream_at` 未設定) を用意して検証する。ngtcp2 のクライアント/サーバー側で transport parameter の書き出しをテスト用に制御する経路が必要になる
 
 ## 完了条件
 
-- クライアントが SETTINGS_WT_ENABLED の値 2 を受信したときに H3_SETTINGS_ERROR で接続が閉じる
-- クライアントがサーバーの transport parameter 要件 (max_datagram_frame_size > 0 / reset_stream_at) を検証し、要件未達のサーバーとセッションを確立しない
-- サーバーがクライアントの SETTINGS / transport parameter を検証し、要件未達なら確立済み・新規の全セッションを malformed として扱う
+- クライアントがサーバーの transport parameter 要件 (`max_datagram_frame_size > 0` / `reset_stream_at`) を検証し、要件未達のサーバーとセッションを確立しない
+- サーバーがクライアントの transport parameter を検証し、要件未達なら確立済み・新規の全セッションを malformed として扱う
 - 上記のテストが追加され通る
