@@ -9,6 +9,7 @@ import asyncio
 import socket
 from typing import TYPE_CHECKING, Self
 
+from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
 
@@ -257,6 +258,47 @@ class Server:
         loop = asyncio.get_running_loop()
         await loop.sock_sendto(self._socket, packet.data, dest)
 
+    async def _drain_all_to(self, addr: tuple[str, int], client: ClientConnection) -> None:
+        """該当クライアントの送信キューにあるパケットをすべて送出する
+
+        close() 後は draining 状態に入るため、_send_to の 1 パケット制約
+        (ACK 待ちハング懸念) は該当しない。CONNECTION_CLOSE を含む
+        残存パケットを確実にピアへ送出するために使用する。
+        低レベル QUIC 側の実装バグで send() が延々と返し続けても
+        run() 全体が凍らないよう防御的に上限を設ける。
+        """
+        if self._socket is None or client.quic_connection is None:
+            return
+        loop = asyncio.get_running_loop()
+        # 通常は 1〜数パケットで返り値が None になる。64 は防御的な上限
+        for _ in range(64):
+            packet = client.quic_connection.send()
+            if packet is None:
+                return
+            if packet.remote_host and packet.remote_port:
+                dest: tuple[str, int] = (packet.remote_host, packet.remote_port)
+            else:
+                dest = addr
+            await loop.sock_sendto(self._socket, packet.data, dest)
+
+    async def _close_client_connection_on_h3_error(
+        self, addr: tuple[str, int], client: ClientConnection
+    ) -> None:
+        """HTTP/3 プロトコルエラーで閉じた ClientConnection を回収する
+
+        client.http3_connection.is_closed() が True になったときに呼び、
+        QUIC 層に CONNECTION_CLOSE を送出したうえで self._clients から削除する。
+        既存の CONNECTION_CLOSED ハンドラと同じ in ガード付き削除を行う。
+        呼び出し側は先に _send_to を通して HTTP/3 が生成した残存バイト列を
+        吐き切ってから本メソッドを呼ぶこと (受信成功後分岐・タイマー分岐の
+        両方で対称)。
+        """
+        if client.quic_connection is not None and not client.quic_connection.is_closed():
+            client.quic_connection.close(H3_GENERAL_PROTOCOL_ERROR, "http3 protocol error")
+            await self._drain_all_to(addr, client)
+        if addr in self._clients:
+            del self._clients[addr]
+
     async def submit_response(
         self,
         addr: tuple[str, int],
@@ -417,14 +459,28 @@ class Server:
 
                 await self._send_to(addr, client)
 
+                # 受信成功後の分岐: HTTP/3 プロトコルエラーで低レベルが
+                # 自主クローズしていたら CONNECTION_CLOSE を送出して回収する
+                if client.http3_connection is not None and client.http3_connection.is_closed():
+                    await self._close_client_connection_on_h3_error(addr, client)
+
             except TimeoutError:
                 pass
 
-            for addr, client in list(self._clients.items()):
+            # タイムアウト分岐でも通る per-client タイマー処理ループ。
+            # ピアが黙り込んで受信成功後分岐に入らないケースを回収する。
+            # ループ変数は try 節の addr とシャドウさせないため client_addr を使う
+            for client_addr, client in list(self._clients.items()):
                 if client.quic_connection is not None:
                     timeout = client.quic_connection.get_timeout()
                     if timeout is not None and timeout <= 0:
                         client.quic_connection.handle_timeout()
-                        await self._send_to(addr, client)
+                        await self._send_to(client_addr, client)
+                # HTTP/3 プロトコルエラーで自主クローズした client を回収する。
+                # 受信成功後分岐と対称に close 前に _send_to を通し、
+                # HTTP/3 が生成した残存バイト列を吐き切ってから CONNECTION_CLOSE を送る
+                if client.http3_connection is not None and client.http3_connection.is_closed():
+                    await self._send_to(client_addr, client)
+                    await self._close_client_connection_on_h3_error(client_addr, client)
 
             await asyncio.sleep(0.001)

@@ -994,3 +994,113 @@ async def test_large_post_body(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_http3_client_run_exits_on_client_close(test_certificates):
+    """Client.run() 実行中に close() が呼ばれると run() が終了することを回帰確認する
+
+    close() は QUIC 側の close() を呼び CONNECTION_CLOSE をピアに送出する。
+    Client.run() は次周回で QUIC の CONNECTION_CLOSED イベントを受けて
+    _running = False になり終了する。新規追加した HTTP/3 層の is_closed()
+    チェックが既存の QUIC 終了経路を壊していないことの回帰確認。
+    """
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    connected = await client.connect()
+    assert connected is True
+
+    # run() をバックグラウンドで起動、少し待ってから close を呼ぶ
+    run_task = asyncio.create_task(client.run())
+    await asyncio.sleep(0.05)
+
+    await client.close()
+
+    # QUIC CONNECTION_CLOSED 経路で数秒以内に終了する
+    await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done() is True
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_http3_server_removes_client_on_client_close(test_certificates):
+    """Client が close() したとき Server が該当 client を辞書から回収することを回帰確認する
+
+    Client.close() で送出される QUIC CONNECTION_CLOSE を Server 側で受信し、
+    既存 CONNECTION_CLOSED ハンドラで del self._clients[addr] される。
+    新規追加した HTTP/3 層の is_closed() チェックが既存経路を
+    壊していないことの回帰確認。
+    """
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    connected = await client.connect()
+    assert connected is True
+
+    # ハンドシェイクとクライアント登録を確定させるためリクエストを 1 本送る
+    stream_id = await client.request("GET", "/")
+    assert stream_id >= 0
+
+    run_task = asyncio.create_task(client.run())
+    await asyncio.sleep(0.2)
+
+    # この時点で server._clients に addr が登録されている
+    assert len(server._clients) == 1
+
+    await client.close()
+
+    # close() 経由で Client.run() が自然終了する (回帰: cancel 不要で終了する)
+    await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done() is True
+
+    # server 側で該当 client が回収されていること
+    # (public API 未提供のため private 属性で確認する)
+    assert len(server._clients) == 0
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await server.stop()
