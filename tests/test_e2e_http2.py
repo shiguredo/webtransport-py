@@ -334,3 +334,97 @@ async def test_server_client_post_with_body(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_run_exits_on_close(test_certificates):
+    """Client.run() 実行中に close() が呼ばれると run() が終了することを回帰確認する
+
+    close() は最初の await より前に同期的に _running = False を立てるため、
+    次のループ頭で run() が抜ける。is_closed() チェック追加が既存経路の
+    挙動を壊していないことを確認するための回帰テスト。
+    """
+    from webtransport.http2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+    assert client.is_connected is True
+
+    # run() をバックグラウンドで起動し、SETTINGS 交換 1 周分待ってから close() を呼ぶ
+    run_task = asyncio.create_task(client.run())
+    await asyncio.sleep(0.05)
+
+    await client.close()
+
+    # 追加した is_closed() チェックが既存 close 経路を壊していなければ数秒以内に終了する
+    await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done() is True
+
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_run_exits_on_goaway_injection(test_certificates):
+    """GOAWAY フレーム受信で Client.run() が終了することを回帰確認する
+
+    低レベル Connection.receive() に GOAWAY フレームのバイト列を直接注入する。
+    bindings の on_frame_recv_callback は GO_AWAY イベント push 後に
+    closed_ = true を立てる (src/bindings/http2.cpp の NGHTTP2_GOAWAY 分岐)。
+    このため GO_AWAY イベント経路と is_closed() チェック経路の両方で
+    _running = False が立つが、bool への同値代入は idempotent で例外にならない。
+    追加した is_closed() チェックが既存 GO_AWAY 経路を壊していないことを
+    確認するための回帰テスト。
+    """
+    from webtransport.http2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+    assert client.is_connected is True
+
+    run_task = asyncio.create_task(client.run())
+    # SETTINGS 交換で 1 周分待ってから注入する
+    await asyncio.sleep(0.05)
+
+    # GOAWAY フレーム (Length=8, Type=7, Flags=0, StreamID=0,
+    # Payload=Last-Stream-ID:0, Error-Code:NO_ERROR)
+    goaway_frame = (
+        b"\x00\x00\x08"  # Length: 8
+        b"\x07"  # Type: GOAWAY
+        b"\x00"  # Flags
+        b"\x00\x00\x00\x00"  # Stream ID: 0
+        b"\x00\x00\x00\x00"  # Last-Stream-ID: 0
+        b"\x00\x00\x00\x00"  # Error Code: NO_ERROR
+    )
+    assert client._connection is not None
+    client._connection.receive(goaway_frame)
+
+    # GO_AWAY 受信で数秒以内に終了する
+    await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done() is True
+
+    await client.close()
+    await server.stop()

@@ -1,7 +1,7 @@
 # HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-21
 - Branch: feature/refactor-http2-client-run-loop-symmetry
 - Polished: 2026-08-21
 
@@ -41,14 +41,11 @@ HTTP/3 側の高レベル `run()` が握りつぶされたエラーで終了で�
 
 ## 解決方法
 
-- 変更対象: `src/webtransport/http2/client.py`
-  - `Client.run` のメインループのイベント処理ループ (`while True: next_event()`) の直後、`await asyncio.sleep(0.01)` の前で `if self._connection.is_closed(): self._running = False` を追加する
-- 変更対象: `tests/test_e2e_http2.py`
-  - HTTP/2 の e2e テストパターンに合わせて次の 2 ケース (回帰) を追加する:
-    - GO_AWAY 受信経路の回帰: 低レベル `Connection.receive` に GOAWAY フレームのバイト列を注入して `Client.run()` が終了することを検証する (bindings の `on_frame_recv_callback` で GO_AWAY イベント経路と `is_closed()` チェック経路の両方が立ち、二重の `_running = False` 代入で例外にならないことも実運用シナリオで担保する)
-    - `close()` 呼び出し経路の回帰: `Client.run()` 実行中にクライアント自身が `close()` を呼び、run() が終了することを検証する
-- 変更対象: `CHANGES.md`
-  - `## develop` セクションの `### misc` に `[UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する` を追加する (refactor カテゴリのため `### misc` の `[UPDATE]`)
-- 変更対象外: `src/webtransport/http2/client.py` の `_receive` / `_send_pending` / `close` (現行挙動を維持する)
-- 変更対象外: `src/webtransport/http3/client.py` (0107 のスコープ)
-- 変更対象外: `src/bindings/http2.cpp` (bindings 側にテスト専用ヘルパを追加する話は別 issue で扱う)
+- `src/webtransport/http2/client.py`: `Client.run` のイベント処理ループ (`while True: next_event()`) の直後、`await asyncio.sleep(0.01)` の前で `if self._connection.is_closed(): self._running = False` を追加した。`src/webtransport/http2/server.py` の `_handle_client` (`if connection.is_closed(): break`) と対称になる位置に配置した
+- `tests/test_e2e_http2.py`: 次の 2 つの回帰テストを追加した:
+  - `test_client_run_exits_on_close`: `Client.run()` 実行中に `close()` を呼び、run() が終了することを検証する
+  - `test_client_run_exits_on_goaway_injection`: 低レベル `Connection.receive` に GOAWAY フレームのバイト列を注入し、`Client.run()` が終了することを検証する
+- `CHANGES.md`: `## develop` の `### misc` に `[UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する` を追加した
+- テスト全 722 件パス、`ruff format` / `ruff check` / `ty check` はすべて通過
+
+フレームエラー独立検証テストは、Python 側から nghttp2 の negative return 経路を誘発できないため本 issue では追加していない。bindings 側にテスト専用ヘルパを追加する話は別 issue で扱う
