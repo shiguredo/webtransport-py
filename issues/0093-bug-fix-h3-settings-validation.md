@@ -5,6 +5,14 @@
 - Branch: feature/fix-h3-settings-validation
 - Polished: 2026-08-18
 
+## pending にした理由
+
+- 2026-08-21 の polish 過程で、`SETTINGS_WT_ENABLED > 1` のクライアント側検証 (draft-ietf-webtrans-http3-16 §3.1 MUST) を実装するには nghttp3 (webtransport branch) 側の対応が必要と判明
+- nghttp3 は `nghttp3_conn_on_settings_entry_received` (`lib/nghttp3_conn.c` line 2377-2384) で受信値を boolean 正規化してから `recv_settings2_cb` に渡すため、Python バインディング側の callback 単独では raw value を観測できない
+- 上流 (`github.com/ngtcp2/nghttp3` の `webtransport` branch、確認時点の HEAD は `ffc6cdb`) に対して、`SETTINGS_WT_ENABLED` の case を分離してクライアント時に値検証する PR を送るか、shiguredo fork の nghttp3 に patch を当てて `deps.json` の参照先を固定するかの判断待ち
+- 併せて、サーバー側の SETTINGS / transport parameter 検証の実装方針も、上流 nghttp3 の `conn_wt_enabled` (`lib/nghttp3_conn.c` line 66-88) にある interop TODO (「server は remote の `SETTINGS_WT_ENABLED` を要求しない」) の扱いを上流と相談する必要がある
+- 上記の外部依存判断が確定するまで実装着手できないため pending に移動
+
 ## 目的
 
 draft-ietf-webtrans-http3-16 Section 3.1 の SETTINGS / transport parameter 検証 MUST が未実装のままである問題を修正する。現在はピアの SETTINGS / transport parameter を検証しないため、要件を満たさないピアとの間で WebTransport セッションを確立し得る。
