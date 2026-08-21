@@ -146,6 +146,10 @@ size_t Http3Connection::receive_stream_data(int64_t stream_id,
   nghttp3_ssize rv = nghttp3_conn_read_stream2(
       conn_, stream_id, data.data(), data.size(), fin ? 1 : 0, 0);
   if (rv < 0) {
+    // nghttp3 のプロトコルエラー時に closed_ を立てる。
+    // Http2Connection::receive の同種経路と対称にし、高レベル層の
+    // is_closed() チェックで run() を終了させる。
+    closed_ = true;
     return 0;
   }
 
@@ -169,6 +173,9 @@ Http3Connection::get_streams_to_send() {
     nghttp3_ssize sveccnt =
         nghttp3_conn_writev_stream(conn_, &stream_id, &fin, vec, 16);
     if (sveccnt < 0) {
+      // nghttp3 の送信側プロトコルエラー時に closed_ を立てる。
+      // Http2Connection::send の同種経路と対称にする。
+      closed_ = true;
       break;
     }
 

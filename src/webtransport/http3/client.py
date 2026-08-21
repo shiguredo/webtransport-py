@@ -9,6 +9,7 @@ import asyncio
 import socket
 from typing import TYPE_CHECKING, Self
 
+from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
 
@@ -171,6 +172,43 @@ class Client:
             packet.data,
             self._destination_for_packet(packet),
         )
+
+    async def _drain_all(self) -> None:
+        """QUIC の送信キューにあるパケットをすべて送出する
+
+        close() 後は draining 状態に入って新規データ生成が止まるため、
+        _send_pending の 1 パケット制約 (ACK 待ちでハングする懸念) は該当しない。
+        CONNECTION_CLOSE を含む残存パケットを確実にピアへ送出するために使用する。
+        低レベル QUIC 側の実装バグで send() が延々とパケットを返し続けても
+        run() 全体が凍らないよう、防御的に上限を設ける。
+        """
+        if self._quic_connection is None or self._socket is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        # 通常は 1〜数パケットで返り値が None になる。64 は防御的な上限
+        for _ in range(64):
+            packet = self._quic_connection.send()
+            if packet is None:
+                return
+            await loop.sock_sendto(
+                self._socket,
+                packet.data,
+                self._destination_for_packet(packet),
+            )
+
+    async def _close_on_h3_error(self) -> None:
+        """HTTP/3 プロトコルエラー検知時に QUIC を閉じて run() を終了する
+
+        RFC 9114 Section 5.3 (Immediate Application Closure) に沿って
+        QUIC CONNECTION_CLOSE を送出したうえで _running を落とす。
+        error_code は H3_GENERAL_PROTOCOL_ERROR (RFC 9114 Section 8.1) を使用する。
+        """
+        if self._quic_connection is not None and not self._quic_connection.is_closed():
+            self._quic_connection.close(H3_GENERAL_PROTOCOL_ERROR, "http3 protocol error")
+            await self._drain_all()
+        self._running = False
+        self._connected = False
 
     async def _receive(self) -> None:
         """データを受信する"""
@@ -407,6 +445,14 @@ class Client:
             timeout = self._quic_connection.get_timeout()
             if timeout is not None and timeout <= 0:
                 self._quic_connection.handle_timeout()
+
+            # HTTP/3 層のプロトコルエラーで低レベルが自主クローズしたとき、
+            # QUIC の CONNECTION_CLOSED イベントは発火しないため、
+            # is_closed() を確認して QUIC 層に CONNECTION_CLOSE を送出しつつ
+            # run() を終了する。H3 が閉じていれば必ず run を止めるため、
+            # QUIC 側の状態は close() 呼び出し可否の判定にだけ使う
+            if self._http3_connection.is_closed():
+                await self._close_on_h3_error()
 
             await asyncio.sleep(0.01)
 

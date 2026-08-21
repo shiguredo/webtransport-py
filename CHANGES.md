@@ -165,6 +165,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の受信ストリーム数が広告した Maximum Streams を超えても検知せずセッションを閉じない問題を修正する
   - @voluntas
+- [FIX] HTTP/3 のプロトコルエラーで run() が QUIC アイドルタイムアウトまで無限ハングする問題を修正する
+  - @voluntas
 
 ### misc
 
