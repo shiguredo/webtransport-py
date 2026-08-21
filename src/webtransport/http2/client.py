@@ -260,6 +260,12 @@ class Client:
                 elif event.type == http2_low.EventType.GO_AWAY:
                     self._running = False
 
+            # フレームエラーで低レベルが自主クローズしたとき、GO_AWAY イベントも
+            # TCP EOF も発火しないため、is_closed() を確認して終了する。
+            # サーバー側 (server.py の _handle_client) と同じパターン
+            if self._connection.is_closed():
+                self._running = False
+
             await asyncio.sleep(0.01)
 
     async def close(self) -> None:

@@ -168,6 +168,8 @@
 
 ### misc
 
+- [UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する
+  - @voluntas
 - [FIX] QUIC 受信フロー制御テストの ACK 遅延タイマーを確実に満了させるよう修正する
   - @voluntas
 - [FIX] ブラウザテストの接続確立フレークをリトライで回避する
