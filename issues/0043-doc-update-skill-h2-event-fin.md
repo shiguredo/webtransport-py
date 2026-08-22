@@ -1,7 +1,7 @@
 # skills/webtransport-py/SKILL.md のイベント型の記述に h2.Event の fin フィールドを追加する
 
 - Created: 2026-08-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/update-skill-h2-event-fin
 - Polished: {YYYY-MM-DD}
 
@@ -23,3 +23,8 @@
 ## 完了条件
 
 - `skills/webtransport-py/SKILL.md` の「イベント型」セクションの `h2.Event` のフィールド一覧に `fin` が記載され、`src/bindings/webtransport_h2.cpp` の `H2Event` バインディングと一致する
+
+## 解決方法
+
+- 実装は不要だった。triage で確認したところ、`skills/webtransport-py/SKILL.md` の「イベント型 (EventType)」セクションには既に「h2.Event はさらに fin を持つ」の記述があり、`src/bindings/webtransport_h2.cpp` の `H2Event` バインディング (`.def_ro("fin", &H2Event::fin)`) と一致する状態だった
+- 記述の追加自体は SKILL.md を最新化した別作業のコミットですでに反映済みだったため、実装・テストは行わず closed にする
