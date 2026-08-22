@@ -55,8 +55,15 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv sync --only-group test
+          uv sync --only-group test --only-group lint
           uv pip install wheelhouse/*.whl
+
+      - name: Run lint
+        run: |
+          uv run ruff check src/ tests/ examples/
+          uv run ty check src
+        env:
+          UV_NO_SYNC: 1
 
       - name: Run tests
         run: |
@@ -108,8 +115,15 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv sync --only-group test
+          uv sync --only-group test --only-group lint
           uv pip install wheelhouse/*.whl
+
+      - name: Run lint
+        run: |
+          uv run ruff check src/ tests/ examples/
+          uv run ty check src
+        env:
+          UV_NO_SYNC: 1
 
       - name: Run tests
         run: |
