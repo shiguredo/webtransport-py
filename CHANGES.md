@@ -181,6 +181,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 が :protocol "webtransport" トークンの CONNECT をネイティブセッションとして受理する問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 が "webtransport" トークンの CONNECT を拒否し実ブラウザとセッション確立できない問題を修正する
+  - @voluntas
 
 ### misc
 
