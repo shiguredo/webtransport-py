@@ -320,7 +320,9 @@ class Client:
 
         # サーバーの transport parameter を検証する
         # (draft-ietf-webtrans-http3-16 Section 3.1)。要件未達なら
-        # CONNECT を送らずにセッションを確立しない
+        # CONNECT を送らずにセッションを確立しない。reset_stream_at の
+        # 扱い (実ブラウザ互換のため必須としない) は
+        # meets_transport_param_requirements の docstring を参照する
         if self._quic_connection is None or not meets_transport_param_requirements(
             self._quic_connection
         ):

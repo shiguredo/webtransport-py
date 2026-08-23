@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/fix-h3-transport-param-browser-interop
 - Polished: 2026-08-18
 
@@ -57,3 +57,10 @@ draft-ietf-webtrans-http3-16 Section 3.1 の QUIC transport parameter 検証 MUS
 - `src/webtransport/h3/client.py`: コンストラクタに `quic_config` を追加。connect() のハンドシェイク完了直後 (CONNECT 送出前) にサーバーの transport parameter を検証し、要件未達なら `False` を返す
 - `src/webtransport/h3/server.py`: コンストラクタに `quic_config` を追加。SESSION_READY (CONNECT 受信) 時にクライアントの transport parameter を検証し、要件未達なら H3_MESSAGE_ERROR (0x010E) で接続を閉じる (RFC 9114 Section 4.1.2)
 - テスト: `tests/test_e2e_webtransport_h3.py` に欠落 TP ピアとの e2e テスト 6 件 (datagram / reset_stream_at / both、クライアント側・サーバー側)、`tests/test_quic.py` に低レベル getter / config テスト 3 件を追加
+
+## 解決方法 (実ブラウザ互換の再修正)
+
+- `src/webtransport/h3/_transport_params.py`: `meets_transport_param_requirements` を「`max_datagram_frame_size > 0` のみ必須」に変更。`reset_stream_at` は実ブラウザ (Chromium / WebKit) が現時点で送信しないため、相互運用性を優先して必須から外す (draft-ietf-webtrans-http3-16 Section 3.1 の該当 MUST は将来の改訂で見直す可能性がある)。クライアント・サーバー検証は `max_datagram_frame_size > 0` の欠落 (未設定・0) のみを拒否する
+- `src/webtransport/h3/client.py` / `server.py`: 検証のコメントを緩和後の判定内容に合わせて更新 (判定ロジックは共通ヘルパーに集約済みのため変更なし)
+- テスト: `tests/test_e2e_webtransport_h3.py` の欠落 TP ピアテストを更新。`reset_stream_at` 欠落は受け入れることの検証テスト 2 件 (`test_client_connect_accepts_server_without_reset_stream_at` / `test_server_accepts_client_without_reset_stream_at`) を新規追加し、拒否テスト 2 件は `datagram` / `both` に絞る
+- 確認: 実ブラウザ E2E (Chromium 8 件 / WebKit 16 件) が全件通ることをローカルで確認。`tests/browser/` 全滅の原因が `reset_stream_at` 緩和で回復することを実測で確認済み

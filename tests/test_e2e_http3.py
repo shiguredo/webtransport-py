@@ -1,6 +1,7 @@
 """webtransport.http3 高レベル API テスト"""
 
 import asyncio
+import time
 
 import pytest
 
@@ -1099,6 +1100,13 @@ async def test_http3_server_removes_client_on_client_close(test_certificates):
 
     # server 側で該当 client が回収されていること
     # (public API 未提供のため private 属性で確認する)
+    # client.close() で送出される CONNECTION_CLOSE の受信・処理はサーバー側の
+    # イベントループ次第で、client.close() の完了と同期しないため、
+    # 削除されるまで待ってから検証する (フレークを避ける)。CONNECTION_CLOSE
+    # はクライアント送出済みで必ず届く (UDP ロスは not acked で ngtcp2 が再送)
+    deadline = time.monotonic() + 5.0
+    while len(server._clients) != 0 and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
     assert len(server._clients) == 0
 
     server_task.cancel()

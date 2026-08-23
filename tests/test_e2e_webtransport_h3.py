@@ -7,6 +7,7 @@ h3.Session) を使う。
 
 import asyncio
 import socket
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -3258,8 +3259,8 @@ def _make_config_missing_transport_params(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "missing",
-    ["datagram", "reset_stream_at", "both"],
-    ids=["datagram", "reset_stream_at", "both"],
+    ["datagram", "both"],
+    ids=["datagram", "both"],
 )
 async def test_client_connect_rejects_server_without_transport_params(
     test_certificates,
@@ -3268,12 +3269,14 @@ async def test_client_connect_rejects_server_without_transport_params(
     """サーバーが transport parameter を欠落させていると Client.connect() が False を返すことを確認
 
     draft-ietf-webtrans-http3-16 Section 3.1 の MUST (サーバーは
-    max_datagram_frame_size > 0 と reset_stream_at を送ること) を満たさない
-    サーバーとはセッションを確立しない。検証はハンドシェイク完了直後
-    (CONNECT 送出前) に行われるため、クライアントは CONNECT を送らずに
-    False を返す。サーバー側で SESSION_READY が発火しないことをあわせて
-    検証し、CONNECT が送出されていないことを直接確認する。修正前は検証が
+    max_datagram_frame_size > 0 を送ること) を満たさないサーバーとは
+    セッションを確立しない。検証はハンドシェイク完了直後 (CONNECT 送出前)
+    に行われるため、クライアントは CONNECT を送らずに False を返す。
+    サーバー側で SESSION_READY が発火しないことをあわせて検証し、
+    CONNECT が送出されていないことを直接確認する。修正前は検証が
     無く、要件未達のサーバーとセッションが確立し得た。
+    reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
+    このテストの対象外である。
     """
     from webtransport.h3 import Client, Server
 
@@ -3322,8 +3325,8 @@ async def test_client_connect_rejects_server_without_transport_params(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "missing",
-    ["datagram", "reset_stream_at", "both"],
-    ids=["datagram", "reset_stream_at", "both"],
+    ["datagram", "both"],
+    ids=["datagram", "both"],
 )
 async def test_server_rejects_client_without_transport_params(
     test_certificates,
@@ -3337,6 +3340,8 @@ async def test_server_rejects_client_without_transport_params(
     connect() は CONNECT 送出を楽観的に成功させる (2xx 応答を待たない) ため、
     戻り値ではなくサーバーの接続クローズ (error_code 0x010E) と
     on_session_ready 不発火で検証する。
+    reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
+    このテストの対象外である。
     """
     from webtransport.h3 import Client, Server
 
@@ -3390,6 +3395,151 @@ async def test_server_rejects_client_without_transport_params(
         assert quic_conn.error_code == 0x010E
         # 要件未達のクライアントのセッションは確立されない
         assert server_session_ready_called is False
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(
+            *(t for t in [client_task, server_task] if t is not None),
+            return_exceptions=True,
+        )
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_connect_accepts_server_without_reset_stream_at(
+    test_certificates,
+):
+    """reset_stream_at を送らないサーバーでも Client.connect() が成功することを確認
+
+    draft-ietf-webtrans-http3-16 Section 3.1 はクライアント・サーバー双方に
+    reset_stream_at の送信を要求するが、実ブラウザ (Chromium / WebKit) が
+    現時点で送信しないため、相互運用性を優先して必須としない (緩和)。
+    緩和前はブラウザ E2E テストが全滅した (サーバー側が require している
+    ため)。reset_stream_at を欠落させたサーバーとセッションが確立できる
+    ことを検証する。max_datagram_frame_size > 0 の欠落は引き続き拒否される。
+    """
+    from webtransport.h3 import Client, Server
+
+    server_session_ready_called = False
+
+    async def on_session_ready(session_id, addr):
+        nonlocal server_session_ready_called
+        server_session_ready_called = True
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        quic_config=_make_config_missing_transport_params("reset_stream_at"),
+    )
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    client_task = None
+    try:
+        connected = await client.connect()
+        assert connected is True
+        assert client.is_connected is True
+
+        async def run_client():
+            await client.run()
+
+        client_task = asyncio.create_task(run_client())
+
+        # セッション要求がサーバーに届くまで待ってから検証する。
+        # connect() の返却は楽観的 (2xx 応答を待たない) ため、
+        # サーバー側の CONNECT 処理完了を保証しない
+        deadline = time.monotonic() + 5.0
+        while not server_session_ready_called and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert server_session_ready_called is True
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(
+            *(t for t in [client_task, server_task] if t is not None),
+            return_exceptions=True,
+        )
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_accepts_client_without_reset_stream_at(
+    test_certificates,
+):
+    """reset_stream_at を送らないクライアントでもサーバーが接続を維持することを確認
+
+    draft-ietf-webtrans-http3-16 Section 3.1 はクライアント・サーバー双方に
+    reset_stream_at の送信を要求するが、実ブラウザ (Chromium / WebKit) が
+    現時点で送信しないため、相互運用性を優先して必須としない (緩和)。
+    緩和前は SESSION_READY 時にサーバーが H3_MESSAGE_ERROR (0x010E) で
+    接続を閉じ、実ブラウザからのセッション確立が全滅した。ここでは
+    reset_stream_at を欠落させたクライアントからセッションが確立される
+    ことを検証する。max_datagram_frame_size > 0 の欠落は引き続き拒否される。
+    """
+    from webtransport.h3 import Client, Server
+
+    server_session_ready_called = False
+
+    async def on_session_ready(session_id, addr):
+        nonlocal server_session_ready_called
+        server_session_ready_called = True
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        quic_config=_make_config_missing_transport_params("reset_stream_at"),
+    )
+
+    client_task = None
+    try:
+        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+
+        async def run_client():
+            await client.run()
+
+        client_task = asyncio.create_task(run_client())
+
+        # 接続が 0x010E で閉じられていないことを確認するため、
+        # run() が即終了せず継続していることが期待される
+        await asyncio.sleep(0.5)
+        assert client_task.done() is False
+        assert server_session_ready_called is True
     finally:
         if client_task is not None:
             client_task.cancel()

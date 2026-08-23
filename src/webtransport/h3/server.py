@@ -390,7 +390,10 @@ class Server:
                 # 扱う (同 MUST)。RFC 9114 Section 4.1.2 の H3_MESSAGE_ERROR
                 # をエラーコードに用いる。要件未達は接続全体のクライアント
                 # transport parameter に起因し全セッションへ波及するため、
-                # ストリームエラーではなく接続を閉じて扱う
+                # ストリームエラーではなく接続を閉じて扱う。評価は
+                # meets_transport_param_requirements に委ねており、
+                # reset_stream_at の扱い (実ブラウザ互換のため必須としない)
+                # はそちらの docstring を参照する
                 quic_conn = client.quic_connection
                 if quic_conn is None or not meets_transport_param_requirements(quic_conn):
                     if quic_conn is not None:
