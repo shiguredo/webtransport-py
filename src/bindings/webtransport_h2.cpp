@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -2016,6 +2017,7 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             H2Event event;
             event.type = H2EventType::SessionReady;
             event.session_id = stream_id;
+            event.headers = it->second;
             h2_session->push_event(std::move(event));
           }
           h2_session->pending_headers_.erase(it);
@@ -2087,6 +2089,7 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             H2Event event;
             event.type = H2EventType::SessionReady;
             event.session_id = stream_id;
+            event.headers = it->second;
             h2_session->push_event(std::move(event));
 
             // 初期フロー制御 Capsule を送信
@@ -2111,9 +2114,11 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             // 非 2xx 応答 (拒否) を受信したセッションは一度も確立されていない
             // (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
             // session is established when the server sends a 2xx
-            // response」)。SessionClosed は発火しない (黙って削除): 一度も
-            // 確立されていないセッションの終了通知という意味論が合わない。
-            // エントリ削除により、以後の on_stream_close_callback /
+            // response」)。SessionClosed は発火しない: 一度も確立されて
+            // いないセッションの終了通知という意味論が合わないため、
+            // 拒否の通知としては SessionRejected イベント (status_code
+            // 付き) を push してからエントリを削除する。エントリ削除により、
+            // 以後の on_stream_close_callback /
             // close_session / send_datagram / send_stream_data / open_stream /
             // reset_stream / stop_sending / drain_session がエントリ不在で
             // 自然に塞がる (二重発火の経路も残らない)。HTTP/2 ストリーム
@@ -2124,7 +2129,28 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             // (nghttp2 は 1xx で abort せず最終応答を待つ)。1xx を挟んだ
             // 応答の最終応答は NGHTTP2_HCAT_HEADERS で通知され、本分岐で
             // 捕捉されないため wt_sessions_ のエントリと pending_headers_
-            // が残る (既知の制約。1xx 後の最終応答の捕捉不能)
+            // が残る (既知の制約。1xx 後の最終応答の捕捉不能)。なお、
+            // 拒否応答の受信前にキュー済みだったカプセル
+            // (http2_stream_buffers_) は後始末せず、以後の send() で送出
+            // され得る (既存の挙動を維持する。エントリ削除で塞がるのは
+            // 以後の send_datagram 等の新規呼び出しのみ)
+            H2Event rejected_event;
+            rejected_event.type = H2EventType::SessionRejected;
+            rejected_event.session_id = stream_id;
+            // std::from_chars を使い C++ 例外を投げない (nghttp2 の C ABI
+            // 境界のため)。nghttp2 は :status を 100-999 の 3 桁数字として
+            // バリデーション済みだが、パース失敗時と HTTP status code として
+            // 意味を持つ 100-599 の範囲外 (600-999 等) は 0 に丸める
+            // (不正な status code をアプリへ渡さない)
+            uint16_t code = 0;
+            const auto parse_result = std::from_chars(
+                status_value.data(),
+                status_value.data() + status_value.size(), code);
+            if (parse_result.ec != std::errc{} || code < 100 || code >= 600) {
+              code = 0;
+            }
+            rejected_event.status_code = code;
+            h2_session->push_event(std::move(rejected_event));
             h2_session->wt_sessions_.erase(stream_id);
           }
           h2_session->pending_headers_.erase(it);
@@ -2336,7 +2362,8 @@ void bind_webtransport_h2(nb::module_& m) {
       .value("STREAM_RESET", H2EventType::StreamReset)
       .value("STOP_SENDING", H2EventType::StopSending)
       .value("DATAGRAM", H2EventType::Datagram)
-      .value("ERROR", H2EventType::Error);
+      .value("ERROR", H2EventType::Error)
+      .value("SESSION_REJECTED", H2EventType::SessionRejected);
 
   // H2Event
   nb::class_<H2Event>(h2_mod, "Event", "WebTransport over HTTP/2 イベント")
@@ -2353,7 +2380,13 @@ void bind_webtransport_h2(nb::module_& m) {
           "イベントデータ")
       .def_ro("error_code", &H2Event::error_code)
       .def_ro("error_message", &H2Event::error_message)
-      .def_ro("fin", &H2Event::fin);
+      .def_ro("fin", &H2Event::fin)
+      .def_ro("status_code", &H2Event::status_code,
+              "SessionRejected 発火時の HTTP status code。他イベントでは 0 "
+              "(不正値・パース失敗は 0 に丸められる)")
+      .def_ro("headers", &H2Event::headers,
+              "SessionReady 発火時の受信 HTTP ヘッダー (疑似ヘッダー :status "
+              "等を含む)。他イベントでは空");
 
   // H2Session
   nb::class_<H2Session>(h2_mod, "Session",

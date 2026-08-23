@@ -6,7 +6,8 @@
 検証する。draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
 session is established when the server sends a 2xx response」により、非 2xx
 で拒否されたセッションは一度も確立されておらず、終了通知 (SessionClosed)
-の意味論が合わないため黙って削除する。
+の意味論が合わない。そのため SESSION_REJECTED を push してからセッション
+エントリを削除する。
 
 あわせて、サーバー側 reject_session が 2xx 応答でセッション ID を削除しない
 こと (2xx 送出 = セッション確立) を検証する。2xx 保持エントリの残留は
@@ -105,8 +106,8 @@ def test_client_non_2xx_reject_no_session_closed_event() -> None:
 
     非 2xx で拒否されたセッションは一度も確立されていない (draft-15
     Section 3.2) ため、SessionClosed (セッション終了の通知) の意味論が
-    合わない。黙って削除する。本テストは修正前実装でも通る設計ピンであり、
-    SessionClosed 不発火の意味論を守る。
+    合わない。SessionRejected を発火してからエントリを削除する。本テストは
+    修正前実装でも通る設計ピンであり、SessionClosed 不発火の意味論を守る。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -340,3 +341,116 @@ def test_server_reject_status_code_entry_retention(status_code: int, expected_cl
         assert closed_events[0].error_code == 0
     else:
         assert len(closed_events) == 0
+
+
+@pytest.mark.parametrize(
+    "status_code",
+    [403, 302, 500, 600, 700],
+    ids=["forbidden", "redirect", "server_error", "invalid_600", "invalid_700"],
+)
+def test_client_non_2xx_reject_pushes_session_rejected_event(
+    status_code: int,
+) -> None:
+    """非 2xx 拒否で SESSION_REJECTED が status_code 付きで発火することを確認
+
+    SessionClosed は一度も確立されていないセッションの終了通知という
+    意味論が合わないため発火しない (設計ピン)。拒否の通知としては
+    SESSION_REJECTED が発火し、event.session_id が該当セッション、
+    event.status_code には受信した HTTP status code が載る。HTTP status
+    code として意味を持たない 600 以上は 0 に丸められる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # サーバーが非 2xx で拒否する
+    server.reject_session(session_id, status_code)
+    _h2_pump(server, client)
+
+    # SESSION_REJECTED が該当セッションで発火し、他のイベントは発火しない
+    events = _drain_events(client)
+    assert len(events) == 1
+    rejected_event = events[0]
+    assert rejected_event.type == h2.EventType.SESSION_REJECTED
+    assert rejected_event.session_id == session_id
+    expected_status_code = status_code if status_code < 600 else 0
+    assert rejected_event.status_code == expected_status_code
+    assert rejected_event.headers == []
+
+
+def test_session_ready_includes_received_headers() -> None:
+    """SESSION_READY イベントに受信 HTTP ヘッダーが載ることを確認
+
+    サーバー側には CONNECT リクエストのヘッダー (:method / :scheme /
+    :authority / :path / :protocol / origin / webtransport-init) が送信順で、
+    クライアント側には 2xx 応答のヘッダー (:status / webtransport-init) が
+    載る。順序と各ヘッダーの名前・値を検証する。
+
+    サーバー側の headers は将来の高レベル Origin 検証 API が参照する。
+    ただしヘッダー順序は RFC で規定されず、bindings の nva 提出順に依存
+    する (意図的なピンである)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport", "https://example.com")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # サーバー側の SESSION_READY に CONNECT リクエストのヘッダーが載る
+    server_ready_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_READY]
+    assert len(server_ready_events) == 1
+    server_headers = server_ready_events[0].headers
+    assert server_headers[0] == (":method", "CONNECT")
+    assert server_headers[1] == (":scheme", "https")
+    assert server_headers[2] == (":authority", "localhost")
+    assert server_headers[3] == (":path", "/webtransport")
+    assert server_headers[4] == (":protocol", "webtransport")
+    assert server_headers[5] == ("origin", "https://example.com")
+    assert server_headers[6] == ("webtransport-init", "u=262144, bl=262144, br=262144")
+    assert len(server_headers) == 7
+
+    # サーバーが受理すると、クライアント側の SESSION_READY に応答ヘッダーが載る
+    assert server.accept_session(session_id) is True
+    _h2_pump(server, client)
+
+    client_ready_events = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_READY]
+    assert len(client_ready_events) == 1
+    client_headers = client_ready_events[0].headers
+    assert client_headers[0] == (":status", "200")
+    assert client_headers[1] == ("webtransport-init", "u=262144, bl=262144, br=262144")
+    assert len(client_headers) == 2
+
+
+def test_session_ready_status_code_stays_default() -> None:
+    """SESSION_READY イベントの status_code がデフォルト値のままであることを確認
+
+    status_code は SessionRejected 発火時のみ意味を持ち、他のイベントでは
+    デフォルト値 (0) のままである。SessionReady では headers のみ意味を
+    持ち、status_code が 0 であることを検証する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+    assert server.accept_session(session_id) is True
+    _h2_pump(server, client)
+
+    # クライアント側の SESSION_READY の status_code はデフォルト 0
+    ready_events = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1
+    assert ready_events[0].status_code == 0
+
+    # サーバー側の SESSION_READY の status_code もデフォルト 0
+    server_ready_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_READY]
+    assert len(server_ready_events) == 1
+    assert server_ready_events[0].status_code == 0
+
+    # SessionRejected 以外のイベント (StreamData) でもデフォルトのまま
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+    client.send_stream_data(session_id, stream_id, b"hello")
+    _h2_pump(client, server)
+    stream_events = [e for e in _drain_events(server) if e.type == h2.EventType.STREAM_DATA]
+    assert len(stream_events) == 1
+    assert stream_events[0].status_code == 0
+    assert stream_events[0].headers == []
