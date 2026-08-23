@@ -1,12 +1,13 @@
 # WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
 
 - Created: 2026-08-18
-- Completed: 2026-08-23
-- Branch: feature/fix-h3-transport-param-validation
+- Completed: {YYYY-MM-DD}
+- Branch: feature/fix-h3-transport-param-browser-interop
 - Polished: 2026-08-18
 
 ## reopened にした理由
 
+- **実ブラウザとの相互運用性が破壊された (今回)**: 本 issue の実装 (2026-08-23) がサーバー側に「クライアントの `reset_stream_at` 未送信を要件未達として H3_MESSAGE_ERROR で全接続を閉じる」仕組みを持ち込んだ。しかし実ブラウザ (Chromium / WebKit) は現時点で `reset_stream_at` transport parameter を送信しない。その結果、実ブラウザの WebTransport over HTTP/3 セッション確立がすべて 0x010E で拒否され、`tests/browser/` のブラウザ E2E テストが全滅した (実測: `remote_reset_stream_at=False`)。仕様 MUST (draft-ietf-webtrans-http3-16 Section 3.1) と実ブラウザの対応状況の乖離であり、本ライブラリとしては実ブラウザ互換を優先して検証を緩和する
 - 2026-08-21 に nghttp3 上流 (webtransport branch のメンテナ) から、SETTINGS_WT_ENABLED > 1 のクライアント側検証 (draft-ietf-webtrans-http3-16 §3.1 MUST) について「厳密化したいのでなければ現状維持で問題ない (このあたりは常に変更があるため)」との回答を受領した
 - SETTINGS_WT_ENABLED > 1 検証を実現するには nghttp3 fork + patch + `deps.json` の参照先固定が必要になるが、上流方針を踏まえるとメンテナンスコストに見合わないため、本 issue のスコープから当該検証を除外する
 - 加えて、上流 nghttp3 の `conn_wt_enabled` (`lib/nghttp3_conn.c`) にある interop 目的の緩和 (サーバーがクライアントの `SETTINGS_WT_ENABLED` を要求しない) の理由が「webtransport-go が `SETTINGS_WT_ENABLED` を送ってこないため」であることも上流から共有されたため、本 issue のサーバー側実装はこの緩和方針に追随する
