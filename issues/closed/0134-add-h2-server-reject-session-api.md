@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 高レベル Server に拒否 API を追加する
 
 - Created: 2026-08-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/add-h2-server-reject-session-api
 - Polished: 2026-08-21
 
@@ -74,50 +74,23 @@ draft-ietf-webtrans-http2-15 §3.2 の逐語引用 (405 / 403 の SHOULD):
 ## 解決方法
 
 - `src/webtransport/h2/server.py`:
-  - `if TYPE_CHECKING:` ブロック内の import は既存の `Awaitable` / `Callable` をそのまま利用する。`tuple[object, ...]` は組み込み型なので追加 import は不要 (`shiguredo-python` の「Any を使わない、object で代替できる場合は object」規約に従い、既存 `_normalize_addr` (`h3/server.py`) と同じ型を採用)
   - `Server.__init__` に `self._on_session_request: Callable[[int, list[tuple[str, str]], tuple[object, ...]], Awaitable[int | None]] | None = None` を追加
-  - `Server.on_session_request(callback)` メソッドを追加 (既存の `on_session_ready` / `on_stream_data` 等と同じパターン)
-  - `Server._handle_client` の SESSION_READY 分岐を以下に変更 (accept 経路の SessionWriter 生成 + on_session_ready 呼び出しを保つこと):
-    ```python
-    if event.type == h2_low.EventType.SESSION_READY:
-        should_accept = True
-        if self._on_session_request is not None:
-            # peername は対向切断直後などで None を返しうる。
-            # None の場合は callback をスキップして accept 経路に流す
-            peername = writer.get_extra_info("peername")
-            if peername is not None:
-                status = await self._on_session_request(
-                    event.session_id,
-                    event.headers,
-                    peername,
-                )
-                if status is not None:
-                    # bool は int のサブクラスなので明示的に弾く
-                    if isinstance(status, bool):
-                        raise ValueError(
-                            f"on_session_request must return None or int, got bool: {status}"
-                        )
-                    # HTTP status code の妥当範囲は 200-599 のみ受け入れる
-                    if not (200 <= status < 600):
-                        raise ValueError(
-                            f"on_session_request status_code out of range (200-599): {status}"
-                        )
-                    if status >= 300:
-                        # reject
-                        session.reject_session(event.session_id, status)
-                        should_accept = False
-        if should_accept:
-            session.accept_session(event.session_id)
-            session_writer = SessionWriter(writer, session, event.session_id)
-            session_writers[event.session_id] = session_writer
-            if self._on_session_ready is not None:
-                await self._on_session_ready(session_writer)
-    ```
+  - `Server.on_session_request(callback)` メソッドを追加 (既存の `on_session_ready` / `on_stream_data` 等と同じパターン。戻り値の意味と範囲外扱いを docstring に明記)
+  - `Server._handle_client` の SESSION_READY 分岐を、`on_session_request` 登録時にコールバックへ委譲する形式に変更した:
+    - peername (`writer.get_extra_info("peername")`) が None の場合はコールバックをスキップして accept 経路に流す (対向切断直後の限定的タイミングで、accept 側が安全なため)
+    - コールバックが None / 200-299 を返したら accept (既存の SessionWriter 生成 + on_session_ready 呼び出しを維持。低レベル `accept_session` は常に 200 を送出)
+    - コールバックが 300-599 を返したら `session.reject_session(event.session_id, status)` で reject し、SessionWriter は生成しない (on_session_ready / on_session_closed は発火しない)
+    - 範囲外値 (0-199 / 600 以上 / bool を含む非 int) は ValueError を投げ、接続を閉じる (`_handle_client` の finally で writer.close())
+  - コールバック未登録時は従来通り無条件 accept (後方互換)
 - `src/webtransport/h2.pyi`:
-  - `Server` に `on_session_request(callback)` メソッドを追加。docstring に「戻り値 None または int (200-299): accept (低レベルは常に 200 を送出)、int (300-599): reject。範囲外の int や bool は ValueError」旨を記載
-  - コールバック引数 `headers` は SESSION_READY イベントに載る受信 HTTP ヘッダー、`addr` は `writer.get_extra_info('peername')` の戻り値 (IPv6 では 4-tuple、IPv4 では 2-tuple、対向切断直後は取得できないケースあり) 旨も記載
-  - docstring に「`peername` が取得できない場合、callback は呼ばれず accept 経路に流れる」旨を明記 (アプリ側は callback 内で必ずしも呼ばれない前提で書けるように)
-  - docstring には issue 番号を書かないこと
+  - 変更していない。`h2.pyi` は nanobind が生成する bindings のスタブで、高レベル `Server` クラス (純 Python の `server.py`) の型はソース自体が持つため、編集しない
+- `tests/test_e2e_webtransport_h2.py`:
+  - 新規テスト 3 種を追加:
+    - `test_h2_server_rejects_session_with_non_2xx`: `on_session_request` が 403 を返し、対向 Sans-IO `h2_low.Session` が `SESSION_REJECTED` (status_code 403) を受信することを検証
+    - `test_h2_server_accept_via_on_session_request`: `on_session_request` が None / 200 / 299 を返し、accept 経路 (クライアント側 SESSION_READY + サーバー側 on_session_ready 発火) が動作することを検証
+    - `test_h2_server_on_session_request_invalid_status_raises_value_error`: 範囲外値 (0 / -1 / 100 / 600 / False / 3.5) で ValueError により接続が閉じ、拒否・受理・終了のいずれのイベントもクライアントに届かないことを検証
+  - 実 Server と Sans-IO クライアントを組み合わせるヘルパー (`_h2_server_with_sans_io_client` / `_pump_sans_io_h2` 等) を追加
+- `CHANGES.md`: `[ADD]` エントリを追加
 - `tests/test_e2e_webtransport_h2.py` に e2e テスト追加:
   - `test_h2_server_rejects_session_with_non_2xx`: `on_session_request` から 403 を返し、対向 Sans-IO `h2_low.Session` (クライアント役) が 0133 の `SESSION_REJECTED` イベントを受信して `status_code == 403` を確認
   - `test_h2_server_accept_via_on_session_request`: `on_session_request` から `None` または `200` を返し、accept 経路 (`on_session_ready` 発火) が正常動作することを確認

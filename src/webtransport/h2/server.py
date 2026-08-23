@@ -156,6 +156,9 @@ class Server:
         self._running = False
         self._actual_port = 0
 
+        self._on_session_request: (
+            Callable[[int, list[tuple[str, str]], tuple[object, ...]], Awaitable[int | None]] | None
+        ) = None
         self._on_session_ready: Callable[[SessionWriter], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[SessionWriter], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, SessionWriter], Awaitable[None]] | None = None
@@ -193,6 +196,34 @@ class Server:
             callback: async def callback(session_writer: SessionWriter) -> None
         """
         self._on_session_ready = callback
+
+    def on_session_request(
+        self,
+        callback: Callable[[int, list[tuple[str, str]], tuple[object, ...]], Awaitable[int | None]],
+    ) -> None:
+        """CONNECT 要求を受けたときのコールバックを設定する
+
+        コールバックの戻り値:
+            None または int (200-299): accept する (低レベルは常に 200 を
+                送出する。2xx 非 200 を返しても実際の送出は 200 になる)
+            int (300-599): reject する。指定した status_code で応答する
+            範囲外の int (0-199 / 600 以上 / 負値)、bool (int のサブクラス)、
+            非 int (float 等) は ValueError が投げられ、接続が閉じる
+            (コールバック本体が例外を投げた場合も接続は閉じる)
+
+        引数の headers は SESSION_READY イベントに載る受信 HTTP ヘッダー
+        (疑似ヘッダーを含む)。addr は writer.get_extra_info('peername') の
+        戻り値で、IPv6 では 4-tuple、IPv4 では 2-tuple になる。peername が
+        取得できない場合、callback は呼ばれず accept 経路に流れる。
+
+        Args:
+            callback: async def callback(
+                session_id: int,
+                headers: list[tuple[str, str]],
+                addr: tuple[object, ...],
+            ) -> int | None
+        """
+        self._on_session_request = callback
 
     def on_session_closed(
         self,
@@ -324,11 +355,40 @@ class Server:
                         break
 
                     if event.type == h2_low.EventType.SESSION_READY:
-                        session.accept_session(event.session_id)
-                        session_writer = SessionWriter(writer, session, event.session_id)
-                        session_writers[event.session_id] = session_writer
-                        if self._on_session_ready is not None:
-                            await self._on_session_ready(session_writer)
+                        should_accept = True
+                        if self._on_session_request is not None:
+                            # peername は対向切断直後などで None を返しうる。
+                            # None の場合は callback をスキップして accept 経路に流す
+                            peername = writer.get_extra_info("peername")
+                            if peername is not None:
+                                status = await self._on_session_request(
+                                    event.session_id,
+                                    event.headers,
+                                    peername,
+                                )
+                                if status is not None:
+                                    # bool は int のサブクラスなので明示的に弾く。
+                                    # float 等の非 int も受け入れない
+                                    if isinstance(status, bool) or not isinstance(status, int):
+                                        raise ValueError(
+                                            f"on_session_request must return None or int, got {type(status).__name__}: {status!r}"
+                                        )
+                                    # HTTP status code の妥当範囲は 200-599 のみ受け入れる
+                                    if not (200 <= status < 600):
+                                        raise ValueError(
+                                            f"on_session_request status_code out of range (200-599): {status}"
+                                        )
+                                    if status >= 300:
+                                        # reject。サーバー側の reject_session は非 2xx
+                                        # 応答の送出とセッションエントリの削除を行う
+                                        session.reject_session(event.session_id, status)
+                                        should_accept = False
+                        if should_accept:
+                            session.accept_session(event.session_id)
+                            session_writer = SessionWriter(writer, session, event.session_id)
+                            session_writers[event.session_id] = session_writer
+                            if self._on_session_ready is not None:
+                                await self._on_session_ready(session_writer)
 
                     elif event.type == h2_low.EventType.SESSION_CLOSED:
                         session_writer = session_writers.get(event.session_id)

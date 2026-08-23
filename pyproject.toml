@@ -82,6 +82,11 @@ python-preference = "only-managed"
 target-version = "py314"
 line-length = 100
 
+[tool.ruff.lint.isort]
+# ビルド成果物 (*.so) が src に置かれるローカル環境と、置かれない CI とで
+# first-party 判定が分かれるのを防ぐため、webtransport を明示的に first-party に指定する
+known-first-party = ["webtransport"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # package = false のため、ソースツリーを import パスに載せる

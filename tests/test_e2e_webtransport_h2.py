@@ -1,8 +1,14 @@
 """webtransport.h2 (WebTransport over HTTP/2) 高レベル API テスト"""
 
 import asyncio
+import ssl
+import time
+from collections.abc import Awaitable, Callable
 
 import pytest
+
+from webtransport.h2 import Server
+from webtransport.webtransport_ext import h2 as h2_low
 
 
 def _encode_h2_wt_stream_data_frame(http2_stream_id: int, wt_stream_id: int, data: bytes) -> bytes:
@@ -958,3 +964,229 @@ async def test_client_stream_state_error_does_not_notify_on_error(test_certifica
     await asyncio.gather(client_task, return_exceptions=True)
     await client.close()
     await server.stop()
+
+
+async def _open_sans_io_h2_connection(
+    port: int,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """証明書検証を無効化した TLS 接続を開く (Sans-IO クライアント用)"""
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    return await asyncio.open_connection("127.0.0.1", port, ssl=ssl_context)
+
+
+def _send_all_h2_data(session: h2_low.Session, writer: asyncio.StreamWriter) -> None:
+    """Sans-IO セッションの送信バッファを全てワイヤへ送出する"""
+    while True:
+        data = session.send()
+        if data is None:
+            break
+        writer.write(data)
+
+
+async def _pump_sans_io_h2(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    session: h2_low.Session,
+    want_types: set[h2_low.EventType],
+) -> list[h2_low.Event]:
+    """Sans-IO h2.Session をサーバーと往復させ、目的種別のイベントを収集する
+
+    送信バッファを全て送出し、受信データを処理する。want_types に該当する
+    イベントが揃うか、接続終了 (EOF) ・タイムアウト (5 秒) まで繰り返す。
+    発火したイベントは一覧で返し、テスト側で種別フィルターする。
+    """
+    events: list[h2_low.Event] = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        _send_all_h2_data(session, writer)
+        await writer.drain()
+        try:
+            received = await asyncio.wait_for(reader.read(65535), timeout=0.2)
+        except TimeoutError:
+            continue
+        if not received:
+            break  # サーバーが接続を閉じた
+        session.receive(received)
+        while True:
+            event = session.next_event()
+            if event is None:
+                break
+            events.append(event)
+        if any(e.type in want_types for e in events):
+            break
+    return events
+
+
+async def _h2_server_with_sans_io_client(
+    test_certificates: dict[str, str],
+    on_session_request: Callable[
+        [int, list[tuple[str, str]], tuple[object, ...]], Awaitable[int | None]
+    ],
+) -> tuple[Server, asyncio.StreamReader, asyncio.StreamWriter, h2_low.Session, int]:
+    """高レベル Server を起動し、Sans-IO クライアントで CONNECT まで進める
+
+    preface + SETTINGS 交換と、CONNECT を送信バッファへ積み終えた状態を
+    返す (ワイヤへの送出は初回の pump で行われる)。呼び出し側で finally に
+    writer / server の後始末を書くこと。
+
+    @return (server, reader, writer, client, session_id)
+    """
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    server.on_session_request(on_session_request)
+    await server.start()
+
+    reader, writer = await _open_sans_io_h2_connection(server.actual_port)
+    client = h2_low.Session.create_client(h2_low.Config())
+
+    # preface + SETTINGS を送出し、サーバーの SETTINGS を受信する
+    _send_all_h2_data(client, writer)
+    await writer.drain()
+    received = await asyncio.wait_for(reader.read(65535), timeout=2.0)
+    assert received
+    client.receive(received)
+    assert client.is_webtransport_ready() is True
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+
+    return server, reader, writer, client, session_id
+
+
+@pytest.mark.asyncio
+async def test_h2_server_rejects_session_with_non_2xx(test_certificates):
+    """on_session_request が 403 を返すとクライアントに SESSION_REJECTED が届くことを確認
+
+    draft-15 Section 3.2 の Origin 検証失敗時の 403 SHOULD を高レベル
+    Server から発行できることの検証。クライアントは高レベル Client では
+    なく Sans-IO h2_low.Session を使い、非 2xx 受信時の SESSION_REJECTED
+    イベントを直接観測する。
+    """
+
+    async def on_session_request(session_id, headers, addr):
+        assert session_id >= 0
+        assert any(name == ":path" and value == "/webtransport" for name, value in headers)
+        # addr は peername の挙動 (IPv4 では 2-tuple) を担保する
+        assert isinstance(addr, tuple) and len(addr) >= 2
+        return 403
+
+    server, reader, writer, client, session_id = await _h2_server_with_sans_io_client(
+        test_certificates, on_session_request
+    )
+    try:
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={h2_low.EventType.SESSION_REJECTED},
+        )
+        rejected_events = [e for e in events if e.type == h2_low.EventType.SESSION_REJECTED]
+        assert len(rejected_events) == 1
+        assert rejected_events[0].session_id == session_id
+        assert rejected_events[0].status_code == 403
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision", [None, 200, 299], ids=["none", "two_hundred", "two_ninety_nine"]
+)
+async def test_h2_server_accept_via_on_session_request(test_certificates, decision):
+    """on_session_request が None または 200-299 を返すと accept 経路が動作することを確認
+
+    コールバック未登録時と同等の後方互換挙動 (無条件 accept) を保ち、
+    クライアント側は SESSION_READY を受信してセッションが確立する。
+    200-299 を返した場合は accept 判定の経路を通る (299 は上限境界)。
+    """
+    server_ready_event = asyncio.Event()
+
+    async def on_session_request(session_id, headers, addr):
+        return decision
+
+    async def on_session_ready(session_writer):
+        server_ready_event.set()
+
+    server, reader, writer, client, session_id = await _h2_server_with_sans_io_client(
+        test_certificates, on_session_request
+    )
+    server.on_session_ready(on_session_ready)
+    try:
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={h2_low.EventType.SESSION_READY},
+        )
+        ready_events = [e for e in events if e.type == h2_low.EventType.SESSION_READY]
+        assert len(ready_events) == 1
+        assert ready_events[0].session_id == session_id
+        # サーバー側でも on_session_ready が発火して accept 経路が流れる
+        await asyncio.wait_for(server_ready_event.wait(), timeout=2.0)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status_code",
+    [0, -1, 100, 600, False, 3.5],
+    ids=["zero", "negative", "info", "too_high", "bool", "float"],
+)
+async def test_h2_server_on_session_request_invalid_status_raises_value_error(
+    test_certificates,
+    status_code,
+):
+    """on_session_request が範囲外値を返すと ValueError で接続が閉じることを確認
+
+    HTTP status code として意味を持たない値 (0-199 / 600 以上 / bool /
+    非 int) を silent に受け入れると :status が不正な値になるため、範囲
+    チェックで ValueError を投げる。接続が閉じることでクライアント側は
+    EOF を観測し、SESSION_READY / SESSION_REJECTED のどちらも受信しない
+    (この検証はサーバープロセス内の例外を直接観測できないため間接的)。
+    """
+
+    async def on_session_request(session_id, headers, addr):
+        return status_code
+
+    server, reader, writer, client, _ = await _h2_server_with_sans_io_client(
+        test_certificates, on_session_request
+    )
+    try:
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={
+                h2_low.EventType.SESSION_READY,
+                h2_low.EventType.SESSION_REJECTED,
+                h2_low.EventType.SESSION_CLOSED,
+            },
+        )
+        # 拒否・受理・終了のいずれも通知されない
+        assert all(
+            e.type
+            not in (
+                h2_low.EventType.SESSION_READY,
+                h2_low.EventType.SESSION_REJECTED,
+                h2_low.EventType.SESSION_CLOSED,
+            )
+            for e in events
+        )
+        # 接続が閉じられたことを確認する (EOF)
+        remaining = await asyncio.wait_for(reader.read(65535), timeout=1.0)
+        assert remaining == b""
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
