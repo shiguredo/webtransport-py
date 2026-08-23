@@ -73,6 +73,10 @@
   - @voluntas
 - [ADD] WebTransport over HTTP/2 高レベル Server にセッション拒否 API (on_session_request コールバック) を追加する
   - @voluntas
+- [ADD] QUIC Config に reset_stream_at の広告制御 (enable_reset_stream_at) とピアの受信確認 API (remote_reset_stream_at) を追加する
+  - @voluntas
+- [ADD] WebTransport over HTTP/3 の高レベル Client / Server に QUIC 設定 (quic_config) を渡せるようにする
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
@@ -172,6 +176,8 @@
 - [FIX] HTTP/3 のプロトコルエラーで run() が QUIC アイドルタイムアウトまで無限ハングする問題を修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の高レベル Client.connect() が非 2xx 拒否で永久ブロックする問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
   - @voluntas
 
 ### misc

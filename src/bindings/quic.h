@@ -74,6 +74,10 @@ struct QuicConfig {
   bool enable_datagram = true;
   uint64_t max_datagram_frame_size = 65536;
 
+  // RESET_STREAM_AT の受信対応の広告 (draft-ietf-quic-reliable-stream-reset-09
+  // Section 3)。テストで欠落ピアを作るための制御フラグ
+  bool enable_reset_stream_at = true;
+
   // 0-RTT / セッションチケット
   bool enable_early_data = true;
   // create 時に import するセッションチケット (DER)
@@ -589,6 +593,13 @@ class QuicConnection {
   std::optional<uint64_t> remote_initial_max_streams_bidi() const;
   std::optional<uint64_t> remote_initial_max_streams_uni() const;
   std::optional<uint64_t> remote_max_datagram_frame_size() const;
+  /**
+   * ピアが reset_stream_at transport parameter を送信したか
+   *
+   * ピアからトランスポートパラメータを受信していない場合は nullopt。
+   * 受信済みなら true (TP 送信 = 対応広告)。
+   */
+  std::optional<bool> remote_reset_stream_at() const;
 
   /**
    * ローカルのトランスポートパラメータを取得

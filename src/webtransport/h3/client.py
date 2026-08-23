@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport.h3._transport_params import meets_transport_param_requirements
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -40,6 +41,7 @@ class Client:
         idle_timeout_ns: int = 30_000_000_000,
         ca_file: str | None = None,
         verify_callback: Callable[[list[bytes]], bool] | None = None,
+        quic_config: quic.Config | None = None,
     ) -> None:
         """クライアントを初期化する
 
@@ -50,6 +52,11 @@ class Client:
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
             ca_file: CA 証明書ファイルパス
             verify_callback: ピア証明書検証コールバック
+            quic_config: QUIC 設定。省略時は既定値。alpn_protocols /
+                idle_timeout_ns / verify_peer / server_name はコンストラクタ
+                引数の値で接続時に上書きされる。enable_datagram /
+                enable_reset_stream_at を無効化すると WebTransport の要件を
+                満たさないピアを作れる (テスト用)
         """
         self._url = url
         self._verify_peer = verify_peer
@@ -57,6 +64,7 @@ class Client:
         self._idle_timeout_ns = idle_timeout_ns
         self._ca_file = ca_file
         self._verify_callback = verify_callback
+        self._user_quic_config = quic_config
         self._host, self._port, self._path = self._parse_url(url)
 
         self._quic_connection: quic.Connection | None = None
@@ -261,7 +269,9 @@ class Client:
         Returns:
             接続に成功した場合は True
         """
-        quic_config = quic.Config()
+        quic_config = (
+            self._user_quic_config if self._user_quic_config is not None else quic.Config()
+        )
         quic_config.alpn_protocols = ["h3"]
         quic_config.idle_timeout_ns = self._idle_timeout_ns
         quic_config.verify_peer = self._verify_peer
@@ -307,6 +317,15 @@ class Client:
 
             await self._send_pending()
             await asyncio.sleep(0.01)
+
+        # サーバーの transport parameter を検証する
+        # (draft-ietf-webtrans-http3-16 Section 3.1)。要件未達なら
+        # CONNECT を送らずにセッションを確立しない
+        if self._quic_connection is None or not meets_transport_param_requirements(
+            self._quic_connection
+        ):
+            self._running = False
+            return False
 
         self._setup_streams()
         await self._send_pending()
