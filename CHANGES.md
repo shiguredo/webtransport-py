@@ -71,6 +71,8 @@
   - @voluntas
 - [ADD] WebTransport over HTTP/2 bindings のイベントに SESSION_REJECTED (status_code 付き) と SESSION_READY への受信 HTTP ヘッダーを追加する
   - @voluntas
+- [ADD] WebTransport over HTTP/2 高レベル Server にセッション拒否 API (on_session_request コールバック) を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
