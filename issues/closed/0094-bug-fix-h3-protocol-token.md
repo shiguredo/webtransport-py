@@ -1,9 +1,14 @@
 # WebTransport over HTTP/3 が :protocol "webtransport" トークンを受理する問題を修正する
 
 - Created: 2026-08-18
-- Completed: 2026-08-23
-- Branch: feature/fix-h3-protocol-token
+- Completed: {YYYY-MM-DD}
+- Branch: feature/fix-h3-nonstandard-protocol-token
 - Polished: 2026-08-18
+
+## reopened にした理由
+
+- 本 issue の実装 (2026-08-23) は `:protocol: "webtransport"` の CONNECT を 501 で拒否したが、実ブラウザ (Chromium / WebKit) の WebTransport クライアント (Shiguredo WebTransport DevTools) は現時点でも `:protocol: "webtransport"` を送信する (実測: `recv_header_cb` で `:protocol value=webtransport` を観測)。その結果、実ブラウザの WebTransport over HTTP/3 セッション確立がすべて 501 で拒否され、`tests/browser/` のブラウザ E2E テストが全滅した。"webtransport" は draft-ietf-webtrans-http2-15 のアップグレードトークンであり、HTTP/2 ベースのカプセルプロトコル (WebTransport over HTTP/2) と将来の HTTP/3 カプセルプロトコルにも使われる可能性があるため、本ライブラリ (ネイティブ HTTP/3 実装) が両方のトークンをネイティブセッションとして受け入れる
+- 仕様上の正しさ (draft-16 Section 3.2 の MUST「:protocol は webtransport-h3」) と実ブラウザの現状の乖離であり、本ライブラリとしては実ブラウザ互換を優先して "webtransport" も "webtransport-h3" と同様に受理する
 
 ## 目的
 
