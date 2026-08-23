@@ -1,7 +1,7 @@
 # h2.Client.connect() が非 2xx 拒否で永久ブロックする問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/fix-h2-client-connect-block
 - Polished: 2026-08-21
 

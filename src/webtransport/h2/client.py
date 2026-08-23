@@ -294,6 +294,18 @@ class Client:
                     self._connected = False
                     return False
 
+                # 非 2xx 拒否 (draft-15 Section 3.2: 2xx 以外はセッション未確立)。
+                # SESSION_READY / SESSION_CLOSED のどちらも発火しないため、
+                # 待たずに False を返して終了する。bindings は 200 のみを
+                # 確立とみなすため、2xx 非 200 (201 等) は本分岐に到達
+                # せずブロックする既知の制約が残る
+                if (
+                    event.type == h2_low.EventType.SESSION_REJECTED
+                    and event.session_id == self._session_id
+                ):
+                    self._connected = False
+                    return False
+
             await asyncio.sleep(0.001)
 
         return False

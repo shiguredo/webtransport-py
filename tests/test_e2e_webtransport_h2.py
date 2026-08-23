@@ -1138,6 +1138,45 @@ async def test_h2_server_accept_via_on_session_request(test_certificates, decisi
 
 
 @pytest.mark.asyncio
+async def test_h2_client_connect_returns_false_on_non_2xx_reject(test_certificates):
+    """on_session_request が 403 を返すと Client.connect() が False を返すことを確認
+
+    draft-15 Section 3.2 により、非 2xx 応答はセッション未確立を意味する。
+    bindings は拒否時に SESSION_REJECTED のみを発火し、SESSION_READY /
+    SESSION_CLOSED は発火しない。connect() の while ループが
+    SESSION_REJECTED を検知しないと永久ブロックするため、実 Server と実
+    Client を組み合わせて有限時間で False が返ることを検証する (修正前は
+    wait_for のタイムアウトで失敗する)。
+    """
+    from webtransport.h2 import Client, Server
+
+    async def on_session_request(session_id, headers, addr):
+        return 403
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    server.on_session_request(on_session_request)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    try:
+        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
+        assert connected is False
+        assert client.is_connected is False
+    finally:
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status_code",
     [0, -1, 100, 600, False, 3.5],

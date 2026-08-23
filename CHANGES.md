@@ -171,6 +171,8 @@
   - @voluntas
 - [FIX] HTTP/3 のプロトコルエラーで run() が QUIC アイドルタイムアウトまで無限ハングする問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の高レベル Client.connect() が非 2xx 拒否で永久ブロックする問題を修正する
+  - @voluntas
 
 ### misc
 
