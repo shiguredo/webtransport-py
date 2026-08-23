@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 bindings に SESSION_REJECTED イベントと SESSION_READY の受信ヘッダーを追加する
 
 - Created: 2026-08-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/add-h2-session-rejected-event
 - Polished: 2026-08-23
 
@@ -60,41 +60,19 @@ draft-ietf-webtrans-http2-15 §3.2 の逐語引用:
 
 - `src/bindings/webtransport_h2.h`:
   - `H2EventType` 列挙の末尾 (Error の後) に `SessionRejected` を追加
-  - `H2Event` 構造体に `uint16_t status_code = 0;  // SessionRejected 発火時の HTTP status code。他イベントでは 0` と `std::vector<std::pair<std::string, std::string>> headers;  // SessionReady 発火時の受信 HTTP ヘッダー。他イベントでは空` を追加
+  - `H2Event` 構造体に `uint16_t status_code = 0;` と `std::vector<std::pair<std::string, std::string>> headers;` を追加し、それぞれの意味 (SessionRejected 発火時のみ status_code / SessionReady 発火時のみ headers) をコメントで明記した
 - `src/bindings/webtransport_h2.cpp`:
-  - `on_frame_recv_callback` の非 2xx 応答分岐 (`wt_sessions_.erase(stream_id)` の直前) に以下を追加:
-    ```cpp
-    H2Event event;
-    event.type = H2EventType::SessionRejected;
-    event.session_id = stream_id;
-    // std::from_chars を使い C++ 例外を投げない (nghttp2 の C ABI 境界のため)。
-    // nghttp2 は :status を 100-999 の 3 桁数字としてバリデーション済みだが、
-    // HTTP status code として意味を持つ 100-599 の範囲外 (600-999 等) は
-    // 0 に丸める (不正な status code をアプリへ渡さない)
-    uint16_t code = 0;
-    std::from_chars(status_value.data(),
-                    status_value.data() + status_value.size(), code);
-    if (code < 100 || code >= 600) {
-      code = 0;
-    }
-    event.status_code = code;
-    h2_session->push_event(std::move(event));
-    ```
-  - SESSION_READY イベント push の 2 箇所 (サーバー側・クライアント側) で `event.headers = it->second;` を追加する (`pending_headers_.erase(it)` の直前)
-  - 上記変更後、既存の非 2xx 分岐コメントを「SESSION_REJECTED を push した上で削除する」意味論に更新
-  - `bind_webtransport_h2` の `H2EventType` enum export (`nb::enum_<H2EventType>(h2_mod, "EventType", ...)`) に `.value("SESSION_REJECTED", H2EventType::SessionRejected)` を追加
-  - `H2Event` の nanobind export (`nb::class_<H2Event>(...)` の `.def_ro` 連鎖) に `.def_ro("status_code", &H2Event::status_code, "SessionRejected 発火時の HTTP status code。他イベントでは 0")` と `.def_ro("headers", &H2Event::headers, "SessionReady 発火時の受信 HTTP ヘッダー。他イベントでは空")` を追加
-  - `<charconv>` を include する
-- `src/webtransport/h2.pyi`:
-  - 手編集しない。上記 bindings 側の変更で生成される (`.value` が `EventType.SESSION_REJECTED` を、`.def_ro` がプロパティと docstring を生成する)
-- `tests/test_webtransport_h2_reject_session.py`:
-  - 新規テスト `test_client_non_2xx_reject_pushes_session_rejected_event`: サーバー役 `h2_low.Session` から `reject_session(session_id, status)` を呼び、クライアント役の Session に `SESSION_REJECTED` イベント (`event.session_id` が該当セッション、`event.status_code == 期待値`) が push されることを parametrize (403 / 302 / 500) で横断確認。既存 `test_client_non_2xx_reject_removes_session` と同じ Sans-IO パターン。テスト名・docstring・コメントは日本語で意図を明記する
-  - 新規テスト `test_session_ready_includes_received_headers`: クライアント役から `connect(url, origin)` (origin を指定した場合に `origin` ヘッダーが送信される。空の場合は送信されない) してサーバー役が `accept_session` し、サーバー役の SESSION_READY イベントの `headers` に受信 HTTP ヘッダー (`:method` / `:scheme` / `:authority` / `:path` / `:protocol` / `origin` 等) が受信順で載ることを確認する (ヘッダー順序は `connect` の nva 提出順で決定的)。クライアント役の SESSION_READY イベントには応答ヘッダー (`:status` / `webtransport-init`) が載ることを確認する
-  - 既存の設計ピンテスト (`test_client_non_2xx_reject_no_session_closed_event` 等) が引き続き pass することの回帰確認
-- 変更対象: `src/bindings/webtransport_h2.h` / `src/bindings/webtransport_h2.cpp` / `tests/test_webtransport_h2_reject_session.py` / `CHANGES.md`
-- 変更対象外: `src/webtransport/h2/client.py` (SESSION_REJECTED を高レベルで消費する変更は 0111 のスコープ)
-- 変更対象外: `src/webtransport/h2/server.py` (Server 側の拒否 API 追加は 0134 のスコープ)
-- 変更対象外: `src/bindings/webtransport_h3.h` / `src/bindings/webtransport_h3.cpp` / `src/webtransport/h3.pyi` (HTTP/3 版の SESSION_REJECTED 追加は 0112 の解決方針次第。本 issue は HTTP/2 のみを扱う)
+  - `on_frame_recv_callback` の非 2xx 応答分岐で `SessionRejected` イベントを push してから `wt_sessions_.erase(stream_id)` する方式に変更した。status_code は `<charconv>` の `std::from_chars` (例外を投げない) でパースし、パース失敗・100-599 範囲外は 0 に丸める
+  - SESSION_READY イベントを push する 2 箇所 (サーバー側 CONNECT 受理 / クライアント側 200 応答受信) で `pending_headers_` を `event.headers` へコピーする (`pending_headers_.erase(it)` の直前)
+  - 非 2xx 分岐の既存コメントを「SESSION_REJECTED を push した上で削除する」意味論に更新し、キュー済みカプセルは後始末しない既存挙動も明記した
+  - `bind_webtransport_h2` に `.value("SESSION_REJECTED", H2EventType::SessionRejected)` と `.def_ro("status_code")` / `.def_ro("headers")` (docstring 付き) を追加した
+- `src/webtransport/h2.pyi`: 手編集せず、bindings 側の変更から生成された (`SESSION_REJECTED = 8` / `status_code: int` / `headers: list[tuple[str, str]]`)
+- `tests/test_webtransport_h2_reject_session.py`: 新規テスト 3 本を追加した
+  - `test_client_non_2xx_reject_pushes_session_rejected_event` (parametrize: 403 / 302 / 500 / 600 / 700、600 以上は 0 丸め、headers が空であることも検証、SESSION_CLOSED 非発火を確認)
+  - `test_session_ready_includes_received_headers` (サーバー役: CONNECT リクエストのヘッダーを送信順・値まで検証、クライアント役: 応答ヘッダーを検証)
+  - `test_session_ready_status_code_stays_default` (SessionReady で status_code が 0 のまま、StreamData で headers が空のまま)
+- `CHANGES.md`: `[ADD]` エントリを追加
+- 変更対象外 (指示どおり): `src/webtransport/h2/client.py` (0111 のスコープ) / `src/webtransport/h2/server.py` (0134 のスコープ) / HTTP/3 側 (0112 のスコープ)
 
 ## 依存関係と関連 issue
 
