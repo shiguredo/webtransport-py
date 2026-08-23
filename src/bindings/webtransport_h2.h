@@ -133,6 +133,10 @@ enum class H2EventType {
 
   // エラー
   Error,
+
+  // セッション拒否 (非 2xx 応答の受信。末尾に追加し既存バリアントの
+  // 数値を変えない)
+  SessionRejected,
 };
 
 /**
@@ -146,6 +150,11 @@ struct H2Event {
   uint32_t error_code = 0;
   std::string error_message;
   bool fin = false;
+  // SessionRejected 発火時にのみ意味を持つ HTTP status code。他イベントでは 0
+  uint16_t status_code = 0;
+  // SessionReady 発火時にのみ意味を持つ受信 HTTP ヘッダー (受信順の
+  // name / value)。他イベントでは空
+  std::vector<std::pair<std::string, std::string>> headers;
 };
 
 /**
