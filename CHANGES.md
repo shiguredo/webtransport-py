@@ -179,6 +179,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 が :protocol "webtransport" トークンの CONNECT をネイティブセッションとして受理する問題を修正する
+  - @voluntas
 
 ### misc
 

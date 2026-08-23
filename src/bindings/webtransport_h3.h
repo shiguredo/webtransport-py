@@ -476,6 +476,15 @@ class H3Session {
       int64_t stream_id) const;
 
   /**
+   * テスト専用: reject_session が最後に送出した応答のステータスコード
+   *
+   * 恒久的な公開 API ではなく、テストでの拒否応答ステータスの検証にのみ
+   * 使う。reject_session 未呼び出し時 (ガードによる no-op を含む) は nullopt。
+   * @return 最後に送出したステータスコード
+   */
+  std::optional<int64_t> last_reject_status_code() const;
+
+  /**
    * ストリームが書き込み可能か確認
    *
    * 存在しない・closed・フロー制御ブロック・入力データ待ち・half-closed の
@@ -715,6 +724,10 @@ class H3Session {
 
   // 接続状態
   bool closed_ = false;
+
+  // reject_session が最後に送出した応答のステータスコード (テスト専用。
+  // 未送出時は std::nullopt を返すために 0 で初期化する)
+  int64_t last_reject_status_code_ = 0;
 };
 
 // Python バインディングを定義

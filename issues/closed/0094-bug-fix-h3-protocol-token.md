@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 が :protocol "webtransport" トークンを受理する問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/fix-h3-protocol-token
 - Polished: 2026-08-18
 
@@ -19,12 +19,18 @@ draft-ietf-webtrans-http3-16 Section 3.2 の MUST「:protocol は webtransport-h
 ## 設計方針
 
 - `end_headers_cb` の `:protocol` 判定を "webtransport-h3" のみに限定し、**"webtransport" の CONNECT は C++ 側で自動的に拒否応答を返す** (応答を返さないと高レベル層では SESSION_READY が発火せずアプリが応答できないため、クライアントが応答待ちでハングし、未応答の CONNECT ストリームが残留する)。実装は「`is_connect` かつ `:protocol` が "webtransport"」を検出して既存の `reject_session` を呼ぶ追加分岐とする。既存の Origin 検証失敗分岐 (403) と同じ後始末 (`pending_qpack_blocked_fin_stream_ids_` と `pending_headers_` からの除去) を行ってから return する
-- 拒否応答のステータスコードは 405 とする。仕様上の根拠は「target resource が WebTransport をサポートしない場合の 405 SHOULD」(draft-ietf-webtrans-http3-16 Section 3.2。draft-ietf-webtrans-http2-15 Section 3.2 にも同様の 405 SHOULD がある) に準じる (":protocol: webtransport" の HTTP/3 上での応答コードは draft-ietf-webtrans-http3-16 では未規定のため、405 を選択する)。nghttp3 は非 2xx 応答を受信すると WebTransport アップグレード拒否として扱うため整合する
+- 拒否応答のステータスコードは 501 とする。Extended CONNECT を広告したサーバーが未サポートの `:protocol` を受信した場合は 501 で応答する SHOULD (RFC 9220 Section 3。draft-ietf-webtrans-http3-16 Section 3.1 が RFC 9220 を規範的に参照)。draft-16 Section 3.2 の 405 SHOULD は webtransport-h3 で target resource が非サポートのケースに限定され、本ケースには適用されない (実装時に 405 → 501 へ変更。ユーザー確認済み)。nghttp3 は非 2xx 応答を受信すると WebTransport アップグレード拒否として扱うため整合する
 - "webtransport" の CONNECT を拒否するテストを追加する。クライアント API の `connect()` は :protocol を "webtransport-h3" に固定して送出するため、テストでは QPACK 手動エンコード等で ":protocol: webtransport" の CONNECT をサーバーへ注入する手段を用意する
 - 変更内容を CHANGES.md の `## develop` に [FIX] として記載する
 
 ## 完了条件
 
-- `:protocol: webtransport` の CONNECT リクエストがネイティブセッションとして受理されず、405 応答が返る
+- `:protocol: webtransport` の CONNECT リクエストがネイティブセッションとして受理されず、501 応答が返る
 - 拒否後にクライアントが応答待ちでハングしない (ストリームが残留しない)
 - テストが追加され通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `end_headers_cb` に `is_capsule_protocol` (":protocol: webtransport") の分岐を追加し、`reject_session(stream_id, 501)` で拒否する。後始末 (pending_qpack_blocked_fin_stream_ids_ / pending_headers_ の除去) は既存の Origin 検証失敗分岐 (403) と同型。:protocol 判定は "webtransport-h3" のみを受理
+- `src/bindings/webtransport_h3.cpp` / `h`: テスト専用アクセサ `_last_reject_status_code()` を追加 (reject_session が送出したステータスコードを返す。未送出時は None)
+- `tests/test_webtransport_h3_protocol_token.py` (新規): QPACK 手動エンコードで任意の :protocol の CONNECT を注入するテスト 3 件 (webtransport が 501 で拒否 / クライアントセッション削除 / webtransport-h3 受理の回帰)
