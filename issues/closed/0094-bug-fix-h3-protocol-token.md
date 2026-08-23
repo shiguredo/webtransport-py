@@ -2,8 +2,13 @@
 
 - Created: 2026-08-18
 - Completed: 2026-08-23
-- Branch: feature/fix-h3-protocol-token
+- Branch: feature/fix-h3-nonstandard-protocol-token
 - Polished: 2026-08-18
+
+## reopened にした理由
+
+- 本 issue の実装 (2026-08-23) は `:protocol: "webtransport"` の CONNECT を 501 で拒否したが、実ブラウザ (Chromium / WebKit) の WebTransport クライアント (Shiguredo WebTransport DevTools) は現時点でも `:protocol: "webtransport"` を送信する (実測: `recv_header_cb` で `:protocol value=webtransport` を観測)。その結果、実ブラウザの WebTransport over HTTP/3 セッション確立がすべて 501 で拒否され、`tests/browser/` のブラウザ E2E テストが全滅した。"webtransport" は draft-ietf-webtrans-http2-15 のアップグレードトークンであり、HTTP/2 ベースのカプセルプロトコル (WebTransport over HTTP/2) と将来の HTTP/3 カプセルプロトコルにも使われる可能性があるため、本ライブラリ (ネイティブ HTTP/3 実装) が両方のトークンをネイティブセッションとして受け入れる
+- 仕様上の正しさ (draft-16 Section 3.2 の MUST「:protocol は webtransport-h3」) と実ブラウザの現状の乖離であり、本ライブラリとしては実ブラウザ互換を優先して "webtransport" も "webtransport-h3" と同様に受理する
 
 ## 目的
 
@@ -34,3 +39,9 @@ draft-ietf-webtrans-http3-16 Section 3.2 の MUST「:protocol は webtransport-h
 - `src/bindings/webtransport_h3.cpp` の `end_headers_cb` に `is_capsule_protocol` (":protocol: webtransport") の分岐を追加し、`reject_session(stream_id, 501)` で拒否する。後始末 (pending_qpack_blocked_fin_stream_ids_ / pending_headers_ の除去) は既存の Origin 検証失敗分岐 (403) と同型。:protocol 判定は "webtransport-h3" のみを受理
 - `src/bindings/webtransport_h3.cpp` / `h`: テスト専用アクセサ `_last_reject_status_code()` を追加 (reject_session が送出したステータスコードを返す。未送出時は None)
 - `tests/test_webtransport_h3_protocol_token.py` (新規): QPACK 手動エンコードで任意の :protocol の CONNECT を注入するテスト 3 件 (webtransport が 501 で拒否 / クライアントセッション削除 / webtransport-h3 受理の回帰)
+
+## 解決方法 (実ブラウザ互換の再修正)
+
+- `src/bindings/webtransport_h3.cpp` の `end_headers_cb`: `:protocol` 判定で "webtransport-h3" と "webtransport" の両方をネイティブ HTTP/3 セッションのトークンとして受理する (501 拒否分岐を削除)。実ブラウザ (Chromium / WebKit) および Shiguredo WebTransport DevTools は現時点でも ":protocol: webtransport" で CONNECT するため (実測済み。`recv_header_cb` で `:protocol value=webtransport` を観測)、互換を優先する。仕様 (draft-16 Section 3.2 の MUST) との既知の逸脱であり、実ブラウザのトークン移行後に削除する旨をコメントに明記する
+- `src/bindings/webtransport_h3.cpp` / `h`: 501 拒否検証用のテスト専用アクセサ `_last_reject_status_code()` を削除する (拒否経路がなくなったため)
+- `tests/test_webtransport_h3_protocol_token.py`: "webtransport" の CONNECT が受理されるテスト 2 件 (受理とクライアントセッション維持) と webtransport-h3 受理の回帰テスト 1 件に書き換える

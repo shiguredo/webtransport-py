@@ -476,22 +476,10 @@ class H3Session {
       int64_t stream_id) const;
 
   /**
-   * テスト専用: reject_session が最後に送出した応答のステータスコード
-   *
-   * 恒久的な公開 API ではなく、テストでの拒否応答ステータスの検証にのみ
-   * 使う。reject_session 未呼び出し時 (ガードによる no-op を含む) は nullopt。
-   * @return 最後に送出したステータスコード
-   */
-  std::optional<int64_t> last_reject_status_code() const;
-
-  /**
    * ストリームが書き込み可能か確認
    *
-   * 存在しない・closed・フロー制御ブロック・入力データ待ち・half-closed の
-   * いずれかで書き込み不可。
    * @param stream_id ストリーム ID
-   * @return 書き込み可能なら 1、不可なら 0、コネクションが無いか閉じている
-   *   場合は nullopt
+   * @return nghttp3_conn_is_stream_writable2 の結果。接続が閉じている場合は nullopt
    */
   std::optional<int> stream_writable(int64_t stream_id) const;
 
@@ -727,7 +715,6 @@ class H3Session {
 
   // reject_session が最後に送出した応答のステータスコード (テスト専用。
   // 未送出時は std::nullopt を返すために 0 で初期化する)
-  int64_t last_reject_status_code_ = 0;
 };
 
 // Python バインディングを定義
