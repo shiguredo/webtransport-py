@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-23
 - Branch: feature/fix-h3-transport-param-validation
 - Polished: 2026-08-18
 
@@ -48,3 +48,11 @@ draft-ietf-webtrans-http3-16 Section 3.1 の QUIC transport parameter 検証 MUS
 - クライアントがサーバーの transport parameter 要件 (`max_datagram_frame_size > 0` / `reset_stream_at`) を検証し、要件未達のサーバーとセッションを確立しない
 - サーバーがクライアントの transport parameter を検証し、要件未達なら確立済み・新規の全セッションを malformed として扱う
 - 上記のテストが追加され通る
+
+## 解決方法
+
+- `src/bindings/quic.cpp` / `quic.h`: `QuicConnection::remote_reset_stream_at()` getter を追加し、`QuicConfig::enable_reset_stream_at` (既定 true、テスト用の欠落制御) を追加。reset_stream_at の広告を 4 箇所 (early data context / client / server / server from packet) すべてフラグで制御する
+- `src/webtransport/h3/_transport_params.py` (新規): クライアント・サーバー共通の検証ヘルパー `meets_transport_param_requirements(conn)` を追加
+- `src/webtransport/h3/client.py`: コンストラクタに `quic_config` を追加。connect() のハンドシェイク完了直後 (CONNECT 送出前) にサーバーの transport parameter を検証し、要件未達なら `False` を返す
+- `src/webtransport/h3/server.py`: コンストラクタに `quic_config` を追加。SESSION_READY (CONNECT 受信) 時にクライアントの transport parameter を検証し、要件未達なら H3_MESSAGE_ERROR (0x010E) で接続を閉じる (RFC 9114 Section 4.1.2)
+- テスト: `tests/test_e2e_webtransport_h3.py` に欠落 TP ピアとの e2e テスト 6 件 (datagram / reset_stream_at / both、クライアント側・サーバー側)、`tests/test_quic.py` に低レベル getter / config テスト 3 件を追加

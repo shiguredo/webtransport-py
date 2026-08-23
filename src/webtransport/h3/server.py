@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport.h3._transport_params import meets_transport_param_requirements
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -52,6 +53,7 @@ class Server:
         keyfile: str | None = None,
         idle_timeout_ns: int = 30_000_000_000,
         allowed_origins: list[str] | None = None,
+        quic_config: quic.Config | None = None,
     ) -> None:
         """サーバーを初期化する
 
@@ -63,6 +65,11 @@ class Server:
             idle_timeout_ns: アイドルタイムアウト (ナノ秒)
             allowed_origins: 許可オリジンリスト (None と空リストは
                 どちらも全オリジンを受理する)
+            quic_config: QUIC 設定。省略時は既定値。alpn_protocols /
+                idle_timeout_ns は常に、cert_file / key_file はコンストラクタ
+                引数 (certfile / keyfile) が指定された場合に接続時に上書き
+                される。enable_datagram / enable_reset_stream_at を無効化
+                すると WebTransport の要件を満たさないピアを作れる (テスト用)
         """
         self._host = host
         self._port = port
@@ -70,6 +77,7 @@ class Server:
         self._keyfile = keyfile
         self._idle_timeout_ns = idle_timeout_ns
         self._allowed_origins: list[str] | None = allowed_origins
+        self._user_quic_config = quic_config
 
         self._socket: socket.socket | None = None
         # bind 後のローカルアドレス (host, port)
@@ -234,7 +242,9 @@ class Server:
         """
         client = ClientConnection()
 
-        quic_config = quic.Config()
+        quic_config = (
+            self._user_quic_config if self._user_quic_config is not None else quic.Config()
+        )
         quic_config.alpn_protocols = ["h3"]
         quic_config.idle_timeout_ns = self._idle_timeout_ns
         if self._certfile is not None:
@@ -373,6 +383,33 @@ class Server:
                 break
 
             if webtransport_event.type == h3_low.EventType.SESSION_READY:
+                # クライアントの transport parameter を検証する
+                # (draft-ietf-webtrans-http3-16 Section 3.1: クライアントは
+                # max_datagram_frame_size > 0 と reset_stream_at を送ること)。
+                # 要件未達なら確立済み・新規の全セッションを malformed として
+                # 扱う (同 MUST)。RFC 9114 Section 4.1.2 の H3_MESSAGE_ERROR
+                # をエラーコードに用いる。要件未達は接続全体のクライアント
+                # transport parameter に起因し全セッションへ波及するため、
+                # ストリームエラーではなく接続を閉じて扱う
+                quic_conn = client.quic_connection
+                if quic_conn is None or not meets_transport_param_requirements(quic_conn):
+                    if quic_conn is not None:
+                        quic_conn.close(
+                            0x010E,
+                            "client transport parameters do not meet WebTransport requirements",
+                        )
+                        # 要件未達ピアは障害・攻撃の可能性があるため、送出失敗が
+                        # サーバーの run() 全体を止めないよう例外を隔離する
+                        try:
+                            await self._send_to(addr, client)
+                        except OSError as exc:
+                            logger.warning(
+                                "failed to send connection close to non-compliant peer: %s",
+                                exc,
+                            )
+                        if addr in self._clients:
+                            del self._clients[addr]
+                    break
                 client.webtransport_session.accept_session(webtransport_event.session_id)
                 if self._on_session_ready is not None:
                     await self._on_session_ready(webtransport_event.session_id, addr)

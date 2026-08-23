@@ -427,7 +427,7 @@ bool QuicConnection::setup_server_early_data() {
   // Section 3)。0-RTT では両エンドポイントがこの値を記憶し、サーバーが 0-RTT を
   // 受け入れる場合は再開コネクションで無効化してはならない (同 MUST) ため、
   // early data context にも含めて恒常的に広告する
-  params.reset_stream_at = 1;
+  params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
   ngtcp2_ssize quic_early_data_ctxlen = ngtcp2_transport_params_encode(
       quic_early_data_ctx.data(), quic_early_data_ctx.size(), &params);
@@ -576,7 +576,7 @@ bool QuicConnection::initialize_client(const std::string& local_host,
 
   // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
   // Section 3。送出・受信の両方で必要。詳細は reset_stream のコメント参照)
-  params.reset_stream_at = 1;
+  params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
   if (config_.enable_datagram) {
     params.max_datagram_frame_size = config_.max_datagram_frame_size;
@@ -701,7 +701,7 @@ bool QuicConnection::initialize_server() {
 
   // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
   // Section 3。送出・受信の両方で必要。詳細は reset_stream のコメント参照)
-  params.reset_stream_at = 1;
+  params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
   if (config_.enable_datagram) {
     params.max_datagram_frame_size = config_.max_datagram_frame_size;
@@ -837,7 +837,7 @@ bool QuicConnection::initialize_server_from_packet(
 
   // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
   // Section 3。送出・受信の両方で必要。詳細は reset_stream のコメント参照)
-  params.reset_stream_at = 1;
+  params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
   if (config_.enable_datagram) {
     params.max_datagram_frame_size = config_.max_datagram_frame_size;
@@ -2096,6 +2096,14 @@ std::optional<uint64_t> QuicConnection::remote_max_datagram_frame_size() const {
   return params->max_datagram_frame_size;
 }
 
+std::optional<bool> QuicConnection::remote_reset_stream_at() const {
+  const auto* params = get_remote_transport_params();
+  if (!params) {
+    return std::nullopt;
+  }
+  return params->reset_stream_at != 0;
+}
+
 uint64_t QuicConnection::local_max_idle_timeout() const {
   const auto* params = get_local_transport_params();
   if (!params) {
@@ -2642,6 +2650,8 @@ void bind_quic(nb::module_& m) {
               "Datagram を有効にするか")
       .def_rw("max_datagram_frame_size", &QuicConfig::max_datagram_frame_size,
               "最大 Datagram フレームサイズ")
+      .def_rw("enable_reset_stream_at", &QuicConfig::enable_reset_stream_at,
+              "RESET_STREAM_AT の受信対応を広告するか")
       .def_rw("enable_early_data", &QuicConfig::enable_early_data,
               "0-RTT early data を有効にするか")
       .def_prop_rw(
@@ -3084,6 +3094,11 @@ void bind_quic(nb::module_& m) {
           &QuicConnection::remote_max_datagram_frame_size,
           nb::sig("def remote_max_datagram_frame_size(self) -> int | None"),
           "ピアの Datagram フレームサイズ上限")
+      .def_prop_ro(
+          "remote_reset_stream_at",
+          &QuicConnection::remote_reset_stream_at,
+          nb::sig("def remote_reset_stream_at(self) -> bool | None"),
+          "ピアが reset_stream_at transport parameter を送信したか")
       .def_prop_ro("local_max_idle_timeout",
                    &QuicConnection::local_max_idle_timeout,
                    nb::sig("def local_max_idle_timeout(self) -> int"),
