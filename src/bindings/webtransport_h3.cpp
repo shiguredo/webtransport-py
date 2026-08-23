@@ -47,7 +47,8 @@ H3Session::H3Session(H3Session&& other) noexcept
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
       qpack_decoder_stream_id_(other.qpack_decoder_stream_id_),
-      closed_(other.closed_) {
+      closed_(other.closed_),
+      last_reject_status_code_(other.last_reject_status_code_) {
   other.conn_ = nullptr;
 }
 
@@ -80,6 +81,7 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
     qpack_decoder_stream_id_ = other.qpack_decoder_stream_id_;
     closed_ = other.closed_;
+    last_reject_status_code_ = other.last_reject_status_code_;
     other.conn_ = nullptr;
   }
   return *this;
@@ -739,8 +741,13 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
        status_value.size(), NGHTTP3_NV_FLAG_NONE},
   };
 
-  nghttp3_conn_submit_response(conn_, stream_id, nva.data(), nva.size(),
-                               nullptr);
+  // 送出したステータスコードをテスト検証用に記録する (0 は未送出の
+  // センチネルとして扱う)。submit_response の成否を確認してから記録する
+  // (失敗時は未送出のまま)
+  if (nghttp3_conn_submit_response(conn_, stream_id, nva.data(), nva.size(),
+                                   nullptr) == 0) {
+    last_reject_status_code_ = status_code;
+  }
 
   // 非 2xx 応答で拒否されたセッションは一度も確立されていない
   // (draft-ietf-webtrans-http3-16 Section 3.2) ため、SessionClosed は発火
@@ -1269,6 +1276,13 @@ std::optional<bool> H3Session::has_pending_qpack_blocked_fin_stream(
   return true;
 }
 
+std::optional<int64_t> H3Session::last_reject_status_code() const {
+  if (last_reject_status_code_ == 0) {
+    return std::nullopt;
+  }
+  return last_reject_status_code_;
+}
+
 std::optional<int> H3Session::stream_writable(int64_t stream_id) const {
   if (!conn_ || closed_) {
     return std::nullopt;
@@ -1467,19 +1481,44 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
   // WebTransport CONNECT リクエストかチェック
   bool is_connect = false;
   bool is_webtransport = false;
+  bool is_capsule_protocol = false;
   std::string status;
 
   for (const auto& header : headers) {
     if (header.first == ":method" && header.second == "CONNECT") {
       is_connect = true;
     }
-    if (header.first == ":protocol" && (header.second == "webtransport-h3" ||
-                                        header.second == "webtransport")) {
-      is_webtransport = true;
+    if (header.first == ":protocol") {
+      if (header.second == "webtransport-h3") {
+        is_webtransport = true;
+      } else if (header.second == "webtransport") {
+        // "webtransport" はカプセルベースプロトコル用のトークンであり
+        // (draft-ietf-webtrans-http3-16 Section 2.1.2)、ネイティブ HTTP/3
+        // セッションのトークンではない
+        is_capsule_protocol = true;
+      }
     }
     if (header.first == ":status") {
       status = header.second;
     }
+  }
+
+  // ":protocol: webtransport" の CONNECT はネイティブセッションとして受理
+  // しない。カプセルベースプロトコル用トークン (draft-ietf-webtrans-http3-16
+  // Section 2.1.2) を Extended CONNECT で受信した場合、本実装は未サポート
+  // の :protocol に対する 501 応答の SHOULD (RFC 9220 Section 3。draft-16
+  // Section 3.1 が RFC 9220 を規範的に参照) に従って 501 で応答する。
+  // draft-16 Section 3.2 の 405 SHOULD は webtransport-h3 で target resource
+  // が非サポートのケースに限定され、本ケースには適用されない。応答を返さ
+  // ないとクライアントが応答待ちでハングし、未応答の CONNECT ストリームが
+  // 残留する。他の未知 :protocol (websocket 等) への 501 応答は対象外
+  // (本分岐は ":protocol: webtransport" のみ)。Origin 検証失敗分岐 (403)
+  // と同じ後始末を行ってから return する
+  if (is_connect && is_capsule_protocol && session->is_server_) {
+    session->reject_session(stream_id, 501);
+    session->pending_qpack_blocked_fin_stream_ids_.erase(stream_id);
+    session->pending_headers_.erase(it);
+    return 0;
   }
 
   if (is_connect && is_webtransport && session->is_server_) {
@@ -2006,6 +2045,9 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::sig("def _has_pending_qpack_blocked_fin_stream(self, "
                    "stream_id: int) -> bool | None"),
            "テスト専用: QPACK ブロック中 fin の保留記録の有無を確認")
+      .def("_last_reject_status_code", &H3Session::last_reject_status_code,
+           nb::sig("def _last_reject_status_code(self) -> int | None"),
+           "テスト専用: reject_session が最後に送出したステータスコードを確認")
       .def("stream_writable", &H3Session::stream_writable, nb::arg("stream_id"),
            nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
            "ストリームが書き込み可能か確認")
