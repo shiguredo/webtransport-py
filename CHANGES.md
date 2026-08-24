@@ -85,6 +85,8 @@
   - @voluntas
 - [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の `close_session` が 1024 バイトでエラーメッセージを切り詰める際に UTF-8 文字境界を無視し、不完全な UTF-8 シーケンスが送出される問題を修正する
+  - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
