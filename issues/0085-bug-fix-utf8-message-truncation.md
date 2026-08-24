@@ -3,7 +3,7 @@
 - Created: 2026-08-15
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-utf8-message-truncation
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-24
 
 ## 目的
 
@@ -12,7 +12,7 @@ draft-ietf-webtrans-http2-15 Section 6.12 の MUST「Senders that truncate an ap
 ## 現状
 
 - `src/bindings/webtransport_h2.cpp` の `close_session` は `std::min(error_message.size(), 1024)` のバイト単位でエラーメッセージを切り詰める。UTF-8 文字境界を考慮しないため、マルチバイト文字が 1024 バイト境界を跨ぐと不完全な UTF-8 シーケンスが送出される
-- 受信側 (`handle_wt_close_session`) はメッセージの UTF-8 妥当性を検証しない (受信側の検証は本 issue のスコープ外)
+- 受信側 (`handle_wt_close_session`) は 1024 バイト超過・不正 UTF-8 の WT_CLOSE_SESSION を検知して WT_ERROR にしている (対応済み)。本 issue のスコープは送信側の切り詰めのみ
 - テストは 1024 バイト超のマルチバイトメッセージを未カバー (既存テストは短い ASCII メッセージのみ)
 
 ## 設計方針
