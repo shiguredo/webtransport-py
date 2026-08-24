@@ -12,6 +12,67 @@
 namespace webtransport {
 namespace h3 {
 
+namespace {
+
+// draft-16 Section 6 の "valid UTF-8" を RFC 3629 の well-formed UTF-8 として
+// 検査する。overlong 符号化、サロゲート (U+D800..U+DFFF)、U+10FFFF 超、
+// 不完全シーケンス、非先頭バイトを拒否する。受信検証 (recv_wt_close_session_cb)
+// と送信トリミング (close_session) の両方で使う
+bool is_valid_utf8(const uint8_t* data, size_t length) {
+  size_t offset = 0;
+  while (offset < length) {
+    if (data[offset] <= 0x7F) {
+      offset += 1;
+      continue;
+    }
+    size_t extra = 0;
+    uint32_t min_codepoint = 0;
+    uint32_t codepoint = 0;
+    if ((data[offset] & 0xE0) == 0xC0) {
+      extra = 1;
+      min_codepoint = 0x80;
+      codepoint = data[offset] & 0x1F;
+    } else if ((data[offset] & 0xF0) == 0xE0) {
+      extra = 2;
+      min_codepoint = 0x800;
+      codepoint = data[offset] & 0x0F;
+    } else if ((data[offset] & 0xF8) == 0xF0) {
+      extra = 3;
+      min_codepoint = 0x10000;
+      codepoint = data[offset] & 0x07;
+    } else {
+      return false;
+    }
+    if (offset + 1 + extra > length) {
+      return false;
+    }
+    for (size_t index = 1; index <= extra; ++index) {
+      if ((data[offset + index] & 0xC0) != 0x80) {
+        return false;
+      }
+      codepoint = (codepoint << 6) | (data[offset + index] & 0x3F);
+    }
+    if (codepoint < min_codepoint || codepoint > 0x10FFFF ||
+        (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+      return false;
+    }
+    offset += 1 + extra;
+  }
+  return true;
+}
+
+// WT_CLOSE_SESSION の Application Error Message の最大長 (draft-16 Section 6
+// の「its length MUST NOT exceed 1024 bytes」)
+constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
+
+// 受信側の H3_MESSAGE_ERROR リセット (handle_wt_close_session_error) で使う
+// H3_MESSAGE_ERROR (nghttp3.h の公開定数)。WT_CLOSE_SESSION の Application
+// Error Message の不正 (1024 バイト超・4 バイト未満の不正な長さ・不正 UTF-8)
+// 受信時の CONNECT ストリームのリセットに使う (draft-16 Section 6 の MUST)
+constexpr uint64_t kH3MessageError = NGHTTP3_H3_MESSAGE_ERROR;
+
+}  // namespace
+
 // ========== H3Session 実装 ==========
 
 H3Session::H3Session(bool is_server, const H3SessionConfig& config)
@@ -42,6 +103,8 @@ H3Session::H3Session(H3Session&& other) noexcept
           std::move(other.pre_accept_fin_accepted_session_ids_)),
       pending_stale_2xx_discard_session_ids_(
           std::move(other.pending_stale_2xx_discard_session_ids_)),
+      pending_wt_close_session_error_session_id_(
+          other.pending_wt_close_session_error_session_id_),
       accepting_session_id_(other.accepting_session_id_),
       stream_info_(std::move(other.stream_info_)),
       control_stream_id_(other.control_stream_id_),
@@ -74,6 +137,8 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
         std::move(other.pre_accept_fin_accepted_session_ids_);
     pending_stale_2xx_discard_session_ids_ =
         std::move(other.pending_stale_2xx_discard_session_ids_);
+    pending_wt_close_session_error_session_id_ =
+        other.pending_wt_close_session_error_session_id_;
     accepting_session_id_ = other.accepting_session_id_;
     stream_info_ = std::move(other.stream_info_);
     control_stream_id_ = other.control_stream_id_;
@@ -157,12 +222,37 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
       conn_, stream_id, data.data(), data.size(), fin ? 1 : 0, 0);
 
   if (consumed < 0) {
-    H3Event event;
-    event.type = H3EventType::Error;
-    event.stream_id = stream_id;
-    event.error_code = static_cast<uint64_t>(-consumed);
-    event.error_message = nghttp3_strerror(static_cast<int>(consumed));
-    push_event(std::move(event));
+    // WT_CLOSE_SESSION 関連のストリームエラー検知時の分離処理:
+    // - NGHTTP3_ERR_H3_MESSAGE_ERROR かつ CONNECT ストリームは、WT_CLOSE_SESSION
+    //   の Application Error Message が 1024 バイト超 (または 4 バイト未満の
+    //   不正な長さ) の経路 (draft-16 Section 6 の MUST: H3_MESSAGE_ERROR
+    //   でのストリームリセット)。コールバックは発火していないため
+    //   session_ids_ に残存しており、リセット処理はここで行う。ストリーム
+    //   エラーであり接続エラーではないため Error イベントは積まない
+    // - recv_wt_close_session_cb で検知した不正 UTF-8 は保留され、コールバック
+    //   の非 0 戻りが NGHTTP3_ERR_CALLBACK_FAILURE として返る。リセット処理は
+    //   保留したセッション ID で行い、接続エラーの通知 (Error イベント) は
+    //   汎用の負値分岐と同じ挙動で積む (ストリームエラーが接続エラー風に
+    //   通知されるが、高レベル層は接続クローズに直接作用しないため許容)
+    bool h3_message_error_reset = false;
+    if (consumed == NGHTTP3_ERR_H3_MESSAGE_ERROR &&
+        session_ids_.count(stream_id) > 0) {
+      handle_wt_close_session_error(stream_id);
+      h3_message_error_reset = true;
+    }
+    if (pending_wt_close_session_error_session_id_.has_value()) {
+      int64_t pending_session_id = *pending_wt_close_session_error_session_id_;
+      pending_wt_close_session_error_session_id_.reset();
+      handle_wt_close_session_error(pending_session_id);
+    }
+    if (!h3_message_error_reset) {
+      H3Event event;
+      event.type = H3EventType::Error;
+      event.stream_id = stream_id;
+      event.error_code = static_cast<uint64_t>(-consumed);
+      event.error_message = nghttp3_strerror(static_cast<int>(consumed));
+      push_event(std::move(event));
+    }
   }
 
   // 受理前 FIN の検知 (サーバー側の CONNECT ストリームに限定)。
@@ -693,6 +783,23 @@ bool H3Session::accept_session(int64_t stream_id) {
       pre_accept_fin_accepted_session_ids_.erase(stream_id);
       pending_pre_accept_fin_session_ids_.insert(stream_id);
     }
+    // confirm の処理中に受理前バッファの WT_CLOSE_SESSION が処理されて不正と
+    // 判定された場合のリセット処理:
+    // - 不正 UTF-8 は recv_wt_close_session_cb 内で検知され保留される
+    //   (コールバックの非 0 戻りが NGHTTP3_ERR_CALLBACK_FAILURE として
+    //   confirm の失敗へ合流する)
+    // - 1024 バイト超 (および 4 バイト未満の不正な長さ) のカプセルは
+    //   コールバック非発火のため保留は未設定で、confirm 自体が
+    //   NGHTTP3_ERR_H3_MESSAGE_ERROR で失敗する
+    // どちらも draft-16 Section 6 の MUST (H3_MESSAGE_ERROR でのリセット) を
+    // 満たすため、当該セッション ID でリセット処理を実行する
+    if (rv == NGHTTP3_ERR_H3_MESSAGE_ERROR ||
+        pending_wt_close_session_error_session_id_.has_value()) {
+      int64_t error_session_id =
+          pending_wt_close_session_error_session_id_.value_or(stream_id);
+      pending_wt_close_session_error_session_id_.reset();
+      handle_wt_close_session_error(error_session_id);
+    }
     discard_stale_2xx();
     return false;
   }
@@ -1157,6 +1264,40 @@ void H3Session::discard_stale_2xx() {
   pending_stale_2xx_discard_session_ids_.clear();
 }
 
+void H3Session::handle_wt_close_session_error(int64_t session_id) {
+  // WT_CLOSE_SESSION の Application Error Message の不正 (1024 バイト超・
+  // 4 バイト未満の不正な長さ・不正 UTF-8。draft-16 Section 6 の MUST:
+  // H3_MESSAGE_ERROR での CONNECT ストリームのリセット) のセッション終了処理。呼び出し元は
+  // receive_stream_data の負値分岐 (read_stream2 からの復帰後) と
+  // accept_session の確認失敗分岐 (アプリ呼び出し) の両方で、nghttp3 の
+  // コールバック内からは呼ばれない (再入なし)。
+  // リセットの送出手段: nghttp3 の公開 API に CONNECT ストリームの
+  // reset_stream_cb を発火させる手段はない (close_stream / close_stream2 は
+  // conn_delete_stream を呼ぶのみで、reset_stream_cb は内部の
+  // nghttp3_conn_abort_stream のみが発火させる)。そのため QUIC RESET_STREAM
+  // の送出は高レベル層の既存変換 (ResetStream イベント →
+  // quic_connection.reset_stream) に委ね、ここでイベントを明示 push する。
+  // nghttp3 側には close_stream (CONNECT ストリームの消去) で終了を伝える。
+  // このとき nghttp3 内部 (conn_unlink_wt_session) が残留データストリームを
+  // WT_SESSION_GONE (0x170D7B68) で破棄し (reset_stream_cb / stop_sending_cb
+  // 発火)、イベント経由で QUIC 層へ通知される。close_stream はまた
+  // SessionClosed イベント (セッション終了の通知) を積む
+  if (session_ids_.count(session_id) == 0) {
+    // 既に終了を学習済みのセッションは後始末済み (セッション終了の
+    // 後始末と SessionClosed の通知は close_stream 側で行われた)。
+    // 0x010E 自体の通知は「まだ行っていない」場合があるが、終了済み
+    // セッションのリセット送出は意味を成さないため何もしない
+    return;
+  }
+  close_stream(session_id, kH3MessageError);
+  H3Event event;
+  event.type = H3EventType::ResetStream;
+  event.stream_id = session_id;
+  event.session_id = session_id;
+  event.error_code = kH3MessageError;
+  push_event(std::move(event));
+}
+
 void H3Session::close_session(int64_t session_id,
                               uint64_t error_code,
                               const std::string& error_message) {
@@ -1166,10 +1307,30 @@ void H3Session::close_session(int64_t session_id,
 
   // nghttp3 の WebTransport セッション終了 API を使用
   // WT_CLOSE_SESSION カプセルを送信し、全ストリームを適切にシャットダウン
+  // エラーメッセージはバイト単位で 1024 に切り詰めた後、末尾が不完全な
+  // UTF-8 シーケンスになる場合は文字境界まで後退させる (draft-16 Section 6
+  // の「Senders that truncate an application-supplied message MUST do so at a
+  // UTF-8 character boundary」。is_valid_utf8 は切り詰めで生じる不完全な終端
+  // を検出する。ASCII のみのメッセージでは従来どおり 1024 バイトで切る。
+  // 1024 バイト超のメッセージをそのまま渡すと nghttp3 が
+  // NGHTTP3_ERR_INVALID_ARGUMENT を返し、close_session は黙って失敗する)。
+  // なお Python str は常に well-formed UTF-8 のため、先頭 1024 バイト内の
+  // 不正シーケンスは存在せず、後退は不完全な末尾に対してのみ発生する
+  std::string trimmed_message = error_message;
+  if (trimmed_message.size() > kMaxApplicationErrorMessageBytes) {
+    size_t message_len = kMaxApplicationErrorMessageBytes;
+    while (message_len > 0 &&
+           !is_valid_utf8(
+               reinterpret_cast<const uint8_t*>(trimmed_message.data()),
+               message_len)) {
+      message_len -= 1;
+    }
+    trimmed_message.resize(message_len);
+  }
   int rv = nghttp3_conn_close_wt_session(
       conn_, session_id, static_cast<uint32_t>(error_code),
-      reinterpret_cast<const uint8_t*>(error_message.data()),
-      error_message.size());
+      reinterpret_cast<const uint8_t*>(trimmed_message.data()),
+      trimmed_message.size());
 
   if (rv != 0) {
     return;
@@ -1185,7 +1346,7 @@ void H3Session::close_session(int64_t session_id,
   event.type = H3EventType::SessionClosed;
   event.session_id = session_id;
   event.error_code = error_code;
-  event.error_message = error_message;
+  event.error_message = trimmed_message;
   push_event(std::move(event));
 }
 
@@ -1734,6 +1895,27 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
   (void)stream_user_data;
 
   auto* session = static_cast<H3Session*>(conn_user_data);
+
+  // Application Error Message の不正検知 (draft-16 Section 6 の MUST:
+  // 「If the Application Error Message exceeds 1024 bytes or is not valid
+  // UTF-8, the receiver MUST reset the stream with code H3_MESSAGE_ERROR」)。
+  // 1024 バイト超過は nghttp3 が LENGTH 段階で NGHTTP3_ERR_H3_MESSAGE_ERROR
+  // を返すため、本コールバックが発火する前に弾かれる (ここに到達するのは
+  // 不正 UTF-8 のみ。msglen > 1024 は nghttp3 の実装変更で到達し得る防御的
+  // チェック)。検知した場合はコールバック内で nghttp3 を呼べない
+  // (再入防止) ため、セッション ID の保留と非 0 の戻りだけを行う。
+  // 非 0 を返すと nghttp3 は NGHTTP3_ERR_CALLBACK_FAILURE を返し、nghttp3 の
+  // デフォルトのセッションシャットダウン (WT_SESSION_GONE = 0x170D7B68 での
+  // リセット) を止める。0 を返すと 0x170D7B68 が先行し、リセットコードを
+  // H3_MESSAGE_ERROR (0x010E) にできないため、この経路が仕様 MUST を満たす
+  // 唯一の方法である。読み取りが CALLBACK_FAILURE で戻った先
+  // (receive_stream_data の負値分岐 / accept_session の確認失敗分岐) で
+  // handle_wt_close_session_error を実行する
+  if (msglen > kMaxApplicationErrorMessageBytes ||
+      (msglen > 0 && !is_valid_utf8(msg, msglen))) {
+    session->pending_wt_close_session_error_session_id_ = session_id;
+    return NGHTTP3_ERR_H3_MESSAGE_ERROR;
+  }
 
   // 当該セッションに属するストリーム情報と送信バッファを削除する
   session->erase_session_streams(session_id);

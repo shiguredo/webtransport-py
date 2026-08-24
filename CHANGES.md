@@ -87,6 +87,10 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の `close_session` が 1024 バイトでエラーメッセージを切り詰める際に UTF-8 文字境界を無視し、不完全な UTF-8 シーケンスが送出される問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 の `close_session` が 1024 バイト超のエラーメッセージで WT_CLOSE_SESSION を送出せず、UTF-8 文字境界を無視する問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 で不正な WT_CLOSE_SESSION (1024 バイト超・不正な UTF-8 の Application Error Message) を受信しても H3_MESSAGE_ERROR (0x010E) で CONNECT ストリームをリセットしない問題を修正する
+  - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
