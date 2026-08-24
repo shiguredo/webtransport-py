@@ -3,7 +3,7 @@
 - Created: 2026-08-18
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-http3-server-accept-exception
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-24
 
 ## 目的
 
