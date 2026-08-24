@@ -3,37 +3,38 @@
 - Created: 2026-08-18
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-h3-close-session-message
-- Polished: 2026-08-18
+- Polished: 2026-08-24
 
 ## 目的
 
-draft-ietf-webtrans-http3-16 Section 6 の WT_CLOSE_SESSION メッセージに関する MUST を実装する。対象は (a) 送信側の 1024 バイト制限と UTF-8 文字境界トリミング、(b) 受信側の 1024 バイト超過・不正 UTF-8 の検知と H3_MESSAGE_ERROR でのリセット。H2 側の同種対応は issue 0085 (送信側トリミング) / 0100 (受信側検証) で別途対応中であり、本 issue は H3 側を担当する。
+draft-ietf-webtrans-http3-16 Section 6 の WT_CLOSE_SESSION メッセージに関する MUST を実装する。対象は (a) 送信側の 1024 バイト制限と UTF-8 文字境界トリミング、(b) 受信側の 1024 バイト超過・不正 UTF-8 の検知と H3_MESSAGE_ERROR でのリセット。H2 側の同種対応は issue 0085 (送信側トリミング) / 0100 (受信側検証) が別途担当しており、本 issue は H3 側を担当する。
 
 ## 現状
 
-- **送信側**: `src/bindings/webtransport_h3.cpp` の `H3Session::close_session` は error_message を無検証で `nghttp3_conn_close_wt_session` へ渡す。nghttp3 は送信時に長さ検証もトリミングもしないため、1024 バイト超のメッセージを送ると「its length MUST NOT exceed 1024 bytes」に違反し、コンプライアントなピアから H3_MESSAGE_ERROR を受ける
+- **送信側**: `src/bindings/webtransport_h3.cpp` の `H3Session::close_session` は error_message を無検証で `nghttp3_conn_close_wt_session` へ渡す。nghttp3 は送信時にメッセージ長が 1024 バイトを超えると `NGHTTP3_ERR_INVALID_ARGUMENT` を返す (トリミングはしない)。現行の `close_session` は `rv != 0` で無条件に return するため、1024 バイト超のメッセージでは WT_CLOSE_SESSION が送出されず、セッションも閉じない (アプリへは何も通知されない)。違反メッセージがワイヤへ載ることはないが、「its length MUST NOT exceed 1024 bytes」を満たす送出が現行ではできない
 - **受信側**: `H3Session::recv_wt_close_session_cb` はメッセージを無検証でアプリへ渡す。nghttp3 は 1024 バイト超過を `NGHTTP3_ERR_H3_MESSAGE_ERROR` で検知するのみで、リセットは送出しない。UTF-8 妥当性は検証しないため、以下が未達:
   - 「is not valid UTF-8, the receiver MUST reset the stream with code H3_MESSAGE_ERROR」
   - 1024 バイト超過受信時の「MUST reset the stream with code H3_MESSAGE_ERROR」(nghttp3 の検知だけでリセットが発生しない)
+  - さらに、コールバックが 0 を返す正常経路では nghttp3 が `NGHTTP3_ERR_WT_SESSION_GONE` を内部で捕捉し、`WT_SESSION_GONE` (0x170D7B68) でのセッションシャットダウンを実行する。そのため不正 UTF-8 をコールバックで検知しても、コールバックが 0 を返すと 0x170D7B68 が先行し、リセットコードを H3_MESSAGE_ERROR (0x010E) にはできない (このとき読み取りは正当値として返り、Error イベントも積まれない)
 - 高レベル API (client.py / server.py) には error_message 付きの close_session が存在せず、現状の 1024 バイト超送出は C++ バインディング直接利用時に限られる
 
 ## 設計方針
 
-- **変更対象**: `src/bindings/webtransport_h3.cpp` の `H3Session::close_session` (送信側トリミング) / `H3Session::recv_wt_close_session_cb` (受信側検証) / 関連する受信リセット経路 / テスト / CHANGES.md
-- **送信側**: error_message をバイト単位で 1024 に切り詰めた後、末尾が不完全な UTF-8 シーケンスなら直前の文字境界まで後退させる (issue 0085 の H2 側と同じ手法)。1024 バイトちょうどは合法 (MUST NOT exceed の超過のみ違反)
-- **受信側**: 1024 バイト超過・不正 UTF-8 の両方を検知し、H3_MESSAGE_ERROR でストリームをリセットする。検知経路が 2 系統あることに注意する:
-  - **1024 バイト超過**: `recv_wt_close_session_cb` は発火せず、`nghttp3_conn_read_stream2` の戻り値 `NGHTTP3_ERR_H3_MESSAGE_ERROR` で検知される。`receive_stream_data` の `consumed < 0` 分岐でリセットを送出する。この経路ではコールバック未発火のため `session_ids_` にセッションが残存しており、既存の `close_stream` の CONNECT ストリーム判定が成立し得る (再入問題なし)
-  - **不正 UTF-8**: `recv_wt_close_session_cb` 内で検知する。発火経路は 2 つある:
-    - `nghttp3_conn_read_stream2` 経由 (通常受信)。コールバックは処理中に同期発火するため、コールバック内で nghttp3 を呼ぶと再入になる。既存パターン (`pending_stale_2xx_discard_session_ids_` 方式) と同様に、検知を保留集合へ記録し `receive_stream_data` が `read_stream2` から戻った後にリセット処理を実行する
-    - `accept_session` の confirm 処理中 (受理前にバッファされた WT_CLOSE_SESSION が `process_blocked_wt_stream_data` で同期処理される経路)。この経路では `receive_stream_data` が呼ばれないため、リセット処理の実行は `accept_session` 内 (既存の `discard_stale_2xx()` 呼び出しと同じ場所) で行う
-  - **コールバック戻り値の設計が必要**: `recv_wt_close_session_cb` が 0 を返すと、nghttp3 は `NGHTTP3_ERR_WT_SESSION_GONE` を戻り値として返すのみで、CONNECT ストリームのリセットは H3_MESSAGE_ERROR では行われない (既存コードは `receive_stream_data` の `consumed < 0` 分岐で Error イベントを積むだけ) ため、仕様 MUST (H3_MESSAGE_ERROR でのリセット) を満たさない。コールバックから非 0 を返すと `NGHTTP3_ERR_CALLBACK_FAILURE` になり、`receive_stream_data` の `consumed < 0` 分岐がアプリへ誤った Error イベントを積むため、この経路の扱い (Error イベントを積まない等) を設計する。また、コールバック非 0 で nghttp3 のセッション破棄を止めた場合、セッション所属データストリームの WT_SESSION_GONE 破棄 (Section 6 の MUST) を誰が担うかも設計に含める
-  - どちらの経路も、`recv_wt_close_session_cb` 発火時点 (不正 UTF-8 経路) または検知時点 (1024 バイト超過経路) で `session_ids_` から削除済みか否かが異なるため、リセットの送出手段 (QUIC 層への直接リセット要求等) を実装時に決める
-- テストを追加する: 送信側の UTF-8 境界トリミング (1024 バイト超・マルチバイト文字)、受信側の不正 UTF-8・1024 バイト超過で H3_MESSAGE_ERROR のリセットが発生すること。Sans-IO 構成 (既存のワイヤ検査テストと同様) で検証する
+- **変更対象**: `src/bindings/webtransport_h3.cpp` の `H3Session::close_session` (送信側トリミング) / `H3Session::recv_wt_close_session_cb` (受信側検知) / `H3Session::receive_stream_data` (リセット処理) / `H3Session::accept_session` (confirm 経路のリセット処理) / テスト / CHANGES.md
+- **送信側**: error_message をバイト単位で 1024 に切り詰めた後、末尾が不完全な UTF-8 シーケンスなら直前の文字境界まで後退させる (issue 0085 の H2 側と同じ手法)。1024 バイトちょうどは合法 (MUST NOT exceed の超過のみ違反)。トリミングは nghttp3 の `NGHTTP3_ERR_INVALID_ARGUMENT` を避けるためにも必須となる
+- **受信側**: 1024 バイト超過・不正 UTF-8 の両方で CONNECT ストリームを H3_MESSAGE_ERROR (0x010E) でリセットする。検知経路が 2 系統あることに注意する:
+  - **1024 バイト超過**: `recv_wt_close_session_cb` は発火せず、`nghttp3_conn_read_stream2` の戻り値 `NGHTTP3_ERR_H3_MESSAGE_ERROR` で検知される。`receive_stream_data` の `consumed < 0` 分岐で CONNECT ストリームのリセットを送出する。この経路ではコールバック未発火のため `session_ids_` にセッションが残存しており、CONNECT ストリームの特定はセッション ID から行える (再入問題なし)
+  - **不正 UTF-8**: `recv_wt_close_session_cb` 内で検知し、**コールバックは非 0 を返す**。コールバックが 0 を返すと nghttp3 が 0x170D7B68 でセッションを先にシャットダウンし、0x010E に矯正できないため。コールバック非 0 では `NGHTTP3_ERR_CALLBACK_FAILURE` が `nghttp3_conn_read_stream2` から返り、`consumed < 0` 分岐でリセット処理へ合流できる。コールバック内で nghttp3 を呼ぶと再入になるため、検知はコールバック内で行い、リセットの実行は `receive_stream_data` が `read_stream2` から戻った後の `consumed < 0` 分岐で行う
+  - **accept_session の confirm 経由**: 受理前にバッファされた WT_CLOSE_SESSION が `process_blocked_wt_stream_data` で同期処理される経路では `receive_stream_data` が呼ばれない。1024 バイト超過は confirm 自体が `NGHTTP3_ERR_H3_MESSAGE_ERROR` で失敗し、不正 UTF-8 はコールバックの非 0 戻り (CALLBACK_FAILURE) により confirm が失敗する。どちらも `accept_session` の確認失敗分岐 (既存の `discard_stale_2xx()` 呼び出しがある `rv != 0` 分岐) でリセット処理を実行する
+  - **コールバック非 0 の影響**: コールバック非 0 では nghttp3 のセッションシャットダウン (0x170D7B68 でのリセット) が発動しないため、Section 6 の MUST (セッション終了時の残留データストリームの WT_SESSION_GONE でのリセット) は下記のリセット送出手段 (close_stream 適用時に nghttp3 が発火させる reset_stream_cb) に委ねる。CONNECT ストリームの 0x010E リセット、残留データストリームの 0x170D7B68 リセット、セッション後始末 (erase_session_streams / session_ids_ 削除 / セッション終了イベント) の順序を設計に含める
+  - **リセットの送出手段 (公開 API の制約)**: nghttp3 の公開ヘッダー (nghttp3.h) に `nghttp3_conn_abort_stream` の宣言はなく、CONNECT ストリーム自身の reset_stream_cb を発火させる公開 API は存在しない (`nghttp3_conn_close_stream` / `nghttp3_conn_close_stream2` は `conn_delete_stream` を呼ぶのみで、CONNECT ストリームに対しては reset_stream_cb を発火させない。残留データストリームには `conn_unlink_wt_session` が自動で reset_stream_cb を発火させる)。そのため CONNECT ストリームの 0x010E リセットは、H3Session が `H3EventType::ResetStream` (error_code = 0x010E) を明示 push し、高レベル層の既存変換 (RESET_STREAM イベント → `quic_connection.reset_stream`) を経由してワイヤへ送出する。nghttp3 側のストリーム状態は `nghttp3_conn_close_stream` で CONNECT ストリームの消去を伝える (残留データストリームの 0x170D7B68 リセットはこのとき nghttp3 が発火する reset_stream_cb を経由し、同じ変換で送出される)
+- テストを追加する: 送信側の UTF-8 境界トリミング (1024 バイト超・マルチバイト文字)、受信側の不正 UTF-8・1024 バイト超過で CONNECT ストリームが H3_MESSAGE_ERROR (0x010E) の RESET_STREAM になること。Sans-IO 構成 (既存のワイヤ検査テストと同様) で検証する
+- 0131 との切り分け: 0131 (open) は同一の負値分岐で接続エラー (`nghttp3_err_is_fatal()` が真) の `closed_ = true` 化を担当する。本 issue が扱う `NGHTTP3_ERR_H3_MESSAGE_ERROR` (-611) はストリームレベルのエラーで closed_ にせず、CONNECT ストリームのリセット処理を追加する。エラー値で分離し、両者は協調して付ける
 - 変更内容を CHANGES.md の `## develop` に [FIX] として記載する
 
 ## 完了条件
 
-- 1024 バイト超・マルチバイト文字を含むエラーメッセージが UTF-8 文字境界で切り詰められて送出される
-- 不正な UTF-8 メッセージの受信で H3_MESSAGE_ERROR のリセットが発生する
-- 1024 バイト超過のメッセージ受信で H3_MESSAGE_ERROR のリセットが発生する
+- 1024 バイト超・マルチバイト文字を含むエラーメッセージが UTF-8 文字境界で切り詰められて送出される (ワイヤ上の Application Error Message が有効な UTF-8・1024 バイト以下)
+- 不正な UTF-8 メッセージの受信で CONNECT ストリームが H3_MESSAGE_ERROR (0x010E) でリセットされる
+- 1024 バイト超過のメッセージ受信で CONNECT ストリームが H3_MESSAGE_ERROR (0x010E) でリセットされる
 - それぞれのテストが追加され通る
