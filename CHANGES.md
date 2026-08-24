@@ -83,6 +83,8 @@
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
   - @voluntas
+- [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
+  - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
