@@ -270,11 +270,11 @@ wheels = [
 
 [[package]]
 name = "nanobind"
-version = "2.14.0"
+version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1f/23/a6fdf94de7bf760da93a115593cc1756a7b3d408c12681df9e4c63bf11e3/nanobind-2.14.0.tar.gz", hash = "sha256:0cf1477d8b1697abc1454028b6469e7113d9aa6ba3ced8b102cc569affbacb13", size = 1053642, upload-time = "2026-08-07T06:07:51.605Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/37/5f136054cfdba93e763d956898048a21997b7478ccadcfec6dfebf4b72aa/nanobind-3.0.0.tar.gz", hash = "sha256:68583c41d58af77649b830407d2ba84627f21f07ad4ae2e32c6988fb96eaa71a", size = 1141160, upload-time = "2026-08-22T04:23:31.014Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/17/fba47a85a7b0bfb9ab5a5100e8a26b361b881089c7d8cad9a95f895f1546/nanobind-2.14.0-py3-none-any.whl", hash = "sha256:a57cd4fe613db78410ca13ba007a3ffaf3125b831d8be46ec7f4351e8cf6e513", size = 269917, upload-time = "2026-08-07T06:07:50.045Z" },
+    { url = "https://files.pythonhosted.org/packages/33/8b/cbd87788012d98179686ecdce7d73d154e277c50859458157ec5575c0352/nanobind-3.0.0-py3-none-any.whl", hash = "sha256:3808620334b1e7e647d71feb1bf525496216b48ee2a8cd4c4a31ae1f1cbb1c6f", size = 316362, upload-time = "2026-08-22T04:23:29.737Z" },
 ]
 
 [[package]]
@@ -598,13 +598,13 @@ test = [
 
 [package.metadata.requires-dev]
 build = [
-    { name = "nanobind", specifier = ">=2.13.0" },
+    { name = "nanobind", specifier = "~=3.0.0" },
     { name = "scikit-build-core", specifier = ">=1.0.3" },
 ]
 dev = [
     { name = "cryptography" },
     { name = "hypothesis" },
-    { name = "nanobind", specifier = ">=2.13.0" },
+    { name = "nanobind", specifier = "~=3.0.0" },
     { name = "playwright", specifier = "~=1.62.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },

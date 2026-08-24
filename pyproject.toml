@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=1.0.3", "nanobind>=2.13.0"]
+requires = ["scikit-build-core>=1.0.3", "nanobind~=3.0.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -48,7 +48,7 @@ lint = ["ruff", "ty"]
 # make develop (--no-build-isolation) 用。build-system.requires と揃える
 build = [
   "scikit-build-core>=1.0.3",
-  "nanobind>=2.13.0",
+  "nanobind~=3.0.0",
 ]
 
 [tool.scikit-build]
