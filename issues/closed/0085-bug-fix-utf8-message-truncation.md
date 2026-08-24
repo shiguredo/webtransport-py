@@ -1,7 +1,7 @@
 # HTTP/2 の close_session のエラーメッセージ切り詰めが UTF-8 文字境界を無視する問題を修正する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-utf8-message-truncation
 - Polished: 2026-08-24
 
@@ -26,3 +26,8 @@ draft-ietf-webtrans-http2-15 Section 6.12 の MUST「Senders that truncate an ap
 - マルチバイト文字が 1024 バイト境界を跨ぐエラーメッセージでも、ワイヤへ送出される Application Error Message が常に有効な UTF-8 で 1024 バイト以下になる
 - ASCII のみのメッセージの切り詰めは従来どおり 1024 バイトで行われる
 - 全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `H2Session::close_session` で、バイト単位の 1024 バイト切り詰め後に `is_valid_utf8` (RFC 3629 の well-formed) で先頭部分を検証し、不完全な UTF-8 シーケンスなら文字境界まで 1 バイトずつ後退させてから送出する (draft-15 Section 6.12 の MUST 準拠。最大後退量は 3 バイト)
+- テストを追加した: `tests/test_webtransport_h2_close_session.py` (3 バイト文字の後退 / 4 バイト文字の最大 3 バイト後退 / ASCII の従来挙動 / ちょうど 1024 バイトで後退しないケース。ワイヤ部分列チェックとピア側の SessionClosed 意味論を検証) と `tests/prop_webtransport_h2.py` (1024 バイト超の任意のエラーメッセージに対する UTF-8 安全性と 1024 バイト制限を検証する PBT)

@@ -1771,8 +1771,20 @@ void H2Session::close_session(int32_t session_id,
   payload.push_back(static_cast<uint8_t>(error_code & 0xFF));
 
   if (!error_message.empty()) {
+    // バイト単位で 1024 に切り詰めた後、末尾が不完全な UTF-8 シーケンスに
+    // なる場合は文字境界まで後退させる (draft-15 Section 6.12 の
+    // 「Senders that truncate an application-supplied message MUST do so at
+    // a UTF-8 character boundary」)。切り詰めで生じる不完全な終端は
+    // is_valid_utf8 (RFC 3629 の well-formed) で検出し、先頭部分が有効な
+    // UTF-8 になるまで 1 バイトずつ後退する。ASCII のみのメッセージでは
+    // 従来どおり 1024 バイトで切り詰められる
     size_t message_len =
         std::min(error_message.size(), kMaxApplicationErrorMessageBytes);
+    while (message_len > 0 &&
+           !is_valid_utf8(reinterpret_cast<const uint8_t*>(error_message.data()),
+                          message_len)) {
+      message_len -= 1;
+    }
     payload.insert(payload.end(), error_message.begin(),
                    error_message.begin() +
                        static_cast<std::ptrdiff_t>(message_len));
