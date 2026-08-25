@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の初期フロー制御 0 フォールバックが広告制限を超える問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-h2-initial-flow-control-fallback
 - Polished: 2026-08-24
 
@@ -28,3 +28,8 @@ draft-ietf-webtrans-http2-15 の MUST「WT_STREAM のデータ合計は受信者
 - 対向 SETTINGS が 0 (または未受信) のセッションで、WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS カプセルの受信まで、データ送信・ストリーム開設が行われない (データ送信を試みた場合は既存のフロー制御ガードで WT_FLOW_CONTROL_ERROR、ストリーム開設を試みた場合は open_stream が -1 を返して失敗する)
 - 対向 SETTINGS が非 0 の場合、従来どおり非 0 の値で送信クレジット・ストリーム上限を設定する
 - テストが追加され、全テスト (ブラウザ E2E を含む) が通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `H2Session::apply_peer_initial_flow_control` から自側 config 値へのフォールバックを除去し、対向 SETTINGS が 0 (draft-15 Section 11.2 の既定値) の場合の送信クレジット・ストリーム上限を 0 とした (データクレジット 4 種 + ストリーム数 2 種 + ストリームデータ 3 種の全 9 箇所。Section 6.5 / 6.6 / 6.7 の MUST 準拠)
+- テスト: `tests/test_webtransport_h2_initial_flow_control_fallback.py` (0 クレジットで open_stream が -1・カプセル受信で前進するラウンドトリップ / 単方向ストリーム上限の 0 と前進 / データクレジット 0 での送信試行が WT_FLOW_CONTROL_ERROR)。`tests/test_webtransport_h2_flow_control_capsule.py` の既存テストをフォールバック前提の名称から現状の挙動を説明する名称に変更し、DOCSTRING を更新した。`tests/test_webtransport_h2_close_session.py` のフォールバック前提コメントも更新した
