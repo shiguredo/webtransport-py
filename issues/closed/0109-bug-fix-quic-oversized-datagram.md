@@ -1,7 +1,7 @@
 # QUIC の過大データグラムが送信キューを永久に塞ぐ問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-quic-oversized-datagram
 - Polished: 2026-08-24
 
@@ -29,3 +29,9 @@ RFC 9221 Section 3 の「An endpoint MUST NOT send DATAGRAM frames that are larg
 - 過大データグラムをエンキューしても、後続のデータグラムが送出される (ハンドシェイク前・ハンドシェイク後のどちらでも)
 - CHANGES.md の `## develop` に [FIX] エントリを追加する
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `src/bindings/quic.cpp` の `QuicConnection::send_datagram` で、ピアの max_datagram_frame_size を超えるデータグラムを黙って破棄する。比較対象は DATAGRAM フレーム全体 (type 1 バイト + varint(データ長) + データ長。ngtcp2_pkt_datagram_framelen と同一計算) とし、データ長のみの比較で境界ケースが残る問題を避ける。上限値 0 (ピアが DATAGRAM 非サポート) は自然に破棄される
+- 書き出しループで `NGTCP2_ERR_INVALID_ARGUMENT` (過大) と `NGTCP2_ERR_INVALID_STATE` かつ TP 受信済み (値 0 = 恒久) の場合にキュー先頭エントリを破棄して継続する (head-of-line ブロックの根絶)。TP 未受信の INVALID_STATE は一時状態であり、保留する
+- テスト: `tests/test_quic_oversized_datagram.py` (過大破棄 + 後続送達 / ハンドシェイク前キュー後の書き出し時破棄 / varint 長境界 (63/64 バイト) の破棄判定の一貫性)
