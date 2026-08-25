@@ -35,15 +35,16 @@ def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
     return bytes([capsule_type, len(payload)]) + payload
 
 
-def _encode_1xx_headers(session_id: int, status_code: int) -> bytes:
-    """1xx レスポンスの HEADERS フレームのワイヤバイト列を組み立てる
+def _encode_status_headers(session_id: int, status_code: int) -> bytes:
+    """:status を指定した HEADERS フレームのワイヤバイト列を組み立てる
 
     HPACK 圧縮済みヘッダーブロックは、静的テーブルの :status (index 8) を
     参照するリテラルヘッダーフィールド (RFC 7541 Section 6.2.2 の
     Literal Header Field without Indexing) で組み立てる。0x08 は 4 ビット
     プレフィックスで index 8 を表し、インクリメンタルインデックスを伴わ
     ないためデコーダーの動的テーブルを汚さない。フレームは END_HEADERS
-    フラグ付きの HEADERS フレーム (1xx は中間応答のため END_STREAM なし)。
+    フラグ付きの HEADERS フレーム (中間応答や END_STREAM なしの最終応答の
+    注入に使う)。
     """
     status = str(status_code).encode()
     header_block = bytes([0x08, len(status)]) + status
@@ -153,13 +154,14 @@ def test_client_non_2xx_reject_close_session_noop() -> None:
     assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(client))
 
 
-def test_client_response_201_session_kept() -> None:
-    """2xx 非 200 応答 (201) ではエントリが削除されず送出が続くことを確認
+def test_client_response_201_session_established() -> None:
+    """2xx 非 200 応答 (201) でセッションが確立として扱われることを確認
 
-    draft-15 Section 3.2 では 2xx 全般がセッション確立であり、削除条件は
-    「200 以外」ではなく「2xx 以外」。201 のエントリは is_established が
-    false のまま残る既存の制約が続く (リーク挙動のピン留め)。本テストは
-    修正前実装でも通る設計ピンであり、過剰削除の防止を守る。
+    draft-15 Section 3.2 では 2xx 全般がセッション確立であり、確立条件を
+    「200 のみ」から先頭文字が '2' の 2xx 全般へ広げた。201 は確立
+    (is_established / SESSION_READY) として扱われることを検証する。
+    201 応答は END_STREAM 付きで届くため、確立直後のセッション終了
+    (SessionClosed) も正しく検知される (回帰ピン)。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -167,15 +169,24 @@ def test_client_response_201_session_kept() -> None:
     _h2_pump(client, server)
 
     # サーバーが 201 で応答する (reject_session は任意の status_code で
-    # 応答を生成できる)
+    # 応答を生成できる。2xx は拒否ではなくセッション確立の意味論)
     server.reject_session(session_id, 201)
     _h2_pump(server, client)
 
-    # 201 では削除されない: DATAGRAM capsule がワイヤに送出され続ける
-    client.send_datagram(session_id, b"alive")
-    wire = client.send()
-    assert wire is not None
-    assert _encode_capsule(0x00, b"alive") in wire
+    # 201 は確立として扱われる: SESSION_READY が発火する
+    events = _drain_events(client)
+    ready_events = [event for event in events if event.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1
+    assert ready_events[0].session_id == session_id
+    # イベント順序 (SESSION_READY → SESSION_CLOSED) のピン: 逆転すると
+    # 高レベル Client.connect が SESSION_CLOSED を先に見て False を返す
+    assert events[0].type == h2.EventType.SESSION_READY
+
+    # 201 応答の END_STREAM によりセッション終了が正しく検知される
+    # (修正前は 201 が確立扱いされず END_STREAM も誤検知されず残留した)
+    closed_events = [event for event in events if event.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1
+    assert client.get_session_ids() == []
 
 
 def test_client_receive_1xx_keeps_session() -> None:
@@ -200,7 +211,7 @@ def test_client_receive_1xx_keeps_session() -> None:
     _h2_pump(client, server)
 
     # 1xx レスポンスの HEADERS フレームを直接注入する
-    ret = client.receive(_encode_1xx_headers(session_id, 103))
+    ret = client.receive(_encode_status_headers(session_id, 103))
     assert ret > 0, "1xx HEADERS フレームの注入に失敗しました"
     assert not client.is_closed(), "1xx 注入で接続が閉じられました"
 
@@ -228,7 +239,7 @@ def test_client_receive_1xx_then_final_response_keeps_session() -> None:
 
     # 1xx レスポンスの HEADERS フレームを直接注入し、続けて 403 の最終
     # 応答をサーバーから届ける
-    ret = client.receive(_encode_1xx_headers(session_id, 103))
+    ret = client.receive(_encode_status_headers(session_id, 103))
     assert ret > 0, "1xx HEADERS フレームの注入に失敗しました"
     server.reject_session(session_id, 403)
     _h2_pump(server, client)
@@ -243,8 +254,8 @@ def test_client_receive_1xx_then_final_response_keeps_session() -> None:
 def test_client_accept_200_normal_session_unaffected() -> None:
     """通常のセッション確立 (200 応答) が非 2xx 応答処理の影響を受けないことを確認
 
-    SESSION_READY の発火条件 (200 のみ) は変更しない。本テストは修正前
-    実装でも通る回帰ピンであり、通常の確立経路の維持を守る。
+    SESSION_READY の発火条件 (2xx 全般 = 先頭文字が '2') は非 2xx 拒否処理の
+    追加後も維持される。通常の確立経路の維持を守る回帰ピン。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -454,3 +465,37 @@ def test_session_ready_status_code_stays_default() -> None:
     assert len(stream_events) == 1
     assert stream_events[0].status_code == 0
     assert stream_events[0].headers == []
+
+
+def test_client_response_201_without_end_stream_keeps_session() -> None:
+    """END_STREAM なしの 201 応答でセッションが確立として機能することを確認
+
+    reject_session(201) は END_STREAM 付きで応答するため (確立直後に終了する
+    シナリオ)、確立後にセッションとして機能する挙動はワイヤ注入 (END_STREAM
+    なしの 2xx HEADERS) で検証する。draft-15 Section 3.2 の 2xx 全般確立に
+    より SESSION_READY が発火し、open_stream / send_datagram が機能する
+    (修正前は 201 を非確立として扱い、高レベル Client.connect がハング
+    していた)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # END_STREAM なしの 201 HEADERS をワイヤ注入する
+    ret = client.receive(_encode_status_headers(session_id, 201))
+    assert ret > 0, "201 HEADERS フレームの注入に失敗しました"
+
+    # 確立イベントが発火する
+    events = _drain_events(client)
+    ready_events = [event for event in events if event.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1
+    assert ready_events[0].session_id == session_id
+
+    # 確立後のセッション機能 (ストリーム開設とデータグラム送出) が動作する
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+    client.send_datagram(session_id, b"alive")
+    wire = client.send()
+    assert wire is not None
+    assert _encode_capsule(0x00, b"alive") in wire
