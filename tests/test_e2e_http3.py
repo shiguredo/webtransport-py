@@ -1,6 +1,7 @@
 """webtransport.http3 高レベル API テスト"""
 
 import asyncio
+import socket
 import time
 
 import pytest
@@ -1195,3 +1196,64 @@ async def test_stream_end_callback_bodyless_response(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_run_continues_on_non_initial_packet(test_certificates):
+    """未知アドレスからの非 Initial パケットで run() が継続することを確認
+
+    接続クローズ済みアドレスからの追従パケット等、unknown アドレスからの
+    非 Initial パケットは _accept_connection (quic.Connection.accept) が
+    RuntimeError を投げる。サーバーは黙って破棄して run() を継続する
+    (quic / h3 層の Server.run と同じ挙動)。未対策だとサーバータスクが
+    例外終了する (遠隔 DoS の入口)。
+    """
+    from webtransport.http3 import Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    try:
+        # 非 Initial パケット (長ヘッダーの 1 バイト目が 0x80 等でない、
+        # accept のデコードで失敗するバイト列) を未知アドレスから送る
+        loop = asyncio.get_running_loop()
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            await loop.sock_sendto(
+                sender,
+                b"\x00" + b"non-initial-packet" + (b"\xff" * 32),
+                ("127.0.0.1", server.actual_port),
+            )
+        finally:
+            sender.close()
+        await asyncio.sleep(0.05)
+        assert server_task.done() is False
+        await asyncio.sleep(0.05)
+        assert server_task.done() is False
+
+        # 破棄後もサーバーが正常な接続を受け付けられることを確認する
+        # (例外破棄の実装を残したままタイマー処理やループ制御が壊れた
+        # 変更を検出するため)
+        from webtransport.http3 import Client
+
+        client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
+        assert connected is True
+        await client.close()
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await server.stop()
