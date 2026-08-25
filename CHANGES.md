@@ -149,6 +149,8 @@
   - @voluntas
 - [FIX] HTTP/2 の GOAWAY 受信で接続を閉じてしまい進行中ストリームのレスポンス送出が止まる問題を修正する (RFC 9113 Section 6.8 の graceful shutdown。受信後は既存ストリームの送受信を継続し、新規ストリームの開始のみを抑止する)
   - @voluntas
+- [FIX] QUIC のピアの max_datagram_frame_size を超えるデータグラムが送信キューを永久に塞ぐ問題を修正する (RFC 9221 Section 3)
+  - @voluntas
 - [FIX] 遅延クローズ保留中に破棄されるべき 2xx レスポンスが送出されてしまうのを修正する
   - @voluntas
 - [FIX] セッション終了後に終了したセッション ID 宛のデータグラムが配信されるのを修正する

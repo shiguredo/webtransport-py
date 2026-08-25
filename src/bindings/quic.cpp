@@ -38,6 +38,22 @@ uint64_t get_timestamp_ns() {
       .count();
 }
 
+// QUIC varint のエンコード済みバイト長 (RFC 9000 Section 16。ngtcp2 の
+// ngtcp2_put_uvarintlen と同じ境界計算。ngtcp2_pkt_datagram_framelen は
+// type + この値 + データ長の合計)
+static size_t quic_varint_length(uint64_t value) {
+  if (value <= 63) {
+    return 1;
+  }
+  if (value <= 16383) {
+    return 2;
+  }
+  if (value <= 1073741823) {
+    return 4;
+  }
+  return 8;
+}
+
 // ALPN を構築
 std::vector<uint8_t> build_alpn(const std::vector<std::string>& protocols) {
   std::vector<uint8_t> alpn;
@@ -1323,6 +1339,24 @@ std::optional<QuicPacket> QuicConnection::send() {
         // 進捗がない場合はこの呼び出しで諦めて次へ
         break;
       }
+      // ピアの max_datagram_frame_size 超過 (INVALID_ARGUMENT) は送信
+      // できない過大データグラムを先頭から破棄してループを継続する
+      // (head-of-line ブロックの防止。RFC 9221 Section 3 の MUST NOT に
+      // 従い送出はしない。エンキュー時の検査をすり抜けたもの・
+      // ハンドシェイク前 (検査不能) にキューされたものがここに到達する)。
+      // INVALID_STATE は (a) ハンドシェイク前の TP 未受信 (一時状態であり
+      // 保留する) と (b) TP の max_datagram_frame_size = 0 (DATAGRAM 非
+      // サポート。接続中は恒久であり、破棄して後続を進める) の 2 種:
+      // 値 0 の場合は先頭エントリを破棄してループを継続する
+      if (nwrite == NGTCP2_ERR_INVALID_ARGUMENT) {
+        datagram_queue_.pop_front();
+        continue;
+      }
+      if (nwrite == NGTCP2_ERR_INVALID_STATE &&
+          remote_max_datagram_frame_size().has_value()) {
+        datagram_queue_.pop_front();
+        continue;
+      }
       break;
     }
 
@@ -1697,6 +1731,26 @@ void QuicConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
 void QuicConnection::send_datagram(const std::vector<uint8_t>& data) {
   if (!conn_ || closed_ || !config_.enable_datagram) {
     return;
+  }
+
+  // ピアの max_datagram_frame_size を超えるデータグラムは黙って破棄する
+  // (RFC 9221 Section 3 の「An endpoint MUST NOT send DATAGRAM frames that
+  // are larger than the max_datagram_frame_size value it has received from
+  // its peer」)。ngtcp2 の比較対象は DATAGRAM フレーム全体 (type 1 バイト +
+  // varint(データ長) + データ長) であるため、データ長のみの比較では境界
+  // ケースで ngtcp2 が NGTCP2_ERR_INVALID_ARGUMENT を返し、書き出しループ
+  // がキューを塞ぐ。破棄は黙って行う (既存の終了後ガードと同じ「黙って
+  // 無視」の位置づけ。エラー通知は API 変更を伴うため採用しない)。
+  // 上限値 0 (ピアが DATAGRAM をサポートしない) はフレーム長 >= 1 > 0
+  // のため自然に破棄される。ハンドシェイク前 (transport parameter 未受信)
+  // は上限が不明のため検査できず、この場合は書き出しループの自衛
+  // (INVALID_ARGUMENT 時の先頭エントリ破棄) に委ねる
+  auto remote_limit = remote_max_datagram_frame_size();
+  if (remote_limit.has_value()) {
+    size_t frame_len = 1 + quic_varint_length(data.size()) + data.size();
+    if (frame_len > *remote_limit) {
+      return;
+    }
   }
 
   datagram_queue_.push_back(data);
