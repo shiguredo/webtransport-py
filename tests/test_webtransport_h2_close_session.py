@@ -72,11 +72,12 @@ def _create_h2_session_pair_with_server_stream_limit(
     クライアントのストリーム送信クレジットは対向 (サーバー) の SETTINGS 由来
     (draft-15 Section 4.3.1) のため、サーバー config の
     wt_initial_max_stream_data を小さな正の値にするとクライアントの送信
-    クレジットが縮小する。0 にするとフォールバックで自側 config が使われ
-    縮小しない (apply_peer_initial_flow_control の仕様)。クレジットは
-    SETTINGS と 200 応答の WebTransport-Init ヘッダー (br) を max で合成する
-    が (webtransport_h2.cpp の SETTINGS 受信・200 応答受信処理)、ヘルパーは
-    config の値が両方に反映されるため 4 で一致し、合成経路で上書きされない。
+    クレジットが縮小する。0 にすると送信クレジットは 0 (カプセル到着待ち)
+    になる (apply_peer_initial_flow_control と draft-15 Section 11.2)。
+    クレジットは SETTINGS と 200 応答の WebTransport-Init ヘッダー (br) を
+    max で合成するが (webtransport_h2.cpp の SETTINGS 受信・200 応答受信処理)、
+    ヘルパーは config の値が両方に反映されるため 4 で一致し、合成経路で
+    上書きされない。
     """
     client = h2.Session.create_client(h2.Config())
     server_config = h2.Config()

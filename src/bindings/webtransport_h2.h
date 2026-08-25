@@ -215,8 +215,8 @@ struct WtSessionInfo {
   uint64_t bytes_sent = 0;
   uint64_t max_data_local = 0;
   // 対向から受信した直近の Maximum Data (SETTINGS 非 0 または
-  // WT_MAX_DATA)。未受信は nullopt で、自側 config へのフォールバック
-  // は減少値判定の基準にしない (draft-15 Section 6.5)
+  // WT_MAX_DATA)。未受信は nullopt で、減少値判定の基準にならない
+  // (draft-15 Section 6.5。自側 config へのフォールバックは廃止済み)
   std::optional<uint64_t> received_max_data;
 
   // フロー制御 (受信側)

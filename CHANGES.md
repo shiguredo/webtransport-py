@@ -85,6 +85,8 @@
   - @voluntas
 - [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 で SETTINGS の初期フロー制御値 0 を広告する対向へ自側 config 値にフォールバックして送信できてしまう問題を修正する (draft-15 Section 6.5 / 6.6 / 6.7 の MUST 違反)
+  - @voluntas
 - [FIX] WebTransport over HTTP/2 の `close_session` が 1024 バイトでエラーメッセージを切り詰める際に UTF-8 文字境界を無視し、不完全な UTF-8 シーケンスが送出される問題を修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 の `close_session` が 1024 バイト超のエラーメッセージで WT_CLOSE_SESSION を送出せず、UTF-8 文字境界を無視する問題を修正する
