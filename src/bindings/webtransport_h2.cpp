@@ -1593,11 +1593,16 @@ void H2Session::send_stream_data(int32_t session_id,
 
   auto& stream_info = stream_it->second;
 
-  // リセット済みストリームへの送信は塞ぐ (draft-15 Section 6.4 の
-  // 「A WT_STREAM capsule MUST NOT be sent after a stream is closed or
-  // reset」)。塞ぐのは ResetSent のみとし、FIN 送信後の DataSent 遷移・
-  // FIN 後の再送信の塞ぎ・reset_stream の再呼び出しの扱いはスコープ外
-  if (stream_info.send_state == StreamState::ResetSent) {
+  // リセット済み・FIN 送出済みストリームへの送信は塞ぐ (draft-15
+  // Section 6.4 の「A WT_STREAM capsule MUST NOT be sent after a stream is
+  // closed or reset」。FIN 送出後は送信側状態を DataSent へ遷移させる
+  // (下記の FIN 送出後処理) ため、以後の送信はここで塞がれる。
+  // ピアのリセット受信 (recv_state = ResetRecvd) 後の送信は塞がない:
+  // 送信側状態は Ready のままであり、RFC 9000 の送信禁止は送信側状態への
+  // 言及のため。ピアがリセット後に本実装の受信側規則でエラーにする可能性
+  // はあるが、送信側の終了のみを追跡する契約である
+  if (stream_info.send_state == StreamState::ResetSent ||
+      stream_info.send_state == StreamState::DataSent) {
     return;
   }
 
@@ -1618,6 +1623,14 @@ void H2Session::send_stream_data(int32_t session_id,
   // フロー制御更新
   stream_info.bytes_sent += data.size();
   wt_session->bytes_sent += data.size();
+
+  // FIN 送出後は送信側状態を DataSent へ遷移させる (QUIC の送信状態図の
+  // 「STREAM 送信 + FIN → Data Sent」に対応。draft-15 Section 5.2 は
+  // ACK を待たず即時遷移とする)。以後の send_stream_data は冒頭のガードで
+  // 塞がれる。空の起動 WT_STREAM_FIN (data 空 + fin=True) を含む
+  if (fin) {
+    stream_info.send_state = StreamState::DataSent;
+  }
 }
 
 void H2Session::reset_stream(int32_t session_id,
@@ -1634,8 +1647,23 @@ void H2Session::reset_stream(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.2: Reliable Size は送信済みバイト数以下
+  // 終了済み (リセット送出済み・FIN 送出済み) のストリームへの WT_RESET_STREAM
+  // 送出は塞ぐ (draft-15 Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT
+  // be sent after a stream is closed or reset」。再リセットと FIN 後の
+  // リセットの両方をここで弾く。リセット送出後は送信側のみ終了であり
+  // 受信側は継続するため、送信側の状態だけを判定に使う)。なお RFC 9000
+  // では Data Sent からの RESET_STREAM 送出が許容されるが (送信状態図の
+  // Data Sent → Reset Sent)、本実装は HTTP/2 の順序保証によりピアが必ず
+  // 終端状態 (DataRecvd) で受信するため、draft-15 Section 6.2 の MUST NOT
+  // に従い意図的に塞ぐ
   auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it != wt_session->streams.end() &&
+      (stream_it->second.send_state == StreamState::ResetSent ||
+       stream_it->second.send_state == StreamState::DataSent)) {
+    return;
+  }
+
+  // draft-15 Section 6.2: Reliable Size は送信済みバイト数以下
   if (stream_it != wt_session->streams.end() && reliable_size == 0) {
     reliable_size = stream_it->second.bytes_sent;
   }
