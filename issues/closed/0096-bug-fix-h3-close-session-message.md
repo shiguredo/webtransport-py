@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の WT_CLOSE_SESSION メッセージ送信トリミング・受信検証 (1024 バイト・UTF-8) を実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-h3-close-session-message
 - Polished: 2026-08-24
 
@@ -38,3 +38,9 @@ draft-ietf-webtrans-http3-16 Section 6 の WT_CLOSE_SESSION メッセージに�
 - 不正な UTF-8 メッセージの受信で CONNECT ストリームが H3_MESSAGE_ERROR (0x010E) でリセットされる
 - 1024 バイト超過のメッセージ受信で CONNECT ストリームが H3_MESSAGE_ERROR (0x010E) でリセットされる
 - それぞれのテストが追加され通る
+
+## 解決方法
+
+- **送信側** (`src/bindings/webtransport_h3.cpp` の `H3Session::close_session`): error_message をバイト単位で 1024 に切り詰めた後、不完全な UTF-8 シーケンスなら文字境界まで後退させてから `nghttp3_conn_close_wt_session` へ渡す (draft-16 Section 6 の MUST 準拠。1024 バイト超のメッセージをそのまま渡すと nghttp3 が `NGHTTP3_ERR_INVALID_ARGUMENT` を返して黙って失敗していた)
+- **受信側**: `recv_wt_close_session_cb` で不正 UTF-8 (および防御として 1024 バイト超) を検知し、コールバックの非 0 戻り (`NGHTTP3_ERR_CALLBACK_FAILURE` 経由) と保留により `nghttp3_conn_read_stream2` の負値分岐でリセット処理へ合流させる。1024 バイト超・4 バイト未満の不正な長さは nghttp3 が `NGHTTP3_ERR_H3_MESSAGE_ERROR` を返すため、その負値分岐で直接リセット処理する。リセットは `handle_wt_close_session_error`で行い、nghttp3 には `close_stream` で CONNECT ストリームの消去を伝え、0x010E の QUIC RESET_STREAM は `ResetStream` イベントの明示 push で高レベル層の既存変換に委ねる (nghttp3 の公開 API には reset_stream_cb を発火させる手段がないため)。`accept_session` の confirm 前バッファ経由 (1024 バイト超・不正 UTF-8) も確認失敗分岐で同処理を行う (0131 (open) は接続エラー時の閉鎖を担当し、本 issue はストリームエラーのリセットだけを担当する)
+- テスト: `tests/test_webtransport_h3_close_session_message.py` (送信側のトリミング 2 本 / 受信側の 1024 超・不正 UTF-8・4 バイト未満・1024 ちょうど・空メッセージ・max 長の不正 UTF-8・confirm 前バッファ 2 経路) と `tests/prop_webtransport_h3.py` (1024 バイト超の任意エラーメッセージを検証する PBT)

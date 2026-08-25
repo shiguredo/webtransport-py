@@ -612,6 +612,16 @@ class H3Session {
   // ヘルパー
   void push_event(H3Event event);
 
+  // WT_CLOSE_SESSION のエラーメッセージ不正 (1024 バイト超・4 バイト未満の
+  // 不正な長さ・不正 UTF-8。draft-ietf-webtrans-http3-16 Section 6 の MUST:
+  // H3_MESSAGE_ERROR での CONNECT ストリームのリセット) を検知した際のリセット処理。
+  // receive_stream_data の負値分岐と accept_session の確認失敗分岐から
+  // 呼ばれる。nghttp3 の公開 API に reset_stream_cb を発火させる手段がない
+  // ため、QUIC RESET_STREAM の送出は高レベル層の既存変換 (ResetStream
+  // イベント → quic_connection.reset_stream) に委ね、ここではイベントを
+  // 明示 push する
+  void handle_wt_close_session_error(int64_t session_id);
+
   // セッションに属するストリームの送信バッファとストリーム情報を削除する
   // close_session / recv_wt_close_session_cb / close_stream (CONNECT ストリーム
   // のクローズ経路。リセットと FIN の両方) から呼ばれる
@@ -623,6 +633,15 @@ class H3Session {
   // のためコールバック内では実行できない) と、accept_session が confirm から
   // 戻った後 (アプリ呼び出しのため直接実行できる) の両方から呼ばれる
   void discard_stale_2xx();
+
+  // WT_CLOSE_SESSION の Application Error Message が不正 (1024 バイト超・
+  // 4 バイト未満の不正な長さ・不正 UTF-8) の検知を保留したセッション ID。recv_wt_close_session_cb が
+  // コールバック内で nghttp3 を呼べない (再入防止) ため検知のみを行い、
+  // receive_stream_data (read_stream2 の戻り後) または accept_session
+  // (confirm の失敗分岐) で handle_wt_close_session_error を実行する。
+  // 1 回の read_stream2 呼び出しで処理されるストリームは 1 つだけのため、
+  // 保留は高々 1 件である
+  std::optional<int64_t> pending_wt_close_session_error_session_id_;
 
   bool is_server_;
   H3SessionConfig config_;

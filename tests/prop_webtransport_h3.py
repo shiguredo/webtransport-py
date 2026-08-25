@@ -1,6 +1,6 @@
 """WebTransport over HTTP/3 Sans I/O API の Property-Based Testing"""
 
-from conftest import _encode_wt_datagram, _establish_session
+from conftest import _drain_events, _encode_wt_datagram, _establish_session
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -341,3 +341,36 @@ def prop_set_max_client_streams_bidi_arbitrary(max_streams: int):
     config.is_server = True
     session = h3.Session.create_server(config)
     session.set_max_client_streams_bidi(max_streams)
+
+
+# ========== close_session のエラーメッセージ切り詰め (draft-16 Section 6) ==========
+
+
+@given(st.text(min_size=1025, max_size=2000))
+@settings(max_examples=100)
+def prop_close_session_error_message_utf8_safe(message: str):
+    """任意のエラーメッセージの close_session が UTF-8 境界で切り詰められて届く
+
+    draft-16 Section 6 の MUST「Senders that truncate an application-supplied
+    message MUST do so at a UTF-8 character boundary」「its length MUST NOT
+    exceed 1024 bytes」に従い、message の内容によらずピアへ届く Application
+    Error Message が well-formed UTF-8 で 1024 バイト以下になることを検証する。
+    入力はバイト長 1024 を超える文字列のみとし、切り詰めが発生する経路を
+    必ず通す (st.text の分布は小さな文字列に偏るため)。書き出されたストリーム
+    データをそのままピアに渡し、SessionClosed が正常に届くこと (不正な
+    Application Error Message を拒否しないこと) を最大の不変条件とする。
+    """
+    client, server, session_id = _establish_session()
+    server.close_session(session_id, 0, message)
+    for stream_id, data, fin in server.get_streams_to_send():
+        client.receive_stream_data(stream_id, data, fin)
+
+    closed_events = [
+        event for event in _drain_events(client) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    received = closed_events[0].error_message
+    assert closed_events[0].error_code == 0
+    # 送信したメッセージの先頭部分 (文字境界で切れた整数バイト数) と一致する
+    assert message.startswith(received)
+    assert len(received.encode("utf-8")) <= 1024
