@@ -118,6 +118,10 @@ class Client:
     ) -> None:
         """ストリーム終了時のコールバックを設定する
 
+        クライアントが受信したレスポンスストリームの QUIC FIN (ストリーム
+        終端) を検知したときに呼ばれる。RESET / キャンセルで終了した場合
+        は呼ばれず、on_stream_reset が担う。
+
         Args:
             callback: async def callback(stream_id: int) -> None
         """
@@ -416,9 +420,16 @@ class Client:
                     if self._on_data is not None:
                         await self._on_data(http3_event.stream_id, http3_event.data)
 
-                elif http3_event.type == http3_low.EventType.STREAM_END:
-                    if self._on_stream_end is not None:
-                        await self._on_stream_end(http3_event.stream_id)
+                # STREAM_END イベント (ヘッダー終端などで低レベルが発火する
+                # 終端検知) はここでは消費しない: on_stream_end は受信した
+                # QUIC FIN (finished_streams) の単一経路で通知する。ヘッダー
+                # と FIN が同一の QUIC STREAM_DATA として届くと両経路で
+                # 通知され 2 回呼ばれるため (RFC 9114 Section 4.1 の
+                # メッセージフレーミングと Section 6 のフレーム境界と
+                # QUIC STREAM_DATA 境界の独立性により、1 チャンクで
+                # 届くのは正当なワイヤパターン。実ブラウザ等が送り得る)。
+                # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
+                # 低レベル API の契約としてそのまま維持される
 
                 elif http3_event.type in (
                     http3_low.EventType.RESET_STREAM,

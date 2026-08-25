@@ -1112,3 +1112,86 @@ async def test_http3_server_removes_client_on_client_close(test_certificates):
     server_task.cancel()
     await asyncio.gather(server_task, return_exceptions=True)
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_stream_end_callback_bodyless_response(test_certificates):
+    """ボディなしレスポンスでも on_stream_end が 1 回だけ呼ばれることを確認
+
+    204 レスポンス (ヘッダーのみ) で on_stream_end が 1 回だけ通知される
+    ことを確認する。高レベル Server の現行送出構成ではヘッダーと FIN が
+    別フレームになり得るが、実ブラウザ等が「ヘッダー + FIN を同一 QUIC
+    STREAM_DATA で送る」正当なワイヤパターン (RFC 9114 Section 4.1 の
+    メッセージフレーミングと Section 6 のフレーム境界の独立性) でも、
+    on_stream_end は QUIC FIN の単一経路で通知されることをピン留めする。
+    二重発火の抑制 (STREAM_END イベントを on_stream_end に使わない) の
+    回帰ピン。
+    """
+    from webtransport.http3 import Client, Server
+
+    ended_stream_ids = []
+    stream_ended = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        # ボディなし (204) のレスポンスを送る
+        await server.submit_response(addr, stream_id, [(":status", "204")])
+        await server.send_data(addr, stream_id, b"", fin=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_stream_end(stream_id):
+        ended_stream_ids.append(stream_id)
+        stream_ended.set()
+
+    client.on_stream_end(on_stream_end)
+
+    connected = await client.connect()
+    assert connected is True
+
+    stream_id = await client.request("GET", "/end")
+    assert stream_id >= 0
+    await client.send_data(stream_id, b"", fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(stream_ended.wait(), timeout=5.0)
+
+    # 通知は 1 回だけ (二重発火しない)
+    await asyncio.sleep(0.1)
+    assert ended_stream_ids == [stream_id]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()

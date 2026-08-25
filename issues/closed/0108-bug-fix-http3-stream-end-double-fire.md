@@ -1,7 +1,7 @@
 # HTTP/3 高レベル層で on_stream_end が二重通知される問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-http3-stream-end-double-fire
 - Polished: 2026-08-24
 
@@ -30,3 +30,9 @@
 - `test_stream_end_callback` のボディ付き単一発火の pin 留めが維持される
 - CHANGES.md の `## develop` に [FIX] エントリを追加する
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `src/webtransport/http3/client.py` の `Client.run` で、低レベル `STREAM_END` イベントによる `on_stream_end` 呼び出しを削除し、通知経路を受信 QUIC FIN (`finished_streams`) の単一経路に統一した。ヘッダーと FIN が同一の QUIC STREAM_DATA として届く場合 (RFC 9114 Section 4.1 のメッセージフレーミングと Section 6 のフレーム境界の独立性により正当なワイヤパターン)、両経路で通知すると 2 回呼ばれるため。低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は低レベル API の契約としてそのまま維持する
+- `server.py` は `on_stream_end` 相当の通知経路が存在しないため変更対象外 (設計方針の条件付き記述どおり)
+- テスト: `tests/test_e2e_http3.py` の `test_stream_end_callback_bodyless_response` (ボディなし 204 の単一発火ピン) と `tests/test_http3_message_ext.py` の `test_http3_headers_fin_same_chunk_stream_end_once` (ヘッダー + FIN 同一チャンクで低レベルが STREAM_END を 1 回だけ積むことのピン)
