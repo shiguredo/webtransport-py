@@ -5,6 +5,7 @@
 #include "webtransport_h3.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstddef>
 #include <cstring>
 #include <stdexcept>
@@ -1687,8 +1688,9 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     // セッションが確立される」)。nghttp3 は 2xx 全般をセッション確立として
     // 扱う (status_code / 100 == 2 による confirm。201 等の 2xx 非 200
     // 応答でもセッションが確定する) ため、誤って削除しない。
-    // SESSION_READY は 200 のときのみ発火する (2xx 非 200 応答で
-    // SESSION_READY が発火しないのは既存の制約として残す)
+    // SESSION_READY は 2xx 全般で発火する (高レベル Client.connect が
+    // SESSION_READY を待つため。200 のみだった場合、201 等の 2xx 非 200
+    // 応答で connect がハングした)
     if (status[0] != '2') {
       // 非 2xx 応答 (拒否・リダイレクト) ではセッションは確立されなかった
       // (draft-ietf-webtrans-http3-16 Section 3.2 では 2xx のみが確立)。
@@ -1704,10 +1706,23 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
       // が 1xx を中間応答として扱う更新が入った場合はこの削除の見直しが
       // 必要)。SessionClosed は発火しない (一度も確立されていない
       // セッションの終了通知という意味論が合わないため、黙って削除する)。
-      // 削除後は close_stream の CONNECT ストリーム判定 (session_ids_ の
-      // メンバーシップ確認) が成立しなくなり、二重発火の経路も残らない
+      // 拒否の通知は SessionRejected イベント (status_code 付き。h2 側の
+      // SessionRejected と同じ構造) として push し、高レベル
+      // Client.connect が False を返す根拠にする
       session->session_ids_.erase(stream_id);
-    } else if (status == "200" && session->session_ids_.count(stream_id) > 0) {
+      H3Event rejected_event;
+      rejected_event.type = H3EventType::SessionRejected;
+      rejected_event.session_id = stream_id;
+      uint32_t code = 0;
+      const auto parse_result = std::from_chars(status.data(),
+                                                status.data() + status.size(),
+                                                code);
+      if (parse_result.ec != std::errc{} || code < 100 || code >= 600) {
+        code = 0;
+      }
+      rejected_event.status_code = code;
+      session->push_event(std::move(rejected_event));
+    } else if (session->session_ids_.count(stream_id) > 0) {
       H3Event event;
       event.type = H3EventType::SessionReady;
       event.session_id = stream_id;
@@ -1991,7 +2006,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .value("RESET_STREAM", H3EventType::ResetStream)
       .value("STOP_SENDING", H3EventType::StopSending)
       .value("DATAGRAM", H3EventType::Datagram)
-      .value("ERROR", H3EventType::Error);
+      .value("ERROR", H3EventType::Error)
+      .value("SESSION_REJECTED", H3EventType::SessionRejected);
 
   // H3Event
   nb::class_<H3Event>(h3_mod, "Event", "WebTransport イベント")
@@ -2008,6 +2024,9 @@ void bind_webtransport_h3(nb::module_& m) {
           "イベントデータ")
       .def_ro("error_code", &H3Event::error_code)
       .def_ro("error_message", &H3Event::error_message)
+      .def_ro("status_code", &H3Event::status_code,
+              "SessionRejected 発火時の HTTP status code。他イベントでは 0 "
+              "(パース失敗・範囲外は 0 に丸められる)")
       .def_ro("is_unidirectional", &H3Event::is_unidirectional);
 
   // StreamInfo

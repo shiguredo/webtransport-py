@@ -1,7 +1,7 @@
 # h3.Client.connect() が 2xx 応答を待たずに成功を返す問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-h3-client-connect-2xx
 - Polished: 2026-08-24
 
@@ -34,3 +34,10 @@ draft-ietf-webtrans-http3-16 Section 3.2「From the client's perspective, a WebT
 - 201 等の 2xx 非 200 でもセッション確立として扱われ、SESSION_READY が発火する (0104 と対の契約)
 - CHANGES.md の `## develop` に [FIX] エントリを追加する
 - テストが追加・更新され、全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `end_headers_cb` で、クライアント側の応答処理を (a) 2xx 全般 (先頭文字が '2') で SESSION_READY を発火 (200 のみだったため 201 等で高レベル connect がハングした)、(b) 非 2xx (1xx を含む) で SessionRejected イベント (status_code フィールド付き。h2 側の SessionRejected と同じ構造) を push するように変更した。session_ids_ の削除・SessionClosed 非発火 (既存の意味論) は維持
+- `src/webtransport/h3/client.py` の `Client.connect` が 2xx 応答 (SessionReady) を受けるまで待ち、True を返すようにした。SessionRejected (または接続終了) で False を返す (0111 の h2 側と同型)。待機中は HANDSHAKE / SETTINGS 待ちと同様の receive ループを流用し、QUIC イベントの変換 (STREAM_DATA / DATAGRAM / STREAM_RESET / CONNECTION_CLOSED) も行う
+- SESSION_READY は未配信バッファへ引き継ぎ、run() のイベントループで on_session_ready を発火させる (0110 と同じ方式。登録順序に依存しない)。close() でバッファをクリア
+- テスト: 403 拒否で connect() = False (origin テスト・transport params テストの更新)、SessionRejected の status_code 検証 (403 / 1xx)、201 で SESSION_READY 発火のピン更新

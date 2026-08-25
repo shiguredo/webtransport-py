@@ -74,6 +74,10 @@ enum class H3EventType {
 
   // エラー
   Error,
+
+  // セッション拒否 (非 2xx 応答の受信。h2 側の SessionRejected と同じ
+  // 意味論。末尾に追加し既存バリアントの数値を変えない)
+  SessionRejected,
 };
 
 /**
@@ -86,6 +90,8 @@ struct H3Event {
   std::vector<uint8_t> data;
   uint64_t error_code = 0;
   std::string error_message;
+  // SessionRejected 発火時の HTTP status code。他イベントでは 0
+  uint32_t status_code = 0;
   bool is_unidirectional = false;
 };
 

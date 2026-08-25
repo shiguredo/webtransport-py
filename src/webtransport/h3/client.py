@@ -75,6 +75,10 @@ class Client:
         self._running = False
         self._session_id = -1
         self._connected = False
+        # connect() が SESSION_READY を消費したときの引き継ぎバッファ。
+        # run() のイベントループ開始時に先に処理し、コールバック登録の
+        # 順序に依存せず on_session_ready を発火させる
+        self._pending_session_ready: int | None = None
 
         self._on_session_ready: Callable[[int], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
@@ -369,6 +373,72 @@ class Client:
         if self._webtransport_session.connect(request_stream_id, self._url, self._origin):
             self._session_id = request_stream_id
             await self._send_pending()
+
+            # 2xx 応答 (または非 2xx 拒否) を待つ (draft-16 Section 3.2 の
+            # 「From the client's perspective, a WebTransport session is
+            # established when the client receives a 2xx response」)。
+            # SESSION_READY (2xx 全般) で True、SESSION_REJECTED (非 2xx。
+            # 1xx を含む) で False を返す (h2 側の connect と同型)。
+            # SESSION_READY は run() のコールバック経路を確保するため
+            # 未配信バッファへ引き継ぐ
+            accepted = False
+            for _ in range(100):
+                # WebTransport セッションのイベントを確認する (2xx 応答の
+                # 受信で SESSION_READY が発火する)
+                while True:
+                    event = self._webtransport_session.next_event()
+                    if event is None:
+                        break
+                    if event.type == h3_low.EventType.SESSION_READY:
+                        self._pending_session_ready = event.session_id
+                        accepted = True
+                        # 同一バッチの後続イベント (2xx + FIN 同時受信時の
+                        # SESSION_CLOSED 等) で False にしないため、ドレイン
+                        # を抜ける (残ったイベントはキューに残り、run() で
+                        # 処理される)
+                        break
+                    if (
+                        event.type == h3_low.EventType.SESSION_REJECTED
+                        or event.type == h3_low.EventType.SESSION_CLOSED
+                    ):
+                        self._connected = False
+                        return False
+                if accepted:
+                    break
+                if self._quic_connection.is_closed():
+                    return False
+                # 受信した QUIC イベントを WebTransport セッションへ流す。
+                # run() の _process_quic_events が処理する変換のうち、
+                # connect() の応答待ちに必要な経路 (STREAM_DATA /
+                # DATAGRAM / STREAM_RESET / CONNECTION_CLOSED) をここで
+                # 行う (connect() 中は run() を実行できないため)
+                await self._receive()
+                while True:
+                    quic_event = self._quic_connection.next_event()
+                    if quic_event is None:
+                        break
+                    if quic_event.type == quic.EventType.STREAM_DATA:
+                        self._webtransport_session.receive_stream_data(
+                            quic_event.stream_id,
+                            quic_event.data,
+                            quic_event.fin,
+                        )
+                    elif quic_event.type == quic.EventType.DATAGRAM:
+                        self._webtransport_session.receive_datagram(quic_event.data)
+                    elif quic_event.type == quic.EventType.STREAM_RESET:
+                        self._webtransport_session.close_stream(
+                            quic_event.stream_id, quic_event.error_code
+                        )
+                    elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                        return False
+                await self._send_pending()
+                await asyncio.sleep(0.01)
+            if not accepted:
+                # 応答なし (応答が 2xx でも非 2xx でもなくタイムアウト) で
+                # 確立できない。以後の run() は呼ばず close() する前提
+                # (セッション ID の後始末は close() に依存する)
+                return False
+
             self._connected = True
             return True
 
@@ -584,6 +654,14 @@ class Client:
         if self._quic_connection is None:
             raise RuntimeError("クライアントが接続されていません")
 
+        # connect() が消費した SESSION_READY を引き継ぐ (コールバック登録の
+        # 順序に依存せず、イベントループで発火させる)
+        if self._pending_session_ready is not None:
+            pending_session_id = self._pending_session_ready
+            self._pending_session_ready = None
+            if self._on_session_ready is not None:
+                await self._on_session_ready(pending_session_id)
+
         while self._running:
             await self._receive()
 
@@ -603,6 +681,9 @@ class Client:
 
     async def close(self) -> None:
         """接続を閉じる"""
+        # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
+        # セッション ID で発火させないため)
+        self._pending_session_ready = None
         self._running = False
         self._connected = False
 

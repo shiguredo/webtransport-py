@@ -149,6 +149,8 @@
   - @voluntas
 - [FIX] HTTP/2 の GOAWAY 受信で接続を閉じてしまい進行中ストリームのレスポンス送出が止まる問題を修正する (RFC 9113 Section 6.8 の graceful shutdown。受信後は既存ストリームの送受信を継続し、新規ストリームの開始のみを抑止する)
   - @voluntas
+- [CHANGE] WebTransport over HTTP/3 の Client.connect を 2xx 応答待ちに変更し、非 2xx 拒否時に False を返すようにする (低レベル API に SessionRejected イベントと status_code を追加し、SESSION_READY を 2xx 全般で発火させる)
+  - @voluntas
 - [FIX] WebTransport over HTTP/2 の高レベル Client の on_session_ready コールバックが発火しない問題を修正する (connect() が消費した SESSION_READY を run() へ引き継ぎ、登録順序に依存せず配信する)
   - @voluntas
 - [FIX] QUIC のピアの max_datagram_frame_size を超えるデータグラムが送信キューを永久に塞ぐ問題を修正する (RFC 9221 Section 3)
