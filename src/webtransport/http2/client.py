@@ -258,7 +258,12 @@ class Client:
                         await self._on_stream_end(event.stream_id)
 
                 elif event.type == http2_low.EventType.GO_AWAY:
-                    self._running = False
+                    # RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も
+                    # 既存ストリームの送受信を継続する。新規ストリームの
+                    # 開始は submit_request のガード (bindings 側) で抑止され、
+                    # 接続終了は低レベルの is_closed() / ピアの接続クローズで
+                    # 検知する
+                    pass
 
             # フレームエラーで低レベルが自主クローズしたとき、GO_AWAY イベントも
             # TCP EOF も発火しないため、is_closed() を確認して終了する。

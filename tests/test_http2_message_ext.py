@@ -386,34 +386,83 @@ def test_http2_message_ext_guards() -> None:
         for e in _drain_events(client)
     )
 
-    # サーバーが GOAWAY を送信するとクライアントが閉じる
-    # (閉じたコネクションのガードは test_http2_closed_connection_guards で確認)
+    # サーバー側の GOAWAY 送信 (クライアントの GOAWAY 受信) は下の
+    # test_http2_goaway_connection_guards で検証する
 
 
-def test_http2_closed_connection_guards() -> None:
-    """コネクションが閉じている場合に False / -1 になることを確認"""
-    # サーバー側が閉じる場合 (クライアントの GOAWAY 受信)
+def test_http2_goaway_connection_guards() -> None:
+    """GOAWAY 受信後は新規ストリームのみ抑止され既存ストリーム操作は継続することを確認
+
+    RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も接続は閉じず、
+    新規ストリームの開始 (submit_push_promise / submit_request) のみが
+    goaway_received_ で抑止される。既存ストリームへの操作 (レスポンス送出
+    等) は closed_ 起因のガードだけがあり、GOAWAY では塞がれない。
+    """
+    # クライアント側が GOAWAY を送信する場合 (サーバーの GOAWAY 受信)
     client, server = _create_connection_pair()
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
     _pump(client, server)
     client.goaway()
     _pump(client, server)
-    assert server.is_closed() is True
-    assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is False
+    assert server.is_closed() is False
+    # 新規ストリームの開始 (push promise) は抑止される
     assert server.submit_push_promise(stream_id, _request_headers()) == -1
-    assert server.submit_priority_update(stream_id, 0, False) is False
-    assert server.change_extpri_stream_priority(stream_id, 0, False) is False
+    # 既存ストリームへの操作 (レスポンス送出) は継続する
+    server.submit_response(stream_id, [(":status", "200")])
+    # レスポンスの送出 (既存ストリームの処理継続) がワイヤで確認できる
+    response = server.send()
+    assert response is not None and len(response) > 0
 
-    # クライアント側が閉じる場合 (サーバーの GOAWAY 受信)。closed_ 起因の
-    # ガード確認のため、クライアントセッションでは is_server_ ガードに
-    # 抵触しない submit_priority_update / change_extpri で検証する
+    # クライアント側が GOAWAY を受信する場合 (サーバーの GOAWAY 送信)。
+    # クライアントセッションでは is_server_ ガードに抵触しない
+    # submit_priority_update / change_extpri で検証する
     client2, server2 = _create_connection_pair()
     stream_id2 = client2.submit_request(_request_headers())
     assert stream_id2 > 0
     _pump(client2, server2)
     server2.goaway()
     _pump(server2, client2)
-    assert client2.is_closed() is True
-    assert client2.submit_priority_update(stream_id2, 0, False) is False
-    assert client2.change_extpri_stream_priority(stream_id2, 0, False) is False
+    assert client2.is_closed() is False
+    assert client2.submit_request(_request_headers()) == -1
+    assert client2.submit_priority_update(stream_id2, 0, False) is True
+
+
+def test_http2_goaway_after_response_delivered() -> None:
+    """GOAWAY 受信後も既存ストリームのレスポンスが送出・受信されることを確認
+
+    RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も既存ストリーム
+    の送受信は継続する。サーバーは GOAWAY を受信した後でも、既存のリクエスト
+    ストリームへのレスポンス (HEADERS + DATA) を送出し、クライアントが
+    HEADERS / DATA イベントとして受信できることを検証する。
+    """
+    client, server = _create_connection_pair()
+
+    # クライアントがリクエストを送信する
+    stream_id = client.submit_request(_request_headers())
+    assert stream_id > 0
+    _pump(client, server)
+
+    # クライアントが GOAWAY を送信し、サーバーが受信する
+    # (接続は閉じず graceful shutdown になる)
+    client.goaway()
+    _pump(client, server)
+    assert server.is_closed() is False
+
+    # GOAWAY 受信後に進行中ストリームへのレスポンス送出が継続する
+    # (send() は送信バッファを 1 回で全量返すとは限らないため、None まで
+    # ループで取り出してピアに渡す)
+    server.submit_response(stream_id, [(":status", "200")])
+    server.send_data(stream_id, b"response-body", True)
+    for _ in range(64):
+        response = server.send()
+        if response is None:
+            break
+        assert client.receive(response) > 0
+
+    # ピア (クライアント) で HEADERS + DATA イベントとして受信される
+    events = _drain_events(client)
+    assert any(event.type == http2.EventType.HEADERS for event in events)
+    assert any(
+        event.type == http2.EventType.DATA and event.data == b"response-body" for event in events
+    )

@@ -33,7 +33,8 @@ Http2Connection::Http2Connection(Http2Connection&& other) noexcept
       pending_headers_(std::move(other.pending_headers_)),
       pending_trailers_(std::move(other.pending_trailers_)),
       closed_(other.closed_),
-      goaway_sent_(other.goaway_sent_) {
+      goaway_sent_(other.goaway_sent_),
+      goaway_received_(other.goaway_received_) {
   other.session_ = nullptr;
 }
 
@@ -52,6 +53,7 @@ Http2Connection& Http2Connection::operator=(Http2Connection&& other) noexcept {
     pending_trailers_ = std::move(other.pending_trailers_);
     closed_ = other.closed_;
     goaway_sent_ = other.goaway_sent_;
+    goaway_received_ = other.goaway_received_;
 
     other.session_ = nullptr;
   }
@@ -189,7 +191,7 @@ std::optional<std::vector<uint8_t>> Http2Connection::send() {
 
 int32_t Http2Connection::submit_request(
     const std::vector<std::pair<std::string, std::string>>& headers) {
-  if (!session_ || closed_ || is_server_) {
+  if (!session_ || closed_ || is_server_ || goaway_received_) {
     return -1;
   }
 
@@ -487,7 +489,7 @@ bool Http2Connection::change_extpri_stream_priority(int32_t stream_id,
 int32_t Http2Connection::submit_push_promise(
     int32_t stream_id,
     const std::vector<std::pair<std::string, std::string>>& headers) {
-  if (!session_ || closed_ || !is_server_) {
+  if (!session_ || closed_ || !is_server_ || goaway_received_) {
     return -1;
   }
 
@@ -768,7 +770,11 @@ int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
       event.error_code = frame->goaway.error_code;
       event.last_stream_id = frame->goaway.last_stream_id;
       self->push_event(std::move(event));
-      self->closed_ = true;
+      // RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も既存
+      // ストリームの送受信を継続する。closed_ にはせず、新規ストリーム
+      // 開始の抑止のみを goaway_received_ で行う (submit_request /
+      // submit_push_promise のガード)
+      self->goaway_received_ = true;
     } break;
 
     case NGHTTP2_RST_STREAM: {
