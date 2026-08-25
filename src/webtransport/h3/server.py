@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Self
 from webtransport import h3 as h3_low
 from webtransport import quic
 from webtransport.h3._transport_params import meets_transport_param_requirements
+from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -661,6 +662,26 @@ class Server:
 
                 await self._process_webtransport_events(addr, client)
                 await self._send_to(addr, client)
+
+                # WebTransport over HTTP/3 層のプロトコルエラーで低レベルが
+                # 自主クローズしたとき、QUIC の CONNECTION_CLOSED イベントは
+                # 発火しないため、is_closed() を確認して QUIC 層に
+                # CONNECTION_CLOSE を送出しつつ接続を回収する
+                if (
+                    client.webtransport_session is not None
+                    and client.webtransport_session.is_closed()
+                ):
+                    if (
+                        client.quic_connection is not None
+                        and not client.quic_connection.is_closed()
+                    ):
+                        client.quic_connection.close(
+                            H3_GENERAL_PROTOCOL_ERROR,
+                            "webtransport over http/3 protocol error",
+                        )
+                        await self._send_to(addr, client)
+                    if addr in self._clients:
+                        del self._clients[addr]
 
             except TimeoutError:
                 pass

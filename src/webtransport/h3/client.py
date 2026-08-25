@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Self
 from webtransport import h3 as h3_low
 from webtransport import quic
 from webtransport.h3._transport_params import meets_transport_param_requirements
+from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -646,6 +647,19 @@ class Client:
                 self._connected = False
                 break
 
+    async def _close_on_protocol_error(self) -> None:
+        """WebTransport over HTTP/3 プロトコルエラー検知時に QUIC を閉じる
+
+        RFC 9114 Section 5.3 (Immediate Application Closure) に沿って
+        QUIC CONNECTION_CLOSE を送出する。error_code は
+        H3_GENERAL_PROTOCOL_ERROR (RFC 9114 Section 8.1)。
+        """
+        if self._quic_connection is not None and not self._quic_connection.is_closed():
+            self._quic_connection.close(
+                H3_GENERAL_PROTOCOL_ERROR, "webtransport over http/3 protocol error"
+            )
+        await self._send_pending()
+
     async def run(self) -> None:
         """メインループを実行する
 
@@ -672,6 +686,17 @@ class Client:
 
             await self._process_webtransport_events()
             await self._send_pending()
+
+            # WebTransport over HTTP/3 層のプロトコルエラーで低レベルが
+            # 自主クローズしたとき、QUIC の CONNECTION_CLOSED イベントは
+            # 発火しないため、is_closed() を確認して QUIC 層に
+            # CONNECTION_CLOSE を送出しつつ run() を終了する
+            if self._webtransport_session is not None and self._webtransport_session.is_closed():
+                if self._quic_connection is not None and not self._quic_connection.is_closed():
+                    await self._close_on_protocol_error()
+                self._running = False
+                self._connected = False
+                break
 
             timeout = self._quic_connection.get_timeout()
             if timeout is not None and timeout <= 0:

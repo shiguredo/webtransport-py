@@ -212,7 +212,7 @@ bool H3Session::initialize() {
 size_t H3Session::receive_stream_data(int64_t stream_id,
                                       const std::vector<uint8_t>& data,
                                       bool fin) {
-  if (!conn_) {
+  if (!conn_ || closed_) {
     return 0;
   }
 
@@ -235,24 +235,39 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
     //   保留したセッション ID で行い、接続エラーの通知 (Error イベント) は
     //   汎用の負値分岐と同じ挙動で積む (ストリームエラーが接続エラー風に
     //   通知されるが、高レベル層は接続クローズに直接作用しないため許容)
-    bool h3_message_error_reset = false;
+    bool wt_close_session_error = false;
     if (consumed == NGHTTP3_ERR_H3_MESSAGE_ERROR &&
         session_ids_.count(stream_id) > 0) {
       handle_wt_close_session_error(stream_id);
-      h3_message_error_reset = true;
+      wt_close_session_error = true;
     }
     if (pending_wt_close_session_error_session_id_.has_value()) {
       int64_t pending_session_id = *pending_wt_close_session_error_session_id_;
       pending_wt_close_session_error_session_id_.reset();
       handle_wt_close_session_error(pending_session_id);
+      wt_close_session_error = true;
     }
-    if (!h3_message_error_reset) {
+    if (!wt_close_session_error) {
       H3Event event;
       event.type = H3EventType::Error;
       event.stream_id = stream_id;
       event.error_code = static_cast<uint64_t>(-consumed);
       event.error_message = nghttp3_strerror(static_cast<int>(consumed));
       push_event(std::move(event));
+    }
+    // nghttp3 の負値 return は「接続エラーであり、接続を閉じなければ
+    // ならない」(nghttp3.h の nghttp3_conn_read_stream2 の docstring)。
+    // 接続エラーは HTTP/3 のフレームレイヤエラー (H3_FRAME_ERROR 等) と
+    // ライブラリ内部エラー (NOMEM 等) の両方を含むため、負値のうち
+    // ストリームレベルのエラー (WT_CLOSE_SESSION の不正メッセージの
+    // リセット処理。NGHTTP3_ERR_H3_MESSAGE_ERROR と不正 UTF-8 検知由来の
+    // CALLBACK_FAILURE を含む) だけを除外し、それ以外は closed_ = true を
+    // 立てる (http3.cpp の Http3Connection / http2.cpp の
+    // Http2Connection の負値時 closed_ と対称)。draft-16 Section 6 の
+    // MUST はストリームのリセットのみを要求し、接続を継続すべきため
+    // ストリームエラーは除外する)
+    if (!wt_close_session_error) {
+      closed_ = true;
     }
   }
 
@@ -438,7 +453,7 @@ std::vector<std::tuple<int64_t, std::vector<uint8_t>, bool>>
 H3Session::get_streams_to_send() {
   std::vector<std::tuple<int64_t, std::vector<uint8_t>, bool>> result;
 
-  if (!conn_) {
+  if (!conn_ || closed_) {
     return result;
   }
 
@@ -454,6 +469,16 @@ H3Session::get_streams_to_send() {
         nghttp3_conn_writev_stream(conn_, &stream_id, &fin, vec, 8);
 
     if (sveccnt < 0) {
+      // nghttp3 の負値 return は接続エラーであり、接続を閉じなければ
+      // ならない (nghttp3.h の nghttp3_conn_writev_stream の docstring)。
+      // closed_ = true を立てる (receive_stream_data の負値分岐と対称)。
+      // Error イベント (nghttp3_strerror) も push してアプリへ通知する
+      closed_ = true;
+      H3Event event;
+      event.type = H3EventType::Error;
+      event.error_code = static_cast<uint64_t>(-sveccnt);
+      event.error_message = nghttp3_strerror(static_cast<int>(sveccnt));
+      push_event(std::move(event));
       break;
     }
 

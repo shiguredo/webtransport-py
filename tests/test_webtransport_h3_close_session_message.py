@@ -122,6 +122,8 @@ def test_client_receive_over_1024_bytes_resets_with_h3_message_error() -> None:
     assert len(reset_events) == 1
     assert reset_events[0].stream_id == session_id
     assert any(event.type == h3.EventType.SESSION_CLOSED for event in events)
+    # ストリームエラーは接続エラーではないため、セッションは閉じない
+    assert client.is_closed() is False
 
 
 def test_client_receive_invalid_utf8_resets_with_h3_message_error() -> None:
@@ -149,6 +151,9 @@ def test_client_receive_invalid_utf8_resets_with_h3_message_error() -> None:
     assert len(reset_events) == 1
     assert reset_events[0].stream_id == session_id
     assert any(event.type == h3.EventType.SESSION_CLOSED for event in events)
+    # ストリームエラーは接続エラーではないため、セッションは閉じない
+    # (接続エラーのみ closed_ にすること)
+    assert client.is_closed() is False
 
 
 def test_server_accept_pre_buffer_over_1024_bytes_resets_with_h3_message_error() -> None:
@@ -185,6 +190,8 @@ def test_server_accept_pre_buffer_over_1024_bytes_resets_with_h3_message_error()
     assert len(reset_events) == 1
     assert reset_events[0].stream_id == 0
     assert any(event.type == h3.EventType.SESSION_CLOSED for event in events)
+    # ストリームエラーは接続エラーではないため、セッションは閉じない
+    assert server.is_closed() is False
 
 
 def test_server_accept_pre_buffer_invalid_utf8_resets_with_h3_message_error() -> None:
@@ -221,6 +228,8 @@ def test_server_accept_pre_buffer_invalid_utf8_resets_with_h3_message_error() ->
     assert len(reset_events) == 1
     assert reset_events[0].stream_id == 0
     assert any(event.type == h3.EventType.SESSION_CLOSED for event in events)
+    # ストリームエラーは接続エラーではないため、セッションは閉じない
+    assert server.is_closed() is False
 
 
 def test_client_receive_exact_1024_bytes_message_accepted() -> None:
@@ -316,3 +325,25 @@ def test_client_receive_1024_bytes_invalid_utf8_resets_with_h3_message_error() -
     ]
     assert len(reset_events) == 1
     assert reset_events[0].stream_id == session_id
+
+
+def test_connection_error_closes_session() -> None:
+    """nghttp3 の接続エラーで H3Session が closed_ になることを確認
+
+    サーバーが自身が開始したストリーム ID (パリティ違反: % 4 == 1 を
+    receive) を受信すると、nghttp3 は NGHTTP3_ERR_H3_STREAM_CREATION_ERROR
+    (-609) を返す (read_stream2 の API 契約では「負値 = 接続エラーであり、
+    接続を閉じなければならない」)。H3Session はこの負値を検知して
+    closed_ = true にし、高レベル Client.run / Server.run が is_closed()
+    で終了できるようにする (接続エラー時 run() が終了しないハングの
+    修正。ストリームレベルのエラー = WT_CLOSE_SESSION の不正メッセージ
+    リセット処理は接続を継続する)。
+    """
+    server_config = h3.Config()
+    server_config.is_server = True
+    server = h3.Session.create_server(server_config)
+
+    # パリティ違反 (サーバー開始双方向 = % 4 == 1) のストリームを受信する
+    ret = server.receive_stream_data(1, b"\x00", False)
+    assert ret == 0
+    assert server.is_closed() is True
