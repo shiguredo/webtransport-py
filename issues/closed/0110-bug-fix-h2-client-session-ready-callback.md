@@ -1,7 +1,7 @@
 # h2.Client の on_session_ready コールバックが発火しない問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-h2-client-session-ready-callback
 - Polished: 2026-08-24
 
@@ -30,3 +30,10 @@
 - 拒否 (非 2xx) 時は connect() が False を返す挙動が維持される
 - CHANGES.md の `## develop` に [FIX] エントリを追加する
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `src/webtransport/h2/client.py` の `Client.connect` が SESSION_READY を消費して確立判定を行った際に、イベントを未配信バッファ `_pending_session_ready` へ引き継ぐようにした。`Client.run` はイベントループ冒頭で未配信バッファを処理し、`on_session_ready` を発火させる (コールバック登録の順序に依存せず、connect() の前・後のどちらで登録しても発火する。bindings の next_event() は pop のみで peek できないため、判定に使うイベントを保持して run() に再配信する方式とした)
+- `Client.close` で未配信バッファをクリアする (再 connect() 時の古いセッション ID での誤発火防止)
+- 発火は 1 回のみ (発火前にバッファをクリア)
+- テスト: `tests/test_e2e_webtransport_h2.py` (connect() の前に登録した場合 / connect() の後に登録した場合の両方で 1 回だけ発火することを検証)

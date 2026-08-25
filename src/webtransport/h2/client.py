@@ -65,6 +65,11 @@ class Client:
         self._running = False
         self._connected = False
         self._session_id = -1
+        # connect() が SESSION_READY を消費したときの引き継ぎバッファ。
+        # run() のイベントループ開始時に先に処理し、コールバック登録の
+        # 順序に依存せず on_session_ready を発火させる (イベントは
+        # キューから取り出した時点で確定するため、1 件のみ保持すればよい)
+        self._pending_session_ready: int | None = None
 
         self._on_session_ready: Callable[[int], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
@@ -285,6 +290,10 @@ class Client:
                     and event.session_id == self._session_id
                 ):
                     self._connected = True
+                    # run() のイベントループで on_session_ready を発火させる
+                    # ため、イベントを未配信バッファへ引き継ぐ
+                    # (コールバック登録の順序に依存しないため)
+                    self._pending_session_ready = event.session_id
                     return True
 
                 if (
@@ -385,6 +394,14 @@ class Client:
         if self._session is None:
             raise RuntimeError("クライアントが接続されていません")
 
+        # connect() が消費した SESSION_READY を引き継ぐ (コールバック登録の
+        # 順序に依存せず、run() のイベントループで発火させる)
+        if self._pending_session_ready is not None:
+            pending_session_id = self._pending_session_ready
+            self._pending_session_ready = None
+            if self._on_session_ready is not None:
+                await self._on_session_ready(pending_session_id)
+
         while self._running:
             await self._receive()
             await self._send_pending()
@@ -441,6 +458,9 @@ class Client:
         was_running = self._running
         self._running = False
         self._connected = False
+        # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
+        # セッション ID で発火させないため)
+        self._pending_session_ready = None
 
         if self._session is not None and self._session_id >= 0:
             self._session.close_session(self._session_id)
