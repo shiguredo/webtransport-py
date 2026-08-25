@@ -1229,3 +1229,122 @@ async def test_h2_server_on_session_request_invalid_status_raises_value_error(
         writer.close()
         await writer.wait_closed()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_on_session_ready_fires(test_certificates):
+    """クライアントの on_session_ready コールバックが発火することを確認
+
+    connect() は SESSION_READY イベントを消費して確立判定を行うが、
+    コールバック登録の順序に依存せず run() のイベントループで
+    on_session_ready が 1 回発火することを検証する (修正前は connect() が
+    イベントを消費してしまうため、コールバックが一度も呼ばれなかった)。
+    """
+    from webtransport.h2 import Client, Server
+
+    ready_event = asyncio.Event()
+    ready_stream_ids: list[int] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_client_session_ready(session_id: int) -> None:
+        ready_stream_ids.append(session_id)
+        ready_event.set()
+
+    # connect() の前にコールバックを登録する (connect() 中に発火する
+    # SESSION_READY が消費されても、run() で発火することを確認する)
+    client.on_session_ready(on_client_session_ready)
+
+    connected = await client.connect()
+    assert connected is True
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(ready_event.wait(), timeout=5.0)
+
+    # 発火は 1 回だけ
+    await asyncio.sleep(0.1)
+    assert ready_stream_ids == [client.session_id]
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_on_session_ready_after_connect(test_certificates):
+    """connect() の後にコールバックを登録しても on_session_ready が発火することを確認
+
+    __aenter__ が connect() を先に実行する利用形態 (async with で既に
+    connect() が完了している場合も含む) で、connect() 後に on_session_ready
+    を登録しても発火が保証されることを検証する。無登録のまま connect() が
+    終わっても、イベントは未配信バッファに保持され、登録後の run() で
+    発火する。
+    """
+    from webtransport.h2 import Client, Server
+
+    ready_event = asyncio.Event()
+    ready_stream_ids: list[int] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    connected = await client.connect()
+    assert connected is True
+
+    # connect() の後にコールバックを登録する
+    async def on_client_session_ready(session_id: int) -> None:
+        ready_stream_ids.append(session_id)
+        ready_event.set()
+
+    client.on_session_ready(on_client_session_ready)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(ready_event.wait(), timeout=5.0)
+
+    await asyncio.sleep(0.1)
+    assert ready_stream_ids == [client.session_id]
+
+    client_task.cancel()
+    await asyncio.gather(client_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
