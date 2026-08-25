@@ -1,7 +1,7 @@
 # http3.Server.stop() が CONNECTION_CLOSE を送出しない問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-http3-server-stop-close
 - Polished: 2026-08-24
 
@@ -23,3 +23,8 @@
 
 - stop() 時に CONNECTION_CLOSE がピアへ送出される
 - テストが追加される
+
+## 解決方法
+
+- `src/webtransport/http3/server.py` の `Server.stop` を quic / h3 層の `Server.stop` と同じ構造に修正した: 接続スナップショット (`list(self._clients.items())`。並行する run() が self._clients を del しても壊れない) → close() 呼び出し → 生成された CONNECTION_CLOSE パケットの送出 (`_send_to`。1 接続の送出失敗で残りへの送出が中断されないよう OSError を接続ごとに隔離) → finally で後始末 (clear + ソケットクローズ) を保証
+- テスト: `tests/test_e2e_http3.py` の `test_server_stop_delivers_connection_close` (stop() の CONNECTION_CLOSE を受信してクライアントの run() が自然終了することを検証。修正前はパケット未送出のためタイムアウトで失敗する)
