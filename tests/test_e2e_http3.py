@@ -1257,3 +1257,77 @@ async def test_server_run_continues_on_non_initial_packet(test_certificates):
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_stop_delivers_connection_close(test_certificates):
+    """http3.Server.stop() が CONNECTION_CLOSE を送出してクライアントが終了を検知する
+
+    修正前は stop() が close() を呼ぶだけで、生成された CONNECTION_CLOSE
+    パケットを送出せずにソケットを閉じていた (クライアントは切断理由を
+    受け取れず run() がタイムアウトまで待ち続ける)。修復後は quic / h3
+    層の Server.stop() と同様に、close() 生成の CONNECTION_CLOSE を
+    送出してからソケットを閉じる。クライアントの run() が受信した
+    CONNECTION_CLOSE で自然終了することを検証する。
+    """
+    from webtransport.http3 import Client, Server
+
+    client_finished_event = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    server_task = None
+    client_task = None
+    client = None
+    try:
+        await server.start()
+
+        client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+
+        async def run_server():
+            try:
+                await server.run()
+            except asyncio.CancelledError:
+                pass
+
+        server_task = asyncio.create_task(run_server())
+
+        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
+        assert connected is True
+
+        async def run_client():
+            try:
+                await client.run()
+                # run() が自然終了した (CancelledError ではない) 場合のみ
+                # 到達する。stop() の CONNECTION_CLOSE を受信して run() が
+                # 終了した証拠
+                client_finished_event.set()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+
+        # サーバーを停止する。stop() は接続ごとに close() を呼び、生成された
+        # CONNECTION_CLOSE をソケットから送出する
+        await server.stop()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+
+        # クライアントは CONNECTION_CLOSE を受信して run() が自然終了する
+        # (受信できなければタイムアウトで失敗する)
+        await asyncio.wait_for(client_finished_event.wait(), timeout=5.0)
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+        if server_task is not None:
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+        if client is not None:
+            await client.close()
+        await server.stop()

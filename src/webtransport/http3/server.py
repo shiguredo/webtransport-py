@@ -6,12 +6,16 @@ asyncio と UDP を使用した高レベル HTTP/3 サーバー実装。
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -180,13 +184,24 @@ class Server:
     async def stop(self) -> None:
         """サーバーを停止する"""
         self._running = False
-        for client in self._clients.values():
-            if client.quic_connection is not None:
-                client.quic_connection.close()
-        self._clients.clear()
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        try:
+            for addr, client in list(self._clients.items()):
+                if client.quic_connection is not None:
+                    client.quic_connection.close()
+                    try:
+                        # close() が生成した CONNECTION_CLOSE をピアへ
+                        # 送出する。1 接続の送出失敗で残りの接続への送出が
+                        # 中断されないよう接続ごとに例外を隔離する
+                        # (quic / h3 層の Server.stop と同じ挙動。
+                        # http3 / http3_connection のクライアント層と対称)
+                        await self._send_to(addr, client)
+                    except OSError as exc:
+                        logger.warning("failed to send connection close: %s", exc)
+        finally:
+            self._clients.clear()
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""

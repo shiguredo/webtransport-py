@@ -153,6 +153,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の高レベル Client の on_session_ready コールバックが発火しない問題を修正する (connect() が消費した SESSION_READY を run() へ引き継ぎ、登録順序に依存せず配信する)
   - @voluntas
+- [FIX] 高レベル HTTP/3 サーバー (`http3.Server.stop`) が close() 生成の CONNECTION_CLOSE を送出しない問題を修正する
+  - @voluntas
 - [FIX] 高レベル HTTP/3 サーバー (`http3.Server.run`) が未知アドレスからの非 Initial パケットを受信すると `RuntimeError` で停止するのを修正する
   - @voluntas
 - [FIX] QUIC のピアの max_datagram_frame_size を超えるデータグラムが送信キューを永久に塞ぐ問題を修正する (RFC 9221 Section 3)
