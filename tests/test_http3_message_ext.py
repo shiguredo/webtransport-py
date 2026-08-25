@@ -341,3 +341,43 @@ def test_http3_shutdown_stream_write_blocks_pending() -> None:
 
     # 本体は送出されない
     assert server.next_event() is None
+
+
+def test_http3_headers_fin_same_chunk_stream_end_once() -> None:
+    """ヘッダーと FIN が同一チャンクで届いたときに STREAM_END が 1 回であることを確認
+
+    レスポンス送信側が「ヘッダー + FIN」を 1 回の送信にまとめた場合
+    (RFC 9114 Section 4.1 のメッセージフレーミングと Section 6 のフレーム
+    境界と QUIC STREAM_DATA 境界の独立性。1 チャンクで届くのは正当な
+    ワイヤパターン)、受信側の低レベルは
+    end_headers_cb の fin=1 で STREAM_END イベントを 1 回積む
+    (ヘッダー終端の終端検知)。イベントが重複しないことをピンする。
+    高レベル層がこのイベントを on_stream_end に使わないこと (QUIC FIN
+    の単一経路化) は client.py の run() の実装で担保される。
+    """
+    client, server = _create_connection_pair()
+
+    # クライアントがリクエストを送信し、サーバーが受理する
+    assert client.submit_request(0, _request_headers()) is True
+    _pump(client, server)
+
+    # サーバーが 200 応答 + FIN を 1 回の get_streams_to_send で書き出す
+    # (送信側はヘッダーと DATA (空) をまとめて flush し、1 チャンクに収まる)
+    assert server.submit_response(0, [(":status", "200")]) is True
+    server.send_data(0, b"", fin=True)
+    # 1 回目の取り出しでヘッダー + FIN を含むチャンクが返る
+    streams = server.get_streams_to_send()
+    assert any(stream_id == 0 and fin for stream_id, data, fin in streams)
+    for stream_id, data, fin in streams:
+        client.receive_stream_data(stream_id, data, fin)
+
+    # ヘッダー + FIN の同一チャンクでも STREAM_END は 1 回のみ
+    events = []
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        events.append(event)
+    assert any(event.type == http3.EventType.HEADERS for event in events)
+    end_events = [event for event in events if event.type == http3.EventType.STREAM_END]
+    assert len(end_events) == 1
