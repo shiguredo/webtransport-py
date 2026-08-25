@@ -484,6 +484,12 @@ class Http2Connection {
   // 接続状態
   bool closed_ = false;
   bool goaway_sent_ = false;
+  // ピアから GOAWAY を受信したか (RFC 9113 Section 6.8 の graceful
+  // shutdown。受信後も既存ストリームの送受信は継続し、新規ストリームの
+  // 開始のみを抑止する。closed_ にはしない。なお WebTransport over HTTP/2
+  // (draft-15 Section 6.13 の「ピアは GOAWAY 後に新規 WebTransport ストリーム
+  // を開いても MAY」) との相互作用は別途検討する)
+  bool goaway_received_ = false;
 };
 
 // Python バインディングを定義

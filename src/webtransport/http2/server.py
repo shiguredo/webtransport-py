@@ -210,7 +210,11 @@ class Server:
                             await self._on_data(event.stream_id, event.data, response_writer)
 
                     elif event.type == http2_low.EventType.GO_AWAY:
-                        return
+                        # RFC 9113 Section 6.8 の graceful shutdown: GOAWAY
+                        # 受信後も既存ストリームの送受信を継続する。接続終了
+                        # はピアの接続クローズ (TCP EOF) と is_closed() で
+                        # 検知する
+                        pass
 
                 data = connection.send()
                 if data:

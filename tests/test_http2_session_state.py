@@ -314,8 +314,13 @@ def test_http2_stream_close() -> None:
     assert client.stream_remote_close(stream_id) is None
 
 
-def test_http2_closed_connection_returns_none() -> None:
-    """コネクションが閉じた場合に全ての getter が None を返すことを確認"""
+def test_http2_goaway_connection_keeps_state() -> None:
+    """GOAWAY 受信後も接続状態の getter が値を返し続けることを確認
+
+    RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も接続は閉じず、
+    既存ストリームの処理を継続するため、is_closed() は False のままで
+    状態 getter も値を返し続ける。
+    """
     client, server = _create_connection_pair()
 
     # GOAWAY 送信後は閉鎖扱いにならず getter は値を返し続ける
@@ -324,21 +329,11 @@ def test_http2_closed_connection_returns_none() -> None:
     assert client.is_closed() is False
     assert client.remote_window_size == 65535
     # request_allowed は GOAWAY 送信後に False になる (アクティブストリーム
-    # が無い場合、 GOAWAY 送信後に want_read / want_write が 0 になり
+    # が無い場合、GOAWAY 送信後に want_read / want_write が 0 になり
     # セッションが終了状態になるため)
     assert client.request_allowed is False
 
-    # サーバーは GOAWAY を受信すると閉鎖扱いになる
-    assert server.is_closed() is True
-    assert server.remote_settings is None
-    assert server.local_settings is None
-    assert server.outbound_queue_size is None
-    assert server.remote_window_size is None
-    assert server.local_window_size is None
-    assert server.effective_recv_data_length is None
-    assert server.request_allowed is None
-    assert server.stream_remote_window_size(1) is None
-    assert server.stream_local_window_size(1) is None
-    assert server.stream_effective_recv_data_length(1) is None
-    assert server.stream_local_close(1) is None
-    assert server.stream_remote_close(1) is None
+    # サーバーは GOAWAY を受信しても閉鎖扱いにならず、getter は値を返す
+    assert server.is_closed() is False
+    assert server.remote_window_size == 65535
+    assert server.request_allowed is not None

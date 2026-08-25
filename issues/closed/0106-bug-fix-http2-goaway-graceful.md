@@ -1,7 +1,7 @@
 # HTTP/2 の GOAWAY 受信で進行中ストリームの処理が止まる問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-http2-goaway-graceful
 - Polished: 2026-08-24
 
@@ -30,3 +30,9 @@ RFC 9113 Section 6.8 が定義する GOAWAY の graceful shutdown (既存スト�
 - 既存の closed_ 仕様テスト (test_http2_message_ext.py / test_http2_session_state.py / test_http2_session_control.py / test_e2e_http2.py の 5 本) を新しい挙動に合わせて更新する
 - CHANGES.md の `## develop` に [FIX] エントリを追加する
 - テストが追加され、全テストが通る
+
+## 解決方法
+
+- `src/bindings/http2.cpp` / `http2.h`: NGHTTP2_GOAWAY 分岐で `closed_ = true` を立てず `goaway_received_ = true` とする (RFC 9113 Section 6.8 の graceful shutdown)。`submit_request` / `submit_push_promise` に `goaway_received_` ガードを追加し、新規ストリームの開始を抑止する (nghttp2 は submit 時に拒否せず送信時に silent 破棄するため自前ガードが必要)
+- `src/webtransport/http2/client.py` / `server.py`: GO_AWAY イベントのハンドラを「即終了」から「継続」に変更する (接続終了はピアの接続クローズと is_closed() で検知)
+- 既存テスト 5 本を新しい挙動に合わせて更新し、`test_http2_goaway_after_response_delivered` (GOAWAY 受信後に進行中ストリームのレスポンス HEADERS + DATA がピアで受信されること) と e2e の継続テストを追加した

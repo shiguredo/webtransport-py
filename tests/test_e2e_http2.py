@@ -376,16 +376,15 @@ async def test_client_run_exits_on_close(test_certificates):
 
 
 @pytest.mark.asyncio
-async def test_client_run_exits_on_goaway_injection(test_certificates):
-    """GOAWAY フレーム受信で Client.run() が終了することを回帰確認する
+async def test_client_run_continues_after_goaway_injection(test_certificates):
+    """GOAWAY フレーム受信後も Client.run() が継続することを回帰確認する
 
     低レベル Connection.receive() に GOAWAY フレームのバイト列を直接注入する。
-    bindings の on_frame_recv_callback は GO_AWAY イベント push 後に
-    closed_ = true を立てる (src/bindings/http2.cpp の NGHTTP2_GOAWAY 分岐)。
-    このため GO_AWAY イベント経路と is_closed() チェック経路の両方で
-    _running = False が立つが、bool への同値代入は idempotent で例外にならない。
-    追加した is_closed() チェックが既存 GO_AWAY 経路を壊していないことを
-    確認するための回帰テスト。
+    RFC 9113 Section 6.8 の graceful shutdown により、GOAWAY 受信後も接続は
+    閉じず run() は継続する (既存ストリームの処理を完了させる)。クライアント
+    の close() で run() が終了することを確認する。既存ストリームの処理継続と
+    レスポンス送出の詳細は低レベルテスト (test_http2_message_ext.py の
+    test_http2_goaway_after_response_delivered) で検証する。
     """
     from webtransport.http2 import Client, Server
 
@@ -422,9 +421,13 @@ async def test_client_run_exits_on_goaway_injection(test_certificates):
     assert client._connection is not None
     client._connection.receive(goaway_frame)
 
-    # GO_AWAY 受信で数秒以内に終了する
+    # GO_AWAY 受信後も run() は終了しない (graceful shutdown の継続)
+    await asyncio.sleep(0.1)
+    assert run_task.done() is False
+
+    # クライアントの close() で run() が終了する
+    await client.close()
     await asyncio.wait_for(run_task, timeout=3.0)
     assert run_task.done() is True
 
-    await client.close()
     await server.stop()
