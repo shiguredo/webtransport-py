@@ -1,7 +1,7 @@
 # http3.Server.run() が非 Initial パケットの RuntimeError で死ぬ問題を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-http3-server-accept-exception
 - Polished: 2026-08-24
 
@@ -23,3 +23,8 @@
 
 - 非 Initial パケットが送られても run() が継続する
 - テストが追加される
+
+## 解決方法
+
+- `src/webtransport/http3/server.py` の `Server.run` で、未知アドレスからの `_accept_connection` 呼び出しを `RuntimeError` 捕捉で包み、非 Initial パケット (接続クローズ済みアドレスからの追従パケット等) を黙って破棄するようにした (quic / h3 層の `Server.run` と同じ挙動。accept は Initial パケット以外・デコード不能パケットで RuntimeError を投げる)
+- テスト: `tests/test_e2e_http3.py` の `test_server_run_continues_on_non_initial_packet` (未知アドレスから非 Initial パケットを送っても run() が継続し、その後正常な HTTP/3 接続が確立できることを検証)
