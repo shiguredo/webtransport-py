@@ -335,12 +335,13 @@ def test_wt_max_data_decrease_does_not_push_error_event() -> None:
     _assert_flow_control_error_sent(server, "WT_MAX_DATA decreased")
 
 
-def test_wt_max_data_below_fallback_without_received_does_not_close() -> None:
-    """フォールバック値より小さい最初の WT_MAX_DATA を減少扱いしないことを確認
+def test_wt_max_data_first_capsule_no_decrease_does_not_close() -> None:
+    """受信値 0 より大きい最初の WT_MAX_DATA を減少扱いしないことを確認
 
-    対向 SETTINGS が 0 のときは自側 config (1 MiB) へフォールバックするが、
-    フォールバックは受信値ではない。カプセル未到着のまま 100 を受け取っても
-    Section 6.5 の減少にはならない。受信後に 50 を受け取ると減少になる。
+    クライアントが 0 の初期フロー制御 (wt_initial_max_data = 0) を広告した
+    セッションでは、サーバーの「前回受信値」は未設定のまま (0 は記録されない)
+    ため、最初のカプセルで 100 を受け取っても Section 6.5 の減少にはならない。
+    受信後に 50 を受け取ると 100 からの減少になる。
     """
     client_config = h2.Config()
     client_config.wt_initial_max_data = 0
@@ -361,7 +362,9 @@ def test_wt_max_data_below_fallback_without_received_does_not_close() -> None:
     assert len(ready_events) == 1
     assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
     _h2_pump(server, client)
-    # クライアントの初期 WT_MAX_DATA (値 0) はまだサーバーへ届いていない
+    # クライアントの初期 WT_MAX_DATA カプセル (値 0) はまだサーバーへ
+    # 届いていない (SETTINGS の 0 は既に受信済みだが、クライアントの
+    # セッション確立後の初期カプセルは _h2_pump(server, client) まで送られない)
 
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(100))
     _assert_no_flow_control_error_sent(server)

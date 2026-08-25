@@ -910,23 +910,22 @@ WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
 void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const {
   // 対向 SETTINGS が我々の送信上限 (local)、自側 config が受信上限 (remote)
   // draft-15 Section 4.3.1
-  // 対向が 0 のままの場合は capsule 到着まで送れないため、自側 config を下限にする
-  // (SETTINGS 未受信や default 0 へのフォールバック)
-  wt_session.max_data_local =
-      peer_wt_initial_max_data_ > 0 ? peer_wt_initial_max_data_
-                                    : config_.wt_initial_max_data;
+  // 対向 SETTINGS が 0 (draft-15 Section 11.2 の既定値) の場合、送信
+  // クレジットは 0 であり「WT_MAX_DATA / WT_MAX_STREAM_DATA /
+  // WT_MAX_STREAMS カプセル到着まで送信不可」を意味する (Section 6.5 /
+  // 6.6 / 6.7 は非 0 値での MAY 伝達を定める)。自側 config 値を下限にする
+  // フォールバックは広告制限を超えるため行わない (過去の実装は相互運用の
+  // ためフォールバックしていたが、仕様の MUST 違反である)。
+  // クライアントは SETTINGS 受信後に Extended CONNECT を送る (draft-15
+  // Section 3.1。高レベル層の _wait_webtransport_ready もこの順序) ため、
+  // SETTINGS 未受信は通常経路では起きないが、既定値 0 として仕様どおり扱う
+  wt_session.max_data_local = peer_wt_initial_max_data_;
   wt_session.max_data_remote = config_.wt_initial_max_data;
   if (peer_wt_initial_max_data_ > 0) {
     wt_session.received_max_data = peer_wt_initial_max_data_;
   }
-  wt_session.max_streams_bidi_local =
-      peer_wt_initial_max_streams_bidi_ > 0
-          ? peer_wt_initial_max_streams_bidi_
-          : config_.wt_initial_max_streams_bidi;
-  wt_session.max_streams_uni_local =
-      peer_wt_initial_max_streams_uni_ > 0
-          ? peer_wt_initial_max_streams_uni_
-          : config_.wt_initial_max_streams_uni;
+  wt_session.max_streams_bidi_local = peer_wt_initial_max_streams_bidi_;
+  wt_session.max_streams_uni_local = peer_wt_initial_max_streams_uni_;
   if (peer_wt_initial_max_streams_bidi_ > 0) {
     wt_session.received_max_streams_bidi = peer_wt_initial_max_streams_bidi_;
   }
@@ -936,28 +935,21 @@ void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const
   wt_session.max_streams_bidi_remote = config_.wt_initial_max_streams_bidi;
   wt_session.max_streams_uni_remote = config_.wt_initial_max_streams_uni;
 
-  wt_session.peer_max_stream_data_uni =
-      peer_wt_initial_max_stream_data_uni_ > 0
-          ? peer_wt_initial_max_stream_data_uni_
-          : config_.wt_initial_max_stream_data;
+  wt_session.peer_max_stream_data_uni = peer_wt_initial_max_stream_data_uni_;
   if (peer_wt_initial_max_stream_data_uni_ > 0) {
     wt_session.received_initial_max_stream_data_uni =
         peer_wt_initial_max_stream_data_uni_;
   }
   // 自側開始 bidi: 対向の BIDI_REMOTE
   wt_session.peer_max_stream_data_bidi_local =
-      peer_wt_initial_max_stream_data_bidi_remote_ > 0
-          ? peer_wt_initial_max_stream_data_bidi_remote_
-          : config_.wt_initial_max_stream_data;
+      peer_wt_initial_max_stream_data_bidi_remote_;
   if (peer_wt_initial_max_stream_data_bidi_remote_ > 0) {
     wt_session.received_initial_max_stream_data_bidi_local =
         peer_wt_initial_max_stream_data_bidi_remote_;
   }
   // 対向開始 bidi: 対向の BIDI_LOCAL
   wt_session.peer_max_stream_data_bidi_remote =
-      peer_wt_initial_max_stream_data_bidi_local_ > 0
-          ? peer_wt_initial_max_stream_data_bidi_local_
-          : config_.wt_initial_max_stream_data;
+      peer_wt_initial_max_stream_data_bidi_local_;
   if (peer_wt_initial_max_stream_data_bidi_local_ > 0) {
     wt_session.received_initial_max_stream_data_bidi_remote =
         peer_wt_initial_max_stream_data_bidi_local_;
