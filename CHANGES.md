@@ -85,6 +85,8 @@
   - @voluntas
 - [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
   - @voluntas
+- [FIX] HTTP/2 で FIN 送出済み・リセット送出済みのストリームへの send_stream_data / reset_stream がカプセルを送出してしまうのを修正する (draft-15 Section 6.2 / 6.4 の MUST 違反)
+  - @voluntas
 - [FIX] WebTransport over HTTP/2 のクライアントが 2xx 非 200 応答をセッション確立として扱わない問題を修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/2 で SETTINGS の初期フロー制御値 0 を広告する対向へ自側 config 値にフォールバックして送信できてしまう問題を修正する (draft-15 Section 6.5 / 6.6 / 6.7 の MUST 違反)

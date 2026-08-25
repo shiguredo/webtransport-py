@@ -1,8 +1,9 @@
-"""WebTransport over HTTP/2 の send_stream_data / reset_stream のローカル close_session 後送出抑止テスト
+"""WebTransport over HTTP/2 の send_stream_data / reset_stream の終了後送出抑止テスト
 
 ローカル close_session 後 (flush 前) に send_stream_data / reset_stream を
 呼んでも、終了済みセッション宛の WT_STREAM / WT_RESET_STREAM capsule が
-ワイヤへ送出されないことを検証する。close_session はエントリを残したまま
+ワイヤへ送出されないことと、FIN 送出後・リセット送出後のストリームへの
+再送信が塞がれることを検証する。close_session はエントリを残したまま
 is_terminated を立てるため、修正前は get_wt_session の確認だけでは塞がれず、
 flush 前はカプセルが WT_CLOSE_SESSION の後ろに積まれてワイヤへ送出され、
 flush 後は http2_stream_buffers_ に残留していた。残留は内部状態のため公開
@@ -170,3 +171,108 @@ def test_reset_stream_alive_session_delivered() -> None:
     assert reset_events[0].session_id == session_id
     assert reset_events[0].stream_id == stream_id
     assert reset_events[0].error_code == 42
+
+
+def test_send_stream_data_after_fin_not_sent() -> None:
+    """FIN 送出後の send_stream_data が塞がれることを確認
+
+    FIN (WT_STREAM_FIN) 送出後は送信側状態を DataSent へ遷移させ、以後の
+    send_stream_data を無視する (draft-15 Section 6.4 の「A WT_STREAM
+    capsule MUST NOT be sent after a stream is closed or reset」)。修正前は
+    FIN 後に再度 send_stream_data を呼ぶと閉じたストリームへの WT_STREAM が
+    ワイヤへ送出され、ピアから WT_STREAM_STATE_ERROR を受けた。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # FIN 付きで送信する (ワイヤには WT_STREAM_FIN capsule が積まれる)
+    client.send_stream_data(session_id, stream_id, b"hello", fin=True)
+    wire = client.send()
+    assert wire is not None
+    assert _encode_wt_stream_capsule(stream_id, b"hello", fin=True) in wire
+
+    # FIN 後の再送信はワイヤへ送出されない (送出物は何も残らない)
+    client.send_stream_data(session_id, stream_id, b"again")
+    wire = client.send()
+    assert wire is None
+
+
+def test_reset_stream_after_fin_not_sent() -> None:
+    """FIN 送出後の reset_stream が塞がれることを確認
+
+    FIN 送出後 (DataSent 相当) のストリームは送信側から見て閉じているため、
+    WT_RESET_STREAM の送出も塞ぐ (draft-15 Section 6.2 の「A
+    WT_RESET_STREAM capsule MUST NOT be sent after a stream is closed or
+    reset」)。修正前は FIN 後に reset_stream を呼ぶと WT_RESET_STREAM が
+    ワイヤへ送出され、ピア (サーバー側の DataRecvd 検知) がセッション
+    エラーにした。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # FIN 付きで送信する
+    client.send_stream_data(session_id, stream_id, b"hello", fin=True)
+    wire = client.send()
+    assert wire is not None
+    assert _encode_wt_stream_capsule(stream_id, b"hello", fin=True) in wire
+
+    # FIN 後の reset_stream はワイヤへ送出されない (送出物は何も残らない。
+    # reliable_size は省略時 0 であり、仮に送出された場合の Reliable Size
+    # は FIN 送出時の bytes_sent (= b"hello" の長さ = 5) へフォールバック
+    # するが、ガードにより送出される前に返る)
+    client.reset_stream(session_id, stream_id, 1)
+    wire = client.send()
+    assert wire is None
+
+
+def test_reset_stream_after_reset_not_sent() -> None:
+    """リセット送出後の再 reset_stream が塞がれることを確認
+
+    リセット送出後 (ResetSent) のストリームへの再 reset_stream は無視する
+    (draft-15 Section 6.2 の MUST NOT。修正前は WT_RESET_STREAM が二重に
+    ワイヤへ送出された)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # 1 回目の reset_stream で WT_RESET_STREAM が送出される
+    client.reset_stream(session_id, stream_id, 1)
+    wire = client.send()
+    assert wire is not None
+    assert _encode_wt_reset_stream_capsule(stream_id, 1, 0) in wire
+
+    # 2 回目の reset_stream はワイヤへ送出されない (送出物は何も残らない)
+    client.reset_stream(session_id, stream_id, 2)
+    wire = client.send()
+    assert wire is None
+
+
+def test_empty_fin_then_send_not_sent() -> None:
+    """空の起動 WT_STREAM_FIN 送出後の send_stream_data が塞がれることを確認
+
+    data 空 + fin=True の起動 WT_STREAM_FIN (ストリームを開いて同時に閉じる
+    カプセル。draft-15 Section 6.4 の「Empty WT_STREAM capsules MUST NOT be
+    used unless they open or close a stream」) でも DataSent へ遷移し、
+    以後の send_stream_data は塞がれる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # 空の起動 WT_STREAM_FIN を送信する
+    client.send_stream_data(session_id, stream_id, b"", fin=True)
+    wire = client.send()
+    assert wire is not None
+    assert _encode_wt_stream_capsule(stream_id, b"", fin=True) in wire
+
+    # 空 FIN 後の再送信はワイヤへ送出されない (送出物は何も残らない)
+    client.send_stream_data(session_id, stream_id, b"again")
+    wire = client.send()
+    assert wire is None

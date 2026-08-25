@@ -161,7 +161,8 @@ struct H2Event {
  * WebTransport ストリーム状態
  */
 enum class StreamState {
-  // 送信側状態
+  // 送信側状態 (Send は未使用。Ready → DataSent (FIN 送出) / ResetSent
+  // (リセット送出) の 2 終端のみ。受信側の追跡は recv_state が担当する)
   Ready,
   Send,
   DataSent,
@@ -373,8 +374,9 @@ class H2Session {
    * WT_STREAM capsule を送信
    *
    * 終了したセッション ID への送信は黙って無視する (send_datagram と同じ
-   * ガード構成)。リセット済み (send_state が ResetSent) のストリームへの
-   * 送信も無視する (draft-15 Section 6.4)。
+   * ガード構成)。リセット済み (send_state が ResetSent)・FIN 送出済み
+   * (send_state が DataSent) のストリームへの送信も無視する
+   * (draft-15 Section 6.4)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param data 送信データ
@@ -390,7 +392,11 @@ class H2Session {
    * WT_RESET_STREAM capsule を送信
    *
    * 終了したセッション ID への送信は黙って無視する (send_datagram と同じ
-   * ガード構成)。送信リセットは送信側の終了のみであり受信側は継続するため
+   * ガード構成)。リセット送出済み (ResetSent)・FIN 送出済み (DataSent)
+   * のストリームへの WT_RESET_STREAM 送出も無視する (draft-15
+   * Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT be sent after a
+   * stream is closed or reset」。再リセットと FIN 後のリセットの両方)。
+   * 送信リセットは送信側の終了のみであり受信側は継続するため
    * (draft-15 Section 5.2 の QUIC 状態ミラー)、エントリは保持され、以後の
    * send_stream_data は塞がれる (受信側の追跡は維持される)。
    * @param session_id セッション ID
