@@ -308,12 +308,12 @@ def test_end_stream_close_session_noop() -> None:
     assert wire is None or b"after-end-stream" not in wire
 
 
-def test_end_stream_201_no_termination() -> None:
-    """201 応答のエントリでは END_STREAM で終了処理が実行されないことを確認
+def test_end_stream_201_terminates_session() -> None:
+    """201 応答のセッションは END_STREAM で終了処理が実行されることを確認
 
-    201 は 2xx 非 200 のため is_established が false のまま残る (既知の
-    制約。後始末経路が存在しない限り残留し続ける)。確立済みでないエントリ
-    の END_STREAM は誤検知しない。
+    201 は 2xx 全般のセッション確立 (draft-15 Section 3.2) であり、
+    is_established = true となる。確立済みセッションの END_STREAM は
+    セッション終了として検知され、SessionClosed が発火する。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -324,8 +324,14 @@ def test_end_stream_201_no_termination() -> None:
     server.reject_session(session_id, 201)
     _h2_pump(server, client)
 
-    # SessionClosed は発火しない (誤検知しない)
-    assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(client))
+    # 確立済みセッションの END_STREAM は SessionClosed を 1 回だけ発火させる
+    closed_events = [
+        event for event in _drain_events(client) if event.type == h2.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == 0
+    assert client.get_session_ids() == []
 
 
 def test_end_stream_wt_stream_fin_no_termination() -> None:

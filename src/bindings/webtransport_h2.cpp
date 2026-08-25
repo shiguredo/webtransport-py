@@ -817,7 +817,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
   // を閉じた場合のセッション終了処理 (draft-15 Section 3.4 の正規の終了経路)。
   // 対象は確立済み (is_established) のセッションに限定する: 非 2xx 拒否、
-  // 201 応答、サーバー側の受理前 FIN は確立されておらず、誤検知しない
+  // サーバー側の受理前 FIN は確立されておらず、誤検知しない
   // (非 2xx 拒否は応答受信時にエントリ削除済み)。WT_CLOSE_SESSION 受信済み
   // のセッションは handle_wt_close_session がエントリを削除済みのため、
   // get_wt_session が失敗してここで返る。ローカル close_session 済みの
@@ -843,7 +843,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // エントリを削除して以後の on_stream_close_callback / close_session /
   // send_datagram / send_stream_data / open_stream / reset_stream /
   // stop_sending / drain_session をエントリ不在で塞ぐ。キュー済みの
-  // カプセル (http2_stream_buffers_) も破棄する: 200 + END_STREAM (受理と
+  // カプセル (http2_stream_buffers_) も破棄する: 2xx + END_STREAM (受理と
   // 同時クローズ) では同一 receive() 内で確立処理が初期フロー制御カプセル
   // をキューしており、セッション終了を学習した後に送出しないため
   // (on_stream_close_callback のバッファ破棄と対称)。ピアの END_STREAM に
@@ -1717,7 +1717,7 @@ void H2Session::send_datagram(int32_t session_id,
   // close_session はここと同じガードを自前で持つ)。
   // 楽観的送信 (draft-15 Section 3.2 の MAY
   // 「クライアントは応答を待たずに WebTransport カプセルを送信してよい」)
-  // は妨げない: クライアントは connect 直後 (200 応答前)・サーバーは
+  // は妨げない: クライアントは connect 直後 (2xx 応答前)・サーバーは
   // CONNECT リクエスト受信時に wt_sessions_ へエントリが挿入され、終了
   // フラグが立っていない (is_established はこの間 false のため、終了状態の
   // 判定に is_established を使うと楽観的送信がすべて無視される)
@@ -2041,7 +2041,10 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
           for (const auto& [name, value] : it->second) {
             if (name == ":status") {
               status_value = value;
-              if (value == "200") {
+              // draft-15 Section 3.2 の「A WebTransport session is established
+              // when the server sends a 2xx response」。200 のみでなく先頭
+              // 文字が '2' の 2xx 全般を確立として扱う
+              if (!value.empty() && value[0] == '2') {
                 is_success = true;
               }
             }
@@ -2053,6 +2056,7 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
           auto* wt_session = h2_session->get_wt_session(stream_id);
           if (is_success && wt_session) {
             // draft-15 Section 4.3: 応答の WebTransport-Init も反映
+            // (2xx 全般の確立であり、200 のみに限らない)
             if (has_wt_init) {
               uint64_t init_u = 0;
               uint64_t init_bl = 0;
@@ -2172,7 +2176,7 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
 
   // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
   // を閉じた場合のセッション終了検知 (draft-15 Section 3.4 の正規の終了経路)。
-  // HEADERS フレームの処理分岐の後に置く: 200 + END_STREAM (受理と同時
+  // HEADERS フレームの処理分岐の後に置く: 2xx + END_STREAM (受理と同時
   // クローズ) では HCAT_RESPONSE 分岐で is_established が設定された後に検知
   // する必要がある。フレーム種別 (cat) に依存させない (trailers 等の
   // HCAT_HEADERS + END_STREAM も捕捉する)。END_STREAM ビット (0x01) は
