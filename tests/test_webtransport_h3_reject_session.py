@@ -155,14 +155,13 @@ def test_client_response_103_session_removed() -> None:
 
 
 def test_client_response_201_session_kept_until_fin() -> None:
-    """2xx 非 200 応答 (201) のセッションが誤って削除されないことを確認
+    """2xx 非 200 応答 (201) のセッションがセッション確立として扱われることを確認
 
     nghttp3 は 2xx 全般をセッション確立として扱う (status_code / 100 == 2
     による confirm) ため、201 応答は有効なセッションである。session_ids_
-    に残ること・SESSION_READY が発火しないこと (200 のみ発火する既存の
-    制約) を確認し、FIN 到着後は既存の FIN 経路で後始末されることを確認
-    する。本テストは修正前実装でも通る設計ピンであり、過剰削除の防止を
-    守る。
+    に残ること・SESSION_READY が発火すること (2xx 全般で発火する契約。
+    0104 の h2 側と同じ) を確認し、FIN 到着後は既存の FIN 経路で後始末
+    されることを確認する。
     """
     client, server = _create_session_pair()
     assert client.connect(0, "https://localhost/webtransport") is True
@@ -185,11 +184,15 @@ def test_client_response_201_session_kept_until_fin() -> None:
         if not sent:
             break
 
-    # 2xx のため削除されず、SESSION_READY も発火しない (既存の制約)。
+    # 2xx のため削除されず、SESSION_READY が発火する (2xx 全般)。
     # セッションは確立済みとして実用可能 (send_datagram / open_stream が
     # 成功する)
     assert client.get_session_ids() == [0]
-    assert all(event.type != h3.EventType.SESSION_READY for event in _drain_events(client))
+    ready_events = [
+        event for event in _drain_events(client) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1
+    assert ready_events[0].session_id == 0
     client.send_datagram(0, b"alive")
     assert len(client.get_datagrams_to_send()) == 1
     assert client.open_stream(0, 4, False) is True
@@ -207,11 +210,62 @@ def test_client_response_201_session_kept_until_fin() -> None:
 def test_client_accept_200_normal_session_unaffected() -> None:
     """通常のセッション確立 (200 応答) が非 2xx 応答処理の影響を受けないことを確認
 
-    SESSION_READY の発火条件 (200 のみ) は変更しない。本テストは修正前
-    実装でも通る回帰ピンであり、通常の確立経路の維持を守る。
+    SESSION_READY の発火条件 (2xx 全般 = 先頭文字が '2') は非 2xx 拒否処理の
+    追加後も維持される。通常の確立経路の維持を守る回帰ピン。
     """
     client, server = _create_session_pair()
     session_id = _connect_session(client, server, 0)
 
     # クライアントで SESSION_READY が発火し、セッションが確立される
     assert client.get_session_ids() == [session_id]
+
+
+def test_client_non_2xx_rejected_event_includes_status_code() -> None:
+    """拒否時の SESSION_REJECTED イベントに status_code が含まれることを確認
+
+    非 2xx 応答 (403) の受信で SESSION_REJECTED イベントが発火し、
+    status_code フィールドに応答の HTTP status code がパースされて入る
+    (h2 側の SessionRejected と同じ構造)。高レベル Client.connect が
+    False を返す根拠になる。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, False)
+
+    # サーバーが 403 で拒否する
+    server.reject_session(0, 403)
+    _pump(server, client)
+
+    # セッション ID は削除され、SessionRejected (status_code 403) が発火する
+    assert client.get_session_ids() == []
+    rejected_events = [
+        event for event in _drain_events(client) if event.type == h3.EventType.SESSION_REJECTED
+    ]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].session_id == 0
+    assert rejected_events[0].status_code == 403
+
+
+def test_client_1xx_rejected_event_status_code() -> None:
+    """1xx 応答でも SESSION_REJECTED イベントに status_code が含まれることを確認
+
+    現在の依存 nghttp3 は 1xx を非 2xx として abort するため、SessionRejected
+    (status_code = 1xx の値) が発火する (h2 側とは 1xx の扱いが異なる既知の
+    差分)。高レベル Client.connect が False を返す根拠になる。
+    """
+    client, server = _create_session_pair()
+    assert client.connect(0, "https://localhost/webtransport") is True
+    headers = _setup_connect(client, server, 0)
+    server.receive_stream_data(0, headers, False)
+
+    # サーバーが 103 で応答する
+    server.reject_session(0, 103)
+    _pump(server, client)
+
+    assert client.get_session_ids() == []
+    rejected_events = [
+        event for event in _drain_events(client) if event.type == h3.EventType.SESSION_REJECTED
+    ]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].status_code == 103

@@ -356,9 +356,8 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
 
     allowed_origins に含まれない Origin ヘッダーを送るクライアントの接続は
     拒否され、サーバー側でセッションが確立されない (on_session_ready が
-    発火しない)。このテストが観測できるのはセッション不確立のみであり、
-    403 応答の受信はクライアントが非 200 をイベント化しないため観測
-    対象外である。
+    発火しない)。クライアントの connect() は 403 拒否を検知して False を
+    返す (低レベルの SessionRejected イベント、status_code 付き)。
     """
     from webtransport.h3 import Client, Server
 
@@ -393,24 +392,13 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
     )
 
     connected = await client.connect()
-    # QUIC トランスポートの接続は成功するが、CONNECT リクエスト自体は拒否される
-    assert connected is True
+    # QUIC トランスポートの接続は成功するが、CONNECT リクエスト自体は拒否
+    # (403) されるため、connect() は False を返す (draft-16 Section 3.2)
+    assert connected is False
+    assert client.is_connected is False
 
-    async def run_client():
-        try:
-            await client.run()
-        except asyncio.CancelledError:
-            pass
-
-    client_task = asyncio.create_task(run_client())
-
-    # セッションが確立されないことを確認する
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
-
-    client_task.cancel()
     server_task.cancel()
-    await asyncio.gather(client_task, server_task, return_exceptions=True)
+    await asyncio.gather(server_task, return_exceptions=True)
 
     await client.close()
     await server.stop()
@@ -3336,9 +3324,8 @@ async def test_server_rejects_client_without_transport_params(
 
     draft-ietf-webtrans-http3-16 Section 3.1 の MUST を満たさないクライアント
     に対し、サーバーは確立済み・新規の全セッションを malformed として扱い、
-    H3_MESSAGE_ERROR (RFC 9114 Section 4.1.2) で接続を閉じる。クライアントの
-    connect() は CONNECT 送出を楽観的に成功させる (2xx 応答を待たない) ため、
-    戻り値ではなくサーバーの接続クローズ (error_code 0x010E) と
+    H3_MESSAGE_ERROR (RFC 9114 Section 8.1) で接続を閉じる。connect() は
+    2xx 応答を待つため、拒否された場合は False を返す。戻り値と
     on_session_ready 不発火で検証する。
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
     このテストの対象外である。
@@ -3375,34 +3362,19 @@ async def test_server_rejects_client_without_transport_params(
         quic_config=_make_config_missing_transport_params(missing),
     )
 
-    client_task = None
     try:
-        # CONNECT 送出までは楽観的に成功する (2xx 応答を待たない既存仕様)
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
-
-        async def run_client():
-            # CancelledError を握らない (wait_for のタイムアウトを
-            # TimeoutError として検知するため)
-            await client.run()
-
-        client_task = asyncio.create_task(run_client())
-
-        # サーバーが H3_MESSAGE_ERROR (0x010E) で接続を閉じると
-        # クライアントの run() が CONNECTION_CLOSED で終了する
-        await asyncio.wait_for(client_task, timeout=5.0)
-        quic_conn = client._quic_connection
-        assert quic_conn is not None
-        assert quic_conn.error_code == 0x010E
+        # 要件未達のクライアントの CONNECT はサーバーが H3_MESSAGE_ERROR
+        # で拒否する。connect() は応答待ちで False を返すことが期待される
+        # (draft-16 Section 3.2。CONNECTION_CLOSED の受信または応答なしで
+        # False)
+        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
+        assert connected is False
+        assert client.is_connected is False
         # 要件未達のクライアントのセッションは確立されない
         assert server_session_ready_called is False
     finally:
-        if client_task is not None:
-            client_task.cancel()
         server_task.cancel()
-        await asyncio.gather(
-            *(t for t in [client_task, server_task] if t is not None),
-            return_exceptions=True,
-        )
+        await asyncio.gather(server_task, return_exceptions=True)
         await client.close()
         await server.stop()
 
