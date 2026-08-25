@@ -383,7 +383,16 @@ class Server:
                 addr = self._normalize_addr(raw_addr)
 
                 if addr not in self._clients:
-                    client = self._accept_connection(addr, data)
+                    try:
+                        client = self._accept_connection(addr, data)
+                    except RuntimeError:
+                        # 接続クローズ済みのアドレスからの追従パケット等、
+                        # 未知アドレスからの非 Initial パケットは新しい
+                        # 接続を開始できないため黙って破棄する (accept は
+                        # Initial パケット以外で RuntimeError を投げる)。
+                        # quic / h3 層の Server.run と同じ挙動 (サーバーの
+                        # run() を継続させる)
+                        continue
                 else:
                     client = self._clients[addr]
                     if client.quic_connection is not None:
