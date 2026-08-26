@@ -1,7 +1,7 @@
 # skills/webtransport-py/SKILL.md の h3.Client.open_stream 記述を現実装に合わせて更新する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/update-skill-open-stream
 - Polished: {YYYY-MM-DD}
 
@@ -23,3 +23,7 @@
 ## 完了条件
 
 - SKILL.md の h3.Client.open_stream の記述が現実装と一致する
+
+## 解決方法
+
+- `skills/webtransport-py/SKILL.md` の h3.Client.open_stream 説明を、登録失敗時も RESET_STREAM で解放して -1 を返す現実装に合わせて更新した
