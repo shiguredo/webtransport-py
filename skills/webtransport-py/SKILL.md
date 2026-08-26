@@ -645,9 +645,9 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `PUSH_PROMISE` / `GO_AWAY` / `RESET` / `RESET_STREAM` / `STOP_SENDING` / `WEBTRANSPORT_SESSION_READY` / `WEBTRANSPORT_STREAM_DATA` / `WEBTRANSPORT_DATAGRAM`
 - `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `STREAM_OPENED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE`
-- `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
+- `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)、`h3.Event` / `h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` (h3.Event はさらに `is_unidirectional` を持つが、値が設定される経路が無く常に False。h2.Event はさらに `fin` を持つ)、`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id`、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value`。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `is_unidirectional` (`is_unidirectional` は値が設定される経路が無く常に False)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id`、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value`。
 
 ## 注意点
 
