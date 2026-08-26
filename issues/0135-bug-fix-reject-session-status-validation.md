@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の reject_session が不正な status code を無検証で送出する問題を修正する
 
 - Created: 2026-08-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/fix-reject-session-status-validation
 - Polished: 2026-08-24
 
@@ -34,3 +34,8 @@
 - bindings 側の docstring に制約が明記され、`ty check` が通ること
 - 既存の 2xx (201 等) の挙動が変わらないこと (既存テスト pass。0104 実装後はその更新後のテストで担保)
 - 全テスト pass、`ruff format` / `ruff check` / `ty check` 通過
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の `H2Session::reject_session` に `status_code < 200 || status_code >= 600` の検証を追加し、`std::invalid_argument` (nanobind では ValueError) を投げるようにした。検証は `nghttp2_submit_response` を含む副作用より前に置き、状態を汚さない。docstring に「200-599 (実質 300-599 用)」を明記
+- テスト: `tests/test_webtransport_h2_reject_session.py` (範囲外 99 / 100 / 101 / 199 / 600 / 999 で ValueError が投げられワイヤに送出されない / 許容境界 200 / 599 で送出される / 600 以上の 0 丸めをワイヤ注入で検証)。`tests/prop_webtransport_h2.py` の PBT の前提を「範囲外は ValueError」に更新した
