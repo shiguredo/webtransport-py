@@ -378,10 +378,30 @@ class H3Session {
    * nghttp3 への通知は close_stream と同じ。close_stream の戻り値
    * (セッション ID) は破棄する。高レベル API では QUIC RESET_STREAM
    * 送出と合わせて使う。
+   *
+   * CONNECT ストリーム以外は、アプリの 32bit エラーコードを
+   * WT_APPLICATION_ERROR レンジへリマップしてから nghttp3 に渡す
+   * (draft-ietf-webtrans-http3-16 Section 4.4)。CONNECT ストリームは
+   * リマップしない。error_code が 0xffffffff を超える場合は
+   * std::invalid_argument を投げる。
+   *
    * @param stream_id ストリーム ID
-   * @param error_code エラーコード
+   * @param error_code アプリケーションエラーコード (データストリーム) または
+   *   HTTP/3 エラーコード (CONNECT 等)
    */
   void reset_stream(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
+   * 送信時のエラーコードをワイヤ用に変換する
+   *
+   * CONNECT ストリーム (session_ids_) 以外は WT_APPLICATION_ERROR へ
+   * リマップする。対向 RESET_STREAM 受信で stream_info_ が消えた後の
+   * ローカル abort でも Section 4.4 の MUST を満たすため、stream_info_
+   * の有無には依存しない。高レベル層が quic_connection.reset_stream に
+   * 渡す値の算出に使う (H3Session::reset_stream 側でも同じ変換を行う)。
+   * error_code が 0xffffffff を超える場合は std::invalid_argument を投げる。
+   */
+  uint64_t map_send_error_code(int64_t stream_id, uint64_t error_code) const;
 
   /**
    * WebTransport セッションを閉じる

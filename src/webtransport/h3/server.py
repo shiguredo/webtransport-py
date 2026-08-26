@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 
@@ -93,7 +94,7 @@ class Server:
             Callable[[int, int, bytes, tuple[str, int]], Awaitable[None]] | None
         ) = None
         self._on_stream_reset: (
-            Callable[[int, int, int, tuple[str, int]], Awaitable[None]] | None
+            Callable[[int, int, int | None, tuple[str, int]], Awaitable[None]] | None
         ) = None
         self._on_datagram: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
 
@@ -152,7 +153,7 @@ class Server:
 
     def on_stream_reset(
         self,
-        callback: Callable[[int, int, int, tuple[str, int]], Awaitable[None]],
+        callback: Callable[[int, int, int | None, tuple[str, int]], Awaitable[None]],
     ) -> None:
         """ストリームリセット受信時のコールバックを設定する
 
@@ -160,8 +161,14 @@ class Server:
         セッション ID を復元できない場合 (WT ヘッダー未受信のまま
         リセットされたストリーム等) は -1 が渡る。
 
+        error_code はワイヤ上のコードを変更せずに渡す
+        (draft-ietf-webtrans-http3-16 Section 4.4)。データストリームで
+        WT_APPLICATION_ERROR レンジ外 (予約済み含む) の場合は None
+        (アプリエラーコードなし)。CONNECT ストリームのリセットは
+        HTTP/3 エラーコード空間のまま渡す。
+
         Args:
-            callback: async def callback(session_id: int, stream_id: int, error_code: int, addr: tuple[str, int]) -> None
+            callback: async def callback(session_id: int, stream_id: int, error_code: int | None, addr: tuple[str, int]) -> None
         """
         self._on_stream_reset = callback
 
@@ -353,6 +360,10 @@ class Server:
             elif quic_event.type == quic.EventType.DATAGRAM:
                 client.webtransport_session.receive_datagram(quic_event.data)
             elif quic_event.type == quic.EventType.STREAM_RESET:
+                # CONNECT 判定は close_stream が session_ids_ から消す前に行う
+                is_connect_stream = (
+                    quic_event.stream_id in client.webtransport_session.get_session_ids()
+                )
                 session_id = client.webtransport_session.close_stream(
                     quic_event.stream_id,
                     quic_event.error_code,
@@ -361,7 +372,10 @@ class Server:
                     await self._on_stream_reset(
                         session_id,
                         quic_event.stream_id,
-                        quic_event.error_code,
+                        deliver_stream_reset_error_code(
+                            wire_error_code=quic_event.error_code,
+                            is_connect_stream=is_connect_stream,
+                        ),
                         addr,
                     )
             elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
@@ -522,19 +536,33 @@ class Server:
     ) -> None:
         """ストリームをリセットする (QUIC RESET_STREAM + nghttp3 通知)
 
+        データストリームのアプリケーションエラーコードは
+        WT_APPLICATION_ERROR レンジへリマップしてワイヤに載せる
+        (draft-ietf-webtrans-http3-16 Section 4.4)。CONNECT ストリームは
+        リマップしない。error_code が 0xffffffff を超える場合は
+        ValueError を上げる。
+
         Args:
             addr: クライアントアドレス
             stream_id: ストリーム ID
-            error_code: エラーコード
+            error_code: アプリケーションエラーコード (CONNECT 以外) または
+                HTTP/3 エラーコード (CONNECT)
         """
         client = self._clients.get(addr)
-        if client is None:
+        if client is None or client.webtransport_session is None:
             return
 
+        # quic 経路と nghttp3 経路の双方に同じワイヤコードを載せる。
+        # map_send_error_code / reset_stream が CONNECT 判定とリマップを
+        # 行い、quic には変換後、Session.reset_stream にはアプリコードを
+        # 渡す (内部で再度リマップする)
+        wire_error_code = client.webtransport_session.map_send_error_code(
+            stream_id,
+            error_code,
+        )
         if client.quic_connection is not None:
-            client.quic_connection.reset_stream(stream_id, error_code)
-        if client.webtransport_session is not None:
-            client.webtransport_session.reset_stream(stream_id, error_code)
+            client.quic_connection.reset_stream(stream_id, wire_error_code)
+        client.webtransport_session.reset_stream(stream_id, error_code)
         await self._send_to(addr, client)
 
     async def close_stream(

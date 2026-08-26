@@ -1015,7 +1015,11 @@ async def test_server_resets_client_stream(test_certificates):
     await asyncio.wait_for(client_reset_received.wait(), timeout=5.0)
 
     assert reset_info["stream_id"] == stream_id
-    assert reset_info["error_code"] == 0x01
+    # 受信側はワイヤコードを変更せず配信する (Section 4.4)。
+    # 送信側がアプリコード 0x01 を WT_APPLICATION_ERROR へリマップする
+    from webtransport.h3._error_codes import webtransport_code_to_http_code
+
+    assert reset_info["error_code"] == webtransport_code_to_http_code(0x01)
 
     client_task.cancel()
     server_task.cancel()
@@ -1110,7 +1114,11 @@ async def test_client_resets_server_stream(test_certificates):
     await asyncio.wait_for(server_reset_received.wait(), timeout=5.0)
 
     assert reset_info["stream_id"] == stream_id
-    assert reset_info["error_code"] == 0x02
+    # 受信側はワイヤコードを変更せず配信する (Section 4.4)。
+    # 送信側がアプリコード 0x02 を WT_APPLICATION_ERROR へリマップする
+    from webtransport.h3._error_codes import webtransport_code_to_http_code
+
+    assert reset_info["error_code"] == webtransport_code_to_http_code(0x02)
     # リセットされたストリームの属するセッション ID が渡される
     assert reset_info["session_id"] == expected_session_id["session_id"]
 
@@ -1645,10 +1653,11 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
     assert invalid_stream_id == -1
 
     # 開いた QUIC ストリームの RESET_STREAM がクライアントに届き、
-    # クライアントは接続を維持する
+    # クライアントは接続を維持する。内部解放のワイヤコード 0 は
+    # WT_APPLICATION_ERROR レンジ外のためアプリには None で配信される
     await asyncio.wait_for(client_reset_received.wait(), timeout=5.0)
     assert len(client_resets) == 1
-    assert client_resets[0][1] == 0
+    assert client_resets[0][1] is None
 
     # 正しいセッション ID では引き続きストリームを開いて送信できる
     stream_id = await server.open_stream(client_addr, client_session_id)
@@ -2083,9 +2092,14 @@ class _LowLevelClient:
         QUIC と h3 層の両方にリセットを通知し、QUIC 層の送信のみを
         実行する。h3 層の get_streams_to_send を呼ぶと積まれた WT
         ヘッダーが送信されてしまうため、WT ヘッダー未受信のまま
-        リセットする検証が決定的でなくなる
+        リセットする検証が決定的でなくなる。
+
+        データストリームのアプリエラーコードは高レベル API と同様に
+        WT_APPLICATION_ERROR へリマップしてから QUIC に渡す
+        (draft-ietf-webtrans-http3-16 Section 4.4)。
         """
-        self._quic_connection.reset_stream(stream_id, error_code)
+        wire_error_code = self._h3_session.map_send_error_code(stream_id, error_code)
+        self._quic_connection.reset_stream(stream_id, wire_error_code)
         self._h3_session.reset_stream(stream_id, error_code)
         await self._send_quic_only()
 
@@ -3106,8 +3120,10 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
     QUIC ストリームだけが開いた無効な stream_id が返っていた問題の修正。
     修正後は -1 を返し、開いた QUIC ストリームを RESET_STREAM で解放する
     (Server.open_stream と対称の挙動)。RESET_STREAM はサーバー側の
-    on_stream_reset で観測する (WT ヘッダー未受信のため session_id は -1、
-    error_code は 0)。
+    on_stream_reset で観測する (WT ヘッダー未受信のため session_id は -1)。
+    内部解放リセットのワイヤコード 0 は WT_APPLICATION_ERROR レンジ外のため、
+    アプリにはエラーコードなし (None) として配信される
+    (draft-ietf-webtrans-http3-16 Section 4.4)。
     """
     from webtransport.h3 import Client, Server
 
@@ -3135,7 +3151,7 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
 
     async def on_stream_reset(session_id, stream_id, error_code, addr):
         server_resets.append((session_id, error_code))
-        if error_code == 0:
+        if error_code is None:
             server_stream_reset_event.set()
 
     server.on_stream_reset(on_stream_reset)
@@ -3191,11 +3207,11 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
         failed_stream_id = await client.open_stream()
         assert failed_stream_id == -1
 
-        # 開いた QUIC ストリームの RESET_STREAM (error_code 0) がサーバーに届く
+        # 開いた QUIC ストリームの RESET_STREAM (ワイヤ 0 → 配信は None) が届く
         await asyncio.wait_for(server_stream_reset_event.wait(), timeout=5.0)
-        zero_code_resets = [r for r in server_resets if r[1] == 0]
-        assert len(zero_code_resets) == 1
-        assert zero_code_resets[0][0] == -1
+        none_code_resets = [r for r in server_resets if r[1] is None]
+        assert len(none_code_resets) == 1
+        assert none_code_resets[0][0] == -1
     finally:
         if client_task is not None:
             client_task.cancel()

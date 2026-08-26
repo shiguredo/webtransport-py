@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 のアプリケーションエラーコードのリマップを実装する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/add-h3-error-code-remap
 - Polished: 2026-08-18
 
@@ -35,3 +35,11 @@ draft-ietf-webtrans-http3-16 Section 4.4 の MUST「WebTransport アプリケー
 - WebTransport 以外の経路 (プレーン HTTP/3・内部解放リセット・CONNECT ストリームのリセット) はリマップされない
 - 32bit 範囲超過の送信エラーコードがエラーとして扱われる
 - 上記がテストで検証できる
+
+## 解決方法
+
+- `src/webtransport/h3/_error_codes.py` に Figure 4 の変換と受信配信整形 (`deliver_stream_reset_error_code`) を追加した
+- `H3Session::map_send_error_code` / `reset_stream` で CONNECT (`session_ids_`) 以外を WT_APPLICATION_ERROR へリマップする。対向 RESET 後の `stream_info_` 消去後も MUST を満たすため、判定は CONNECT 除外に統一した
+- 高レベル `Client` / `Server.reset_stream` は quic にワイヤコード、Session にアプリコードを渡し、双方で同じ変換になるようにした。内部解放は従来どおり `quic.reset_stream` 直呼びでリマップしない
+- 受信 `STREAM_RESET` はワイヤコードを無変換配信し、データストリームのレンジ外は `error_code=None`。CONNECT は HTTP/3 空間のまま。STOP_SENDING 受信通知は既存どおり未実装のままとした
+- 32bit 超過は `ValueError`。単体・hypothesis 往復・CONNECT 非リマップ・e2e 期待値更新を追加し、`CHANGES.md` に `[ADD]` を記載した
