@@ -145,6 +145,8 @@
   - @voluntas
 - [FIX] QPACK デコードブロック中の受理前 FIN でセッション終了が検知されないのを修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 の接続エラー時に高レベル Client.run / Server.run が終了しない問題を修正する
+  - @voluntas
 - [FIX] HTTP/3 の `on_stream_end` がヘッダーと FIN が同一の QUIC STREAM_DATA で届いたボディなしレスポンスで二重通知される問題を修正する
   - @voluntas
 - [FIX] HTTP/2 の GOAWAY 受信で接続を閉じてしまい進行中ストリームのレスポンス送出が止まる問題を修正する (RFC 9113 Section 6.8 の graceful shutdown。受信後は既存ストリームの送受信を継続し、新規ストリームの開始のみを抑止する)

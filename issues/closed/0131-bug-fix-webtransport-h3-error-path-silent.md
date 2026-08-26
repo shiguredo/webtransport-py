@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の H3Session が nghttp3 のエラーで closed_ を立てない問題を修正する
 
 - Created: 2026-08-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-25
 - Branch: feature/fix-webtransport-h3-error-path-silent
 - Polished: 2026-08-24
 
@@ -37,12 +37,18 @@
 
 ## 完了条件
 
-- `src/bindings/webtransport_h3.cpp` の `H3Session::receive_stream_data` / `get_streams_to_send` が接続エラー (`nghttp3_err_is_fatal()` が真) の負値 return 時に `closed_ = true` を立てるようになっている
+- `src/bindings/webtransport_h3.cpp` の `H3Session::receive_stream_data` / `get_streams_to_send` が接続エラー (nghttp3_err_is_fatal() が真) の負値 return 時に `closed_ = true` を立てるようになっている
 - `NGHTTP3_ERR_H3_MESSAGE_ERROR` の場合、closed_ = true にせず 0096 (open) のリセット処理と干渉しない
 - `src/webtransport/h3/client.py` の `Client.run` / `src/webtransport/h3/server.py` の `Server.run` に `is_closed()` チェックと QUIC `close()` 呼び出しが追加され、closed 済み 0107 の HTTP/3 版と対称になっている
 - `AGENTS.md`「モックやスタブは絶対に利用しないこと」に従い、実 Client / Server を組み合わせた e2e で回帰確認する
 - 追加テストにはコメントで意図・前提・期待値を日本語で明記する
 - 既存 e2e テスト (`tests/test_e2e_webtransport_h3.py` 等) がすべて pass、`ruff format` / `ruff check` / `ty check` 通過
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `H3Session::receive_stream_data` と `get_streams_to_send` で、nghttp3 の負値 return (接続エラー。nghttp3.h の API 契約「負値 = 接続を閉じなければならない」) 時に `closed_ = true` を立てるようにした。ストリームレベルのエラー (WT_CLOSE_SESSION の不正メッセージのリセット処理。NGHTTP3_ERR_H3_MESSAGE_ERROR と不正 UTF-8 検知由来の CALLBACK_FAILURE) は接続を継続するため除外する (設計方針の「nghttp3_err_is_fatal で分離」は、RFC 9114 の接続エラーコード (-601〜-609) が -900 以上で非 fatal 判定になることが判明したため、「ストリームエラー以外の負値」の分離に変更した)
+- 高レベル `src/webtransport/h3/client.py` / `server.py` に is_closed() チェックを追加し、QUIC に CONNECTION_CLOSE (H3_GENERAL_PROTOCOL_ERROR, RFC 9114 Section 5.3 / 8.1) を送出して run() を終了する (closed 済み 0107 の HTTP/3 版と対称)
+- テスト: `tests/test_webtransport_h3_close_session_message.py` に接続エラー注入 (パリティ違反のストリーム ID で -609) で is_closed() になるテストと、ストリームエラーでは閉じない回帰アサーション 4 箇所を追加した
 
 ## 変更対象・対象外
 
