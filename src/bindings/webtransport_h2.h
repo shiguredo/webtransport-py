@@ -14,12 +14,6 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
-// Windows では ssize_t が定義されていないため定義する
-#ifdef _WIN32
-#include <BaseTsd.h>
-typedef SSIZE_T ssize_t;
-#endif
-
 #include <nghttp2/nghttp2.h>
 
 #include <cstdint>

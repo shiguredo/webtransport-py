@@ -1,7 +1,7 @@
 # Windows 対応終了後に残ったビルド設定とコードの残骸を削除する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/remove-windows-leftovers
 - Polished: {YYYY-MM-DD}
 
@@ -30,3 +30,9 @@ CHANGES.md に「Windows 対応を終了する」と記載されているが、�
 - `CMakeLists.txt` に WIN32 / MSVC 分岐がなくなる
 - `src/bindings/http2.h` / `src/bindings/webtransport_h2.h` に `_WIN32` 分岐がなくなる
 - ビルドが通る
+
+## 解決方法
+
+- `CMakeLists.txt` から WIN32 / MSVC 分岐を削除し、POSIX 用の静的ライブラリパスと `-fvisibility=hidden` を常時適用にした
+- `src/bindings/http2.h` と `src/bindings/webtransport_h2.h` の `_WIN32` による ssize_t 定義を削除した
+- `make develop` でビルドが通ることを確認した
