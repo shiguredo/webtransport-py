@@ -183,7 +183,7 @@ async def run() -> None
 async def close() -> None
 ```
 
-`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、Sans I/O の `h3.Session.open_stream` の登録に失敗しても stream_id を返す (失敗を無視する実装上の非対称。サーバー側の `open_stream` は失敗時 -1 を返す)。QUIC 層の `open_stream` が失敗した場合 (未接続時等) は -1 を返す。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
 
 ### WebTransport over HTTP/2 (`webtransport.h2`)
 
