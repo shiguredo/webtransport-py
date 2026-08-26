@@ -1,7 +1,7 @@
 # 古いスナップショットのまま残るトップレベル .pyi を削除する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/remove-stale-top-level-pyi
 - Polished: {YYYY-MM-DD}
 
@@ -25,3 +25,10 @@
 
 - 3 ファイルが削除され、型スタブの解決がパッケージ版に統一される
 - ty / ruff チェックが通る
+
+## 解決方法
+
+- `src/webtransport/quic.pyi` / `http2.pyi` / `http3.pyi` を削除した。いずれも `*.pyi` の gitignore 対象でリポジトリ未追跡のローカル残骸だった
+- `Makefile` はパッケージ版 (`quic/__init__.pyi` 等) のみへコピーしており、トップレベルへの再生成経路は無い
+- `h2.pyi` / `h3.pyi` / パッケージ版スタブは残した
+- `uv run ty check src` と `uv run ruff check src` が通ることを確認した
