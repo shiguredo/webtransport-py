@@ -9,7 +9,7 @@ dynamic = ["version"]
 description = "webtransport-py is a Sans-IO WebTransport/HTTP3/HTTP2/QUIC library using ngtcp2, nghttp3 and nghttp2."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES.md"]
 classifiers = [
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",
