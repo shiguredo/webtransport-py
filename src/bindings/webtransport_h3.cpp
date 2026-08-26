@@ -15,6 +15,20 @@ namespace h3 {
 
 namespace {
 
+// draft-ietf-webtrans-http3-16 Section 4.4 / Figure 4。
+// アプリの 32bit エラーコードを WT_APPLICATION_ERROR レンジへ変換する。
+// 予約済みコードポイント (0x1f * N + 0x21) をスキップする。
+constexpr uint64_t kWtApplicationErrorFirst = 0x52e4a40fa8dbULL;
+constexpr uint64_t kMaxApplicationErrorCode = 0xffffffffULL;
+
+uint64_t webtransport_code_to_http_code(uint64_t n) {
+  if (n > kMaxApplicationErrorCode) {
+    throw std::invalid_argument(
+        "application error code out of uint32 range");
+  }
+  return kWtApplicationErrorFirst + n + (n / 0x1eULL);
+}
+
 // draft-16 Section 6 の "valid UTF-8" を RFC 3629 の well-formed UTF-8 として
 // 検査する。overlong 符号化、サロゲート (U+D800..U+DFFF)、U+10FFFF 超、
 // 不完全シーケンス、非先頭バイトを拒否する。受信検証 (recv_wt_close_session_cb)
@@ -1246,9 +1260,34 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   return session_id;
 }
 
+uint64_t H3Session::map_send_error_code(int64_t stream_id,
+                                        uint64_t error_code) const {
+  // draft-ietf-webtrans-http3-16 Section 4.4:
+  // データストリームのアプリエラーコードは WT_APPLICATION_ERROR へ
+  // リマップする MUST。CONNECT ストリームは HTTP/3 エラーコード空間のまま。
+  //
+  // 判定は session_ids_ (CONNECT) を除外し、それ以外はリマップする。
+  // stream_info_ 有無だけでは不十分: 対向 RESET_STREAM 受信で
+  // close_stream が stream_info_ を消した後に、アプリが自側送信を
+  // abort するケースでリマップが落ちるため。
+  // 内部解放 (open_stream 失敗時の quic.reset_stream 直呼び) は本関数を
+  // 経由しない。
+  if (error_code > kMaxApplicationErrorCode) {
+    throw std::invalid_argument(
+        "application error code out of uint32 range");
+  }
+  if (session_ids_.count(stream_id) > 0) {
+    return error_code;
+  }
+  return webtransport_code_to_http_code(error_code);
+}
+
 void H3Session::reset_stream(int64_t stream_id, uint64_t error_code) {
-  // nghttp3 への通知は close_stream と同じ。QUIC RESET_STREAM は高レベル側で送る
-  close_stream(stream_id, error_code);
+  // nghttp3 への通知は close_stream と同じ。QUIC RESET_STREAM は高レベル側で送る。
+  // 送信経路でのみリマップする (close_stream は受信 STREAM_RESET 通知からも
+  // 呼ばれる共有関数のため、ここでは触らない)
+  uint64_t wire_error_code = map_send_error_code(stream_id, error_code);
+  close_stream(stream_id, wire_error_code);
 }
 
 void H3Session::erase_session_streams(int64_t session_id) {
@@ -2211,7 +2250,14 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
-           "WebTransport ストリームをリセットする (nghttp3 に通知)")
+           "WebTransport ストリームをリセットする (nghttp3 に通知。"
+           "データストリームは WT_APPLICATION_ERROR へリマップ)")
+      .def("map_send_error_code", &H3Session::map_send_error_code,
+           nb::arg("stream_id"), nb::arg("error_code"),
+           nb::sig("def map_send_error_code(self, stream_id: int, "
+                   "error_code: int) -> int"),
+           "送信時のエラーコードをワイヤ用に変換する "
+           "(データストリームは WT_APPLICATION_ERROR へリマップ)")
       .def("close_session", &H3Session::close_session, nb::arg("session_id"),
            nb::arg("error_code") = 0, nb::arg("error_message") = "",
            nb::sig("def close_session(self, session_id: int, error_code: int = "

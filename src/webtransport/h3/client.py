@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 
@@ -84,7 +85,7 @@ class Client:
         self._on_session_ready: Callable[[int], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes], Awaitable[None]] | None = None
-        self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int | None], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
 
     @property
@@ -147,12 +148,18 @@ class Client:
 
     def on_stream_reset(
         self,
-        callback: Callable[[int, int], Awaitable[None]],
+        callback: Callable[[int, int | None], Awaitable[None]],
     ) -> None:
         """ストリームリセット受信時のコールバックを設定する
 
+        error_code はワイヤ上のコードを変更せずに渡す
+        (draft-ietf-webtrans-http3-16 Section 4.4)。データストリームで
+        WT_APPLICATION_ERROR レンジ外 (予約済み含む) の場合は None
+        (アプリエラーコードなし)。CONNECT ストリームのリセットは
+        HTTP/3 エラーコード空間のまま渡す。
+
         Args:
-            callback: async def callback(stream_id: int, error_code: int) -> None
+            callback: async def callback(stream_id: int, error_code: int | None) -> None
         """
         self._on_stream_reset = callback
 
@@ -530,14 +537,31 @@ class Client:
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームをリセットする (QUIC RESET_STREAM + nghttp3 通知)
 
+        データストリームのアプリケーションエラーコードは
+        WT_APPLICATION_ERROR レンジへリマップしてワイヤに載せる
+        (draft-ietf-webtrans-http3-16 Section 4.4)。CONNECT ストリームは
+        リマップしない。error_code が 0xffffffff を超える場合は
+        ValueError を上げる。
+
         Args:
             stream_id: ストリーム ID
-            error_code: エラーコード
+            error_code: アプリケーションエラーコード (CONNECT 以外) または
+                HTTP/3 エラーコード (CONNECT)
         """
+        if self._webtransport_session is None:
+            return
+
+        # quic 経路と nghttp3 経路の双方に同じワイヤコードを載せる。
+        # map_send_error_code / reset_stream が CONNECT 判定とリマップを
+        # 行い、quic には変換後、Session.reset_stream にはアプリコードを
+        # 渡す (内部で再度リマップする)
+        wire_error_code = self._webtransport_session.map_send_error_code(
+            stream_id,
+            error_code,
+        )
         if self._quic_connection is not None:
-            self._quic_connection.reset_stream(stream_id, error_code)
-        if self._webtransport_session is not None:
-            self._webtransport_session.reset_stream(stream_id, error_code)
+            self._quic_connection.reset_stream(stream_id, wire_error_code)
+        self._webtransport_session.reset_stream(stream_id, error_code)
         await self._send_pending()
 
     async def _process_quic_events(self) -> bool:
@@ -563,6 +587,10 @@ class Client:
             elif quic_event.type == quic.EventType.DATAGRAM:
                 self._webtransport_session.receive_datagram(quic_event.data)
             elif quic_event.type == quic.EventType.STREAM_RESET:
+                # CONNECT 判定は close_stream が session_ids_ から消す前に行う
+                is_connect_stream = (
+                    quic_event.stream_id in self._webtransport_session.get_session_ids()
+                )
                 # 対向からの RESET_STREAM を nghttp3 に通知する
                 self._webtransport_session.close_stream(
                     quic_event.stream_id,
@@ -571,7 +599,10 @@ class Client:
                 if self._on_stream_reset is not None:
                     await self._on_stream_reset(
                         quic_event.stream_id,
-                        quic_event.error_code,
+                        deliver_stream_reset_error_code(
+                            wire_error_code=quic_event.error_code,
+                            is_connect_stream=is_connect_stream,
+                        ),
                     )
             elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                 return False
