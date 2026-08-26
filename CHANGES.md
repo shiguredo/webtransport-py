@@ -222,6 +222,8 @@
 
 ### misc
 
+- [UPDATE] wheel ワークフローの paths-ignore から tests/ を外し、tests/ のみの変更でも単体テストが CI で実行されるようにする
+  - @voluntas
 - [UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する
   - @voluntas
 - [FIX] QUIC 受信フロー制御テストの ACK 遅延タイマーを確実に満了させるよう修正する
