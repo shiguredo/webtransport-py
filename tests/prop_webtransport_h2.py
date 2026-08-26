@@ -171,11 +171,19 @@ def prop_accept_session_arbitrary(session_id: int):
 )
 @settings(max_examples=100)
 def prop_reject_session_arbitrary(session_id: int, status_code: int):
-    """任意のパラメータで reject_session してもクラッシュしない"""
+    """任意のパラメータで reject_session してもクラッシュしない
+
+    サーバー API は 200-599 以外の status_code を ValueError にする
+    (誤用パスで「SessionClosed 非発火」の設計ピンを破らせない)。
+    それ以外のパラメータ (セッション未確立等) は無視される。
+    """
     config = h2.Config()
     config.is_server = True
     session = h2.Session.create_server(config)
-    session.reject_session(session_id, status_code)
+    try:
+        session.reject_session(session_id, status_code)
+    except ValueError:
+        pass
 
 
 # ========== open_stream の堅牢性テスト ==========

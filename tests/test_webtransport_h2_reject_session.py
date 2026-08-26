@@ -356,8 +356,8 @@ def test_server_reject_status_code_entry_retention(status_code: int, expected_cl
 
 @pytest.mark.parametrize(
     "status_code",
-    [403, 302, 500, 600, 700],
-    ids=["forbidden", "redirect", "server_error", "invalid_600", "invalid_700"],
+    [403, 302, 500],
+    ids=["forbidden", "redirect", "server_error"],
 )
 def test_client_non_2xx_reject_pushes_session_rejected_event(
     status_code: int,
@@ -367,8 +367,10 @@ def test_client_non_2xx_reject_pushes_session_rejected_event(
     SessionClosed は一度も確立されていないセッションの終了通知という
     意味論が合わないため発火しない (設計ピン)。拒否の通知としては
     SESSION_REJECTED が発火し、event.session_id が該当セッション、
-    event.status_code には受信した HTTP status code が載る。HTTP status
-    code として意味を持たない 600 以上は 0 に丸められる。
+    event.status_code には受信した HTTP status code が載る (600 以上は
+    0 丸めで、その検証はワイヤ注入の
+    test_client_non_2xx_overflow_status_rounds_zero_by_wire_injection で
+    行う。reject_session は 600 以上を ValueError にするため)。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -499,3 +501,67 @@ def test_client_response_201_without_end_stream_keeps_session() -> None:
     wire = client.send()
     assert wire is not None
     assert _encode_capsule(0x00, b"alive") in wire
+
+
+def test_client_non_2xx_overflow_status_rounds_zero_by_wire_injection() -> None:
+    """ワイヤ注入の 600 以上 :status で SESSION_REJECTED の status_code が 0 に丸められることを確認
+
+    reject_session は範囲外 (200-599 以外) を ValueError にするため、
+    600 以上の :status を受信した場合の 0 丸めはワイヤ注入で検証する
+    (HTTP status code として意味を持たない値をアプリへ渡さない)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # 600 のレスポンス HEADERS をワイヤ注入する
+    ret = client.receive(_encode_status_headers(session_id, 600))
+    assert ret > 0, "600 HEADERS フレームの注入に失敗しました"
+
+    events = _drain_events(client)
+    rejected_events = [event for event in events if event.type == h2.EventType.SESSION_REJECTED]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].status_code == 0
+
+
+def test_server_reject_session_invalid_status_code_raises_value_error() -> None:
+    """範囲外の status_code で reject_session が ValueError を投げることを確認
+
+    reject_session は 200-599 以外 (1xx・3 桁未満・4 桁以上・600 以上) を
+    ValueError にする (誤用パスで「SessionClosed 非発火」の設計ピンを
+    破らせない)。例外は副作用の前に投げられるため、ワイヤにも :status は
+    送出されない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    for invalid in (99, 100, 101, 199, 600, 999):
+        with pytest.raises(ValueError):
+            server.reject_session(session_id, invalid)
+
+    # 例外時はワイヤに :status は送出されない (send() に送信物が残らない)
+    wire = server.send()
+    assert wire is None or b":status" not in wire
+
+
+def test_server_reject_session_valid_status_code_delivered() -> None:
+    """許容範囲内の status_code (200-599) で reject_session が送出されることを確認
+
+    403 等の拒否コードはワイヤに送出され、クライアントで SESSION_REJECTED
+    として受信される (既存挙動の回帰ピン)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    server.reject_session(session_id, 403)
+    _h2_pump(server, client)
+
+    events = _drain_events(client)
+    rejected_events = [event for event in events if event.type == h2.EventType.SESSION_REJECTED]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].status_code == 403
