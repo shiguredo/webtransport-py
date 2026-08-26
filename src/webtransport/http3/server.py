@@ -232,7 +232,7 @@ class Server:
         http3_config.is_server = True
 
         if self._local_addr is None:
-            raise RuntimeError("サーバーが開始されていません")
+            raise RuntimeError("server is not started")
 
         client.quic_connection = quic_low.Connection.accept(
             quic_config,
@@ -385,7 +385,7 @@ class Server:
         サーバーが停止されるまでブロックする。
         """
         if self._socket is None or self._local_addr is None:
-            raise RuntimeError("サーバーが開始されていません")
+            raise RuntimeError("server is not started")
 
         loop = asyncio.get_running_loop()
 

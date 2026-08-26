@@ -201,7 +201,7 @@ class Server:
     ) -> quic_low.Connection:
         """初期パケットから接続を作成する"""
         if self._local_addr is None:
-            raise RuntimeError("サーバーが開始されていません")
+            raise RuntimeError("server is not started")
 
         config = self._create_config()
         connection = quic_low.Connection.accept(
@@ -298,7 +298,7 @@ class Server:
         サーバーが停止されるまでブロックする。
         """
         if self._socket is None or self._local_addr is None:
-            raise RuntimeError("サーバーが開始されていません")
+            raise RuntimeError("server is not started")
 
         loop = asyncio.get_running_loop()
 

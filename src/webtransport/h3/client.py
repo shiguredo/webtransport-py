@@ -697,7 +697,7 @@ class Client:
         接続が終了するまでブロックする。
         """
         if self._quic_connection is None:
-            raise RuntimeError("クライアントが接続されていません")
+            raise RuntimeError("client is not connected")
 
         # connect() が消費した SESSION_READY を引き継ぐ (コールバック登録の
         # 順序に依存せず、イベントループで発火させる)

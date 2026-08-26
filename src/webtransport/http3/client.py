@@ -373,7 +373,7 @@ class Client:
         接続が終了するまでブロックする。
         """
         if self._quic_connection is None or self._http3_connection is None:
-            raise RuntimeError("クライアントが接続されていません")
+            raise RuntimeError("client is not connected")
 
         while self._running:
             await self._receive()
