@@ -224,6 +224,8 @@
 
 ### misc
 
+- [UPDATE] RuntimeError メッセージを英語に統一し、C++ の英語コメントを日本語に直す
+  - @voluntas
 - [UPDATE] Windows 対応終了後に残ったビルド設定とコードの残骸を削除する
   - @voluntas
 - [UPDATE] wheel ワークフローの外部 action をコミットハッシュ固定に統一する

@@ -539,14 +539,14 @@ std::optional<Http3Event> Http3Connection::next_event() {
 
 std::vector<std::pair<std::string, bool>>
 Http3Connection::get_required_streams() const {
-  // HTTP/3 requires 3 unidirectional streams
-  // control (server -> client or client -> server)
+  // HTTP/3 は単方向ストリームを 3 本必要とする
+  // control (server -> client または client -> server)
   // qpack encoder
   // qpack decoder
   return {
-      {"control", false},        // false = unidirectional
-      {"qpack_encoder", false},  // false = unidirectional
-      {"qpack_decoder", false},  // false = unidirectional
+      {"control", false},        // false = 単方向
+      {"qpack_encoder", false},  // false = 単方向
+      {"qpack_decoder", false},  // false = 単方向
   };
 }
 

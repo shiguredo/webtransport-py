@@ -280,7 +280,7 @@ class Server:
         サーバーが停止されるまでブロックする。
         """
         if self._server is None:
-            raise RuntimeError("サーバーが開始されていません")
+            raise RuntimeError("server is not started")
 
         async with self._server:
             await self._server.serve_forever()
