@@ -1,7 +1,7 @@
 # エラーメッセージとコメントの言語規約違反を修正する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/refactor-error-message-language
 - Polished: {YYYY-MM-DD}
 
@@ -35,3 +35,9 @@ AGENTS.md の規約「ログメッセージは全て英語」「コメントは�
 - RuntimeError メッセージが全て英語になる
 - C++ のコメントが全て日本語になる
 - 全テストが通る
+
+## 解決方法
+
+- 日本語の RuntimeError を `server is not started` / `client is not connected` に置き換えた (quic / http2 / http3 / h2 / h3 の Client / Server)
+- `src/bindings/http3.cpp` の `get_required_streams` 周辺の英語コメントを日本語に直した
+- テストが文言に依存していないことを確認し、全テストが通ることを確認した
