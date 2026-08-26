@@ -1,7 +1,7 @@
-# CI のトリガー条件と README のライセンス節を整備する
+# CI のトリガー条件と README の第三者ライセンス節を整備する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/refactor-ci-repo-cleanup
 - Polished: {YYYY-MM-DD}
 
@@ -23,3 +23,9 @@ CI のトリガー条件の問題 (tests/ のみの変更で単体テストが�
 
 - tests/ のみの変更でも単体テストが CI で実行される
 - README のライセンス節が THIRD_PARTY_LICENSES.md へのリンクに置き換わる
+
+## 解決方法
+
+- `.github/workflows/wheel.yml` の `paths-ignore` から `tests/**` を削除した。tests/ のみの push でも wheel ビルド → `test.yml` 経由で単体テストが走る
+- `README.md` から ngtcp2 / nghttp3 / nghttp2 のライセンス全文節を削除し、`## 第三者ライセンス` 節と `THIRD_PARTY_LICENSES.md` へのリンクを追加した。プロジェクト本体の `## ライセンス` (Apache License 2.0) は残した
+- `CHANGES.md` の `### misc` に CI 変更の `[UPDATE]` エントリを追加した (README 変更は changelog 規約により記載しない)
