@@ -224,6 +224,8 @@
 
 ### misc
 
+- [UPDATE] wheel ワークフローの外部 action をコミットハッシュ固定に統一する
+  - @voluntas
 - [UPDATE] wheel ワークフローの paths-ignore から tests/ を外し、tests/ のみの変更でも単体テストが CI で実行されるようにする
   - @voluntas
 - [UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する
