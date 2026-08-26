@@ -153,6 +153,8 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 の Client.connect を 2xx 応答待ちに変更し、非 2xx 拒否時に False を返すようにする (低レベル API に SessionRejected イベントと status_code を追加し、SESSION_READY を 2xx 全般で発火させる)
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の reject_session が 200-599 以外の status_code を無検証で送出する問題を修正する (200-599 は ValueError を送出する)
+  - @voluntas
 - [FIX] WebTransport over HTTP/2 の高レベル Client の on_session_ready コールバックが発火しない問題を修正する (connect() が消費した SESSION_READY を run() へ引き継ぎ、登録順序に依存せず配信する)
   - @voluntas
 - [FIX] 高レベル HTTP/3 サーバー (`http3.Server.stop`) が close() 生成の CONNECTION_CLOSE を送出しない問題を修正する

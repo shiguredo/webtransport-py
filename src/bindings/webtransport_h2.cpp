@@ -1485,6 +1485,21 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
     return;
   }
 
+  // status_code を検証する: HTTP status code (RFC 9110 Section 15) として
+  // 意味を持つ 200-599 のみを許容する。1xx と 3 桁未満・4 桁以上・600 以上
+  // は誤用であり、クライアント側の挙動を壊す: 2 桁以下は nghttp2 が
+  // ストリームエラーにし「SessionClosed 非発火」の設計ピン (draft-15
+  // Section 3.2) を破る。reject_session 経由の 1xx は END_STREAM 付きで
+  // 送出されるため、クライアントの nghttp2 は HTTP メッセージングエラー
+  // として同じくストリームエラーにする (「1xx が中間応答として無視され
+  // 最終応答を待ち続ける」のは END_STREAM なしのワイヤ注入時のみ)。
+  // 例外は nanobind のデフォルト翻訳で ValueError になる (nghttp2 の
+  // C ABI 境界を越えないよう、validate は副作用の前に置く)
+  if (status_code < 200 || status_code >= 600) {
+    throw std::invalid_argument(
+        "reject_session status_code must be in range 200-599");
+  }
+
   std::string status = std::to_string(status_code);
 
   nghttp2_nv nva[] = {
@@ -2486,7 +2501,9 @@ void bind_webtransport_h2(nb::module_& m) {
            nb::arg("status_code"),
            nb::sig("def reject_session(self, session_id: int, status_code: "
                    "int) -> None"),
-           "WebTransport セッションを拒否 (サーバー用)")
+           "WebTransport セッションを拒否 (サーバー用。status_code は "
+           "200-599 (実質 300-599 用)。1xx と 3 桁未満・4 桁以上・600 以上は "
+           "ValueError)")
       .def("open_stream", &H2Session::open_stream, nb::arg("session_id"),
            nb::arg("is_unidirectional"),
            nb::sig("def open_stream(self, session_id: int, is_unidirectional: "
