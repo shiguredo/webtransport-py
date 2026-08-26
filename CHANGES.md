@@ -224,6 +224,8 @@
 
 ### misc
 
+- [UPDATE] Windows 対応終了後に残ったビルド設定とコードの残骸を削除する
+  - @voluntas
 - [UPDATE] wheel ワークフローの外部 action をコミットハッシュ固定に統一する
   - @voluntas
 - [UPDATE] wheel ワークフローの paths-ignore から tests/ を外し、tests/ のみの変更でも単体テストが CI で実行されるようにする

@@ -80,14 +80,8 @@ set(AWS_LC_BUILD_DIR "${DEPS_DIR}/aws-lc/${AWS_LC_VERSION}/build")
 
 # AWS-LC の静的ライブラリパス
 # ssl / crypto はサブディレクトリに出力される
-# Windows の MSVC マルチ構成ジェネレータでは Release/<target>.lib に出力される
-if(WIN32)
-  set(AWS_LC_SSL_LIB ${AWS_LC_BUILD_DIR}/ssl/Release/ssl.lib)
-  set(AWS_LC_CRYPTO_LIB ${AWS_LC_BUILD_DIR}/crypto/Release/crypto.lib)
-else()
-  set(AWS_LC_SSL_LIB ${AWS_LC_BUILD_DIR}/ssl/libssl.a)
-  set(AWS_LC_CRYPTO_LIB ${AWS_LC_BUILD_DIR}/crypto/libcrypto.a)
-endif()
+set(AWS_LC_SSL_LIB ${AWS_LC_BUILD_DIR}/ssl/libssl.a)
+set(AWS_LC_CRYPTO_LIB ${AWS_LC_BUILD_DIR}/crypto/libcrypto.a)
 
 # ビルド済みかチェック
 if(EXISTS ${AWS_LC_SSL_LIB} AND EXISTS ${AWS_LC_CRYPTO_LIB})
@@ -104,13 +98,6 @@ else()
     -DDISABLE_GO=ON
     -DDISABLE_PERL=ON
   )
-
-  # Windows の場合は静的 CRT を使用する
-  if(WIN32)
-    list(APPEND AWS_LC_CMAKE_ARGS
-      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-    )
-  endif()
 
   ExternalProject_Add(
     aws_lc_build
@@ -141,13 +128,8 @@ set(NGTCP2_BUILD_DIR "${DEPS_DIR}/ngtcp2/${NGTCP2_VERSION}/build")
 set(NGTCP2_INSTALL_DIR "${DEPS_DIR}/ngtcp2/${NGTCP2_VERSION}/install")
 
 # 静的ライブラリパス設定
-if(WIN32)
-  set(NGTCP2_LIB ${NGTCP2_INSTALL_DIR}/lib/ngtcp2.lib)
-  set(NGTCP2_CRYPTO_LIB ${NGTCP2_INSTALL_DIR}/lib/ngtcp2_crypto_boringssl.lib)
-else()
-  set(NGTCP2_LIB ${NGTCP2_INSTALL_DIR}/lib/libngtcp2.a)
-  set(NGTCP2_CRYPTO_LIB ${NGTCP2_INSTALL_DIR}/lib/libngtcp2_crypto_boringssl.a)
-endif()
+set(NGTCP2_LIB ${NGTCP2_INSTALL_DIR}/lib/libngtcp2.a)
+set(NGTCP2_CRYPTO_LIB ${NGTCP2_INSTALL_DIR}/lib/libngtcp2_crypto_boringssl.a)
 
 # ビルド済みかチェック
 if(EXISTS ${NGTCP2_LIB} AND EXISTS ${NGTCP2_CRYPTO_LIB})
@@ -156,13 +138,8 @@ if(EXISTS ${NGTCP2_LIB} AND EXISTS ${NGTCP2_CRYPTO_LIB})
 else()
   message(STATUS "Building ngtcp2 with AWS-LC...")
 
-  # Windows の場合は AWS-LC が ws2_32 と advapi32 を必要とする
   # ngtcp2 は AWS-LC を BoringSSL 互換バックエンドとして扱う
-  if(WIN32)
-    set(AWS_LC_LIBS_FOR_NGTCP2 "${AWS_LC_SSL_LIB}$<SEMICOLON>${AWS_LC_CRYPTO_LIB}$<SEMICOLON>ws2_32$<SEMICOLON>advapi32")
-  else()
-    set(AWS_LC_LIBS_FOR_NGTCP2 "${AWS_LC_SSL_LIB}$<SEMICOLON>${AWS_LC_CRYPTO_LIB}")
-  endif()
+  set(AWS_LC_LIBS_FOR_NGTCP2 "${AWS_LC_SSL_LIB}$<SEMICOLON>${AWS_LC_CRYPTO_LIB}")
 
   set(NGTCP2_CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=${NGTCP2_INSTALL_DIR}
@@ -177,15 +154,6 @@ else()
     -DBORINGSSL_INCLUDE_DIR=${AWS_LC_SOURCE_DIR}/include
     -DBORINGSSL_LIBRARIES=${AWS_LC_LIBS_FOR_NGTCP2}
   )
-
-  # Windows の場合は静的 CRT を使用し、AWS-LC 検出をスキップ
-  # check_symbol_exists は値なしマクロ (#define OPENSSL_IS_AWSLC) を検出できないため
-  if(WIN32)
-    list(APPEND NGTCP2_CMAKE_ARGS
-      -DENABLE_STATIC_CRT=ON
-      -DHAVE_AWSLC:BOOL=ON
-    )
-  endif()
 
   ExternalProject_Add(
     ngtcp2_build
@@ -214,11 +182,7 @@ set(NGHTTP3_BUILD_DIR "${DEPS_DIR}/nghttp3/${NGHTTP3_VERSION}/build")
 set(NGHTTP3_INSTALL_DIR "${DEPS_DIR}/nghttp3/${NGHTTP3_VERSION}/install")
 
 # 静的ライブラリパス設定
-if(WIN32)
-  set(NGHTTP3_LIB ${NGHTTP3_INSTALL_DIR}/lib/nghttp3.lib)
-else()
-  set(NGHTTP3_LIB ${NGHTTP3_INSTALL_DIR}/lib/libnghttp3.a)
-endif()
+set(NGHTTP3_LIB ${NGHTTP3_INSTALL_DIR}/lib/libnghttp3.a)
 
 # ビルド済みかチェック
 if(EXISTS ${NGHTTP3_LIB})
@@ -236,11 +200,6 @@ else()
     -DBUILD_TESTING=OFF
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
   )
-
-  # Windows の場合は静的 CRT を使用
-  if(WIN32)
-    list(APPEND NGHTTP3_CMAKE_ARGS -DENABLE_STATIC_CRT=ON)
-  endif()
 
   ExternalProject_Add(
     nghttp3_build
@@ -267,11 +226,7 @@ set(NGHTTP2_BUILD_DIR "${DEPS_DIR}/nghttp2/${NGHTTP2_VERSION}/build")
 set(NGHTTP2_INSTALL_DIR "${DEPS_DIR}/nghttp2/${NGHTTP2_VERSION}/install")
 
 # 静的ライブラリパス設定
-if(WIN32)
-  set(NGHTTP2_LIB ${NGHTTP2_INSTALL_DIR}/lib/nghttp2.lib)
-else()
-  set(NGHTTP2_LIB ${NGHTTP2_INSTALL_DIR}/lib/libnghttp2.a)
-endif()
+set(NGHTTP2_LIB ${NGHTTP2_INSTALL_DIR}/lib/libnghttp2.a)
 
 # ビルド済みかチェック
 if(EXISTS ${NGHTTP2_LIB})
@@ -290,11 +245,6 @@ else()
     -DENABLE_DOC=OFF
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
   )
-
-  # Windows の場合は静的 CRT を使用
-  if(WIN32)
-    list(APPEND NGHTTP2_CMAKE_ARGS -DENABLE_STATIC_CRT=ON)
-  endif()
 
   ExternalProject_Add(
     nghttp2_build
@@ -355,39 +305,10 @@ if(APPLE)
     "-framework CoreFoundation"
     "-framework Security"
   )
-elseif(WIN32)
-  # 文字コードを utf-8 として扱うのと、シンボルテーブル数を増やす
-  target_compile_options(webtransport_ext PRIVATE /utf-8 /bigobj)
-  # CRT ライブラリを静的リンクさせる
-  set_property(TARGET webtransport_ext PROPERTY
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-  # nanobind ターゲットにも同じ設定を適用
-  foreach(NB_TARGET nanobind-static nanobind-static-ft)
-    if(TARGET ${NB_TARGET})
-      set_property(TARGET ${NB_TARGET} PROPERTY
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    endif()
-  endforeach()
-  target_compile_definitions(webtransport_ext PRIVATE
-    _CONSOLE
-    _WIN32_WINNT=0x0A00
-    NOMINMAX
-    WIN32_LEAN_AND_MEAN
-    NGTCP2_STATICLIB
-    NGHTTP2_STATICLIB
-    NGHTTP3_STATICLIB
-  )
-  # Windows ライブラリをリンク
-  target_link_libraries(webtransport_ext PRIVATE
-    ws2_32
-    crypt32
-  )
 endif()
 
 # コンパイルオプション
-if(NOT WIN32)
-  target_compile_options(webtransport_ext PRIVATE -fvisibility=hidden)
-endif()
+target_compile_options(webtransport_ext PRIVATE -fvisibility=hidden)
 
 # 型スタブ (.pyi) ファイルの自動生成
 nanobind_add_stub(
