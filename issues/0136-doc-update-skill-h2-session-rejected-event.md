@@ -1,7 +1,7 @@
 # skills/webtransport-py/SKILL.md のイベント型の記述に SESSION_REJECTED / status_code / headers を反映する
 
 - Created: 2026-08-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/update-skill-h2-session-rejected-event
 - Polished: {YYYY-MM-DD}
 
@@ -27,3 +27,8 @@
 
 - `skills/webtransport-py/SKILL.md` の「イベント型 (EventType)」セクションが `h2.EventType.SESSION_REJECTED` / `h2.Event.status_code` / `h2.Event.headers` を記載し、bindings と一致する
 - 他のレイヤーのドリフトが増えていない (対象外の明記を維持)
+
+## 解決方法
+
+- `h2.EventType` の列挙に `SESSION_REJECTED` を追加し、`SESSION_CLOSED` との意味論の差を併記した
+- `h2.Event` のフィールドに `status_code` / `headers` を追加し、`h2.pyi` の docstring と一致させた
