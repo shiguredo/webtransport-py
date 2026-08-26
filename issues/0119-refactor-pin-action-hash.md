@@ -1,7 +1,7 @@
 # wheel.yml の外部 action をコミットハッシュ固定に統一する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/refactor-pin-action-hash
 - Polished: 2026-08-26
 
@@ -29,3 +29,9 @@
 - `wheel.yml` の `pypa/gh-action-pypi-publish` が `@<ハッシュ> # <リリースタグ>` 形式になる
 - `wheel.yml` の `slack-notify` が `@<ハッシュ> # main` 形式になる
 - `wheel.yml` にタグ名・ブランチ名だけの `@release/v1` / `@main` 参照が残らない
+
+## 解決方法
+
+- `pypa/gh-action-pypi-publish` を最新リリース `v1.14.2` のコミットハッシュに固定した
+- `shiguredo/github-actions/.github/actions/slack-notify` を `main` HEAD のコミットハッシュに固定し、コメントを `# main` とした
+- `wheel.yml` から `@release/v1` / `@main` の浮動参照を除去した
