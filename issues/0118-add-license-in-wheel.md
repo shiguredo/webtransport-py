@@ -1,7 +1,7 @@
 # 配布 wheel に THIRD_PARTY_LICENSES.md を同梱する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Branch: feature/add-license-in-wheel
 - Polished: 2026-08-26
 
@@ -26,3 +26,8 @@
 
 - `project.license-files` に `LICENSE` と `THIRD_PARTY_LICENSES.md` の両方が含まれる
 - ビルドした wheel の `*.dist-info/licenses/` に `LICENSE` と `THIRD_PARTY_LICENSES.md` の両方が含まれる
+
+## 解決方法
+
+- `pyproject.toml` の `project.license-files` に `THIRD_PARTY_LICENSES.md` を追加した
+- `uv build --wheel` で生成した wheel を展開し、`*.dist-info/licenses/THIRD_PARTY_LICENSES.md` と METADATA の `License-File: THIRD_PARTY_LICENSES.md` を確認した
