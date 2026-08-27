@@ -100,3 +100,7 @@
 ## pending にした理由
 
 h2/h3 統一 listen (`webtransport.Server` dual-listen glue) 関連の実装 (0044-0047) を一旦後回しにすることにしたため、その前提群の一部である本 issue も保留する。実装再開時に reopened にする。
+
+## reopened にした理由
+
+0044-0047 を後回しにする方針は現状も有効だが、本 issue は独立したバグ修正 (h3.Client / h2.Client の `connect()` 内の真に無制限な待機ループを bounded にする) であり、他の Phase issue の完了を待たずに先行実装できる。`connect()` が bounded にならないと、UDP blackhole や TCP half-open (完全無応答) 下でハンドラが無限にブロックする実害があるため、優先して reopen する。
