@@ -1,7 +1,7 @@
 # h3 / http3 サーバーの高レベル API を拡充する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-27
 - Branch: feature/add-h3-http3-server-capabilities
 - Polished: {YYYY-MM-DD}
 
@@ -70,3 +70,10 @@ WebTransport over HTTP/3 (`h3.Server`) と HTTP/3 (`http3.Server`) の高レベ�
 - `issues/closed/0003-add-quic-connection-migration.md` — 本 issue の項目 B の前提となる quic 層の Connection Migration 実装
 - `issues/closed/0114-bug-fix-http3-server-accept-exception.md` — 本 issue の項目 B で書き換える accept 経路の RuntimeError 捕捉分岐を追加した修正
 - `issues/closed/0134-add-h2-server-reject-session-api.md` — 本 issue の項目 A で対称の API を追加する h2 側の実装 (シグネチャ・検証の参考)
+
+## 解決方法
+
+polish-issue-deep で 2 項目を独立した issue に分離した。実装は分離先で行う。本 issue は分離済みとして closed にする。
+
+- 項目 A (h3.Server セッション拒否 API): `issues/0137-add-h3-server-reject-session-api.md` に移管
+- 項目 B (h3 / http3 サーバー Connection Migration): `issues/0138-add-h3-http3-server-connection-migration.md` に移管
