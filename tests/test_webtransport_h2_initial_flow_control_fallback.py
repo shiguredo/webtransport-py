@@ -137,7 +137,9 @@ def test_zero_peer_initial_data_limit_send_raises_flow_control_error() -> None:
     ストリーム数上限が通常値 (100) のまま、データクレジットのみ 0 を広告
     されたセッションでは open_stream は成功するが、send_stream_data が
     既存のフロー制御ガード (draft-15 Section 6.5 / 6.6) で
-    WT_FLOW_CONTROL_ERROR (0x50) のセッションクローズになる。
+    WT_FLOW_CONTROL_ERROR (0x50) のセッションクローズになる。0x50 は
+    WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
+    draft で値が確定したら更新する。
     フォールバックで送信できてしまう (修正前) に対するピン。
     """
     client, server = _create_h2_session_pair_with_limits(0, 1024, 100, 100)

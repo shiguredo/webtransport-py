@@ -1096,6 +1096,8 @@ void H2Session::initialize_stream_send_credit(const WtSessionInfo& wt_session,
 
 void H2Session::report_flow_control_error(int32_t session_id,
                                           const std::string& error_message) {
+  // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+  // プレースホルダ。draft で値が確定したら更新する
   close_session(session_id, kWtFlowControlError, error_message);
 }
 
@@ -1105,7 +1107,9 @@ void H2Session::report_recv_flow_control_error(
     const std::string& error_message) {
   // 受信超過は高レベル層への通知のため Error イベントを push してから
   // セッションを閉じる (カプセル値減少の検知は Error を push せず
-  // close_session のみ)
+  // close_session のみ)。error_code の 0x50 は WT_FLOW_CONTROL_ERROR
+  // (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。draft で値が確定
+  // したら更新する
   H2Event event;
   event.type = H2EventType::Error;
   event.session_id = session_id;
