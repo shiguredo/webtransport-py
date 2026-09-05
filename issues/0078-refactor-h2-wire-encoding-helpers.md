@@ -1,7 +1,7 @@
 # h2 テストのワイヤ組み立てヘルパーを conftest.py に集約する
 
 - Created: 2026-08-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-05
 - Branch: feature/refactor-h2-wire-encoding-helpers
 - Polished: 2026-09-05
 
@@ -29,3 +29,9 @@
 
 - h2 系の `_encode_capsule` / `_encode_data_frame` の重複定義が削除され、対象ファイルが全て conftest.py のヘルパーを使う
 - 全テストが通る
+
+## 解決方法
+
+- `tests/conftest.py` に汎用版 `_encode_capsule` (汎用 varint) と `_encode_data_frame` (`end_stream` 付き) を定義した
+- h2 系 9 ファイルの `_encode_capsule` と h2 系 11 ファイルの `_encode_data_frame` のローカル定義を削除し、`from conftest import ...` に置き換えた。H3 系の同名ヘルパーは対象外とした
+- `CHANGES.md` の `### misc` に `[UPDATE]` を追加した
