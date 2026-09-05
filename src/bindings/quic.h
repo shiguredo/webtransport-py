@@ -846,6 +846,15 @@ class QuicConnection {
   // ストリームデータ (送信待ち)
   std::map<int64_t, std::deque<StreamData>> stream_buffers_;
 
+  // 送出済み未受信のストリームデータ (再送保持用)。ngtcp2 は再送時に
+  // アプリの保持メモリを再読する契約のため、受信確認
+  // (acked_stream_data_offset) まで消さない。チャンク単位で追加し、
+  // 先頭から確定受信分のみ消す
+  std::map<int64_t, std::deque<std::vector<uint8_t>>> stream_unacked_;
+
+  // ストリームごとの受信確認済みオフセット (stream_unacked_ 先頭の基点)
+  std::map<int64_t, uint64_t> stream_acked_offset_;
+
   // Datagram 送信キュー
   std::deque<std::vector<uint8_t>> datagram_queue_;
 

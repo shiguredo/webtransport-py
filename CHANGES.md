@@ -111,6 +111,8 @@
   - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
   - @voluntas
+- [FIX] QUIC の再送時にストリームデータが破損するのを修正する (送出バッファを受信確認まで保持する)
+  - @voluntas
 - [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 のリセット・セッション終了時に送信バッファが解放されないのを修正する
