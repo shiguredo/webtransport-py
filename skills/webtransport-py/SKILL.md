@@ -261,6 +261,7 @@ async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> No
 async def recv_stream_data(stream_id: int, timeout: float = 10.0, *, overall_timeout: float | None = None) -> tuple[bytes, bool]  # FIN まで受信し (データ, fin) を返す
 async def shutdown_stream(stream_id: int, error_code: int = 0) -> None  # RESET_STREAM と STOP_SENDING を送出して中断
 async def wait_for_stream_reset(stream_id: int, timeout: float = 10.0) -> int  # ピアの RESET_STREAM を待ちエラーコードを返す
+def discard_recv_state(stream_id: int) -> None  # ストリーム受信状態を明示的に破棄する
 async def send_datagram(data: bytes) -> None
 async def migrate() -> bool  # Connection Migration
 async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
@@ -275,7 +276,7 @@ def was_early_data_attempted() -> bool
 
 `connect()` はバックグラウンド受信タスクを起動し、ハンドシェイク完了を `timeout` (既定 10.0 秒) で打ち切る。期限までに確立できない場合は接続を維持したまま `False` を返す (ハンドシェイクが後で完了する可能性がある。後始末は `close()` が担う)。`timeout <= 0` では接続を開始せず即座に `False` を返す。タイムアウト後は `_recv_task` が存続するため、同じ `Client` で `connect()` を再呼び出しすると `RuntimeError` になる (再試行には新規 `Client` が必要)。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。`max_datagram_frame_size` は DATAGRAM の受信サポート広告 (RFC 9221 Section 3) で、0 なら広告しない (既定 65536)。0 を指定すると低レベル設定の `enable_datagram` が False になり、受信広告だけでなくローカルの `send_datagram()` も無効化される (RFC 9221 は単方向利用を認めるが、本実装では受信と送信が連動する)。
 
-`recv_stream_data()` は呼び出し時点で FIN 完了済みなら即時 return する。タイムアウトは idle deadline (`timeout`) と absolute deadline (`overall_timeout`。None なら `max(timeout * 6, 30)`) の 2 段構えで、どちらかに達すると `TimeoutError` を raise する。接続終了 (CONNECTION_CLOSED) を受信した場合も `TimeoutError` を raise して待機を終了する。STREAM_RESET 受信時は進捗として idle deadline が 1 回延長され、その後は idle timeout になる。コールバック内からは呼べない (`RuntimeError`)。`on_stream_data` コールバックと併用してもデータは両方に配信される。受信データはストリームごとに保持され、`recv_stream_data` の対象外ストリームも保持される (FIN 完了済みの即時 return を実現するため)。
+`recv_stream_data()` は呼び出し時点で FIN 完了済みなら即時 return する。タイムアウトは idle deadline (`timeout`) と absolute deadline (`overall_timeout`。None なら `max(timeout * 6, 30)`) の 2 段構えで、どちらかに達すると `TimeoutError` を raise する。接続終了 (CONNECTION_CLOSED) を受信した場合も `TimeoutError` を raise して待機を終了する。STREAM_RESET 受信時は進捗として idle deadline が 1 回延長され、その後は idle timeout になる。コールバック内からは呼べない (`RuntimeError`)。`on_stream_data` コールバックと併用してもデータは両方に配信される。受信データはストリームごとに保持され、FIN 完了済みの即時 return ができる。FIN で正常 return したストリームの受信状態は自動破棄される (1 回限り。再呼び出しは `TimeoutError` のため避けること)。`recv_stream_data` を呼ばない使い方は `discard_recv_state(stream_id)` で明示的に解放する。
 
 `shutdown_stream()` は低レベル `close_stream` を呼び、RESET_STREAM (RFC 9000 Section 19.4) と STOP_SENDING (Section 19.5) を送出する。双方向ストリームでは両方を送出し、単方向ストリームでは ngtcp2 がローカル単方向なら write 側 (RESET_STREAM) のみ、リモート単方向なら read 側 (STOP_SENDING) のみを shutdown する。`wait_for_stream_reset()` はピアの RESET_STREAM を待ち、そのアプリケーションエラーコードを返す。呼び出し時点で受信済みなら即時 return し、期限までに受信しない場合・接続終了時は `TimeoutError` を raise する。ngtcp2 は STOP_SENDING を受信すると、ストリームが Ready / Send 状態の場合は自動で RESET_STREAM を返す (RFC 9000 Section 3.5 の MUST。エラーコードは STOP_SENDING から複製する SHOULD。Data Sent 状態では MAY)。`shutdown_stream` はコールバック内から呼べる。`wait_for_stream_reset` はコールバック内からは呼べない (`RuntimeError`)。
 

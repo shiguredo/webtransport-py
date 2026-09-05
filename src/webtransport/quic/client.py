@@ -382,6 +382,44 @@ class Client:
         finally:
             _in_callback_var.reset(token)
 
+    def _discard_recv_state(self, stream_id: int) -> None:
+        """ストリーム受信状態のエントリを破棄する
+
+        破棄前に待機者を起床させ、閉じ込めを防ぐ。エントリが無ければ
+        何もしない。破棄後に同一ストリームへ再受信・再呼び出しがあった
+        場合は `setdefault` で新しい空状態が作られ、通常の待機に入る。
+
+        Args:
+            stream_id: 破棄するストリーム ID
+        """
+        state = self._recv_states.get(stream_id)
+        if state is None:
+            return
+        state.event.set()
+        del self._recv_states[stream_id]
+
+    def discard_recv_state(self, stream_id: int) -> None:
+        """ストリーム受信状態を明示的に破棄する
+
+        `recv_stream_data` を呼ばないコールバック専用の利用者が、自分の
+        都合で受信状態を解放するために使う。当該 `stream_id` のエントリ
+        があれば削除し、存在しなければ何もしない。破棄前に待機者を起床
+        させるため、`wait_for_stream_reset` の待機者は閉じ込められない。
+        起床した待機者は新しい空状態から待機を継続する。
+
+        破棄した `stream_id` に対する `recv_stream_data` /
+        `wait_for_stream_reset` の再呼び出しは通常の待機ループに入り、
+        進捗が無ければ `overall_timeout` / `timeout` で `TimeoutError`
+        になる。破棄済みストリームへの再呼び出しは避けること。
+        `wait_for_stream_reset` でエラーコードを取得した後は、受信状態が
+        残るため本メソッドでの解放を推奨する。本メソッドは同期のため、
+        コールバック内 (`on_stream_data` 等) から呼び出せる。
+
+        Args:
+            stream_id: 破棄するストリーム ID
+        """
+        self._discard_recv_state(stream_id)
+
     def _update_recv_state(self, stream_id: int, data: bytes, fin: bool) -> None:
         """ストリーム受信状態を更新する
 
@@ -767,6 +805,14 @@ class Client:
         を受信した場合も待機を終了し TimeoutError を raise する。コールバック
         内から呼び出すと受信処理が進まないため RuntimeError を raise する。
 
+        FIN で正常 return したストリームの受信状態は自動破棄される
+        (以後のデータ到着は期待しない使い方のため)。破棄した `stream_id`
+        への再呼び出しは通常の待機ループに入り、進捗が無ければ
+        `overall_timeout` で `TimeoutError` になるため避けること。同一
+        ストリームへの `recv_stream_data` と `wait_for_stream_reset` の
+        並行呼び出しは、正常 return 時点で `wait_for_stream_reset` 側が
+        新規待機に切り替わる。
+
         Args:
             stream_id: ストリーム ID
             timeout: idle タイムアウト (秒)
@@ -798,14 +844,19 @@ class Client:
         state = self._recv_states.setdefault(stream_id, _StreamRecvState())
 
         if state.fin:
-            return bytes(state.data), True
+            # 既に FIN 完了済みの即時 return でも自動破棄する
+            result = bytes(state.data)
+            self._discard_recv_state(stream_id)
+            return result, True
 
         loop = asyncio.get_running_loop()
         overall_deadline = loop.time() + overall_timeout
 
         while True:
             if state.fin:
-                return bytes(state.data), True
+                result = bytes(state.data)
+                self._discard_recv_state(stream_id)
+                return result, True
             if self._task_error is not None:
                 raise self._task_error
             if self._connection_closed_event.is_set():
@@ -816,6 +867,12 @@ class Client:
                     overall_timeout,
                     len(state.data),
                 )
+            current = self._recv_states.get(stream_id)
+            if current is not state:
+                # 自動破棄・明示破棄でエントリが除去された。新しい空状態
+                # から待機を継続する (破棄前の event.set() で起床済み)
+                state = self._recv_states.setdefault(stream_id, _StreamRecvState())
+                continue
 
             if loop.time() >= overall_deadline:
                 raise self._recv_stream_timeout_error(
@@ -843,7 +900,9 @@ class Client:
                 # 進捗が無いまま idle deadline に達した。同時に FIN が
                 # 届いていた場合は FIN を優先する
                 if state.fin:
-                    return bytes(state.data), True
+                    result = bytes(state.data)
+                    self._discard_recv_state(stream_id)
+                    return result, True
                 if self._task_error is not None:
                     raise self._task_error from None
                 if self._connection_closed_event.is_set():
@@ -915,6 +974,13 @@ class Client:
         TimeoutError を raise して待機を終了する。コールバック内から呼び出すと
         受信処理が進まないため RuntimeError を raise する。
 
+        受信状態が自動破棄・明示破棄された場合は新しい空状態から待機を
+        継続する。破棄した `stream_id` への再呼び出しは通常の待機ループに
+        入り、RESET が届かなければ `timeout` で `TimeoutError` になるため
+        避けること。破棄前に RESET が届いていても、破棄後に起動した待機は
+        旧エラーコードを取得できない。両方が必要な場合は本メソッドを先に
+        起動して並行待機すること。
+
         ngtcp2 は STOP_SENDING を受信すると、ストリームが Ready / Send 状態
         の場合は自動で RESET_STREAM を送出する (RFC 9000 Section 3.5 の
         MUST。エラーコードは STOP_SENDING から複製する SHOULD)。Data Sent
@@ -960,6 +1026,12 @@ class Client:
                     f"connection closed while waiting for stream reset "
                     f"(stream_id={stream_id}, timeout={timeout})"
                 )
+            current = self._recv_states.get(stream_id)
+            if current is not state:
+                # 自動破棄・明示破棄でエントリが除去された。新しい空状態
+                # から待機を継続する (破棄前の event.set() で起床済み)
+                state = self._recv_states.setdefault(stream_id, _StreamRecvState())
+                continue
             if loop.time() >= deadline:
                 raise TimeoutError(
                     f"timeout while waiting for stream reset "
