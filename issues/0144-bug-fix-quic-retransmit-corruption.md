@@ -1,7 +1,7 @@
 # QUIC の再送データ破損を修正する
 
 - Created: 2026-09-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-06
 - Branch: feature/fix-quic-retransmit-corruption
 - Polished: 2026-09-06
 
@@ -36,6 +36,13 @@
 - Sans-IO ロス注入の回帰テストが通る
 - `uv run pytest tests/` を通す
 - CI が通る
+
+## 解決方法
+
+- 送出バッファとは別に送出済み未受信の保持 (`stream_unacked_` と `stream_acked_offset_`) を追加し、`writev_stream` の vec は保持側を指すようにした。書き出し時の erase は送信待ち側のみに残し、保持側は `acked_stream_data_offset_cb` で確定受信分のみ消す
+- `clear()` / `erase` 各経路の判定: `QuicConnection::send()` の SHUT_WR / NOT_FOUND 分岐と `close_stream` / `reset_stream` は終端状態の解放として維持し、`stream_close_cb` 後に保持分も全解放する
+- H3 側の即時 `add_ack_offset` は変更なし (送出バイト列の同期的コピーで安全性が成立することを確認した)
+- `tests/test_quic_stream_retransmit.py` を新設し、c2s 規則ドロップ (3 ごとに 1 枚) の 3 パターンと無ドロップ対照で内容一致を検証する。旧コードでは 3 パターンとも不一致で失敗し、修正後は全通過することを確認した (陰性対照あり)
 
 ## 依存関係
 
