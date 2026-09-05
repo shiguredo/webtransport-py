@@ -186,6 +186,8 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
       ssl_(other.ssl_),
       events_(std::move(other.events_)),
       stream_buffers_(std::move(other.stream_buffers_)),
+      stream_unacked_(std::move(other.stream_unacked_)),
+      stream_acked_offset_(std::move(other.stream_acked_offset_)),
       datagram_queue_(std::move(other.datagram_queue_)),
       handshake_completed_(other.handshake_completed_),
       closed_(other.closed_),
@@ -226,6 +228,8 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     ssl_ = other.ssl_;
     events_ = std::move(other.events_);
     stream_buffers_ = std::move(other.stream_buffers_);
+    stream_unacked_ = std::move(other.stream_unacked_);
+    stream_acked_offset_ = std::move(other.stream_acked_offset_);
     datagram_queue_ = std::move(other.datagram_queue_);
     handshake_completed_ = other.handshake_completed_;
     closed_ = other.closed_;
@@ -1250,9 +1254,15 @@ std::optional<QuicPacket> QuicConnection::send() {
   for (auto& [stream_id, buffers] : stream_buffers_) {
     while (!buffers.empty()) {
       auto& buf = buffers.front();
+      // 保持用にコピーし、vec は保持側を指す。ngtcp2 は再送時にアプリの
+      // 保持メモリを再読する契約 (acked_stream_data_offset まで intact)
+      // のため、送信待ち側の erase では再送が壊れる。事前に消費量が
+      // 不明なため全量複写後に切詰める
+      auto& held_chunks = stream_unacked_[stream_id];
+      held_chunks.emplace_back(buf.data.begin(), buf.data.end());
       ngtcp2_vec vec;
-      vec.base = const_cast<uint8_t*>(buf.data.data());
-      vec.len = buf.data.size();
+      vec.base = held_chunks.back().data();
+      vec.len = held_chunks.back().size();
 
       uint32_t flags = 0;
       if (buf.fin) {
@@ -1268,6 +1278,13 @@ std::optional<QuicPacket> QuicConnection::send() {
       nwrite = ngtcp2_conn_writev_stream(conn_, &path, &pi, send_buffer_.data(),
                                          send_buffer_.size(), &ndatalen, flags,
                                          stream_id, &vec, 1, timestamp_ns_);
+      // 保持側を消費分に詰める (未消費分の残置は再送参照が無いため解放する。
+      // shrink のため再配置は起きず、確定済み vec は有効なまま)
+      if (ndatalen > 0) {
+        held_chunks.back().resize(static_cast<size_t>(ndatalen));
+      } else {
+        held_chunks.pop_back();
+      }
       if (nwrite < 0) {
         switch (nwrite) {
           case NGTCP2_ERR_WRITE_MORE:
@@ -1285,11 +1302,12 @@ std::optional<QuicPacket> QuicConnection::send() {
             // フロー制御でブロックされた場合は次のストリームへ
             break;
           case NGTCP2_ERR_STREAM_SHUT_WR:
-            // ストリームがハーフクローズされた場合はバッファをクリア
+            // ストリームがハーフクローズされた場合はバッファをクリア。
+            // 終端状態の解放であり、保持側は stream_close まで残す
             buffers.clear();
             break;
           case NGTCP2_ERR_STREAM_NOT_FOUND:
-            // ストリームが存在しない場合はバッファをクリア
+            // ストリームが存在しない場合はバッファをクリア (同上)
             buffers.clear();
             break;
           default:
@@ -2455,7 +2473,26 @@ int QuicConnection::acked_stream_data_offset_cb(ngtcp2_conn* conn,
                                                 uint64_t datalen,
                                                 void* user_data,
                                                 void* stream_user_data) {
-  // ACK されたデータのオフセットを処理
+  (void)conn;
+  (void)stream_user_data;
+  auto* self = static_cast<QuicConnection*>(user_data);
+  // 受信確認された範囲の保持を解放する。範囲は [offset, offset+datalen)
+  // で offset 昇順・重なりなしに来る (FIN のみの到達は datalen == 0)。
+  // 先頭から確定受信分のみ消し、未確定の先頭断片は残す (再送参照のため)
+  auto it = self->stream_unacked_.find(stream_id);
+  if (it == self->stream_unacked_.end()) {
+    return 0;
+  }
+  uint64_t release_up_to = offset + datalen;
+  uint64_t& acked = self->stream_acked_offset_[stream_id];
+  auto& chunks = it->second;
+  while (!chunks.empty() && acked + chunks.front().size() <= release_up_to) {
+    acked += chunks.front().size();
+    chunks.pop_front();
+  }
+  if (chunks.empty()) {
+    self->stream_unacked_.erase(it);
+  }
   return 0;
 }
 
@@ -2488,6 +2525,10 @@ int QuicConnection::stream_close_cb(ngtcp2_conn* conn,
   self->push_event(std::move(event));
 
   self->stream_buffers_.erase(stream_id);
+  // stream_close 後は ngtcp2 が閉鎖ストリームのデータに触れない契約のため、
+  // 保持分も全解放する
+  self->stream_unacked_.erase(stream_id);
+  self->stream_acked_offset_.erase(stream_id);
   return 0;
 }
 
