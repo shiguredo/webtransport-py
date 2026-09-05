@@ -11,6 +11,12 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport.exceptions import (
+    ConnectRefusedError,
+    ConnectTimeoutError,
+    HandshakeFailedError,
+    WebTransportConnectError,
+)
 from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
@@ -275,12 +281,28 @@ class Client:
         decoder_stream_id = self._quic_connection.open_stream(False)
         self._webtransport_session.bind_qpack_decoder_stream(decoder_stream_id)
 
-    async def connect(self) -> bool:
+    async def connect(self, timeout: float = 10.0) -> None:
         """WebTransport セッションを確立する
 
-        Returns:
-            接続に成功した場合は True
+        deadline ベースで bounded に動作する。成功時は例外なしで復帰し、
+        失敗時は具体例外で理由を通知する。
+
+        Args:
+            timeout: 接続確立の打ち切り秒数。HANDSHAKE 完了待ち /
+                SETTINGS 受信待ち / 2xx 応答待ちの全ループが同一 deadline
+                を参照する。0 以下では即座に ConnectTimeoutError を送出する
+
+        Raises:
+            ConnectTimeoutError: 待機中に成否を決めるイベントが届かず
+                deadline に達した場合
+            ConnectRefusedError: 待機中に QUIC 側の明示的な
+                `CONNECTION_CLOSE` が届いた場合
+            HandshakeFailedError: TLS 由来のクローズ・transport parameter
+                の要件未達・非 2xx 応答の場合
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
         quic_config = (
             self._user_quic_config if self._user_quic_config is not None else quic.Config()
         )
@@ -296,161 +318,214 @@ class Client:
         webtransport_config = h3_low.Config()
         webtransport_config.is_server = False
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.setblocking(False)
-        self._socket.bind(("0.0.0.0", 0))
-        self._local_addr = self._normalize_addr(self._socket.getsockname())
+        try:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.setblocking(False)
+            self._socket.bind(("0.0.0.0", 0))
+            self._local_addr = self._normalize_addr(self._socket.getsockname())
 
-        self._quic_connection = quic.Connection.create_client(
-            quic_config,
-            self._local_addr,
-            (self._host, self._port),
-        )
-        self._webtransport_session = h3_low.Session.create_client(webtransport_config)
-
-        await self._send_pending()
-        self._running = True
-
-        handshake_done = False
-        while not handshake_done and self._running:
-            await self._receive()
-
-            while True:
-                quic_event = self._quic_connection.next_event()
-                if quic_event is None:
-                    break
-
-                if quic_event.type == quic.EventType.HANDSHAKE_COMPLETED:
-                    handshake_done = True
-                    break
-                elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
-                    self._running = False
-                    return False
+            self._quic_connection = quic.Connection.create_client(
+                quic_config,
+                self._local_addr,
+                (self._host, self._port),
+            )
+            self._webtransport_session = h3_low.Session.create_client(webtransport_config)
 
             await self._send_pending()
-            await asyncio.sleep(0.01)
+            self._running = True
 
-        # サーバーの transport parameter を検証する
-        # (draft-ietf-webtrans-http3-16 Section 3.1)。要件未達なら
-        # CONNECT を送らずにセッションを確立しない。reset_stream_at の
-        # 扱い (実ブラウザ互換のため必須としない) は
-        # meets_transport_param_requirements の docstring を参照する
-        if self._quic_connection is None or not meets_transport_param_requirements(
-            self._quic_connection
-        ):
-            self._running = False
-            return False
-
-        self._setup_streams()
-        await self._send_pending()
-
-        # サーバーの SETTINGS を受信するまで待機
-        settings_received = False
-        max_attempts = 100
-        attempt = 0
-        while not settings_received and self._running and attempt < max_attempts:
-            await self._receive()
-
-            while True:
-                quic_event = self._quic_connection.next_event()
-                if quic_event is None:
-                    break
-
-                if quic_event.type == quic.EventType.STREAM_DATA:
-                    # サーバーからの制御ストリームデータを処理
-                    self._webtransport_session.receive_stream_data(
-                        quic_event.stream_id,
-                        quic_event.data,
-                        quic_event.fin,
-                    )
-                    # サーバーの制御ストリーム (stream_id=3) からデータを受信したら設定完了とみなす
-                    if quic_event.stream_id == 3:
-                        settings_received = True
-                elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
-                    self._running = False
-                    return False
-
-            await self._send_pending()
-            await asyncio.sleep(0.01)
-            attempt += 1
-
-        if not settings_received:
-            return False
-
-        request_stream_id = self._quic_connection.open_stream(True)
-        if self._webtransport_session.connect(request_stream_id, self._url, self._origin):
-            self._session_id = request_stream_id
-            await self._send_pending()
-
-            # 2xx 応答 (または非 2xx 拒否) を待つ (draft-16 Section 3.2 の
-            # 「From the client's perspective, a WebTransport session is
-            # established when the client receives a 2xx response」)。
-            # SESSION_READY (2xx 全般) で True、SESSION_REJECTED (非 2xx。
-            # 1xx を含む) で False を返す (h2 側の connect と同型)。
-            # SESSION_READY は run() のコールバック経路を確保するため
-            # 未配信バッファへ引き継ぐ
-            accepted = False
-            for _ in range(100):
-                # WebTransport セッションのイベントを確認する (2xx 応答の
-                # 受信で SESSION_READY が発火する)
-                while True:
-                    event = self._webtransport_session.next_event()
-                    if event is None:
-                        break
-                    if event.type == h3_low.EventType.SESSION_READY:
-                        self._pending_session_ready = event.session_id
-                        accepted = True
-                        # 同一バッチの後続イベント (2xx + FIN 同時受信時の
-                        # SESSION_CLOSED 等) で False にしないため、ドレイン
-                        # を抜ける (残ったイベントはキューに残り、run() で
-                        # 処理される)
-                        break
-                    if (
-                        event.type == h3_low.EventType.SESSION_REJECTED
-                        or event.type == h3_low.EventType.SESSION_CLOSED
-                    ):
-                        self._connected = False
-                        return False
-                if accepted:
-                    break
-                if self._quic_connection.is_closed():
-                    return False
-                # 受信した QUIC イベントを WebTransport セッションへ流す。
-                # run() の _process_quic_events が処理する変換のうち、
-                # connect() の応答待ちに必要な経路 (STREAM_DATA /
-                # DATAGRAM / STREAM_RESET / CONNECTION_CLOSED) をここで
-                # 行う (connect() 中は run() を実行できないため)
+            handshake_done = False
+            while not handshake_done and self._running and loop.time() < deadline:
                 await self._receive()
+
                 while True:
                     quic_event = self._quic_connection.next_event()
                     if quic_event is None:
                         break
+
+                    if quic_event.type == quic.EventType.HANDSHAKE_COMPLETED:
+                        handshake_done = True
+                        break
+                    elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                        self._running = False
+                        raise HandshakeFailedError("QUIC handshake failed before completion")
+
+                await self._send_pending()
+                await asyncio.sleep(0.01)
+
+            if not handshake_done:
+                self._running = False
+                raise ConnectTimeoutError(
+                    f"QUIC handshake did not complete within {timeout} seconds"
+                )
+
+            # サーバーの transport parameter を検証する
+            # (draft-ietf-webtrans-http3-16 Section 3.1)。要件未達なら
+            # CONNECT を送らずにセッションを確立しない。reset_stream_at の
+            # 扱い (実ブラウザ互換のため必須としない) は
+            # meets_transport_param_requirements の docstring を参照する
+            if self._quic_connection is None or not meets_transport_param_requirements(
+                self._quic_connection
+            ):
+                self._running = False
+                raise HandshakeFailedError(
+                    "server transport parameters do not meet WebTransport requirements"
+                )
+
+            self._setup_streams()
+            await self._send_pending()
+
+            # サーバーの SETTINGS を受信するまで待機
+            settings_received = False
+            while not settings_received and self._running and loop.time() < deadline:
+                await self._receive()
+
+                while True:
+                    quic_event = self._quic_connection.next_event()
+                    if quic_event is None:
+                        break
+
                     if quic_event.type == quic.EventType.STREAM_DATA:
+                        # サーバーからの制御ストリームデータを処理
                         self._webtransport_session.receive_stream_data(
                             quic_event.stream_id,
                             quic_event.data,
                             quic_event.fin,
                         )
-                    elif quic_event.type == quic.EventType.DATAGRAM:
-                        self._webtransport_session.receive_datagram(quic_event.data)
-                    elif quic_event.type == quic.EventType.STREAM_RESET:
-                        self._webtransport_session.close_stream(
-                            quic_event.stream_id, quic_event.error_code
-                        )
+                        # サーバーの制御ストリーム (stream_id=3) からデータを受信したら設定完了とみなす
+                        if quic_event.stream_id == 3:
+                            settings_received = True
                     elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
-                        return False
+                        self._running = False
+                        raise ConnectRefusedError(
+                            "QUIC connection closed while waiting for SETTINGS"
+                        )
+
                 await self._send_pending()
                 await asyncio.sleep(0.01)
-            if not accepted:
-                # 応答なし (応答が 2xx でも非 2xx でもなくタイムアウト) で
-                # 確立できない。以後の run() は呼ばず close() する前提
-                # (セッション ID の後始末は close() に依存する)
-                return False
 
-            self._connected = True
-            return True
+            if not settings_received:
+                self._running = False
+                raise ConnectTimeoutError(f"HTTP/3 SETTINGS not received within {timeout} seconds")
 
-        return False
+            request_stream_id = self._quic_connection.open_stream(True)
+            if self._webtransport_session.connect(request_stream_id, self._url, self._origin):
+                self._session_id = request_stream_id
+                await self._send_pending()
+
+                # 2xx 応答 (または非 2xx 拒否) を待つ (draft-16 Section 3.2 の
+                # 「From the client's perspective, a WebTransport session is
+                # established when the client receives a 2xx response」)。
+                # SESSION_READY (2xx 全般) で復帰し、SESSION_REJECTED (非 2xx。
+                # 1xx を含む) で HandshakeFailedError を送出する (h2 側の
+                # connect と同型)。SESSION_READY は run() のコールバック経路を
+                # 確保するため未配信バッファへ引き継ぐ
+                accepted = False
+                while not accepted and self._running and loop.time() < deadline:
+                    # WebTransport セッションのイベントを確認する (2xx 応答の
+                    # 受信で SESSION_READY が発火する)
+                    while True:
+                        event = self._webtransport_session.next_event()
+                        if event is None:
+                            break
+                        if event.type == h3_low.EventType.SESSION_READY:
+                            self._pending_session_ready = event.session_id
+                            accepted = True
+                            # 同一バッチの後続イベント (2xx + FIN 同時受信時の
+                            # SESSION_CLOSED 等) で失敗扱いにしないため、ドレイン
+                            # を抜ける (残ったイベントはキューに残り、run() で
+                            # 処理される)
+                            break
+                        if event.type == h3_low.EventType.SESSION_REJECTED:
+                            self._connected = False
+                            self._running = False
+                            raise HandshakeFailedError(
+                                "server rejected WebTransport session with non-2xx response"
+                            )
+                        if event.type == h3_low.EventType.SESSION_CLOSED:
+                            self._connected = False
+                            self._running = False
+                            raise HandshakeFailedError(
+                                "session closed before establishment completed"
+                            )
+                    if accepted:
+                        break
+                    if self._quic_connection.is_closed():
+                        self._connected = False
+                        self._running = False
+                        raise ConnectRefusedError(
+                            "QUIC connection closed while waiting for 2xx response"
+                        )
+                    # 受信した QUIC イベントを WebTransport セッションへ流す。
+                    # run() の _process_quic_events が処理する変換のうち、
+                    # connect() の応答待ちに必要な経路 (STREAM_DATA /
+                    # DATAGRAM / STREAM_RESET / CONNECTION_CLOSED) をここで
+                    # 行う (connect() 中は run() を実行できないため)
+                    await self._receive()
+                    while True:
+                        quic_event = self._quic_connection.next_event()
+                        if quic_event is None:
+                            break
+                        if quic_event.type == quic.EventType.STREAM_DATA:
+                            self._webtransport_session.receive_stream_data(
+                                quic_event.stream_id,
+                                quic_event.data,
+                                quic_event.fin,
+                            )
+                        elif quic_event.type == quic.EventType.DATAGRAM:
+                            self._webtransport_session.receive_datagram(quic_event.data)
+                        elif quic_event.type == quic.EventType.STREAM_RESET:
+                            self._webtransport_session.close_stream(
+                                quic_event.stream_id, quic_event.error_code
+                            )
+                        elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                            self._connected = False
+                            self._running = False
+                            raise ConnectRefusedError(
+                                "QUIC connection closed while waiting for 2xx response"
+                            )
+                    await self._send_pending()
+                    await asyncio.sleep(0.01)
+                if not accepted:
+                    # 応答なし (応答が 2xx でも非 2xx でもなく deadline 到達) で
+                    # 確立できない。以後の run() は呼ばず close() する前提
+                    # (セッション ID の後始末は close() に依存する)
+                    self._connected = False
+                    self._running = False
+                    raise ConnectTimeoutError(f"2xx response not received within {timeout} seconds")
+
+                self._connected = True
+                return
+
+            self._connected = False
+            self._running = False
+            raise HandshakeFailedError("failed to send CONNECT request")
+
+        except TimeoutError as exc:
+            # 現状 try 内で wait_for を使うのは _receive のみであり、そこは
+            # 吸収済みである。将来の経路追加に備え、漏れた TimeoutError は
+            # deadline 到達として明示的に受ける
+            self._running = False
+            self._connected = False
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            raise ConnectTimeoutError(
+                f"connection attempt did not complete within {timeout} seconds"
+            ) from exc
+        except (OSError, WebTransportConnectError) as exc:
+            # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は
+            # ConnectRefusedError に寄せて具体例外の契約を保つ。失敗パスの
+            # 後始末は best-effort であり、完全な切断は呼び出し側の close()
+            # が担う
+            self._running = False
+            self._connected = False
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            if isinstance(exc, WebTransportConnectError):
+                raise
+            raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """WebTransport ストリームを開く

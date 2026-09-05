@@ -16,6 +16,11 @@ from conftest import _encode_wt_datagram
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport.exceptions import (
+    ConnectRefusedError,
+    ConnectTimeoutError,
+    HandshakeFailedError,
+)
 from webtransport.h3 import Server
 
 
@@ -328,8 +333,7 @@ async def test_origin_verification_accepts_allowed_origin(test_certificates):
 
     client.on_session_ready(on_client_session_ready)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -356,8 +360,9 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
 
     allowed_origins に含まれない Origin ヘッダーを送るクライアントの接続は
     拒否され、サーバー側でセッションが確立されない (on_session_ready が
-    発火しない)。クライアントの connect() は 403 拒否を検知して False を
-    返す (低レベルの SessionRejected イベント、status_code 付き)。
+    発火しない)。クライアントの connect() は 403 拒否を検知して
+    HandshakeFailedError を送出する
+    (低レベルの SessionRejected イベント、status_code 付き)。
     """
     from webtransport.h3 import Client, Server
 
@@ -391,10 +396,11 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
         origin="https://disallowed.example.com",
     )
 
-    connected = await client.connect()
     # QUIC トランスポートの接続は成功するが、CONNECT リクエスト自体は拒否
-    # (403) されるため、connect() は False を返す (draft-16 Section 3.2)
-    assert connected is False
+    # (403) されるため、connect() は HandshakeFailedError を送出する
+    # (draft-16 Section 3.2)
+    with pytest.raises(HandshakeFailedError):
+        await client.connect()
     assert client.is_connected is False
 
     server_task.cancel()
@@ -442,8 +448,7 @@ async def test_origin_verification_accepts_without_origin(test_certificates):
         verify_peer=False,
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -500,8 +505,7 @@ async def test_origin_verification_accepts_without_allowed_origins(test_certific
         origin="https://example.com",
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -571,8 +575,7 @@ async def test_server_client_communication(test_certificates):
 
     client.on_stream_data(on_client_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream()
     assert stream_id >= 0
@@ -664,8 +667,7 @@ async def test_large_echo_over_initial_recv_window(test_certificates):
 
     client.on_stream_data(on_client_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     # クライアントの受信ループを起動してからセッション確立を待つ。
     # run() を先に回さないと、クライアントはサーバーの応答 (200 OK や
@@ -757,8 +759,7 @@ async def test_server_client_datagram_communication(test_certificates):
 
     client.on_datagram(on_client_datagram)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -840,8 +841,7 @@ async def test_multiple_streams_communication(test_certificates):
 
     client.on_stream_data(on_client_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_ids = []
     for index in range(expected_streams):
@@ -917,8 +917,7 @@ async def test_session_close_notifies_server(test_certificates):
         verify_peer=False,
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
     client_session_id = client.session_id
 
     async def run_client():
@@ -995,8 +994,7 @@ async def test_server_resets_client_stream(test_certificates):
 
     client.on_stream_reset(on_client_stream_reset)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream()
     assert stream_id >= 0
@@ -1089,8 +1087,7 @@ async def test_client_resets_server_stream(test_certificates):
         verify_peer=False,
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream()
     assert stream_id >= 0
@@ -1191,8 +1188,7 @@ async def test_chunked_stream_data(test_certificates):
 
     client.on_stream_data(on_client_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream()
     assert stream_id >= 0
@@ -1277,8 +1273,7 @@ async def test_multiple_datagrams(test_certificates):
 
     client.on_datagram(on_client_datagram)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -1372,8 +1367,7 @@ async def test_stream_and_datagram_combined(test_certificates):
     client.on_stream_data(on_client_stream_data)
     client.on_datagram(on_client_datagram)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream()
     assert stream_id >= 0
@@ -1448,8 +1442,7 @@ async def test_unidirectional_stream(test_certificates):
         verify_peer=False,
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream(unidirectional=True)
     assert stream_id >= 0
@@ -1525,8 +1518,7 @@ async def test_server_unidirectional_stream(test_certificates):
     )
     client.on_stream_data(on_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -1633,8 +1625,7 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
     client.on_stream_data(on_stream_data)
     client.on_stream_reset(on_stream_reset)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -1729,8 +1720,7 @@ async def test_large_stream_payload(test_certificates):
 
     client.on_stream_data(on_client_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.open_stream()
     assert stream_id >= 0
@@ -1803,8 +1793,7 @@ async def test_client_session_ready_callback(test_certificates):
 
     client.on_session_ready(on_client_session_ready)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -2305,7 +2294,7 @@ async def test_stream_reset_second_session_id(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         # 同一 QUIC 接続上に 2 セッションを確立する
         first_session_id, second_session_id = await client.establish_two_sessions()
@@ -2351,7 +2340,7 @@ async def test_stream_reset_at_recovers_session_id(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         session_id = await client.establish_session()
 
@@ -2400,7 +2389,7 @@ async def test_stream_reset_before_data_received_minus_one(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         _first_session_id, second_session_id = await client.establish_two_sessions()
 
@@ -2434,7 +2423,7 @@ async def test_stream_reset_connect_stream_session_id(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         _first_session_id, second_session_id = await client.establish_two_sessions()
 
@@ -2469,7 +2458,7 @@ async def test_connect_stream_reset_notifies_session_closed(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         first_session_id, second_session_id = await client.establish_two_sessions()
 
@@ -2531,7 +2520,7 @@ async def test_connect_stream_fin_notifies_session_closed(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         first_session_id, second_session_id = await client.establish_two_sessions()
 
@@ -2641,8 +2630,7 @@ async def test_server_resets_client_connect_stream_closes_session(test_certifica
 
     client.on_session_closed(on_client_session_closed)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -2725,8 +2713,7 @@ async def test_server_fin_closes_client_session(test_certificates):
 
     client.on_session_closed(on_client_session_closed)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -2807,7 +2794,7 @@ async def test_datagram_invalid_session_id_closes_connection(
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
         session_id = await client.establish_session()
         assert session_id >= 0
 
@@ -2911,7 +2898,7 @@ async def test_datagram_invalid_session_id_closes_connection_client(
 
     client.on_datagram(on_client_datagram)
 
-    assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+    await asyncio.wait_for(client.connect(), timeout=5.0)
 
     async def run_client() -> None:
         try:
@@ -2983,7 +2970,7 @@ async def test_datagram_closed_session_id_discarded(test_certificates):
 
     client = _LowLevelClient(server.actual_port)
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         first_session_id, second_session_id = await client.establish_two_sessions()
 
@@ -3075,8 +3062,7 @@ async def test_server_stop_delivers_connection_close(test_certificates):
 
         server_task = asyncio.create_task(run_server())
 
-        connected = await client.connect()
-        assert connected is True
+        await client.connect()
 
         async def run_client():
             try:
@@ -3177,8 +3163,7 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
     client.on_session_closed(on_session_closed)
 
     try:
-        connected = await client.connect()
-        assert connected is True
+        await client.connect()
 
         async def run_client():
             try:
@@ -3270,13 +3255,13 @@ async def test_client_connect_rejects_server_without_transport_params(
     test_certificates,
     missing,
 ):
-    """サーバーが transport parameter を欠落させていると Client.connect() が False を返すことを確認
+    """サーバーが transport parameter を欠落させていると Client.connect() が HandshakeFailedError を送出することを確認
 
     draft-ietf-webtrans-http3-16 Section 3.1 の MUST (サーバーは
     max_datagram_frame_size > 0 を送ること) を満たさないサーバーとは
     セッションを確立しない。検証はハンドシェイク完了直後 (CONNECT 送出前)
-    に行われるため、クライアントは CONNECT を送らずに False を返す。
-    サーバー側で SESSION_READY が発火しないことをあわせて検証し、
+    に行われるため、クライアントは CONNECT を送らずに HandshakeFailedError
+    を送出する。サーバー側で SESSION_READY が発火しないことをあわせて検証し、
     CONNECT が送出されていないことを直接確認する。修正前は検証が
     無く、要件未達のサーバーとセッションが確立し得た。
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
@@ -3314,8 +3299,8 @@ async def test_client_connect_rejects_server_without_transport_params(
     )
 
     try:
-        connected = await client.connect()
-        assert connected is False
+        with pytest.raises(HandshakeFailedError):
+            await client.connect()
         assert client.is_connected is False
         # CONNECT が送出されていないため、サーバー側でセッション要求は来ない
         assert server_session_ready_called is False
@@ -3341,8 +3326,8 @@ async def test_server_rejects_client_without_transport_params(
     draft-ietf-webtrans-http3-16 Section 3.1 の MUST を満たさないクライアント
     に対し、サーバーは確立済み・新規の全セッションを malformed として扱い、
     H3_MESSAGE_ERROR (RFC 9114 Section 8.1) で接続を閉じる。connect() は
-    2xx 応答を待つため、拒否された場合は False を返す。戻り値と
-    on_session_ready 不発火で検証する。
+    2xx 応答を待つため、拒否された場合は ConnectRefusedError を送出する。
+    例外送出と on_session_ready 不発火で検証する。
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
     このテストの対象外である。
     """
@@ -3380,11 +3365,11 @@ async def test_server_rejects_client_without_transport_params(
 
     try:
         # 要件未達のクライアントの CONNECT はサーバーが H3_MESSAGE_ERROR
-        # で拒否する。connect() は応答待ちで False を返すことが期待される
-        # (draft-16 Section 3.2。CONNECTION_CLOSED の受信または応答なしで
-        # False)
-        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
-        assert connected is False
+        # で拒否する。connect() は応答待ちで ConnectRefusedError を送出す
+        # ることが期待される (draft-16 Section 3.2。ハンドシェイク完了後の
+        # CONNECTION_CLOSED 受信による拒否)
+        with pytest.raises(ConnectRefusedError):
+            await asyncio.wait_for(client.connect(), timeout=5.0)
         assert client.is_connected is False
         # 要件未達のクライアントのセッションは確立されない
         assert server_session_ready_called is False
@@ -3441,8 +3426,7 @@ async def test_client_connect_accepts_server_without_reset_stream_at(
 
     client_task = None
     try:
-        connected = await client.connect()
-        assert connected is True
+        await client.connect()
         assert client.is_connected is True
 
         async def run_client():
@@ -3516,7 +3500,7 @@ async def test_server_accepts_client_without_reset_stream_at(
 
     client_task = None
     try:
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         async def run_client():
             await client.run()
@@ -3538,3 +3522,33 @@ async def test_server_accepts_client_without_reset_stream_at(
         )
         await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_on_blackhole():
+    """応答が返らない UDP 宛先に対して connect() が ConnectTimeoutError を送出することを確認する
+
+    前提: blackhole IP (10.255.255.1) は issue の完了条件が例示する
+    ルーティングされるが応答を返さないアドレスである (経路の無い環境では
+    到達不能系の例外になり得る)。
+    期待値: timeout=1.0 で 1 秒強で ConnectTimeoutError が送出される。
+    """
+    from webtransport.h3 import Client
+
+    # blackhole 宛てのクライアントを構築する
+    client = Client(
+        url="https://10.255.255.1:443/webtransport",
+        verify_peer=False,
+    )
+    try:
+        # 計測区間の開始
+        start = time.monotonic()
+        with pytest.raises(ConnectTimeoutError):
+            await client.connect(timeout=1.0)
+        elapsed = time.monotonic() - start
+        # deadline 到達で打ち切られるため、1 秒強で復帰する
+        assert elapsed >= 0.9
+        assert elapsed < 10.0
+        assert client.is_connected is False
+    finally:
+        await client.close()

@@ -27,8 +27,18 @@ Usage:
 """
 
 from webtransport import h2, h3, http2, http3, quic
+from webtransport.exceptions import (
+    ConnectRefusedError,
+    ConnectTimeoutError,
+    HandshakeFailedError,
+    WebTransportConnectError,
+)
 
 __all__ = [
+    "ConnectRefusedError",
+    "ConnectTimeoutError",
+    "HandshakeFailedError",
+    "WebTransportConnectError",
     "h2",
     "h3",
     "http2",
