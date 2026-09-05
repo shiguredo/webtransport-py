@@ -85,6 +85,8 @@
   - @voluntas
 - [ADD] WebTransport の `connect()` 失敗を通知する例外階層 (`WebTransportConnectError` / `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を追加する
   - @voluntas
+- [ADD] QUIC クライアントにストリーム受信状態の破棄手段 (`discard_recv_state` と FIN 完了時の自動破棄) を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
