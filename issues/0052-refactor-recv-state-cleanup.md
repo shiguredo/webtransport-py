@@ -1,7 +1,7 @@
 # QUIC クライアントのストリーム受信状態の破棄手段を追加する
 
 - Created: 2026-08-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-05
 - Branch: feature/refactor-recv-state-cleanup
 - Polished: 2026-08-26
 - Reporter: @voluntas
@@ -60,4 +60,9 @@
 
 ## 解決方法
 
-(実装時に追記する)
+- `src/webtransport/quic/client.py` に `_discard_recv_state` (待機者起床付きのエントリ除去) と公開 API `discard_recv_state` を追加した
+- `recv_stream_data` の FIN 正常 return 3 箇所 (即時・ループ内・タイムアウト同時到達) の直後に自動破棄する
+- `recv_stream_data` と `wait_for_stream_reset` の待機ループ先頭でエントリの同一性を確認し、破棄検知時は `setdefault` で新しい空状態から待機を継続する (閉じ込め防止)
+- 両メソッドの docstring に破棄後の再呼び出し契約と並行呼び出し仕様を明記した
+- `tests/test_e2e_quic_recv_stream_data.py` に 5 本 (自動破棄・明示破棄・コールバック専用・待機者切り替え・破棄後再呼び出し) を追加した。FIN 後のサーバー自動 RESET は RFC 9000 Section 3.5 の MAY のため決定的に駆動できず、待機者切り替えテストでは RESET 注入を行わず起床と切り替えの観測に限定した。残課題として、RESET 保持エントリの FIN 自動破棄パス (破棄前のコード取得は既存の待機者経路で担保) の直接検証は残る
+- `CHANGES.md` の本体セクションに `[ADD]` を追加した
