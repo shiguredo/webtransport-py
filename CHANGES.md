@@ -246,6 +246,8 @@
   - @voluntas
 - [UPDATE] h2 テストのワイヤ組み立てヘルパーを conftest.py に集約する
   - @voluntas
+- [UPDATE] HTTP/2 のエラーコード 0x50 が draft 未確定値のプレースホルダである旨を注記する
+  - @voluntas
 - [FIX] QUIC 受信フロー制御テストの ACK 遅延タイマーを確実に満了させるよう修正する
   - @voluntas
 - [FIX] ブラウザテストの接続確立フレークをリトライで回避する

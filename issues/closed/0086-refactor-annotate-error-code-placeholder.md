@@ -1,7 +1,7 @@
 # HTTP/2 のエラーコード 0x50 (FLOW_CONTROL_ERROR) が 0xTBD のプレースホルダである旨をコメントに明記する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-05
 - Branch: feature/refactor-annotate-error-code-placeholder
 - Polished: 2026-09-05
 
@@ -27,3 +27,9 @@ draft-ietf-webtrans-http2-15 Section 3.4 のエラーコードは 0xTBD (未割�
 
 - 使用箇所周辺の残件コメントと、未注記テストの docstring にプレースホルダである旨が明記される
 - 全テストが通り、挙動が変わらないこと (フロー制御違反テストが従来どおり通る)
+
+## 解決方法
+
+- 0x50 を送出する集約点の `report_flow_control_error` と `report_recv_flow_control_error` (`src/bindings/webtransport_h2.cpp`) に 0xTBD プレースホルダ旨を注記した。全使用経路がこの 2 helper を経由するため、個別箇所への分散注記は行わない
+- 未注記のテスト docstring 2 件 (`test_close_session_flow_control_violation_internal_call_delivered`、`test_zero_peer_initial_data_limit_send_raises_flow_control_error`) に注記した。注記済みファイル (`recv_flow_control` 等) と比較言及のみの箇所 (`stream_state_error` 等) は対象外とした
+- `CHANGES.md` の `### misc` に `[UPDATE]` を追加した。挙動変更なし

@@ -178,8 +178,9 @@ def test_close_session_flow_control_violation_internal_call_delivered() -> None:
     """send_stream_data のフロー制御違反時の内部 close_session が送出されることを確認
 
     send_stream_data はフロー制御超過 (draft-15 Section 6.5 / 6.6) を検知
-    すると FLOW_CONTROL_ERROR (0x50) で close_session を内部から呼ぶ。この
-    呼び出しは is_terminated が立つ前に行われるため冒頭のガードで塞がれず、
+    すると FLOW_CONTROL_ERROR (0x50) で close_session を内部から呼ぶ。0x50 は
+    WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
+    draft で値が確定したら更新する。この呼び出しは is_terminated が立つ前に行われるため冒頭のガードで塞がれず、
     WT_CLOSE_SESSION がワイヤへ送出される (回帰ピン)。既に終了済みの場合は
     send_stream_data 冒頭のガードで内部呼び出し自体が発生しない。
     """
