@@ -14,6 +14,8 @@ from __future__ import annotations
 from conftest import (
     _connect_h2_session,
     _drain_events,
+    _encode_capsule,
+    _encode_data_frame,
     _encode_varint,
     _h2_pump,
 )
@@ -24,24 +26,9 @@ _WT_STREAM = 0x190B4D3C
 _PEER_EXCEEDED = "peer exceeded flow control limit"
 
 
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Type / Length / Payload のカプセルバイト列を組み立てる"""
-    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
-
-
 def _encode_wt_stream_capsule(stream_id: int, data: bytes) -> bytes:
     """WT_STREAM capsule (FIN なし) のワイヤバイト列を組み立てる"""
     return _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + data)
-
-
-def _encode_data_frame(session_id: int, payload: bytes) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる"""
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, 0x00])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:

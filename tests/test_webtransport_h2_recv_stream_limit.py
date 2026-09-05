@@ -12,6 +12,8 @@ from __future__ import annotations
 from conftest import (
     _connect_h2_session,
     _drain_events,
+    _encode_capsule,
+    _encode_data_frame,
     _encode_varint,
     _h2_pump,
 )
@@ -20,11 +22,6 @@ from webtransport import h2
 
 _WT_FLOW_CONTROL_ERROR = 0x50
 _MSG_STREAM_LIMIT = "peer exceeded Maximum Streams limit"
-
-
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Type / Length / Payload のカプセルバイト列を組み立てる"""
-    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
 
 
 def _encode_wt_stream_capsule(stream_id: int, data: bytes, fin: bool = False) -> bytes:
@@ -42,16 +39,6 @@ def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_si
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる"""
     return _encode_capsule(0x2843, error_code.to_bytes(4, "big") + error_message.encode("utf-8"))
-
-
-def _encode_data_frame(session_id: int, payload: bytes) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる"""
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, 0x00])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def _assert_flow_control_error_sent(server: h2.Session) -> None:

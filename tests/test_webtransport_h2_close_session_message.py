@@ -13,7 +13,8 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
-    _encode_varint,
+    _encode_capsule,
+    _encode_data_frame,
 )
 
 from webtransport import h2
@@ -23,27 +24,12 @@ _MSG_TOO_LONG = "WT_CLOSE_SESSION message exceeds 1024 bytes"
 _MSG_BAD_UTF8 = "WT_CLOSE_SESSION message is not valid UTF-8"
 
 
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Type / Length / Payload のカプセルバイト列を組み立てる"""
-    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
-
-
 def _encode_wt_close_session_capsule(error_code: int, message: bytes) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる
 
     メッセージは bytes のまま載せる。不正 UTF-8 と 1024 バイト超の注入に使う。
     """
     return _encode_capsule(0x2843, error_code.to_bytes(4, "big") + message)
-
-
-def _encode_data_frame(session_id: int, payload: bytes) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる"""
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, 0x00])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:

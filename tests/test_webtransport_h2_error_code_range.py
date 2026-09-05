@@ -14,6 +14,8 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
+    _encode_capsule,
+    _encode_data_frame,
     _encode_varint,
 )
 
@@ -24,11 +26,6 @@ _MAX_ERROR_CODE = 0xFFFFFFFF
 _OVER_MAX_ERROR_CODE = 0x100000000
 _MSG_RESET = "WT_RESET_STREAM error code exceeds 0xffffffff"
 _MSG_STOP = "WT_STOP_SENDING error code exceeds 0xffffffff"
-
-
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Type / Length / Payload のカプセルバイト列を組み立てる"""
-    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
 
 
 def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
@@ -60,16 +57,6 @@ def _encode_wt_stream_fin_capsule(stream_id: int, data: bytes) -> bytes:
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる"""
     return _encode_capsule(0x2843, error_code.to_bytes(4, "big") + error_message.encode("utf-8"))
-
-
-def _encode_data_frame(session_id: int, payload: bytes) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる"""
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, 0x00])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:

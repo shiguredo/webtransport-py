@@ -16,6 +16,7 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
+    _encode_data_frame,
     _encode_varint,
     _h2_pump,
 )
@@ -58,21 +59,6 @@ def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
     payload = _encode_varint(stream_id) + _encode_varint(error_code)
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
     return bytes([0x99, 0x0B, 0x4D, 0x3A, len(payload)]) + payload
-
-
-def _encode_data_frame(session_id: int, payload: bytes = b"") -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる
-
-    ピアからのカプセルをサーバーに注入するために使う。HTTP/2 DATA フレーム
-    のペイロードはカプセルバイト列そのもののため、フレームヘッダー + カプセル
-    で注入できる。
-    """
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, 0x00])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str = "") -> bytes:

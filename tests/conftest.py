@@ -185,6 +185,33 @@ def _encode_varint(value: int) -> bytes:
     return (0xC000000000000000 | value).to_bytes(8, "big")
 
 
+def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
+    """Capsule Protocol のカプセルバイト列を組み立てる (RFC 9297 Section 3.2)
+
+    Type / Length を RFC 9000 の可変長整数でエンコードするため、大きな
+    値にも対応する。HTTP/2 DATA フレームのペイロードはカプセルバイト列
+    そのもののため、ワイヤデータに対する部分列チェックで送出を検証できる。
+    """
+    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
+
+
+def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool = False) -> bytes:
+    """HTTP/2 DATA フレームのワイヤバイト列を組み立てる
+
+    END_STREAM フラグ (0x01) 付きでピアがストリームを閉じた場合を再現する。
+    h2 の公開 API に END_STREAM のみを送出する手段が存在しないため、
+    ワイヤ注入で再現する。WT_CLOSE_SESSION 後の half-close や DATAGRAM
+    capsule (Type 0x00) の送出検証にも使う。
+    """
+    flags = 0x01 if end_stream else 0x00
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes([0x00, flags])
+        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
+        + payload
+    )
+
+
 def _encode_wt_datagram(session_id: int, payload: bytes) -> bytes:
     """WebTransport データグラムのワイヤ形式を組み立てる
 

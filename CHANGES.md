@@ -242,6 +242,8 @@
   - @voluntas
 - [UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する
   - @voluntas
+- [UPDATE] h2 テストのワイヤ組み立てヘルパーを conftest.py に集約する
+  - @voluntas
 - [FIX] QUIC 受信フロー制御テストの ACK 遅延タイマーを確実に満了させるよう修正する
   - @voluntas
 - [FIX] ブラウザテストの接続確立フレークをリトライで回避する
