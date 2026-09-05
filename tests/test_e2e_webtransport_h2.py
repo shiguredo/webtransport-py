@@ -1,12 +1,18 @@
 """webtransport.h2 (WebTransport over HTTP/2) 高レベル API テスト"""
 
 import asyncio
+import socket
 import ssl
 import time
 from collections.abc import Awaitable, Callable
 
 import pytest
 
+from webtransport.exceptions import (
+    ConnectRefusedError,
+    ConnectTimeoutError,
+    HandshakeFailedError,
+)
 from webtransport.h2 import Server
 from webtransport.webtransport_ext import h2 as h2_low
 
@@ -362,8 +368,7 @@ async def test_server_client_communication(test_certificates):
 
     client.on_stream_data(on_client_stream_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     # WebTransport ストリームを開く (Capsule Protocol を使用)
     stream_id = await client.open_stream(unidirectional=False)
@@ -429,7 +434,7 @@ async def test_server_client_datagram_communication(test_certificates):
 
     client.on_datagram(on_client_datagram)
 
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -479,7 +484,7 @@ async def test_unidirectional_stream(test_certificates):
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -525,7 +530,7 @@ async def test_session_close_notifies_server(test_certificates):
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -576,7 +581,7 @@ async def test_server_resets_client_stream(test_certificates):
         reset_event.set()
 
     client.on_stream_reset(on_stream_reset)
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -625,7 +630,7 @@ async def test_chunked_stream_data(test_certificates):
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -664,7 +669,7 @@ async def test_is_webtransport_ready_after_settings(test_certificates):
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
     assert client._session is not None
     assert client._session.is_webtransport_ready() is True
 
@@ -722,7 +727,7 @@ async def test_recv_flow_control_violation_notifies_on_error(test_certificates):
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
     await asyncio.wait_for(session_ready.wait(), timeout=5.0)
 
     assert client._writer is not None
@@ -792,7 +797,7 @@ async def test_client_recv_flow_control_violation_notifies_on_error(test_certifi
 
     client.on_stream_data(on_stream_data)
     client.on_error(on_error)
-    assert await client.connect() is True
+    await client.connect()
     await asyncio.wait_for(session_ready.wait(), timeout=5.0)
 
     async def run_client() -> None:
@@ -863,7 +868,7 @@ async def test_server_stream_state_error_does_not_notify_on_error(test_certifica
         session_closed.set()
 
     client.on_session_closed(on_session_closed)
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -938,7 +943,7 @@ async def test_client_stream_state_error_does_not_notify_on_error(test_certifica
 
     client.on_stream_data(on_stream_data)
     client.on_error(on_error)
-    assert await client.connect() is True
+    await client.connect()
     await asyncio.wait_for(session_ready.wait(), timeout=5.0)
 
     async def run_client() -> None:
@@ -1138,15 +1143,15 @@ async def test_h2_server_accept_via_on_session_request(test_certificates, decisi
 
 
 @pytest.mark.asyncio
-async def test_h2_client_connect_returns_false_on_non_2xx_reject(test_certificates):
-    """on_session_request が 403 を返すと Client.connect() が False を返すことを確認
+async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
+    """on_session_request が 403 を返すと Client.connect() が HandshakeFailedError を送出することを確認
 
     draft-15 Section 3.2 により、非 2xx 応答はセッション未確立を意味する。
     bindings は拒否時に SESSION_REJECTED のみを発火し、SESSION_READY /
-    SESSION_CLOSED は発火しない。connect() の while ループが
+    SESSION_CLOSED は発火しない。connect() の待機ループが
     SESSION_REJECTED を検知しないと永久ブロックするため、実 Server と実
-    Client を組み合わせて有限時間で False が返ることを検証する (修正前は
-    wait_for のタイムアウトで失敗する)。
+    Client を組み合わせて有限時間で HandshakeFailedError が送出されることを
+    検証する (修正前は wait_for のタイムアウトで失敗する)。
     """
     from webtransport.h2 import Client, Server
 
@@ -1168,8 +1173,8 @@ async def test_h2_client_connect_returns_false_on_non_2xx_reject(test_certificat
     )
 
     try:
-        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
-        assert connected is False
+        with pytest.raises(HandshakeFailedError):
+            await asyncio.wait_for(client.connect(), timeout=5.0)
         assert client.is_connected is False
     finally:
         await client.close()
@@ -1267,8 +1272,7 @@ async def test_client_on_session_ready_fires(test_certificates):
     # SESSION_READY が消費されても、run() で発火することを確認する)
     client.on_session_ready(on_client_session_ready)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     async def run_client():
         try:
@@ -1320,8 +1324,7 @@ async def test_client_on_session_ready_after_connect(test_certificates):
         verify_peer=False,
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     # connect() の後にコールバックを登録する
     async def on_client_session_ready(session_id: int) -> None:
@@ -1348,3 +1351,65 @@ async def test_client_on_session_ready_after_connect(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_on_listen_only_server():
+    """accept しない TCP サーバーに対して connect() が ConnectTimeoutError を送出することを確認する
+
+    前提: listen のみで accept しない TCP サーバーには TCP ハンドシェイクが
+    通るが TLS 応答が返らない。
+    期待値: timeout=1.0 で 1 秒強で ConnectTimeoutError が送出される。
+    """
+    from webtransport.h2 import Client
+
+    # accept しないリスナーを用意する (カーネルの backlog が TCP
+    # ハンドシェイクを完了させるため、TLS 層で停滞する)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    client = Client(
+        url=f"https://127.0.0.1:{port}/webtransport",
+        verify_peer=False,
+    )
+    try:
+        # 計測区間の開始
+        start = time.monotonic()
+        with pytest.raises(ConnectTimeoutError):
+            await client.connect(timeout=1.0)
+        elapsed = time.monotonic() - start
+        # deadline 到達で打ち切られるため、1 秒強で復帰する
+        assert elapsed >= 0.9
+        assert elapsed < 10.0
+        assert client.is_connected is False
+    finally:
+        # 確立済み TCP 接続とリスナーを後始末する
+        await client.close()
+        listener.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_refused_on_closed_port():
+    """閉じたポートに対して connect() が ConnectRefusedError を送出することを確認する
+
+    前提: 127.0.0.1:1 は閉じており TCP RST が返る。
+    期待値: Python 標準の ConnectionRefusedError を原因として保持する
+    ConnectRefusedError が即座に送出される。
+    """
+    from webtransport.h2 import Client
+
+    client = Client(
+        url="https://127.0.0.1:1/webtransport",
+        verify_peer=False,
+    )
+    try:
+        with pytest.raises(ConnectRefusedError) as exc_info:
+            await client.connect(timeout=5.0)
+        # 自前の ConnectRefusedError ではなく builtin の ConnectionRefusedError
+        # (綴りが 3 文字違い) が __cause__ に保持される
+        assert isinstance(exc_info.value.__cause__, ConnectionRefusedError)
+        assert client.is_connected is False
+    finally:
+        await client.close()

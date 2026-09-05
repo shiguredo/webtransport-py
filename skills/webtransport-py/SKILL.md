@@ -47,7 +47,7 @@ uv add webtransport-py
 いずれのモジュールも次の共通パターンを持つ。
 
 - サーバー: コンストラクタ → `on_*()` でコールバック登録 → `async with server:` → `await server.run()`
-- クライアント: コンストラクタ → `on_*()` でコールバック登録 → `await client.connect()` (成功で `True`) → 送信 → `await client.run()` → `await client.close()`
+- クライアント: コンストラクタ → `on_*()` でコールバック登録 → `await client.connect()` (成功は例外なしの正常復帰、失敗は `WebTransportConnectError` 派生の具体例外) → 送信 → `await client.run()` → `await client.close()`
 - コールバックはすべて async 関数を渡す
 - `run()` は受信ループなので、クライアントでは `asyncio.wait_for(client.run(), timeout=...)` や `asyncio.create_task()` と組み合わせる。例外は `quic.Client` で、`connect()` がバックグラウンド受信タスクを起動するため `run()` は接続終了を待つだけの完了待ちになる (起動しなくても受信イベントは処理される。`asyncio.create_task(client.run())` で接続終了まで待てる)
 
@@ -131,7 +131,7 @@ async def stop() -> None
 ```python
 import asyncio
 
-from webtransport import h3
+from webtransport import WebTransportConnectError, h3
 
 
 async def main() -> None:
@@ -151,8 +151,11 @@ async def main() -> None:
 
     client.on_stream_data(on_stream_data)
 
-    if not await client.connect():
+    try:
+        await client.connect()
+    except WebTransportConnectError:
         print("接続失敗")
+        await client.close()
         return
 
     stream_id = await client.open_stream()
@@ -173,7 +176,7 @@ asyncio.run(main())
 `h3.Client.__init__(url, verify_peer=True, origin="", idle_timeout_ns=30_000_000_000, ca_file=None, verify_callback=None)`。`url` は `https://host:port/path` 形式 (ポート省略時 443)。`origin` は Origin ヘッダー値で、空文字なら付与しない。プロパティは `url` / `host` / `port` / `is_connected` / `session_id`。主なメソッド:
 
 ```python
-async def connect() -> bool
+async def connect(timeout: float = 10.0) -> None
 async def open_stream(unidirectional: bool = False) -> int
 async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(data: bytes) -> None
@@ -183,7 +186,7 @@ async def run() -> None
 async def close() -> None
 ```
 
-`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
 
 ### WebTransport over HTTP/2 (`webtransport.h2`)
 
@@ -207,7 +210,7 @@ async def reset_stream(stream_id: int, error_code: int = 0) -> None
 async def close_session(error_code: int = 0, error_message: str = "") -> None
 ```
 
-`h2.Client.__init__(url, verify_peer=True, origin="")`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect()` は対向の SETTINGS を待ってから Extended CONNECT を送る。
+`h2.Client.__init__(url, verify_peer=True, origin="")`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。
 
 ### QUIC (`webtransport.quic`)
 
@@ -654,7 +657,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `verify_peer` のデフォルトが層で異なる。asyncio の `Client` は `verify_peer=True`、Sans I/O の `quic.Config` は `verify_peer=False`。Sans I/O API を直接使うときは明示的に有効にすること
 - `open_stream()` の引数名とデフォルトが層で異なる。`quic` は `bidirectional: bool = True`、asyncio の `h3.Client` / `h2.Client` / `h2.SessionWriter` は `unidirectional: bool = False` (デフォルトは双方向)、asyncio の `h3.Server` は `unidirectional: bool = True` (デフォルトは単方向。双方向指定は `NotImplementedError`)。Sans I/O の `h3.Session` / `h2.Session` の `open_stream` はデフォルト値を持たず `is_unidirectional` を必ず指定する
 - タイマー API (`get_timeout()` / `handle_timeout()`) があるのは `quic.Connection` のみ。`http3` / `h3` / `http2` / `h2` の Sans I/O クラスには無い
-- 独自の例外クラスは定義されていない。生成系ファクトリの失敗は `RuntimeError`、asyncio ラッパーの未接続時操作も `RuntimeError` になる
+- 独自の例外クラスは `connect()` 失敗通知に限定して定義する (`WebTransportConnectError` と `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の派生 3 クラス。asyncio の `h3` / `h2` の `Client.connect()` が送出する)。それ以外の生成系ファクトリの失敗は `RuntimeError`、asyncio ラッパーの未接続時操作も `RuntimeError` になる
 - `webtransport.http2.ResponseWriter` はコールバック引数として渡されるが `http2/__init__.py` から再エクスポートされていない。型注釈で import する場合は `from webtransport.http2.server import ResponseWriter` を使う
 - `h2.CapsuleType` (Capsule Protocol の型定数) も再エクスポートされていない。必要なら `from webtransport.webtransport_ext.h2 import CapsuleType` を使う
 

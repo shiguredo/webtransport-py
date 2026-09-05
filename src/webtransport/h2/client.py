@@ -10,6 +10,12 @@ import asyncio
 import ssl
 from typing import TYPE_CHECKING, Self
 
+from webtransport.exceptions import (
+    ConnectRefusedError,
+    ConnectTimeoutError,
+    HandshakeFailedError,
+    WebTransportConnectError,
+)
 from webtransport.webtransport_ext import h2 as h2_low
 
 if TYPE_CHECKING:
@@ -236,12 +242,27 @@ class Client:
             await asyncio.sleep(0.001)
         return False
 
-    async def connect(self) -> bool:
+    async def connect(self, timeout: float = 10.0) -> None:
         """WebTransport セッションを確立する
 
-        Returns:
-            接続に成功した場合は True
+        deadline ベースで bounded に動作する。成功時は例外なしで復帰し、
+        失敗時は具体例外で理由を通知する。
+
+        Args:
+            timeout: 接続確立の打ち切り秒数。TCP 接続・SETTINGS 受信待ち・
+                2xx 応答待ちの全待機が同一 deadline を参照する。0 以下では
+                即座に ConnectTimeoutError を送出する
+
+        Raises:
+            ConnectTimeoutError: 待機中に成否を決めるイベントが届かず
+                deadline に達した場合
+            ConnectRefusedError: 待機中に TCP RST や TLS ハンドシェイク
+                前段の接続拒否が届いた場合
+            HandshakeFailedError: TLS 検証失敗や非 2xx 応答の場合
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
         if self._verify_peer:
             ssl_context = ssl.create_default_context()
         else:
@@ -250,74 +271,134 @@ class Client:
             ssl_context.verify_mode = ssl.CERT_NONE
         ssl_context.set_alpn_protocols(["h2"])
 
-        self._reader, self._writer = await asyncio.open_connection(
-            self._host,
-            self._port,
-            ssl=ssl_context,
-        )
+        try:
+            remaining = deadline - loop.time()
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    self._host,
+                    self._port,
+                    ssl=ssl_context,
+                ),
+                timeout=max(0.0, remaining),
+            )
+        except ssl.SSLError as exc:
+            # builtin の ConnectionRefusedError と自前の ConnectRefusedError
+            # (綴りが 3 文字違い) を取り違えないこと。前者は OSError 派生の
+            # 標準例外で __cause__ に保持し、後者を送出する
+            raise HandshakeFailedError(f"TLS handshake failed: {exc}") from exc
+        except TimeoutError as exc:
+            raise ConnectTimeoutError(
+                f"TCP connection did not complete within {timeout} seconds"
+            ) from exc
+        except ConnectionRefusedError as exc:
+            raise ConnectRefusedError(f"connection refused: {exc}") from exc
+        except OSError as exc:
+            raise ConnectRefusedError(f"connection failed before TLS handshake: {exc}") from exc
 
-        # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
-        # 書き換えない。役割 (クライアント) は create_client が決める
-        config = self._user_config if self._user_config is not None else h2_low.Config()
-        self._session = h2_low.Session.create_client(config)
+        try:
+            # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
+            # 書き換えない。役割 (クライアント) は create_client が決める
+            config = self._user_config if self._user_config is not None else h2_low.Config()
+            self._session = h2_low.Session.create_client(config)
 
-        await self._send_pending()
-
-        self._running = True
-
-        # draft-15 Section 3.1: SETTINGS 受信後に Extended CONNECT を送る
-        if not await self._wait_webtransport_ready():
-            return False
-
-        self._session_id = self._session.connect(self._url, self._origin)
-        if self._session_id < 0:
-            return False
-
-        await self._send_pending()
-
-        # 2xx レスポンス (200 OK 等) を待つ
-        while self._running:
-            await self._receive()
             await self._send_pending()
 
-            while True:
-                event = self._session.next_event()
-                if event is None:
-                    break
+            self._running = True
 
-                if (
-                    event.type == h2_low.EventType.SESSION_READY
-                    and event.session_id == self._session_id
-                ):
-                    self._connected = True
-                    # run() のイベントループで on_session_ready を発火させる
-                    # ため、イベントを未配信バッファへ引き継ぐ
-                    # (コールバック登録の順序に依存しないため)
-                    self._pending_session_ready = event.session_id
-                    return True
-
-                if (
-                    event.type == h2_low.EventType.SESSION_CLOSED
-                    and event.session_id == self._session_id
-                ):
+            # draft-15 Section 3.1: SETTINGS 受信後に Extended CONNECT を送る
+            remaining = deadline - loop.time()
+            if remaining <= 0 or not await self._wait_webtransport_ready(timeout_seconds=remaining):
+                if not self._running:
+                    # _receive が EOF を検知して停止した場合は接続喪失として
+                    # 拒否に寄せる (2xx 待ちの EOF 扱いと同型)
                     self._connected = False
-                    return False
+                    raise ConnectRefusedError("connection lost while waiting for SETTINGS")
+                self._running = False
+                raise ConnectTimeoutError(f"HTTP/2 SETTINGS not received within {timeout} seconds")
 
-                # 非 2xx 拒否 (draft-15 Section 3.2: 2xx 以外はセッション未確立)。
-                # SESSION_READY / SESSION_CLOSED のどちらも発火しないため、
-                # 待たずに False を返して終了する。bindings は 2xx 全般
-                # (先頭文字が '2') を確立とみなすため、2xx 非 200 (201 等)
-                # でも SESSION_READY が発火する
-                if (
-                    event.type == h2_low.EventType.SESSION_REJECTED
-                    and event.session_id == self._session_id
-                ):
+            self._session_id = self._session.connect(self._url, self._origin)
+            if self._session_id < 0:
+                self._running = False
+                raise HandshakeFailedError("failed to send Extended CONNECT request")
+
+            await self._send_pending()
+
+            # 2xx レスポンス (200 OK 等) を待つ
+            while self._running and loop.time() < deadline:
+                await self._receive()
+                await self._send_pending()
+
+                while True:
+                    event = self._session.next_event()
+                    if event is None:
+                        break
+
+                    if (
+                        event.type == h2_low.EventType.SESSION_READY
+                        and event.session_id == self._session_id
+                    ):
+                        self._connected = True
+                        # run() のイベントループで on_session_ready を発火させる
+                        # ため、イベントを未配信バッファへ引き継ぐ
+                        # (コールバック登録の順序に依存しないため)
+                        self._pending_session_ready = event.session_id
+                        return
+
+                    if (
+                        event.type == h2_low.EventType.SESSION_CLOSED
+                        and event.session_id == self._session_id
+                    ):
+                        self._connected = False
+                        self._running = False
+                        raise HandshakeFailedError("session closed before 2xx response")
+
+                    # 非 2xx 拒否 (draft-15 Section 3.2: 2xx 以外はセッション未確立)。
+                    # SESSION_READY / SESSION_CLOSED のどちらも発火しないため、
+                    # 待たずに HandshakeFailedError を送出して終了する。
+                    # bindings は 2xx 全般 (先頭文字が '2') を確立とみなすため、
+                    # 2xx 非 200 (201 等) でも SESSION_READY が発火する
+                    if (
+                        event.type == h2_low.EventType.SESSION_REJECTED
+                        and event.session_id == self._session_id
+                    ):
+                        self._connected = False
+                        self._running = False
+                        raise HandshakeFailedError("server rejected session with non-2xx response")
+
+                if not self._running:
                     self._connected = False
-                    return False
+                    raise ConnectRefusedError("connection lost while waiting for 2xx response")
 
-            await asyncio.sleep(0.001)
+                await asyncio.sleep(0.001)
 
-        return False
+            self._connected = False
+            self._running = False
+            raise ConnectTimeoutError(f"2xx response not received within {timeout} seconds")
+
+        except TimeoutError as exc:
+            # 将来 try 内に wait_for が追加される場合に備え、漏れた
+            # TimeoutError は deadline 到達として明示的に受ける
+            self._running = False
+            self._connected = False
+            if self._writer is not None:
+                self._writer.close()
+                self._writer = None
+            raise ConnectTimeoutError(
+                f"connection attempt did not complete within {timeout} seconds"
+            ) from exc
+        except (OSError, WebTransportConnectError) as exc:
+            # 確立中の素の OSError (drain 時の RST 等) は ConnectRefusedError
+            # に寄せて具体例外の契約を保つ。失敗パスの後始末は best-effort
+            # であり、完全な切断 (close_session 送出等) は呼び出し側の
+            # close() が担う
+            self._running = False
+            self._connected = False
+            if self._writer is not None:
+                self._writer.close()
+                self._writer = None
+            if isinstance(exc, WebTransportConnectError):
+                raise
+            raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """WebTransport ストリームを開く

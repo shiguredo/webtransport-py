@@ -6,7 +6,7 @@
 
 import asyncio
 
-from webtransport import h2
+from webtransport import WebTransportConnectError, h2
 
 
 async def main() -> None:
@@ -33,9 +33,11 @@ async def main() -> None:
     client.on_stream_data(on_stream_data)
     client.on_datagram(on_datagram)
 
-    connected = await client.connect()
-    if not connected:
-        print("接続失敗")
+    try:
+        await client.connect()
+    except WebTransportConnectError as exc:
+        print(f"接続失敗: {exc}")
+        await client.close()
         return
 
     print(f"WebTransport over HTTP/2 クライアント接続: {client.url}")

@@ -204,7 +204,7 @@ async def test_reset_stream_rejects_out_of_uint32(test_certificates) -> None:
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -303,7 +303,7 @@ async def test_connect_stream_reset_is_not_remapped(test_certificates) -> None:
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:
@@ -388,7 +388,7 @@ async def test_session_map_send_error_code_registered_data_stream(
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
-    assert await client.connect() is True
+    await client.connect()
 
     async def run_client() -> None:
         try:

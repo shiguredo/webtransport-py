@@ -17,6 +17,8 @@
   - @voluntas
 - [CHANGE] QUIC の `receive` / `send` / `create_client` / `accept` に実アドレスを必須化する
   - @voluntas
+- [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
+  - @voluntas
 - [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
   - @voluntas
 - [ADD] QUIC クライアントの証明書検証 (`ca_file` / カスタムコールバック) を実装する
@@ -81,6 +83,8 @@
   - @voluntas
 - [ADD] 配布 wheel に THIRD_PARTY_LICENSES.md を同梱する
   - @voluntas
+- [ADD] WebTransport の `connect()` 失敗を通知する例外階層 (`WebTransportConnectError` / `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
@@ -88,6 +92,8 @@
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
   - @voluntas
 - [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/2 の `Client.connect()` の無制限な待機ループを deadline 制御の bounded な待機に修正する
   - @voluntas
 - [FIX] HTTP/2 で FIN 送出済み・リセット送出済みのストリームへの send_stream_data / reset_stream がカプセルを送出してしまうのを修正する (draft-15 Section 6.2 / 6.4 の MUST 違反)
   - @voluntas
