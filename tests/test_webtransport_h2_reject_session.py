@@ -18,21 +18,15 @@ session is established when the server sends a 2xx response」により、非 2x
 from __future__ import annotations
 
 import pytest
-from conftest import _create_h2_session_pair, _drain_events, _h2_pump
+from conftest import (
+    _create_h2_session_pair,
+    _drain_events,
+    _encode_capsule,
+    _encode_data_frame,
+    _h2_pump,
+)
 
 from webtransport import h2
-
-
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Capsule Protocol のカプセルバイト列を組み立てる (RFC 9297 Section 3.2)
-
-    テストで使う小さい値のみ対応する (Type / Length とも 1 バイト varint)。
-    HTTP/2 DATA フレームのペイロードはカプセルバイト列そのもののため、
-    ワイヤデータに対する部分列チェックで送出を検証できる。DATAGRAM capsule
-    の Type は 0x00 である。
-    """
-    assert capsule_type < 0x40 and len(payload) < 0x40
-    return bytes([capsule_type, len(payload)]) + payload
 
 
 def _encode_status_headers(session_id: int, status_code: int) -> bytes:
@@ -56,22 +50,6 @@ def _encode_status_headers(session_id: int, status_code: int) -> bytes:
         + header_block
     )
     return frame
-
-
-def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool = False) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる
-
-    END_STREAM フラグ (0x01) 付きでピアがストリームを閉じた場合を再現する。
-    h2 の公開 API に END_STREAM のみを送出する手段が存在しないため、
-    ワイヤ注入で再現する。
-    """
-    flags = 0x01 if end_stream else 0x00
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, flags])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 @pytest.mark.parametrize(

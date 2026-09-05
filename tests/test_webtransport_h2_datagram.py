@@ -17,23 +17,11 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
+    _encode_capsule,
     _h2_pump,
 )
 
 from webtransport import h2
-
-
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Capsule Protocol のカプセルバイト列を組み立てる (RFC 9297 Section 3.2)
-
-    テストで使う小さい値のみ対応する (Type / Length とも 1 バイト varint)。
-    HTTP/2 DATA フレームのペイロードはカプセルバイト列そのもののため、
-    ワイヤデータに対する部分列チェックで送出を検証できる。テストのペイロード
-    は 64 バイト未満でありフレーム分割は起きない。DATAGRAM capsule の Type は
-    0x00 である。
-    """
-    assert capsule_type < 0x40 and len(payload) < 0x40
-    return bytes([capsule_type, len(payload)]) + payload
 
 
 def test_send_datagram_after_recv_wt_close_session_ignored() -> None:

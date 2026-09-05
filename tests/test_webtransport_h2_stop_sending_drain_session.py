@@ -19,6 +19,7 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
+    _encode_data_frame,
     _encode_varint,
     _h2_pump,
 )
@@ -47,22 +48,6 @@ def _encode_wt_drain_session_capsule() -> bytes:
     対する部分列チェックで送出を検証できる。
     """
     return b"\x80\x00\x78\xae\x00"
-
-
-def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool = False) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる
-
-    END_STREAM フラグ (0x01) 付きでピアがストリームを閉じた場合を再現する。
-    h2 の公開 API に WT_CLOSE_SESSION なしで END_STREAM のみを送出する手段が
-    存在しないため、ワイヤ注入で再現する。
-    """
-    flags = 0x01 if end_stream else 0x00
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, flags])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def test_stop_sending_after_peer_end_stream_not_sent() -> None:

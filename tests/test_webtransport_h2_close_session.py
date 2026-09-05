@@ -26,6 +26,7 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
+    _encode_data_frame,
     _encode_varint,
     _h2_pump,
 )
@@ -91,22 +92,6 @@ def _create_h2_session_pair_with_server_stream_limit(
     _h2_pump(server, client)
 
     return client, server
-
-
-def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool = False) -> bytes:
-    """DATA フレームのワイヤバイト列を組み立てる
-
-    END_STREAM フラグ (0x01) 付きで送出されたフレームを再現する。
-    close_session の half-close (draft-15 Section 6.12 の送出側 MUST) の
-    検証に使う。
-    """
-    flags = 0x01 if end_stream else 0x00
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x00, flags])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def test_close_session_double_call_single_capsule() -> None:
