@@ -1,7 +1,7 @@
 # Client.connect の無制限待機ループを修正して bounded にする
 
 - Created: 2026-08-07
-- Completed:
+- Completed: 2026-09-05
 - Branch: feature/fix-bounded-client-connect
 - Polished: 2026-08-26
 
@@ -75,11 +75,22 @@
 - `examples/webtransport/h2_client.py` (同上)
 - `tests/test_e2e_webtransport_h3.py` (成功時は `await client.connect()`、失敗時は `pytest.raises(...)` の形に)
 - `tests/test_e2e_webtransport_h2.py` (同上)
-- 新規テスト: 上記の既存 E2E ファイルに追加するのを第一選択とする。分離する場合は shiguredo-python の命名規則 (「単体テストのファイル名は `tests/test_<module>.py` とし、`src/<package>/<module>.py` に対応させること」) に従い `tests/test_e2e_webtransport_h3_connect_timeout.py` / `tests/test_e2e_webtransport_h2_connect_timeout.py` のように既存の E2E 命名パターンに揃える (`tests/test_client_connect_timeout.py` のような対応モジュールのない名前は避ける)
-- `skills/webtransport-py/SKILL.md` (Client 節の `connect` 記述を更新)
-- `CHANGES.md` (`[CHANGE]` シグネチャ変更 / `[ADD]` 例外クラス追加 / `[FIX]` 無限ループ修正の複数エントリを想定)
+- 新規テスト: 既存 E2E ファイルに追加した (shiguredo-python の命名規則に従い `tests/test_client_connect_timeout.py` のような対応モジュールのない名前は避けた)
+- `skills/webtransport-py/SKILL.md` (Client 節の `connect` 記述を更新した)
+- `CHANGES.md` (`[CHANGE]` シグネチャ変更 / `[ADD]` 例外クラス追加 / `[FIX]` 無限ループ修正の 3 エントリを追加した)
+
+### 実装内容
+
+- `src/webtransport/exceptions.py` を新設し、`WebTransportConnectError` を親とする `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` を定義した。`webtransport` トップレベルから再エクスポートする
+- `h3.Client.connect(timeout=10.0) -> None` に変更し、HANDSHAKE 待ち / SETTINGS 待ち / 2xx 応答待ちの 3 ループを同一 deadline で制御した。`max_attempts = 100` と `range(100)` の固定値を廃止し、ハンドシェイク中の `CONNECTION_CLOSE` と transport parameter 未達・非 2xx 応答は `HandshakeFailedError`、それ以外の `CONNECTION_CLOSE` は `ConnectRefusedError`、deadline 到達は `ConnectTimeoutError` とした
+- `h2.Client.connect(timeout=10.0) -> None` に変更し、`asyncio.open_connection` を残り時間の `wait_for` でラップした (標準 `ConnectionRefusedError` は wrap して `__cause__` に保持し、TLS 失敗は `HandshakeFailedError` とする)。`_wait_webtransport_ready` にも残り時間を渡し、2xx 応答待ちを deadline 制御にした
+- `tests/test_e2e_webtransport_h3.py` / `tests/test_e2e_webtransport_h2.py` の真偽値パターンを例外形式に書き換え、`tests/test_webtransport_h3_error_code_remap.py` の 3 箇所も追従した。新規テストとして blackhole 宛ての `ConnectTimeoutError` (h3)、無応答 TCP の `ConnectTimeoutError` と閉ポートの `ConnectRefusedError` (h2) を追加した。h3 の `ConnectRefusedError` 経路は既存の H3_MESSAGE_ERROR 拒否テストで決定的に検証する (サーバー停止をポーリングで競わせる方式は非決定的のため採用しない)
+- `examples/webtransport/h3_client.py` / `h2_client.py` を例外ハンドリング形式にし、`skills/webtransport-py/SKILL.md` の Client 節を更新した
+- `CHANGES.md` に `[CHANGE]` / `[ADD]` / `[FIX]` の 3 エントリを追加した
 
 ## 検証
+
+- 実装中に拡張モジュールのビルドが C++ ソースより古いことに気づき (`SESSION_REJECTED` 等が欠落)、`make develop` でリビルドした。生成物は追跡対象外のためコミットに含めない
 
 - `uv run pytest tests/` を通す
 - `uv run pytest tests/prop_webtransport_h3.py tests/prop_webtransport_h2.py` の Hypothesis プロパティテストがリグレッションしないことを確認する
