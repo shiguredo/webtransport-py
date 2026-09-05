@@ -49,3 +49,12 @@ draft-ietf-webtrans-http3-16 Section 5 で定義されるセッションフロ�
 - フロー制御無効時にクライアントが同時 2 セッションを張れない・サーバーが過剰 CONNECT を H3_REQUEST_REJECTED で拒否する・フロー制御カプセルを受信しても無視する
 - WT_MAX_STREAM_DATA / WT_STREAM_DATA_BLOCKED 受信でセッションエラーになる
 - 上記がテストで検証できる
+
+## pending にした理由
+
+- nghttp3 のフォークはしない方針のため、本 issue の前提 (nghttp3 側の補完実装) が実施できない。以下は fork なしでの代替案検証の記録である
+- 受信カプセル: WT コントロールストリームのバイト列は `nghttp3_conn_read_wt_ctrl_stream` (`_deps/nghttp3/webtransport/source/lib/nghttp3_conn.c`) に直行し、WT_CLOSE_SESSION 以外は `NGHTTP3_WT_CTRL_STREAM_STATE_IGN` で長さ分だけ読み飛ばされる。バインディング側で nghttp3 へ渡す前に先読み・除去する迂回は原理的には可能だが、パケット分割時の増分再構成と FIN 意味論の重複実装が必要になり、検証は未完了である
+- 送信カプセル: `nghttp3_conn_close_wt_session` 対称の送出 API は存在せず、バインディング側からの raw 注入の可否も未検証である
+- SETTINGS: HTTP/3 コントロールストリームは nghttp3 の専管であり、未知 SETTINGS ID はパース時に破棄される (`nghttp3_conn.c` の受信 SETTINGS 分岐の default)。`recv_settings2` が届けるのは既知項目のみのため、バインディング層から対向の WT 値を観測する経路が存在しない。送出側の `nghttp3_settings` にも WT 項目が無い。SETTINGS 部分の迂回は不可能であり、nghttp3 側の対応が不可避である
+- SETTINGS なしでは draft-ietf-webtrans-http3-16 Section 5.1 の有効化条件 (双方の非 0 送出) を満たせず、カプセル部分だけの片肺実装は仕様準拠にならない。よって本 issue 全体を保留する
+- 再開条件: nghttp3 上流が WT フロー制御 (SETTINGS 送受信・カプセル送受信) に対応したら reopened にする。フォーク方針が見直された場合も同様である
