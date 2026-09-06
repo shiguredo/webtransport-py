@@ -5,12 +5,12 @@
 QUIC                                                          M. Seemann
 Internet-Draft                                                          
 Intended status: Standards Track                         奥一穂 (K. Oku)
-Expires: 5 January 2027                                           Fastly
-                                                             4 July 2026
+Expires: 10 February 2027                                         Fastly
+                                                           9 August 2026
 
 
                 QUIC Stream Resets with Partial Delivery
-                draft-ietf-quic-reliable-stream-reset-09
+                draft-ietf-quic-reliable-stream-reset-10
 
 Abstract
 
@@ -53,9 +53,9 @@ Status of This Memo
 
 
 
-Seemann & Oku            Expires 5 January 2027                 [Page 1]
+Seemann & Oku           Expires 10 February 2027                [Page 1]
 
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
 
 
    Internet-Drafts are draft documents valid for a maximum of six months
@@ -63,7 +63,7 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 5 January 2027.
+   This Internet-Draft will expire on 10 February 2027.
 
 Copyright Notice
 
@@ -90,16 +90,16 @@ Table of Contents
      5.2.  Multiple RESET_STREAM_AT / RESET_STREAM frames  . . . . .   6
      5.3.  Stream States . . . . . . . . . . . . . . . . . . . . . .   7
      5.4.  Handling STOP_SENDING . . . . . . . . . . . . . . . . . .   7
-   6.  Implementation Guidance . . . . . . . . . . . . . . . . . . .   7
+   6.  Implementation Guidance . . . . . . . . . . . . . . . . . . .   8
    7.  Security Considerations . . . . . . . . . . . . . . . . . . .   8
    8.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .   8
      8.1.  QUIC Transport Parameter  . . . . . . . . . . . . . . . .   8
-     8.2.  QUIC Frame Types  . . . . . . . . . . . . . . . . . . . .   8
+     8.2.  QUIC Frame Types  . . . . . . . . . . . . . . . . . . . .   9
    9.  References  . . . . . . . . . . . . . . . . . . . . . . . . .   9
      9.1.  Normative References  . . . . . . . . . . . . . . . . . .   9
      9.2.  Informative References  . . . . . . . . . . . . . . . . .   9
-   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .   9
-   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .   9
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  10
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  10
 
 
 
@@ -109,9 +109,9 @@ Table of Contents
 
 
 
-Seemann & Oku            Expires 5 January 2027                 [Page 2]
+Seemann & Oku           Expires 10 February 2027                [Page 2]
 
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
 
 
 1.  Introduction
@@ -128,7 +128,7 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    length encoded integer to associate a stream with a particular
    WebTransport session.
 
-   Since QUIC does not provide guaranteed delivery of steam data for
+   Since QUIC does not provide guaranteed delivery of stream data for
    reset streams, it is possible that a receiver is unable to read
    critical information.  In the example above, a reset stream can cause
    the receiver to fail to associate incoming streams with their
@@ -146,9 +146,11 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    This document extends QUIC with a variant of stream resets that
    reliably delivers the beginning of a stream up to a sender-specified
    offset, communicated using the RESET_STREAM_AT frame.  It can be
-   considered a form of range-based partial reliability.  As a variant
-   of reset, application protocols continue to treat this stream
-   function as an abrupt termination; see Section 2.4 of [RFC9000].
+   considered a form of range-based partial reliability.  For the
+   receiving application, RESET_STREAM_AT remains an abrupt termination:
+   after providing the stream data guaranteed by the Reliable Size, the
+   QUIC implementation signals a stream reset rather than a clean end of
+   the stream; see Section 2.4 of [RFC9000].
 
 2.  Conventions and Definitions
 
@@ -163,11 +165,9 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
 
 
 
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 3]
+Seemann & Oku           Expires 10 February 2027                [Page 3]
 
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
 
 
 3.  Transport Parameter
@@ -178,10 +178,11 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    this transport parameter MUST treat the receipt of a non-empty value
    as a connection error of type TRANSPORT_PARAMETER_ERROR.
 
-   When using 0-RTT, both endpoints MUST remember the value of this
-   transport parameter.  This allows use of this extension in 0-RTT
-   packets.  When the server accepts 0-RTT data, the server MUST NOT
-   disable this extension on the resumed connection.
+   When using 0-RTT, both endpoints MUST remember whether this extension
+   was advertised by the server (Section 7.4.1 of [RFC9000]).  This
+   allows use of this extension in 0-RTT packets.  When the server
+   accepts 0-RTT data, the server MUST NOT disable this extension on the
+   resumed connection.
 
 4.  RESET_STREAM_AT Frame
 
@@ -215,16 +216,19 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
       data that needs to be delivered to the application even though the
       stream is reset.
 
+
+
+
+
+
+Seemann & Oku           Expires 10 February 2027                [Page 4]
+
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
+
+
    If the Reliable Size is larger than the Final Size, the receiver MUST
    close the connection with a connection error of type
    FRAME_ENCODING_ERROR.
-
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 4]
-
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
-
 
    As with RESET_STREAM (Section 19.4 of [RFC9000]), Final Size is
    subject to stream and connection-level flow control.  An endpoint
@@ -263,24 +267,23 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    delivering data beyond the specified offset to the receiving
    application.
 
-   Note that a Reliable Size value of zero is valid.  A RESET_STREAM_AT
-   frame with this value is logically equivalent to a RESET_STREAM frame
-   (Section 3.2 of [RFC9000]).  When resetting a stream without the
-   intent to deliver any data to the receiver, the sender MAY use either
-   RESET_STREAM or RESET_STREAM_AT with a Reliable Size of zero.
+   Note that a Reliable Size value of zero is valid.  For purposes of
+   data delivery, a RESET_STREAM_AT frame with this value is logically
+   equivalent to a RESET_STREAM frame (Section 3.2 of [RFC9000]).  When
+   resetting a stream without the intent to deliver any data to the
+   receiver, the sender MAY use either RESET_STREAM or RESET_STREAM_AT
+   with a Reliable Size of zero.
+
+
+
+
+Seemann & Oku           Expires 10 February 2027                [Page 5]
+
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
+
 
    As stated in Section 4.5 of [RFC9000], the final size for a stream
    cannot change once it is known.
-
-
-
-
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 5]
-
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
-
 
 5.1.  Sending RESET_STREAM_AT after FIN
 
@@ -296,20 +299,20 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
 
    The initiator MAY send multiple RESET_STREAM_AT frames for the same
    stream in order to reduce the Reliable Size.  It MAY also send a
-   RESET_STREAM frame, which is equivalent to sending a RESET_STREAM_AT
-   frame with a Reliable Size of 0.  When reducing the Reliable Size,
-   the sender MUST retransmit the RESET_STREAM_AT frame carrying the
-   smallest Reliable Size as well as stream data up to that size, until
-   all acknowledgements for the stream data and the RESET_STREAM_AT
-   frame are received.
+   RESET_STREAM frame, which for purposes of data delivery is equivalent
+   to sending a RESET_STREAM_AT frame with a Reliable Size of zero.
+   When reducing the Reliable Size, the sender MUST retransmit the
+   RESET_STREAM_AT frame carrying the smallest Reliable Size as well as
+   stream data up to that size, until all acknowledgements for the
+   stream data and the RESET_STREAM_AT frame are received.
 
    When sending multiple RESET_STREAM_AT or RESET_STREAM frames for the
    same stream, the initiator MUST NOT increase the Reliable Size.
 
    When receiving a RESET_STREAM_AT frame with a lower Reliable Size,
-   the receiver only needs to provide data up the lower Reliable Size to
-   the application.  It MUST NOT expect the sender to deliver any data
-   beyond that byte offset.
+   the receiver only needs to provide data up to the lower Reliable Size
+   to the application.  It MUST NOT expect the sender to deliver any
+   data beyond that byte offset.
 
    Reordering of packets might lead to a RESET_STREAM_AT frame with a
    higher Reliable Size being received after a RESET_STREAM_AT frame
@@ -323,20 +326,24 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    connection error of type STREAM_STATE_ERROR or FINAL_SIZE_ERROR,
    respectively.
 
+
+
+
+
+
+
+
+Seemann & Oku           Expires 10 February 2027                [Page 6]
+
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
+
+
    While multiple RESET_STREAM_AT frames can reduce Reliable Size, some
    applications might need to ensure that a minimum amount of data is
    always delivered on a stream.  Application protocols can establish
    rules for streams that ensure that Reliable Size is not reduced below
    a certain threshold if that is necessary to ensure correct operation
    of the protocol.
-
-
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 6]
-
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
-
 
 5.3.  Stream States
 
@@ -355,17 +362,19 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    the application resets a stream and all bytes up to the specified
    Reliable Size have already been sent and acknowledged.  Conversely,
    if bytes below that offset still need to be sent or acknowledged, the
-   transition might take multiple network roundtrips and might require
-   additional flow control credit issued by the receiver.
+   transition might take multiple network roundtrips.
+
+   Note that entering the "Data Sent" state might itself be deferred,
+   because flow control can prevent the sender from transmitting the
+   RESET_STREAM_AT frame; see Section 4.
 
    On the receiving side, when a RESET_STREAM_AT frame is received, the
    receiving part of the stream enters the "Size Known" state.  Once all
    data up to the smallest Reliable Size have been received, it enters
-   the "Data Recvd" state.  Similarly to the sending side, transition
-   from "Size Known" to "Data Recvd" might happen immediately, or might
-   require additional network roundtrips while the sender transmits
-   remaining bytes up to the smallest Reliable Size.  This might require
-   the receiver to issue additional flow control credit.
+   the "Data Recvd" state.  Similarly to the sending side, the
+   transition from "Size Known" to "Data Recvd" might happen
+   immediately, or might require additional network roundtrips while the
+   sender transmits remaining bytes up to the smallest Reliable Size.
 
 5.4.  Handling STOP_SENDING
 
@@ -376,6 +385,15 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    the peer has already indicated that it does not intend to process any
    further data.
 
+
+
+
+
+Seemann & Oku           Expires 10 February 2027                [Page 7]
+
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
+
+
 6.  Implementation Guidance
 
    In terms of transport machinery, the RESET_STREAM_AT frame is more
@@ -385,14 +403,6 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
 
    To the endpoints, the main differences from closing a stream by using
    the FIN bit are:
-
-
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 7]
-
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
-
 
    *  the offset up to which the sender commits to sending might be
       smaller than Final Size,
@@ -432,6 +442,14 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
 
    Change Controller:  IETF (iesg@ietf.org)
 
+
+
+
+Seemann & Oku           Expires 10 February 2027                [Page 8]
+
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
+
+
    Contact:  QUIC Working Group (quic@ietf.org)
 
 8.2.  QUIC Frame Types
@@ -441,14 +459,6 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    fields are registered:
 
    Value:  0x24
-
-
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 8]
-
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
-
 
    Frame Type Name:  RESET_STREAM_AT
 
@@ -484,9 +494,17 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
    [WEBTRANSPORT]
               Frindell, A., Kinnear, E., and V. Vasiliev, "WebTransport
               over HTTP/3", Work in Progress, Internet-Draft, draft-
-              ietf-webtrans-http3-15, 2 March 2026,
+              ietf-webtrans-http3-16, 6 July 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-
-              webtrans-http3-15>.
+              webtrans-http3-16>.
+
+
+
+
+Seemann & Oku           Expires 10 February 2027                [Page 9]
+
+Internet-Draft  QUIC Stream Resets with Partial Delivery     August 2026
+
 
 Acknowledgments
 
@@ -498,12 +516,6 @@ Authors' Addresses
 
    Marten Seemann
    Email: martenseemann@gmail.com
-
-
-
-Seemann & Oku            Expires 5 January 2027                 [Page 9]
-
-Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
 
 
    Kazuho Oku
@@ -545,16 +557,4 @@ Internet-Draft  QUIC Stream Resets with Partial Delivery       July 2026
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-Seemann & Oku            Expires 5 January 2027                [Page 10]
+Seemann & Oku           Expires 10 February 2027               [Page 10]
