@@ -239,8 +239,7 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     closing_expiry_ns_ = other.closing_expiry_ns_;
     close_packet_delivered_once_ = other.close_packet_delivered_once_;
     early_data_attempted_ = other.early_data_attempted_;
-    early_data_rejected_event_pushed_ =
-        other.early_data_rejected_event_pushed_;
+    early_data_rejected_event_pushed_ = other.early_data_rejected_event_pushed_;
     last_session_ticket_ = std::move(other.last_session_ticket_);
     local_addr_ = other.local_addr_;
     local_addrlen_ = other.local_addrlen_;
@@ -290,9 +289,8 @@ std::unique_ptr<QuicConnection> QuicConnection::accept(
     const std::string& remote_host,
     uint16_t remote_port) {
   auto conn = std::unique_ptr<QuicConnection>(new QuicConnection(true, config));
-  if (!conn->initialize_server_from_packet(initial_packet, local_host,
-                                           local_port, remote_host,
-                                           remote_port)) {
+  if (!conn->initialize_server_from_packet(
+          initial_packet, local_host, local_port, remote_host, remote_port)) {
     return nullptr;
   }
   return conn;
@@ -482,15 +480,13 @@ bool QuicConnection::setup_client_session() {
       !config_.verify_callback) {
     in_addr ipv4{};
     in6_addr ipv6{};
-    const bool is_ip = inet_pton(AF_INET, config_.server_name.c_str(), &ipv4) ==
-                           1 ||
-                       inet_pton(AF_INET6, config_.server_name.c_str(), &ipv6) ==
-                           1;
+    const bool is_ip =
+        inet_pton(AF_INET, config_.server_name.c_str(), &ipv4) == 1 ||
+        inet_pton(AF_INET6, config_.server_name.c_str(), &ipv6) == 1;
     if (is_ip) {
       X509_VERIFY_PARAM* param = SSL_get0_param(ssl_);
-      if (param == nullptr ||
-          X509_VERIFY_PARAM_set1_ip_asc(param, config_.server_name.c_str()) !=
-              1) {
+      if (param == nullptr || X509_VERIFY_PARAM_set1_ip_asc(
+                                  param, config_.server_name.c_str()) != 1) {
         return false;
       }
     } else if (SSL_set1_host(ssl_, config_.server_name.c_str()) != 1) {
@@ -502,8 +498,7 @@ bool QuicConnection::setup_client_session() {
   if (!config_.session_ticket.empty()) {
     const uint8_t* pointer = config_.session_ticket.data();
     SSL_SESSION* session = d2i_SSL_SESSION(
-        nullptr, &pointer,
-        static_cast<long>(config_.session_ticket.size()));
+        nullptr, &pointer, static_cast<long>(config_.session_ticket.size()));
     if (session == nullptr) {
       return false;
     }
@@ -511,8 +506,7 @@ bool QuicConnection::setup_client_session() {
       SSL_SESSION_free(session);
       return false;
     }
-    if (config_.enable_early_data &&
-        SSL_SESSION_early_data_capable(session)) {
+    if (config_.enable_early_data && SSL_SESSION_early_data_capable(session)) {
       // 0-RTT トランスポートパラメータを記憶していない場合は試行しない
       // (RFC 9000 Section 7.4.1 の MUST。将来改訂される可能性がある)
       if (!config_.early_transport_params.empty()) {
@@ -942,7 +936,8 @@ bool QuicConnection::update_path_addresses(const std::string& local_host,
 // 先頭 2 ビットでエンコード長 (1 / 2 / 4 / 8 バイト) が決まる。
 // @return デコードした値。不正な入力 (長さ不足) の場合は 0 を返し、
 //   *consumed に 0 をセットする
-static uint64_t decode_varint(const uint8_t* data, size_t len,
+static uint64_t decode_varint(const uint8_t* data,
+                              size_t len,
                               size_t* consumed) {
   if (len == 0) {
     *consumed = 0;
@@ -1052,7 +1047,8 @@ QuicPacket QuicConnection::make_packet(const uint8_t* data,
   // パースして short header の有無で行う (RFC 9000 Section 12.2 のコアレッ
   // シングにより、1 データグラムに複数の QUIC パケットが連結されることがあり、
   // 先頭バイトだけでは 1RTT パケットの書き出しを検出できない)
-  if (handshake_completed_ && len > 0 && contains_short_header_packet(data, len)) {
+  if (handshake_completed_ && len > 0 &&
+      contains_short_header_packet(data, len)) {
     post_handshake_write_done_ = true;
   }
 
@@ -1141,7 +1137,11 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
     switch (rv) {
       case NGTCP2_ERR_DRAINING:
         closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+        push_event({QuicEventType::ConnectionClosed,
+                    -1,
+                    {},
+                    false,
+                    0,
                     "connection draining"});
         break;
       case NGTCP2_ERR_CLOSING:
@@ -1158,13 +1158,21 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
           close_packet_armed_ = true;
         } else {
           closed_ = true;
-          push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+          push_event({QuicEventType::ConnectionClosed,
+                      -1,
+                      {},
+                      false,
+                      0,
                       "connection closing"});
         }
         break;
       case NGTCP2_ERR_DROP_CONN:
         closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+        push_event({QuicEventType::ConnectionClosed,
+                    -1,
+                    {},
+                    false,
+                    0,
                     "connection dropped"});
         break;
       case NGTCP2_ERR_RETRY:
@@ -1172,12 +1180,20 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
         // 応答だが、本ライブラリのサーバーには送出手段が無く継続不能なため、
         // 他の終了系エラーと同じく closed_ を立てる。
         closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+        push_event({QuicEventType::ConnectionClosed,
+                    -1,
+                    {},
+                    false,
+                    0,
                     "retry required"});
         break;
       case NGTCP2_ERR_CRYPTO:
         closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+        push_event({QuicEventType::ConnectionClosed,
+                    -1,
+                    {},
+                    false,
+                    0,
                     "crypto error"});
         break;
       case NGTCP2_ERR_DECRYPT:
@@ -1190,7 +1206,11 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
         // その他のエラーは接続を閉じる
         if (rv < NGTCP2_ERR_FATAL) {
           closed_ = true;
-          push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+          push_event({QuicEventType::ConnectionClosed,
+                      -1,
+                      {},
+                      false,
+                      0,
                       "fatal error: " + std::string(ngtcp2_strerror(rv))});
         }
         break;
@@ -1324,8 +1344,8 @@ std::optional<QuicPacket> QuicConnection::send() {
       }
 
       if (nwrite > 0) {
-        return make_packet(send_buffer_.data(),
-                           static_cast<size_t>(nwrite), path);
+        return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
+                           path);
       }
 
       // nwrite == 0: パケットを書けなかった (cwnd 枯渇など)。
@@ -1540,18 +1560,30 @@ void QuicConnection::handle_timeout() {
     switch (rv) {
       case NGTCP2_ERR_IDLE_CLOSE:
         closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+        push_event({QuicEventType::ConnectionClosed,
+                    -1,
+                    {},
+                    false,
+                    0,
                     "idle timeout"});
         break;
       case NGTCP2_ERR_HANDSHAKE_TIMEOUT:
         closed_ = true;
-        push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+        push_event({QuicEventType::ConnectionClosed,
+                    -1,
+                    {},
+                    false,
+                    0,
                     "handshake timeout"});
         break;
       default:
         if (rv < NGTCP2_ERR_FATAL) {
           closed_ = true;
-          push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+          push_event({QuicEventType::ConnectionClosed,
+                      -1,
+                      {},
+                      false,
+                      0,
                       "timeout error: " + std::string(ngtcp2_strerror(rv))});
         }
         break;
@@ -1694,8 +1726,13 @@ void QuicConnection::close_stream(int64_t stream_id, uint64_t error_code) {
     // 致命的エラーの場合のみ接続を閉じる
     if (rv < NGTCP2_ERR_FATAL) {
       closed_ = true;
-      push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
-                  "stream shutdown error: " + std::string(ngtcp2_strerror(rv))});
+      push_event(
+          {QuicEventType::ConnectionClosed,
+           -1,
+           {},
+           false,
+           0,
+           "stream shutdown error: " + std::string(ngtcp2_strerror(rv))});
     }
   }
   stream_buffers_.erase(stream_id);
@@ -1710,7 +1747,11 @@ void QuicConnection::stop_sending(int64_t stream_id, uint64_t error_code) {
   int rv = ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, error_code);
   if (rv != 0 && rv != NGTCP2_ERR_STREAM_NOT_FOUND && rv < NGTCP2_ERR_FATAL) {
     closed_ = true;
-    push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+    push_event({QuicEventType::ConnectionClosed,
+                -1,
+                {},
+                false,
+                0,
                 "stop sending error: " + std::string(ngtcp2_strerror(rv))});
   }
 }
@@ -1739,7 +1780,11 @@ void QuicConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
   if (rv != 0 && rv != NGTCP2_ERR_STREAM_NOT_FOUND) {
     if (rv < NGTCP2_ERR_FATAL) {
       closed_ = true;
-      push_event({QuicEventType::ConnectionClosed, -1, {}, false, 0,
+      push_event({QuicEventType::ConnectionClosed,
+                  -1,
+                  {},
+                  false,
+                  0,
                   "reset stream error: " + std::string(ngtcp2_strerror(rv))});
     }
   }
@@ -2313,8 +2358,7 @@ void QuicConnection::push_event(QuicEvent event) {
 // ========== ngtcp2 / BoringSSL コールバック ==========
 
 int QuicConnection::new_session_cb(SSL* ssl, SSL_SESSION* session) {
-  auto* conn_ref =
-      static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
+  auto* conn_ref = static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
   if (conn_ref == nullptr) {
     return 0;
   }
@@ -2348,8 +2392,7 @@ int QuicConnection::new_session_cb(SSL* ssl, SSL_SESSION* session) {
 ssl_verify_result_t QuicConnection::custom_verify_cb(SSL* ssl,
                                                      uint8_t* out_alert) {
   (void)out_alert;
-  auto* conn_ref =
-      static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
+  auto* conn_ref = static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
   if (conn_ref == nullptr) {
     return ssl_verify_invalid;
   }
@@ -2757,8 +2800,8 @@ void bind_quic(nb::module_& m) {
                 config.session_ticket.size());
           },
           [](QuicConfig& config, nb::bytes value) {
-            config.session_ticket.assign(
-                value.c_str(), value.c_str() + value.size());
+            config.session_ticket.assign(value.c_str(),
+                                         value.c_str() + value.size());
           },
           "セッションチケット (DER bytes)")
       .def_prop_rw(
@@ -2769,8 +2812,8 @@ void bind_quic(nb::module_& m) {
                              config.early_transport_params.size());
           },
           [](QuicConfig& config, nb::bytes value) {
-            config.early_transport_params.assign(
-                value.c_str(), value.c_str() + value.size());
+            config.early_transport_params.assign(value.c_str(),
+                                                 value.c_str() + value.size());
           },
           "0-RTT トランスポートパラメータ (bytes)");
 
@@ -2804,8 +2847,9 @@ void bind_quic(nb::module_& m) {
       .def_ro("fin", &QuicEvent::fin, "FIN フラグ")
       .def_ro("error_code", &QuicEvent::error_code, "エラーコード")
       .def_ro("reason", &QuicEvent::reason, "理由")
-      .def_ro("offset", &QuicEvent::offset,
-              "STREAM_DATA イベントのストリーム上のオフセット (他イベントでは 0)");
+      .def_ro(
+          "offset", &QuicEvent::offset,
+          "STREAM_DATA イベントのストリーム上のオフセット (他イベントでは 0)");
 
   // QuicPacket
   nb::class_<QuicPacket>(quic_m, "Packet", "QUIC UDP パケット (パス情報付き)")
@@ -2813,9 +2857,8 @@ void bind_quic(nb::module_& m) {
       .def_prop_ro(
           "data",
           [](const QuicPacket& packet) {
-            return nb::bytes(
-                reinterpret_cast<const char*>(packet.data.data()),
-                packet.data.size());
+            return nb::bytes(reinterpret_cast<const char*>(packet.data.data()),
+                             packet.data.size());
           },
           "パケットデータ")
       .def_ro("local_host", &QuicPacket::local_host, "ローカルホスト")
@@ -2906,12 +2949,10 @@ void bind_quic(nb::module_& m) {
             }
             return nb::none();
           },
-          nb::sig("def send(self) -> Packet | None"),
-          "送信すべきデータを取得")
+          nb::sig("def send(self) -> Packet | None"), "送信すべきデータを取得")
       .def(
           "initiate_migration",
-          [](QuicConnection& self,
-             std::pair<std::string, uint16_t> local_addr,
+          [](QuicConnection& self, std::pair<std::string, uint16_t> local_addr,
              std::pair<std::string, uint16_t> remote_addr) {
             return self.initiate_migration(local_addr.first, local_addr.second,
                                            remote_addr.first,
@@ -3189,11 +3230,10 @@ void bind_quic(nb::module_& m) {
           &QuicConnection::remote_max_datagram_frame_size,
           nb::sig("def remote_max_datagram_frame_size(self) -> int | None"),
           "ピアの Datagram フレームサイズ上限")
-      .def_prop_ro(
-          "remote_reset_stream_at",
-          &QuicConnection::remote_reset_stream_at,
-          nb::sig("def remote_reset_stream_at(self) -> bool | None"),
-          "ピアが reset_stream_at transport parameter を送信したか")
+      .def_prop_ro("remote_reset_stream_at",
+                   &QuicConnection::remote_reset_stream_at,
+                   nb::sig("def remote_reset_stream_at(self) -> bool | None"),
+                   "ピアが reset_stream_at transport parameter を送信したか")
       .def_prop_ro("local_max_idle_timeout",
                    &QuicConnection::local_max_idle_timeout,
                    nb::sig("def local_max_idle_timeout(self) -> int"),

@@ -1,4 +1,4 @@
-.PHONY: wheel develop clean test lint format
+.PHONY: wheel develop clean test
 
 # リリース用。PEP 517 isolation ありで再現性を優先する
 wheel:
@@ -17,10 +17,3 @@ develop:
 
 test:
 	uv run pytest tests/ -v --timeout=30
-
-lint:
-	uv run ruff check src/ tests/ examples/
-
-format:
-	clang-format -i src/*.cpp src/bindings/*.cpp src/bindings/*.h
-	uv run ruff format src/ tests/ examples/

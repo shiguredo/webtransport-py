@@ -32,18 +32,20 @@ from webtransport import Server, SessionWriter
 
 server = Server(
     host="0.0.0.0",
-    port_h3=4433,           # UDP。None なら H3 を listen しない
-    port_h2=8443,           # TCP。None なら H2 を listen しない
+    port_h3=4433,  # UDP。None なら H3 を listen しない
+    port_h2=8443,  # TCP。None なら H2 を listen しない
     certfile="cert.pem",
     keyfile="key.pem",
     allowed_origins=None,
     idle_timeout_ns=30_000_000_000,
 )
 
+
 @server.on_session_ready
 async def _(writer: SessionWriter) -> None:
     # writer.transport は "h3" または "h2"
     await writer.send_datagram(b"hello")
+
 
 await server.serve()  # 2 つの内部サーバーを並行起動、両方停止するまで await
 ```

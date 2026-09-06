@@ -52,10 +52,7 @@
 
 - `src/webtransport/h2/client.py` の `Client.connect` メインループに以下の分岐を追加:
   ```python
-  if (
-      event.type == h2_low.EventType.SESSION_REJECTED
-      and event.session_id == self._session_id
-  ):
+  if event.type == h2_low.EventType.SESSION_REJECTED and event.session_id == self._session_id:
       self._connected = False
       return False
   ```

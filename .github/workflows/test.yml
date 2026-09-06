@@ -55,15 +55,14 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv sync --only-group test --only-group lint
+          uv sync --only-group test
           uv pip install wheelhouse/*.whl
 
-      - name: Run lint
-        run: |
-          uv run ruff check src/ tests/ examples/
-          uv run ty check src
-        env:
-          UV_NO_SYNC: 1
+      # prek で静的チェックを行う。pytest は wheel に対する別ステップで実行するため除外する
+      - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
+        with:
+          prek-version: 0.5.2
+          extra-args: --all-files --skip pytest
 
       - name: Run tests
         run: |
@@ -115,15 +114,14 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv sync --only-group test --only-group lint
+          uv sync --only-group test
           uv pip install wheelhouse/*.whl
 
-      - name: Run lint
-        run: |
-          uv run ruff check src/ tests/ examples/
-          uv run ty check src
-        env:
-          UV_NO_SYNC: 1
+      # prek で静的チェックを行う。pytest は wheel に対する別ステップで実行するため除外する
+      - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
+        with:
+          prek-version: 0.5.2
+          extra-args: --all-files --skip pytest
 
       - name: Run tests
         run: |

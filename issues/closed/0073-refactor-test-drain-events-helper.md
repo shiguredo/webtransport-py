@@ -37,10 +37,12 @@
 
   E = TypeVar("E")
 
+
   class _EventSource(Protocol[E]):
       """next_event() でイベントを 1 件ずつ取り出せるオブジェクト (h3.Session / h2.Session / http2.Connection)"""
 
       def next_event(self) -> E | None: ...
+
 
   def _drain_events(source: _EventSource[E]) -> list[E]:
       """イベントを全て取り出す (next_event() が None を返すまで)"""

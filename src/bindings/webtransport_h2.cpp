@@ -325,8 +325,8 @@ void H2Session::handle_wt_stream(int32_t session_id,
     // draft-15 Section 6.7: 広告した Maximum Streams を超える受信は
     // WT_FLOW_CONTROL_ERROR。同一タイプ・方向の低い ID も累積カウントする
     if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
-      report_recv_flow_control_error(
-          session_id, stream_id, "peer exceeded Maximum Streams limit");
+      report_recv_flow_control_error(session_id, stream_id,
+                                     "peer exceeded Maximum Streams limit");
       return;
     }
     WtStreamInfo info;
@@ -356,11 +356,11 @@ void H2Session::handle_wt_stream(int32_t session_id,
   // 状態検知はフロー制御チェックより前に置く (フロー制御違反の error code
   // 0x50 と区別するため)。エラー検知の実装は report_stream_state_error に
   // 集約する
-  if (data_len > 0 &&
-      (stream_info.recv_state == StreamState::DataRecvd ||
-       stream_info.recv_state == StreamState::ResetRecvd)) {
-    report_stream_state_error(session_id, stream_id,
-                              "WT_STREAM received for stream in terminal state");
+  if (data_len > 0 && (stream_info.recv_state == StreamState::DataRecvd ||
+                       stream_info.recv_state == StreamState::ResetRecvd)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_STREAM received for stream in terminal state");
     return;
   }
 
@@ -459,8 +459,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     // 制限の対象。 error_code 範囲 (WT_ERROR) と Reliable Size の
     // WT_STREAM_STATE_ERROR のあと、エントリ作成前に検証する
     if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
-      report_recv_flow_control_error(
-          session_id, stream_id, "peer exceeded Maximum Streams limit");
+      report_recv_flow_control_error(session_id, stream_id,
+                                     "peer exceeded Maximum Streams limit");
       return;
     }
     WtStreamInfo info;
@@ -489,8 +489,9 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   // (Section 3.4) of type WT_STREAM_STATE_ERROR MUST be sent」)
   if (stream_info.recv_state == StreamState::DataRecvd ||
       stream_info.recv_state == StreamState::ResetRecvd) {
-    report_stream_state_error(session_id, stream_id,
-                              "WT_RESET_STREAM received for stream in terminal state");
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_RESET_STREAM received for stream in terminal state");
     return;
   }
 
@@ -653,8 +654,8 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
     // Bit 1: directionality (0 = bidi, 1 = uni)
     bool is_unidirectional = (stream_id & 0x02) != 0;
     bool is_local = ((stream_id & 0x01) != 0) == is_server_;
-    previous = advertised_stream_send_credit(*wt_session, is_unidirectional,
-                                             is_local);
+    previous =
+        advertised_stream_send_credit(*wt_session, is_unidirectional, is_local);
   }
 
   if (previous.has_value() && max_data < *previous) {
@@ -907,7 +908,8 @@ WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
   return &it->second;
 }
 
-void H2Session::apply_peer_initial_flow_control(WtSessionInfo& wt_session) const {
+void H2Session::apply_peer_initial_flow_control(
+    WtSessionInfo& wt_session) const {
   // 対向 SETTINGS が我々の送信上限 (local)、自側 config が受信上限 (remote)
   // draft-15 Section 4.3.1
   // 対向 SETTINGS が 0 (draft-15 Section 11.2 の既定値) の場合、送信
@@ -1329,8 +1331,7 @@ std::optional<std::vector<uint8_t>> H2Session::send() {
   return result;
 }
 
-int32_t H2Session::connect(const std::string& url,
-                           const std::string& origin) {
+int32_t H2Session::connect(const std::string& url, const std::string& origin) {
   if (!session_ || is_server_) {
     return -1;
   }
@@ -1409,8 +1410,8 @@ int32_t H2Session::connect(const std::string& url,
   data_prd.source.ptr = this;
   data_prd.read_callback = data_source_read_callback;
 
-  int32_t stream_id = nghttp2_submit_request(
-      session_, nullptr, nva.data(), nva.size(), &data_prd, this);
+  int32_t stream_id = nghttp2_submit_request(session_, nullptr, nva.data(),
+                                             nva.size(), &data_prd, this);
 
   if (stream_id < 0) {
     return -1;
@@ -1627,7 +1628,8 @@ void H2Session::send_stream_data(int32_t session_id,
 
   // draft-15 Section 6.5 / 6.6: フロー制御超過はセッション閉鎖
   if (wt_session->bytes_sent + data.size() > wt_session->max_data_local ||
-      stream_info.bytes_sent + data.size() > stream_info.max_stream_data_local) {
+      stream_info.bytes_sent + data.size() >
+          stream_info.max_stream_data_local) {
     report_flow_control_error(session_id, "flow control limit exceeded");
     return;
   }
@@ -1819,14 +1821,14 @@ void H2Session::close_session(int32_t session_id,
     // 従来どおり 1024 バイトで切り詰められる
     size_t message_len =
         std::min(error_message.size(), kMaxApplicationErrorMessageBytes);
-    while (message_len > 0 &&
-           !is_valid_utf8(reinterpret_cast<const uint8_t*>(error_message.data()),
-                          message_len)) {
+    while (message_len > 0 && !is_valid_utf8(reinterpret_cast<const uint8_t*>(
+                                                 error_message.data()),
+                                             message_len)) {
       message_len -= 1;
     }
-    payload.insert(payload.end(), error_message.begin(),
-                   error_message.begin() +
-                       static_cast<std::ptrdiff_t>(message_len));
+    payload.insert(
+        payload.end(), error_message.begin(),
+        error_message.begin() + static_cast<std::ptrdiff_t>(message_len));
   }
 
   send_capsule(session_id, CapsuleType::WtCloseSession, payload);
@@ -2028,9 +2030,9 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
               bool has_u = false;
               bool has_bl = false;
               bool has_br = false;
-              if (!h2_session->parse_webtransport_init(
-                      wt_init_value, init_u, init_bl, init_br, has_u, has_bl,
-                      has_br)) {
+              if (!h2_session->parse_webtransport_init(wt_init_value, init_u,
+                                                       init_bl, init_br, has_u,
+                                                       has_bl, has_br)) {
                 h2_session->pending_headers_.erase(it);
                 h2_session->reject_session(stream_id, 400);
                 break;
@@ -2045,17 +2047,15 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
                     wt_session.received_initial_max_stream_data_uni, init_u);
               }
               if (has_bl) {
-                wt_session.peer_max_stream_data_bidi_remote =
-                    std::max(wt_session.peer_max_stream_data_bidi_remote,
-                             init_bl);
+                wt_session.peer_max_stream_data_bidi_remote = std::max(
+                    wt_session.peer_max_stream_data_bidi_remote, init_bl);
                 record_received_limit(
                     wt_session.received_initial_max_stream_data_bidi_remote,
                     init_bl);
               }
               if (has_br) {
-                wt_session.peer_max_stream_data_bidi_local =
-                    std::max(wt_session.peer_max_stream_data_bidi_local,
-                             init_br);
+                wt_session.peer_max_stream_data_bidi_local = std::max(
+                    wt_session.peer_max_stream_data_bidi_local, init_br);
                 record_received_limit(
                     wt_session.received_initial_max_stream_data_bidi_local,
                     init_br);
@@ -2199,8 +2199,8 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             // (不正な status code をアプリへ渡さない)
             uint16_t code = 0;
             const auto parse_result = std::from_chars(
-                status_value.data(),
-                status_value.data() + status_value.size(), code);
+                status_value.data(), status_value.data() + status_value.size(),
+                code);
             if (parse_result.ec != std::errc{} || code < 100 || code >= 600) {
               code = 0;
             }
@@ -2329,9 +2329,8 @@ ssize_t H2Session::data_source_read_callback(nghttp2_session* session,
   (void)source;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
-  bool end_pending =
-      h2_session->end_stream_pending_.find(stream_id) !=
-      h2_session->end_stream_pending_.end();
+  bool end_pending = h2_session->end_stream_pending_.find(stream_id) !=
+                     h2_session->end_stream_pending_.end();
 
   auto it = h2_session->http2_stream_buffers_.find(stream_id);
   if (it == h2_session->http2_stream_buffers_.end() || it->second.empty()) {

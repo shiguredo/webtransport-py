@@ -30,7 +30,6 @@ Discord = "https://discord.gg/shiguredo"
 dev = [
   { include-group = "test" },
   { include-group = "example" },
-  { include-group = "lint" },
   { include-group = "build" },
   # 実ブラウザ (Chromium) を使った WebTransport E2E テスト用
   "playwright~=1.62.0",
@@ -44,7 +43,6 @@ test = [
   "hypothesis",
 ]
 example = ["structlog"]
-lint = ["ruff", "ty"]
 # make develop (--no-build-isolation) 用。build-system.requires と揃える
 build = [
   "scikit-build-core>=1.0.3",
@@ -103,6 +101,10 @@ markers = [
 
 [tool.ty.rules]
 unresolved-import = "ignore"
+
+# ty-pre-commit は全体検査のため、診断対象をパッケージ本体に絞る
+[tool.ty.src]
+include = ["src"]
 
 # TOML フォーマッタ・リンタ (tombi) の設定。tombi.toml を廃止して pyproject.toml へ統合した
 [tool.tombi]

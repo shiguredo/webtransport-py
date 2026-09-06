@@ -32,7 +32,7 @@ hooks = [
 ]
 
 # astral-sh/ruff-pre-commit: ruff の公式フック
-# rev はローカルの ruff と揃える
+# rev は prek auto-update で更新する
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
 rev = "v0.16.6"
@@ -47,21 +47,32 @@ priority = 10
 id = "ruff-format"
 priority = 0
 
+# pre-commit/mirrors-clang-format: C++ のフォーマッタ
+# rev が clang-format 本体のバージョンになる
+[[repos]]
+repo = "https://github.com/pre-commit/mirrors-clang-format"
+rev = "v23.1.0"
+hooks = [
+  # c++ のみ対象にする (json 等に clang-format を適用しないため)
+  { id = "clang-format", types = ["c++"] },
+]
+
+# astral-sh/ty-pre-commit: ty の公式フック
+# rev は ty 本体のバージョンに対応する
+# 全体検査のため、診断対象は pyproject.toml の [tool.ty.src] で src に絞る
+# --isolated で uv.lock / .venv を変更せずに実行する
+# このフックは uv 0.12 以降の `uv check` を使う
+[[repos]]
+repo = "https://github.com/astral-sh/ty-pre-commit"
+rev = "v0.0.78"
+hooks = [
+  { id = "ty", args = ["--isolated"] },
+]
+
 # プロジェクト固有のローカルフック
 # priority が小さいほど先に実行される。同じ priority なら並列実行される
 [[repos]]
 repo = "local"
-
-# ty check: 静的型チェッカ (パッケージ本体のみ。examples / tests は対象外)
-# 上流 ty-pre-commit は全体検査専用 (args が効かない) のためローカルを使う
-[[repos.hooks]]
-id = "ty"
-name = "ty check"
-entry = "uv run ty check src"
-language = "system"
-types = ["python"]
-pass_filenames = false
-priority = 20
 
 # pytest: ユニットテスト
 [[repos.hooks]]

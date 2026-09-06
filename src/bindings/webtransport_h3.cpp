@@ -23,8 +23,7 @@ constexpr uint64_t kMaxApplicationErrorCode = 0xffffffffULL;
 
 uint64_t webtransport_code_to_http_code(uint64_t n) {
   if (n > kMaxApplicationErrorCode) {
-    throw std::invalid_argument(
-        "application error code out of uint32 range");
+    throw std::invalid_argument("application error code out of uint32 range");
   }
   return kWtApplicationErrorFirst + n + (n / 0x1eULL);
 }
@@ -1273,8 +1272,7 @@ uint64_t H3Session::map_send_error_code(int64_t stream_id,
   // 内部解放 (open_stream 失敗時の quic.reset_stream 直呼び) は本関数を
   // 経由しない。
   if (error_code > kMaxApplicationErrorCode) {
-    throw std::invalid_argument(
-        "application error code out of uint32 range");
+    throw std::invalid_argument("application error code out of uint32 range");
   }
   if (session_ids_.count(stream_id) > 0) {
     return error_code;
@@ -1384,10 +1382,9 @@ void H3Session::close_session(int64_t session_id,
   std::string trimmed_message = error_message;
   if (trimmed_message.size() > kMaxApplicationErrorMessageBytes) {
     size_t message_len = kMaxApplicationErrorMessageBytes;
-    while (message_len > 0 &&
-           !is_valid_utf8(
-               reinterpret_cast<const uint8_t*>(trimmed_message.data()),
-               message_len)) {
+    while (message_len > 0 && !is_valid_utf8(reinterpret_cast<const uint8_t*>(
+                                                 trimmed_message.data()),
+                                             message_len)) {
       message_len -= 1;
     }
     trimmed_message.resize(message_len);
@@ -1778,9 +1775,8 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
       rejected_event.type = H3EventType::SessionRejected;
       rejected_event.session_id = stream_id;
       uint32_t code = 0;
-      const auto parse_result = std::from_chars(status.data(),
-                                                status.data() + status.size(),
-                                                code);
+      const auto parse_result =
+          std::from_chars(status.data(), status.data() + status.size(), code);
       if (parse_result.ec != std::errc{} || code < 100 || code >= 600) {
         code = 0;
       }

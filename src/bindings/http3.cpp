@@ -143,8 +143,8 @@ size_t Http3Connection::receive_stream_data(int64_t stream_id,
     return 0;
   }
 
-  nghttp3_ssize rv = nghttp3_conn_read_stream2(
-      conn_, stream_id, data.data(), data.size(), fin ? 1 : 0, 0);
+  nghttp3_ssize rv = nghttp3_conn_read_stream2(conn_, stream_id, data.data(),
+                                               data.size(), fin ? 1 : 0, 0);
   if (rv < 0) {
     // nghttp3 のプロトコルエラー時に closed_ を立てる。
     // Http2Connection::receive の同種経路と対称にし、高レベル層の
@@ -1189,10 +1189,11 @@ void bind_http3(nb::module_& m) {
            nb::arg("stream_id"),
            nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
            "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
-      .def("frame_payload_left", &Http3Connection::frame_payload_left,
-           nb::arg("stream_id"),
-           nb::sig("def frame_payload_left(self, stream_id: int) -> int | None"),
-           "受信中フレームのペイロード残量を取得")
+      .def(
+          "frame_payload_left", &Http3Connection::frame_payload_left,
+          nb::arg("stream_id"),
+          nb::sig("def frame_payload_left(self, stream_id: int) -> int | None"),
+          "受信中フレームのペイロード残量を取得")
       .def_prop_ro("drained", &Http3Connection::drained,
                    nb::sig("def drained(self) -> bool | None"),
                    "ドレイン状態か確認 (サーバーのみ)")
@@ -1241,15 +1242,13 @@ void bind_http3(nb::module_& m) {
   // RFC 9218 の Priority ヘッダー値のパース
   http3_m.def(
       "parse_priority",
-      [](const std::string& value)
-          -> std::optional<std::pair<uint32_t, bool>> {
+      [](const std::string& value) -> std::optional<std::pair<uint32_t, bool>> {
         // nghttp3 のパーサは対象の構造体を初期化しないため、デフォルト
         // (urgency=3 / incremental=false) で初期化してからパースする
         // (RFC 9218 のデフォルト適用と同じ挙動)
         nghttp3_pri pri = {NGHTTP3_DEFAULT_URGENCY, 0};
         int rv = nghttp3_pri_parse_priority(
-            &pri, reinterpret_cast<const uint8_t*>(value.data()),
-            value.size());
+            &pri, reinterpret_cast<const uint8_t*>(value.data()), value.size());
         if (rv != 0) {
           return std::nullopt;
         }

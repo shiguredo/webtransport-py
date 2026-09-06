@@ -19,6 +19,7 @@
 
 #include <openssl/ssl.h>
 
+#include <sys/socket.h>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -26,7 +27,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <sys/socket.h>
 #include <vector>
 
 namespace nb = nanobind;
@@ -674,12 +674,11 @@ class QuicConnection {
                          const std::string& remote_host,
                          uint16_t remote_port);
   bool initialize_server();
-  bool initialize_server_from_packet(
-      const std::vector<uint8_t>& initial_packet,
-      const std::string& local_host,
-      uint16_t local_port,
-      const std::string& remote_host,
-      uint16_t remote_port);
+  bool initialize_server_from_packet(const std::vector<uint8_t>& initial_packet,
+                                     const std::string& local_host,
+                                     uint16_t local_port,
+                                     const std::string& remote_host,
+                                     uint16_t remote_port);
 
   // サーバー側 0-RTT early data コンテキストを設定する
   bool setup_server_early_data();
@@ -697,7 +696,8 @@ class QuicConnection {
                              uint16_t remote_port);
 
   // パスから QuicPacket を組み立てる
-  QuicPacket make_packet(const uint8_t* data, size_t len,
+  QuicPacket make_packet(const uint8_t* data,
+                         size_t len,
                          const ngtcp2_path& path);
 
   // CLOSING 期間 (close() 時刻 + 3×PTO) が満了したか
