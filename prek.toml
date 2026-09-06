@@ -31,30 +31,29 @@ hooks = [
   { id = "tombi-format", exclude = { glob = ["**/uv.lock"] } },
 ]
 
+# astral-sh/ruff-pre-commit: ruff の公式フック
+# rev はローカルの ruff と揃える
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.16.2"
+
+# ruff check: リンタ
+[[repos.hooks]]
+id = "ruff-check"
+priority = 10
+
+# ruff format: フォーマッタ
+[[repos.hooks]]
+id = "ruff-format"
+priority = 0
+
 # プロジェクト固有のローカルフック
 # priority が小さいほど先に実行される。同じ priority なら並列実行される
 [[repos]]
 repo = "local"
 
-# ruff format: フォーマッタ
-[[repos.hooks]]
-id = "ruff-format"
-name = "ruff format"
-entry = "uv run ruff format"
-language = "system"
-types = ["python"]
-priority = 0
-
-# ruff check: リンタ
-[[repos.hooks]]
-id = "ruff-check"
-name = "ruff check"
-entry = "uv run ruff check"
-language = "system"
-types = ["python"]
-priority = 10
-
 # ty check: 静的型チェッカ (パッケージ本体のみ。examples / tests は対象外)
+# 上流 ty-pre-commit は全体検査専用 (args が効かない) のためローカルを使う
 [[repos.hooks]]
 id = "ty"
 name = "ty check"
