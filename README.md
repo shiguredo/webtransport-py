@@ -31,6 +31,10 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
 - 二層 API 設計
   - Sans I/O API: プロトコル処理のみを提供する低レベル API
   - asyncio API: すぐに使える高レベルなクライアント/サーバー実装
+- WebTransport over HTTP/3
+  - Sans I/O API と asyncio API の両方を提供
+- WebTransport over HTTP/2
+  - Sans I/O API と asyncio API の両方を提供
 - QUIC
   - Sans I/O API と asyncio API の両方を提供
   - 双方向/単方向ストリーム
@@ -45,10 +49,6 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
 - HTTP/2
   - Sans I/O API と asyncio API の両方を提供
   - [nghttp2](https://github.com/nghttp2/nghttp2) を採用
-- WebTransport over HTTP/3
-  - Sans I/O API と asyncio API の両方を提供
-- WebTransport over HTTP/2
-  - Sans I/O API と asyncio API の両方を提供
 - Python [Free-Threading](https://docs.python.org/3/howto/free-threading-python.html) 対応
   - [PEP 703 – Making the Global Interpreter Lock Optional in CPython \| peps\.python\.org](https://peps.python.org/pep-0703/)
   - [Python Free\-Threading Guide](https://py-free-threading.github.io/)
