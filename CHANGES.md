@@ -95,6 +95,10 @@
   - @voluntas
 - [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
   - @voluntas
+- [UPDATE] aws-lc を v5.8.0 に更新する
+  - @voluntas
+- [UPDATE] nghttp3 の webtransport ブランチを最新化する
+  - @voluntas
 - [FIX] WebTransport over HTTP/3 と HTTP/2 の `Client.connect()` の無制限な待機ループを deadline 制御の bounded な待機に修正する
   - @voluntas
 - [FIX] HTTP/2 で FIN 送出済み・リセット送出済みのストリームへの send_stream_data / reset_stream がカプセルを送出してしまうのを修正する (draft-15 Section 6.2 / 6.4 の MUST 違反)
