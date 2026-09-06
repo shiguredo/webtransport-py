@@ -24,7 +24,7 @@ hooks = [
 # rev は prek auto-update で更新する
 [[repos]]
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
-rev = "v1.2.4"
+rev = "v1.5.2"
 hooks = [
   # uv.lock は自動生成ファイルなので tombi の対象外にする
   { id = "tombi-lint", exclude = { glob = ["**/uv.lock"] } },
@@ -35,7 +35,7 @@ hooks = [
 # rev はローカルの ruff と揃える
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "v0.16.2"
+rev = "v0.16.6"
 
 # ruff check: リンタ
 [[repos.hooks]]
