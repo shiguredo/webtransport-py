@@ -249,6 +249,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 と HTTP/3 のクライアント接続確立が 1 パケットのロスで失敗する問題を修正する
   - @voluntas
+- [FIX] UDP 系の高レベルクライアントが localhost 指定で接続できない問題を修正する
+  - @voluntas
 
 ### misc
 

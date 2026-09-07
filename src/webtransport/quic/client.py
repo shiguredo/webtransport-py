@@ -118,6 +118,8 @@ class Client:
         self._socket: socket.socket | None = None
         # bind 後のローカルアドレス (host, port)
         self._local_addr: tuple[str, int] | None = None
+        # 接続中のリモートアドレス (数値 IP。migrate で再解決せず使い回す)
+        self._remote_addr: tuple[str, int] | None = None
         self._running = False
         self._connected = False
         # SESSION_TICKET イベントで受け取った最新チケット
@@ -299,6 +301,10 @@ class Client:
         """
         if packet.remote_host and packet.remote_port:
             return (packet.remote_host, packet.remote_port)
+        # 数値リモートがあればそれを使い、なければホスト名にフォールバック
+        # する (C++ 側で解決されるが family 食い違いの余地が残る)
+        if self._remote_addr is not None:
+            return self._remote_addr
         return (self._host, self._port)
 
     async def _send_pending(self) -> int:
@@ -609,13 +615,14 @@ class Client:
         close() まで動作し続けるため、明示的に run() を起動しなくても
         受信イベントが処理される。
 
-        timeout はハンドシェイク完了までの全体タイムアウトである。期限までに
+        timeout は各候補への試行のタイムアウトである。名前解決の候補
+        ごとに試行するため、合計は候補数倍になり得る。期限までに
         確立できない場合は接続を維持したまま False を返す (ハンドシェイクが
         後で完了する可能性がある。後始末は close() が担う)。timeout <= 0 の
         ときは接続を開始せずに即座に False を返す。
 
         Args:
-            timeout: ハンドシェイク完了までのタイムアウト (秒)
+            timeout: 各候補への試行のタイムアウト (秒)
 
         Returns:
             接続に成功した場合は True。期限までに確立できない場合・接続
@@ -629,10 +636,87 @@ class Client:
         if timeout <= 0:
             return False
 
+        # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
+        # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
+        try:
+            candidates = await self._resolve_remote(self._host, self._port)
+        except OSError:
+            return False
+        if not candidates:
+            return False
+
         # connect() 実行中は early data 登録を拒否する (実行中に登録されても
         # _flush_early_data() は走り終えているため黙って破棄される)
         self._connecting = True
+        try:
+            saved_early_data = list(self._early_data_queue)
+            for index, (family, ip) in enumerate(candidates):
+                # 試行ごとに登録内容を復元する (失敗試行の flush で空になるため)
+                self._early_data_queue = list(saved_early_data)
+                # 各試行は timeout 全体で駆動する (先頭候補の無応答で予算を
+                # 使い切ると次候補へ進めないため、予算は分割しない)
+                if await self._attempt_connect(family, ip, timeout):
+                    return True
+                if index + 1 < len(candidates):
+                    await self._abandon_attempt()
+            return False
+        finally:
+            self._connecting = False
 
+    async def _resolve_remote(self, host: str, port: int) -> list[tuple[socket.AddressFamily, str]]:
+        """ホストを解決して (family, 数値 IP) の候補列を返す
+
+        getaddrinfo の順序を保ち、重複を除く。TLS の server_name には元の
+        ホスト名を使い続けるため、ここでは数値 IP のみを取り出す。
+        """
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        candidates: list[tuple[socket.AddressFamily, str]] = []
+        seen: set[tuple[socket.AddressFamily, str]] = set()
+        for family, _, _, _, sockaddr in infos:
+            ip = sockaddr[0]
+            if not isinstance(ip, str):
+                continue
+            candidate = (family, ip)
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+        return candidates
+
+    async def _abandon_attempt(self) -> None:
+        """失敗試行の後始末をして次候補に備える"""
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            await asyncio.gather(self._recv_task, return_exceptions=True)
+            self._recv_task = None
+        if self._connect_waiter is not None:
+            if not self._connect_waiter.done():
+                self._connect_waiter.cancel()
+            self._connect_waiter = None
+        self._task_error = None
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+        self._connection = None
+        self._local_addr = None
+        self._remote_addr = None
+        self._running = False
+        self._connected = False
+        self._connection_closed_event.clear()
+        self._recv_states.clear()
+
+    async def _attempt_connect(self, family: socket.AddressFamily, ip: str, timeout: float) -> bool:
+        """単一候補への接続を試みる。成功時は True を返す
+
+        Args:
+            family: ソケット family
+            ip: 接続先の数値 IP (TLS 検証には元のホスト名を使う)
+            timeout: この試行のタイムアウト (秒)
+
+        Returns:
+            接続に成功した場合は True。期限までに確立できない場合・接続
+            失敗時は False (最終試行では従来どおり接続を維持したまま返す)
+        """
         try:
             config = quic_low.Config()
             config.alpn_protocols = self._alpn_protocols
@@ -661,16 +745,17 @@ class Client:
                     config.enable_datagram = True
                     config.max_datagram_frame_size = self._max_datagram_frame_size
 
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket = socket.socket(family, socket.SOCK_DGRAM)
             self._socket.setblocking(False)
-            self._socket.bind(("0.0.0.0", 0))
+            self._socket.bind(("::", 0) if family == socket.AF_INET6 else ("0.0.0.0", 0))
             self._local_addr = self._normalize_addr(self._socket.getsockname())
 
             self._connection = quic_low.Connection.create_client(
                 config,
                 self._local_addr,
-                (self._host, self._port),
+                (ip, self._port),
             )
+            self._remote_addr = (ip, self._port)
             self._flush_early_data()
             await self._send_pending()
             self._running = True
@@ -698,14 +783,21 @@ class Client:
                 self._socket.close()
                 self._socket = None
             raise
+        except OSError:
+            # ソケット操作の失敗 (family 不整合を含む) は次候補へ譲るため
+            # False を返す。古い接続参照を残すと migrate が誤動作するため
+            # 破棄する。ソケットをクローズして FD リークを防ぐ
+            self._connection = None
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            return False
         except BaseException:
             # 接続確立前に失敗した場合はソケットをクローズして FD リークを防ぐ
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
             raise
-        finally:
-            self._connecting = False
 
     async def open_stream(self, bidirectional: bool = True) -> int:
         """ストリームを開く
@@ -1091,14 +1183,23 @@ class Client:
         if self._connection is None:
             return False
 
-        new_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 現接続と同一 family で新ソケットを作る。リモートは接続時の数値
+        # IP を使い回し、再解決しない
+        if self._socket is not None:
+            family = self._socket.family
+        elif self._remote_addr is not None and ":" in self._remote_addr[0]:
+            family = socket.AF_INET6
+        else:
+            family = socket.AF_INET
+        new_socket = socket.socket(family, socket.SOCK_DGRAM)
         new_socket.setblocking(False)
-        new_socket.bind(("0.0.0.0", 0))
+        new_socket.bind(("::", 0) if family == socket.AF_INET6 else ("0.0.0.0", 0))
         new_local = self._normalize_addr(new_socket.getsockname())
+        remote = self._remote_addr if self._remote_addr is not None else (self._host, self._port)
 
         if not self._connection.initiate_migration(
             new_local,
-            (self._host, self._port),
+            remote,
         ):
             new_socket.close()
             return False

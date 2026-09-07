@@ -182,7 +182,7 @@ async def test_http3_connect_refused_invalid_host() -> None:
     try:
         with pytest.raises(ConnectRefusedError) as exc_info:
             await client.connect(timeout=6.0)
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert isinstance(exc_info.value.__cause__, OSError)
         assert client.is_connected is False
     finally:
         await client.close()
@@ -202,7 +202,7 @@ async def test_h3_connect_refused_invalid_host() -> None:
     try:
         with pytest.raises(ConnectRefusedError) as exc_info:
             await client.connect(timeout=6.0)
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert isinstance(exc_info.value.__cause__, OSError)
         assert client.is_connected is False
     finally:
         await client.close()
