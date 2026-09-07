@@ -90,6 +90,9 @@ class Server:
 
         self._on_session_ready: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_goaway: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
+        # GOAWAY 受信済みのアドレス集合 (重複 GOAWAY の多重発火を抑止する)
+        self._goaway_received_addrs: set[tuple[str, int]] = set()
         self._on_stream_data: (
             Callable[[int, int, bytes, tuple[str, int]], Awaitable[None]] | None
         ) = None
@@ -139,6 +142,21 @@ class Server:
             callback: async def callback(session_id: int, addr: tuple[str, int]) -> None
         """
         self._on_session_closed = callback
+
+    def on_goaway(
+        self,
+        callback: Callable[[int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """GOAWAY 受信時のコールバックを設定する
+
+        graceful shutdown の通知であり、セッションは継続できる。接続ごと
+        の初回受信でのみ発火し、2 回目以降は ID の異同を問わず発火しない。
+        登録前に受信した GOAWAY は通知しない。
+
+        Args:
+            callback: async def callback(goaway_id: int, addr: tuple[str, int]) -> None
+        """
+        self._on_goaway = callback
 
     def on_stream_data(
         self,
@@ -224,6 +242,7 @@ class Server:
                     logger.warning("failed to send connection close: %s", exc)
         finally:
             self._clients.clear()
+            self._goaway_received_addrs.clear()
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
@@ -427,10 +446,19 @@ class Server:
                             )
                         if addr in self._clients:
                             del self._clients[addr]
+                            self._goaway_received_addrs.discard(addr)
                     break
                 client.webtransport_session.accept_session(webtransport_event.session_id)
                 if self._on_session_ready is not None:
                     await self._on_session_ready(webtransport_event.session_id, addr)
+
+            elif webtransport_event.type == h3_low.EventType.GOAWAY:
+                # graceful shutdown の通知であり、接続もセッションも継続
+                # する。接続ごとの初回のみ通知し、重複は黙って無視する
+                if addr not in self._goaway_received_addrs:
+                    self._goaway_received_addrs.add(addr)
+                    if self._on_goaway is not None:
+                        await self._on_goaway(webtransport_event.goaway_id, addr)
 
             elif webtransport_event.type == h3_low.EventType.SESSION_CLOSED:
                 if self._on_session_closed is not None:
@@ -498,6 +526,7 @@ class Server:
                     # 同一アドレスからの再接続をブロックしないようにする
                     if addr in self._clients:
                         del self._clients[addr]
+                        self._goaway_received_addrs.discard(addr)
                     # 同一バッチに積まれた残りのイベント (クローズ後に配送される
                     # データグラム等) の処理を打ち切る
                     break
@@ -686,6 +715,7 @@ class Server:
                     await self._send_to(addr, client)
                     if addr in self._clients:
                         del self._clients[addr]
+                        self._goaway_received_addrs.discard(addr)
                     continue
 
                 await self._process_webtransport_events(addr, client)
@@ -710,6 +740,7 @@ class Server:
                         await self._send_to(addr, client)
                     if addr in self._clients:
                         del self._clients[addr]
+                        self._goaway_received_addrs.discard(addr)
 
             except TimeoutError:
                 pass
@@ -731,6 +762,7 @@ class Server:
                             await self._send_to(addr, client)
                             if addr in self._clients:
                                 del self._clients[addr]
+                                self._goaway_received_addrs.discard(addr)
                             continue
                         await self._process_webtransport_events(addr, client)
 

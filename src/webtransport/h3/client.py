@@ -95,6 +95,9 @@ class Client:
         self._on_stream_data: Callable[[int, bytes], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int | None], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
+        self._on_goaway: Callable[[int], Awaitable[None]] | None = None
+        # GOAWAY 受信済みかどうか (重複 GOAWAY の多重発火を抑止する)
+        self._goaway_received = False
 
     @property
     def url(self) -> str:
@@ -142,6 +145,21 @@ class Client:
             callback: async def callback(session_id: int) -> None
         """
         self._on_session_closed = callback
+
+    def on_goaway(
+        self,
+        callback: Callable[[int], Awaitable[None]],
+    ) -> None:
+        """GOAWAY 受信時のコールバックを設定する
+
+        graceful shutdown の通知であり、セッションは継続できる。初回受信
+        でのみ発火し、2 回目以降は ID の異同を問わず発火しない。登録前に
+        受信した GOAWAY は通知しない。
+
+        Args:
+            callback: async def callback(goaway_id: int) -> None
+        """
+        self._on_goaway = callback
 
     def on_stream_data(
         self,
@@ -394,6 +412,7 @@ class Client:
         self._remote_addr = None
         self._session_id = -1
         self._pending_session_ready = None
+        self._goaway_received = False
         self._running = False
         self._connected = False
 
@@ -417,6 +436,8 @@ class Client:
             deadline: 打ち切り時刻
         """
         loop = asyncio.get_running_loop()
+        # 試行ごとに通知状態を戻す
+        self._goaway_received = False
         try:
             self._socket = socket.socket(family, socket.SOCK_DGRAM)
             self._socket.setblocking(False)
@@ -821,6 +842,15 @@ class Client:
                 if self._on_session_closed is not None:
                     await self._on_session_closed(webtransport_event.session_id)
 
+            elif webtransport_event.type == h3_low.EventType.GOAWAY:
+                # graceful shutdown の通知であり、接続もセッションも継続
+                # する。初回のみ通知し、2 回目以降は ID の異同を問わず
+                # 黙って無視する
+                if not self._goaway_received:
+                    self._goaway_received = True
+                    if self._on_goaway is not None:
+                        await self._on_goaway(webtransport_event.goaway_id)
+
             elif webtransport_event.type == h3_low.EventType.STREAM_DATA:
                 if self._on_stream_data is not None:
                     await self._on_stream_data(
@@ -933,6 +963,7 @@ class Client:
         # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
         # セッション ID で発火させないため)
         self._pending_session_ready = None
+        self._goaway_received = False
         self._running = False
         self._connected = False
 

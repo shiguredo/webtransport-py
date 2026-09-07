@@ -78,6 +78,11 @@ enum class H3EventType {
   // セッション拒否 (非 2xx 応答の受信。h2 側の SessionRejected と同じ
   // 意味論。末尾に追加し既存バリアントの数値を変えない)
   SessionRejected,
+
+  // GOAWAY 受信 (graceful shutdown の通知。draft-ietf-webtrans-http3-16
+  // Section 4.7 により受信後もセッションを継続できるため、closed_ は
+  // 立てない。末尾に追加し既存バリアントの数値を変えない)
+  GoAway,
 };
 
 /**
@@ -92,6 +97,8 @@ struct H3Event {
   std::string error_message;
   // SessionRejected 発火時の HTTP status code。他イベントでは 0
   uint32_t status_code = 0;
+  // GoAway 発火時の GOAWAY ID。他イベントでは 0
+  uint64_t goaway_id = 0;
   bool is_unidirectional = false;
 };
 
@@ -429,6 +436,9 @@ class H3Session {
 
   /**
    * 接続が閉じられたか
+   *
+   * nghttp3 の負値 return = 接続エラー時のみ真になる。GOAWAY 受信
+   * (graceful shutdown の通知) では真にならず、セッションを継続できる
    */
   bool is_closed() const;
 

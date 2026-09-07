@@ -87,6 +87,8 @@
   - @voluntas
 - [ADD] QUIC クライアントにストリーム受信状態の破棄手段 (`discard_recv_state` と FIN 完了時の自動破棄) を追加する
   - @voluntas
+- [ADD] WebTransport over HTTP/3 の GOAWAY 受信通知 API (`on_goaway`) を追加する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
   - @voluntas
 - [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
@@ -250,6 +252,8 @@
 - [FIX] WebTransport over HTTP/3 と HTTP/3 のクライアント接続確立が 1 パケットのロスで失敗する問題を修正する
   - @voluntas
 - [FIX] UDP 系の高レベルクライアントが localhost 指定で接続できない問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 が GOAWAY 受信でセッションを閉じてしまう問題を修正する
   - @voluntas
 
 ### misc

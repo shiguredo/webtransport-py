@@ -3619,3 +3619,112 @@ async def test_idle_timeout_reaps_connection(test_certificates):
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_goaway_keeps_session_usable(test_certificates):
+    """GOAWAY 受信後もセッションが継続し on_goaway が 1 回発火する"""
+    from webtransport.h3 import Client, Server
+
+    goaway_ids: list[int] = []
+    client_received_data = []
+    goaway_received = asyncio.Event()
+    client_stream_received = asyncio.Event()
+    client_datagram_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(session_id, stream_id, data, addr):
+        await server.send_stream_data(addr, stream_id, data, fin=False)
+
+    async def on_datagram(session_id, data, addr):
+        await server.send_datagram(addr, session_id, data)
+
+    server.on_stream_data(on_stream_data)
+    server.on_datagram(on_datagram)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    try:
+        client = Client(
+            url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+            verify_peer=False,
+        )
+
+        async def on_goaway(goaway_id: int) -> None:
+            goaway_ids.append(goaway_id)
+            goaway_received.set()
+
+        client.on_goaway(on_goaway)
+        await client.connect()
+
+        async def on_client_stream_data(stream_id, data):
+            client_received_data.append(data)
+            client_stream_received.set()
+
+        async def on_client_datagram(data):
+            client_received_data.append(data)
+            client_datagram_received.set()
+
+        client.on_stream_data(on_client_stream_data)
+        client.on_datagram(on_client_datagram)
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+        try:
+            # GOAWAY 受信前に双方向ストリームを開く
+            stream_id = await client.open_stream()
+            assert stream_id >= 0
+
+            # サーバーの制御ストリーム相当に GOAWAY フレームを注入する。
+            # private 注入のため、前提 (GoAway イベント到達) 自体を待って
+            # 検証する。実ワイヤ経路は低レベル単体と他 e2e で検証済みである
+            session = client._webtransport_session
+            assert session is not None
+            session.receive_stream_data(3, b"\x07\x01\x08", False)
+            await asyncio.wait_for(goaway_received.wait(), timeout=5.0)
+            assert goaway_ids == [8]
+
+            # 2 回目以降は ID の異同を問わず発火しない
+            session.receive_stream_data(3, b"\x07\x01\x04", False)
+            await asyncio.sleep(0.5)
+            assert goaway_ids == [8]
+
+            # セッションは閉じず、プロトコルエラー終了も起きない
+            assert session.is_closed() is False
+            assert client.is_connected is True
+            assert client._quic_connection is not None
+            assert client._quic_connection.is_closed() is False
+            assert len(server._clients) == 1
+
+            # 確立済みストリームとデータグラムの送受信は継続できる
+            await client.send_stream_data(stream_id, b"after-goaway", fin=False)
+            await client.send_datagram(b"goaway-dg")
+            await asyncio.wait_for(client_stream_received.wait(), timeout=5.0)
+            await asyncio.wait_for(client_datagram_received.wait(), timeout=5.0)
+            assert b"after-goaway" in client_received_data
+            assert b"goaway-dg" in client_received_data
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await server.stop()
