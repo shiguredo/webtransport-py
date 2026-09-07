@@ -1,7 +1,7 @@
 # 公開 Sans-IO API の引数や Config 値だけで依存ライブラリの assert に到達し SIGABRT する経路を塞ぐ
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-07
 - Branch: feature/fix-binding-arg-validation-abort
 - Polished: 2026-09-07
 
@@ -44,3 +44,19 @@ nanobind で公開している Sans-IO API に、Python から渡した引数や
 - バインディング内の 8 箇所の誤ったコメントが訂正されていること
 - PBT を追加すること。Config の任意値 (0 〜 2^62 - 1) は `tests/prop_quic.py` (quic Config)・`tests/prop_http3.py` (Http3Config)・`tests/prop_webtransport_h3.py` (h3 Config) に、stream_id の任意値 (負値・パリティ違反を含む整数全域) は `tests/prop_webtransport_h3.py` と `tests/prop_http3.py` に分け、いずれも abort しないことを検証する
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+10 経路に加え、PBT とレビューで見つかった同種の 4 経路も塞いだ。
+
+- QUIC Config の検証 (`src/bindings/quic.cpp` の `is_valid_quic_config`) を追加し、`initialize_client` / `initialize_server` / `initialize_server_from_packet` の先頭で拒否する。対象はフロー制御値 4 件と `max_streams_bidi` / `max_streams_uni` / `max_datagram_frame_size` (varint 上限以下) と `idle_timeout_ns` (UINT64_MAX 未満)。失敗は生成失敗 (`RuntimeError`) になる
+- h3 / HTTP/3 Config の 3 値 (varint 上限以下) を `H3Session::initialize` と `Http3Connection::initialize` で検証し、失敗は生成失敗 (`RuntimeError`) にする
+- `H3Session::open_stream` に重複拒否と自起点限定 (クライアントは `%4==0` と `%4==2`、サーバーは `%4==1` と `%4==3`) と CONNECT・制御・QPACK との ID 衝突拒否を追加し、異常系は `False` を返す
+- `H3Session::set_max_client_streams_bidi` に単調増加ガード (減少値は `ValueError`、未接続・closed・非サーバー時は無視) と累積値メンバーを追加する
+- `Http3Connection::submit_response` に QPACK 未バインド時の `False` ガード、`submit_request` に非自起点 ID の `False` ガードを追加する
+- `Http3Connection::bind_control_stream` に範囲・単方向の検証 (不正値は `ValueError`)、`bind_qpack_encoder_stream` / `bind_qpack_decoder_stream` に同内容の黙却検証を追加する
+- `H3Session::receive_stream_data` と `Http3Connection::receive_stream_data` で範囲外 ID は `ValueError`、バインド済み自単方向ストリームへの受信は黙って無視する
+- `Http3Connection::reset_stream` に範囲外 ID の黙却ガード、`goaway` に二重呼び出しの黙却ガードを追加する
+- 誤ったコメント 8 箇所 (`src/bindings/http3.cpp` の 7 箇所と `src/bindings/http3.h` の 1 箇所) を訂正し、`H3Session::set_max_client_streams_bidi` の文書に拒否方式を追記する
+- `tests/prop_quic.py`・`tests/prop_http3.py`・`tests/prop_webtransport_h3.py` に Config 有効値・無効値と stream_id 全域の PBT と境界値テストを追加する
+- 全 859 件のテストが通過することと、レビュー 7 周で致命的と重要が 0 件であることを確認した

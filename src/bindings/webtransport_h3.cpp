@@ -163,6 +163,7 @@ H3Session::H3Session(H3Session&& other) noexcept
       control_stream_id_(other.control_stream_id_),
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
       qpack_decoder_stream_id_(other.qpack_decoder_stream_id_),
+      max_client_streams_bidi_(other.max_client_streams_bidi_),
       closed_(other.closed_) {
   other.conn_ = nullptr;
 }
@@ -198,6 +199,7 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     control_stream_id_ = other.control_stream_id_;
     qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
     qpack_decoder_stream_id_ = other.qpack_decoder_stream_id_;
+    max_client_streams_bidi_ = other.max_client_streams_bidi_;
     closed_ = other.closed_;
     other.conn_ = nullptr;
   }
@@ -223,6 +225,14 @@ std::unique_ptr<H3Session> H3Session::create_server(
 }
 
 bool H3Session::initialize() {
+  // 異常な Config 値で nghttp3 の assert に到達する前に生成失敗にする
+  // (RFC 9000 Section 16 の varint 上限 2^62 - 1)
+  constexpr uint64_t max_varint = (1ULL << 62) - 1;
+  if (config_.max_field_section_size > max_varint ||
+      config_.qpack_max_dtable_capacity > max_varint ||
+      config_.qpack_blocked_streams > max_varint) {
+    return false;
+  }
   nghttp3_callbacks callbacks{};
   callbacks.acked_stream_data = acked_stream_data_cb;
   callbacks.stream_close = stream_close_cb;
@@ -472,31 +482,42 @@ void H3Session::flush_unblocked_held_data() {
 size_t H3Session::receive_stream_data(int64_t stream_id,
                                       const std::vector<uint8_t>& data,
                                       bool fin) {
+  // 負値や varint 上限超えは nghttp3 の assert に到達するため ValueError で
+  // 拒否する (RFC 9000 Section 16 の varint 上限 2^62 - 1)
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    throw std::invalid_argument("stream_id out of range");
+  }
   if (!conn_ || closed_) {
+    return 0;
+  }
+
+  // バインド済みの自起点単方向ストリーム (制御・QPACK) への受信は
+  // nghttp3 の assert に到達するため黙って無視する。自単方向ストリームは
+  // 送信専用であり、ピアが正規に応答を返すことはない
+  if (stream_id == control_stream_id_ ||
+      stream_id == qpack_encoder_stream_id_ ||
+      stream_id == qpack_decoder_stream_id_) {
     return 0;
   }
 
   // フレーム境界ガードの対象外判定。対象外は既存どおり一括で nghttp3 へ渡す
   // - 空データ (空 FIN を含む。FIN 単体の保持は既存の fin 引数検知が担い、
   //   DATA を伴わないため inq 混入が起きない)
-  // - 不正な負のストリーム ID (nghttp3 側で接続エラーとして扱う)
   // - クライアント起点双方向 (%4==0) 以外のストリーム。CONNECT は常に
   //   クライアント起点双方向であり、サーバー起点双方向 (%4==1) の受信は
   //   パリティ違反として nghttp3 が接続エラーを返す経路のため、ガードで
-  //   吸収せず既存のエラー検知に委ねる。単方向 (制御・QPACK・WT 単方向)
-  //   もここに含まれる
+  //   吸収せず既存のエラー検知に委ねる。未バインド・ピア起点の単方向
+  //   (制御・QPACK・WT 単方向) もここに含まれる (バインド済みの自単方向
+  //   と不正な負値・上限超えの ID は関数先頭で処理済みのためここには
+  //   到達しない)
   // - 確立済み WT データストリーム (stream_info_ 登録済み。CONNECT ではない)
-  // - バインド済みの制御/QPACK ストリーム (防御的な二重化)
+  //   (バインド済みの自単方向ストリームは関数先頭で無視するためここには
+  //   到達しない)
   bool bypass_guard = false;
   if (data.empty()) {
     bypass_guard = true;
-  } else if (stream_id < 0) {
-    bypass_guard = true;
   } else if (stream_id % 4 != 0) {
-    bypass_guard = true;
-  } else if (stream_id == control_stream_id_ ||
-             stream_id == qpack_encoder_stream_id_ ||
-             stream_id == qpack_decoder_stream_id_) {
     bypass_guard = true;
   } else if (stream_info_.count(stream_id) > 0) {
     bypass_guard = true;
@@ -1370,21 +1391,36 @@ bool H3Session::open_stream(int64_t session_id,
     return false;
   }
 
-  // nghttp3 はストリームタイプをアサーションでチェックする
-  // クライアント: client_bidi (%4==0) or server_bidi (%4==1) or client_uni
-  // (%4==2)
-  // サーバー: client_bidi (%4==0) or server_bidi (%4==1) or server_uni (%4==3)
+  // nghttp3 はストリームタイプをアサーションでチェックする。
+  // 開けるのは自起点ストリームのみ (クライアント: client_bidi (%4==0) と
+  // client_uni (%4==2)、サーバー: server_bidi (%4==1) と server_uni (%4==3))
   int mod = stream_id % 4;
   if (is_server_) {
-    // サーバーは client_bidi, server_bidi, server_uni のみ許可
-    if (mod != 0 && mod != 1 && mod != 3) {
+    // サーバーは server_bidi と server_uni のみ許可
+    if (mod != 1 && mod != 3) {
       return false;
     }
   } else {
-    // クライアントは client_bidi, server_bidi, client_uni のみ許可
-    if (mod != 0 && mod != 1 && mod != 2) {
+    // クライアントは client_bidi と client_uni のみ許可
+    if (mod != 0 && mod != 2) {
       return false;
     }
+  }
+
+  // 同じ stream_id の二重オープンは nghttp3 の assert に到達するため拒否する
+  if (stream_info_.count(stream_id) > 0) {
+    return false;
+  }
+
+  // nghttp3 が既に管理するストリーム (CONNECT ストリーム・制御ストリーム・
+  // QPACK ストリーム) との ID 衝突も assert に到達するため拒否する。存在
+  // するストリームへの open_wt_data_stream はリモート起点双方向の場合のみ
+  // 書き込み登録として許されるが、open_stream は自起点の新規オープンのみ
+  // 扱うため一律で拒否する
+  if (session_ids_.count(stream_id) > 0 || stream_id == control_stream_id_ ||
+      stream_id == qpack_encoder_stream_id_ ||
+      stream_id == qpack_decoder_stream_id_) {
+    return false;
   }
 
   // nghttp3 に WebTransport データストリームを登録
@@ -1823,9 +1859,18 @@ std::vector<StreamInfo> H3Session::get_session_streams(
 }
 
 void H3Session::set_max_client_streams_bidi(uint64_t max_streams) {
-  if (!conn_) {
+  if (!conn_ || closed_ || !is_server_) {
     return;
   }
+  // 累積最大数は単調増加のみ許可される (nghttp3 は assert で検証するが、
+  // 依存ライブラリは Release ビルドでも -DNDEBUG が除去され assert が
+  // 本番でも有効なため、C++ 側で減算を拒否する。入口ガード条件のみ
+  // Http3Connection::set_max_client_streams_bidi と同じで、減算時の拒否
+  // 方式は ValueError とする点が異なる)
+  if (max_streams < max_client_streams_bidi_) {
+    throw std::invalid_argument("max_streams must be monotonically increasing");
+  }
+  max_client_streams_bidi_ = max_streams;
   nghttp3_conn_set_max_client_streams_bidi(conn_, max_streams);
 }
 
@@ -2651,7 +2696,8 @@ void bind_webtransport_h3(nb::module_& m) {
            &H3Session::set_max_client_streams_bidi, nb::arg("max_streams"),
            nb::sig("def set_max_client_streams_bidi(self, max_streams: int) -> "
                    "None"),
-           "クライアントからの双方向ストリームの最大数を設定")
+           "クライアントからの双方向ストリームの最大数を設定 "
+           "(単調増加のみ。減少値は ValueError)")
       .def("_has_stream_buffer", &H3Session::has_stream_buffer,
            nb::arg("stream_id"),
            nb::sig("def _has_stream_buffer(self, stream_id: int) -> "

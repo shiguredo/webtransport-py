@@ -64,6 +64,41 @@ std::vector<uint8_t> build_alpn(const std::vector<std::string>& protocols) {
   return alpn;
 }
 
+// QUIC トランスポートパラメータの生成時検証 (RFC 9000 Section 16 の
+// varint 上限と ngtcp2 の assert 条件)。依存ライブラリは
+// Release ビルドでも -DNDEBUG が除去され assert が本番でも有効なため、
+// 異常値はバインディング側で拒否して生成失敗 (false) にする。
+// max_streams_bidi / max_streams_uni / max_datagram_frame_size も
+// エンコード経路 (ngtcp2_put_uvarint 系の assert) に到達するため検証する
+bool is_valid_quic_config(const QuicConfig& config) {
+  constexpr uint64_t max_varint = (1ULL << 62) - 1;
+  if (config.max_data > max_varint) {
+    return false;
+  }
+  if (config.max_stream_data_bidi_local > max_varint) {
+    return false;
+  }
+  if (config.max_stream_data_bidi_remote > max_varint) {
+    return false;
+  }
+  if (config.max_stream_data_uni > max_varint) {
+    return false;
+  }
+  if (config.max_streams_bidi > max_varint) {
+    return false;
+  }
+  if (config.max_streams_uni > max_varint) {
+    return false;
+  }
+  if (config.max_datagram_frame_size > max_varint) {
+    return false;
+  }
+  if (config.idle_timeout_ns == UINT64_MAX) {
+    return false;
+  }
+  return true;
+}
+
 // host+port から sockaddr_storage を埋める (IPv4 / IPv6 / ホスト名)
 bool fill_sockaddr(sockaddr_storage* storage,
                    socklen_t* addrlen,
@@ -524,6 +559,10 @@ bool QuicConnection::initialize_client(const std::string& local_host,
                                        uint16_t local_port,
                                        const std::string& remote_host,
                                        uint16_t remote_port) {
+  // 異常な Config 値で ngtcp2 の assert に到達する前に生成失敗にする
+  if (!is_valid_quic_config(config_)) {
+    return false;
+  }
   // ngtcp2_conn_client_new より先に path を実アドレスで埋める
   if (!update_path_addresses(local_host, local_port, remote_host,
                              remote_port)) {
@@ -655,6 +694,10 @@ bool QuicConnection::initialize_client(const std::string& local_host,
 }
 
 bool QuicConnection::initialize_server() {
+  // 異常な Config 値で ngtcp2 の assert に到達する前に生成失敗にする
+  if (!is_valid_quic_config(config_)) {
+    return false;
+  }
   ssl_ctx_ = create_ssl_ctx();
   if (!ssl_ctx_) {
     return false;
@@ -771,6 +814,10 @@ bool QuicConnection::initialize_server_from_packet(
     uint16_t local_port,
     const std::string& remote_host,
     uint16_t remote_port) {
+  // 異常な Config 値で ngtcp2 の assert に到達する前に生成失敗にする
+  if (!is_valid_quic_config(config_)) {
+    return false;
+  }
   // ngtcp2_conn_server_new より先に path を実アドレスで埋める。
   // ゼロ path で生成したあと別アドレスで read_pkt すると DROP_CONN になる。
   if (!update_path_addresses(local_host, local_port, remote_host,

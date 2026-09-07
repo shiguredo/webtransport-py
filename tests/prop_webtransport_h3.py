@@ -374,3 +374,184 @@ def prop_close_session_error_message_utf8_safe(message: str):
     # 送信したメッセージの先頭部分 (文字境界で切れた整数バイト数) と一致する
     assert message.startswith(received)
     assert len(received.encode("utf-8")) <= 1024
+
+
+# ========== Config の生成時検証テスト ==========
+
+
+@given(
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+)
+@settings(max_examples=100)
+def prop_config_valid_no_abort(
+    max_field_section_size: int,
+    qpack_max_dtable_capacity: int,
+    qpack_blocked_streams: int,
+):
+    """有効範囲内の Config 値でセッション生成が abort しない
+
+    3 値は RFC 9000 Section 16 の varint 上限 (2^62 - 1) 以下が有効範囲で
+    ある。依存ライブラリは Release ビルドでも assert が有効なため、
+    バインディング側で事前検証する
+    """
+    # 有効範囲内の値を設定する
+    config = h3.Config()
+    config.max_field_section_size = max_field_section_size
+    config.qpack_max_dtable_capacity = qpack_max_dtable_capacity
+    config.qpack_blocked_streams = qpack_blocked_streams
+
+    # クライアントとサーバーのどちらも生成が成功する
+    client = h3.Session.create_client(config)
+    assert client is not None
+    server_config = h3.Config()
+    server_config.is_server = True
+    server_config.max_field_section_size = max_field_section_size
+    server_config.qpack_max_dtable_capacity = qpack_max_dtable_capacity
+    server_config.qpack_blocked_streams = qpack_blocked_streams
+    server = h3.Session.create_server(server_config)
+    assert server is not None
+
+
+@given(st.integers(min_value=2**62, max_value=UINT64_MAX))
+@settings(max_examples=100)
+def prop_config_invalid_raises(value: int):
+    """varint 上限超えの Config 値では生成が RuntimeError になる
+
+    3 フィールドのいずれか 1 つに上限超えを設定し、生成失敗が
+    RuntimeError で扱われる (abort しない) ことを検証する
+    """
+    # 上限超えの値を各フィールドに設定して生成する
+    for field in (
+        "max_field_section_size",
+        "qpack_max_dtable_capacity",
+        "qpack_blocked_streams",
+    ):
+        config = h3.Config()
+        setattr(config, field, value)
+
+        # 生成失敗は RuntimeError で扱う (abort しない)
+        try:
+            h3.Session.create_client(config)
+        except RuntimeError:
+            continue
+        raise AssertionError("上限超えの値で生成失敗しませんでした")
+
+
+# ========== stream_id 全域の堅牢性テスト ==========
+
+
+@given(st.integers(), st.integers(), st.booleans())
+@settings(max_examples=100)
+def prop_open_stream_arbitrary_id_no_abort(
+    session_id: int, stream_id: int, is_unidirectional: bool
+):
+    """整数全域の ID で open_stream しても abort しない
+
+    確立済みセッション上で重複 ID・非自起点 ID・範囲外 ID を渡し、成功か
+    False のいずれかで返ることを検証する。int64 に収まらない値は binding
+    境界で TypeError になるが、いずれも abort しない
+    """
+    # 有効なセッションを事前確立する (異常系再現に必要)
+    client, _server, established_session_id = _establish_session()
+
+    # 確立済みセッション ID と任意の ID の両方で呼び出す。open_stream は
+    # 異常系を False で返す契約のため、ValueError は投げない。int64 に収ま
+    # らない値は binding 境界で TypeError になるが、いずれも abort しない
+    for target_session_id in (established_session_id, session_id):
+        try:
+            result = client.open_stream(target_session_id, stream_id, is_unidirectional)
+        except TypeError, OverflowError:
+            continue
+        assert result is False or result is True
+
+
+@given(st.integers(), st.binary(max_size=1024), st.booleans())
+@settings(max_examples=100)
+def prop_receive_stream_data_arbitrary_id_no_abort(stream_id: int, data: bytes, fin: bool):
+    """整数全域の stream_id で receive_stream_data しても abort しない
+
+    負値や varint 上限 (2^62 - 1) 超えは ValueError で拒否し、有効範囲内は
+    処理バイト数を返す。いずれも nghttp3 の assert に到達しない
+    """
+    config = h3.Config()
+    session = h3.Session.create_client(config)
+
+    # 不正 ID は ValueError、有効 ID は処理バイト数を返す。int64 に収まら
+    # ない値は binding 境界で TypeError になるが、いずれも abort しない
+    try:
+        processed = session.receive_stream_data(stream_id, data, fin)
+    except ValueError, TypeError, OverflowError:
+        return
+    assert processed <= len(data)
+
+
+def test_set_max_client_streams_bidi_decrease_raises() -> None:
+    """set_max_client_streams_bidi の減少値が ValueError になる"""
+    # サーバーセッションを用意し、累積最大数を 100 に設定する
+    config = h3.Config()
+    config.is_server = True
+    session = h3.Session.create_server(config)
+    session.set_max_client_streams_bidi(100)
+
+    # 減少値は nghttp3 の assert に到達する前に ValueError で拒否される
+    try:
+        session.set_max_client_streams_bidi(50)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("減少値で ValueError になりませんでした")
+
+    # 同値と増加値は受け付ける (単調増加の仕様どおり)
+    session.set_max_client_streams_bidi(100)
+    session.set_max_client_streams_bidi(200)
+
+
+def test_set_max_client_streams_bidi_client_ignored() -> None:
+    """クライアントの set_max_client_streams_bidi が黙って無視される"""
+    # クライアントセッションでは nghttp3 がサーバーを assert するため、
+    # バインディング側で黙って無視する (abort しない)
+    config = h3.Config()
+    session = h3.Session.create_client(config)
+
+    # 黙って無視され、例外も abort も起きない
+    session.set_max_client_streams_bidi(100)
+
+
+def test_receive_stream_data_invalid_id_raises_value_error() -> None:
+    """範囲外 ID の receive_stream_data が ValueError になる"""
+    # 負値と varint 上限 (2^62 - 1) 超えは nghttp3 の assert に到達する前に
+    # ValueError で拒否される
+    config = h3.Config()
+    session = h3.Session.create_client(config)
+
+    # 不正 ID はいずれも ValueError になる (abort しない)
+    for bad_id in (-1, 2**62):
+        try:
+            session.receive_stream_data(bad_id, b"data", False)
+        except ValueError:
+            continue
+        raise AssertionError("範囲外 ID で ValueError になりませんでした")
+
+
+def test_receive_stream_data_bound_uni_no_abort() -> None:
+    """バインド済みの自単方向ストリームへの受信が黙って無視される"""
+    # クライアントとサーバーで自起点の制御・QPACK ストリームをバインドする
+    client = h3.Session.create_client(h3.Config())
+    client.bind_control_stream(2)
+    client.bind_qpack_encoder_stream(6)
+    client.bind_qpack_decoder_stream(10)
+    server_config = h3.Config()
+    server_config.is_server = True
+    server = h3.Session.create_server(server_config)
+    server.bind_control_stream(3)
+    server.bind_qpack_encoder_stream(7)
+    server.bind_qpack_decoder_stream(11)
+
+    # 自単方向ストリームは送信専用のため、受信しても nghttp3 の assert に
+    # 到達せず黙って無視される (abort しない)
+    for stream_id in (2, 6, 10):
+        assert client.receive_stream_data(stream_id, b"data", False) == 0
+    for stream_id in (3, 7, 11):
+        assert server.receive_stream_data(stream_id, b"data", False) == 0

@@ -444,7 +444,10 @@ class H3Session {
 
   /**
    * クライアントからの双方向ストリームの最大数を設定 (サーバー用)
-   * リクエストストリームを受け入れる前に呼び出す必要がある
+   * リクエストストリームを受け入れる前に呼び出す必要がある。
+   * 累積最大数は単調増加のみ許可し、減少値は ValueError
+   * (C++ 側の std::invalid_argument) で拒否する。未接続・closed・
+   * 非サーバー時は黙って無視する。
    * @param max_streams 最大ストリーム数
    */
   void set_max_client_streams_bidi(uint64_t max_streams);
@@ -832,6 +835,10 @@ class H3Session {
   int64_t control_stream_id_ = -1;
   int64_t qpack_encoder_stream_id_ = -1;
   int64_t qpack_decoder_stream_id_ = -1;
+
+  // set_max_client_streams_bidi で設定した累積最大数 (単調増加ガード用。
+  // Http3Connection の同名メンバーと対称)
+  uint64_t max_client_streams_bidi_ = 0;
 
   // 接続状態
   bool closed_ = false;
