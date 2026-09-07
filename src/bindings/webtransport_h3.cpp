@@ -2552,7 +2552,8 @@ void bind_webtransport_h3(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 fin);
           },
-          nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("fin") = false,
           nb::sig("def receive_stream_data(self, stream_id: int, data: "
                   "bytes, fin: bool = False) -> int"),
           "QUIC ストリームからデータを受信")
@@ -2562,7 +2563,7 @@ void bind_webtransport_h3(nb::module_& m) {
             s.receive_datagram(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
-          nb::arg("data"),
+          nb::lock_self(), nb::arg("data"),
           nb::sig("def receive_datagram(self, data: bytes) -> None"),
           "QUIC データグラムを受信")
       .def(
@@ -2580,6 +2581,7 @@ void bind_webtransport_h3(nb::module_& m) {
             }
             return result;
           },
+          nb::lock_self(),
           nb::sig("def get_streams_to_send(self) -> list[tuple[int, "
                   "bytes, bool]]"),
           "送信すべきストリームデータを取得")
@@ -2595,37 +2597,40 @@ void bind_webtransport_h3(nb::module_& m) {
             }
             return result;
           },
+          nb::lock_self(),
           nb::sig("def get_datagrams_to_send(self) -> list[bytes]"),
           "送信すべきデータグラムを取得")
       .def("bind_control_stream", &H3Session::bind_control_stream,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def bind_control_stream(self, stream_id: int) -> None"),
            "コントロールストリーム ID を設定")
       .def("bind_qpack_encoder_stream", &H3Session::bind_qpack_encoder_stream,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig(
                "def bind_qpack_encoder_stream(self, stream_id: int) -> None"),
            "QPACK エンコーダーストリーム ID を設定")
       .def("bind_qpack_decoder_stream", &H3Session::bind_qpack_decoder_stream,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig(
                "def bind_qpack_decoder_stream(self, stream_id: int) -> None"),
            "QPACK デコーダーストリーム ID を設定")
-      .def("connect", &H3Session::connect, nb::arg("stream_id"), nb::arg("url"),
-           nb::arg("origin") = "",
+      .def("connect", &H3Session::connect, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("url"), nb::arg("origin") = "",
            nb::sig("def connect(self, stream_id: int, url: str, "
                    "origin: str = '') -> bool"),
            "WebTransport セッションを開始 (クライアント用)")
-      .def("accept_session", &H3Session::accept_session, nb::arg("stream_id"),
+      .def("accept_session", &H3Session::accept_session, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def accept_session(self, stream_id: int) -> bool"),
            "WebTransport セッションを受理 (サーバー用)")
-      .def("reject_session", &H3Session::reject_session, nb::arg("stream_id"),
-           nb::arg("status_code"),
+      .def("reject_session", &H3Session::reject_session, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("status_code"),
            nb::sig("def reject_session(self, stream_id: int, status_code: int) "
                    "-> None"),
            "WebTransport セッションを拒否 (サーバー用)")
-      .def("open_stream", &H3Session::open_stream, nb::arg("session_id"),
-           nb::arg("stream_id"), nb::arg("is_unidirectional"),
+      .def("open_stream", &H3Session::open_stream, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("stream_id"),
+           nb::arg("is_unidirectional"),
            nb::sig("def open_stream(self, session_id: int, stream_id: int, "
                    "is_unidirectional: bool) -> bool"),
            "WebTransport ストリームを開く")
@@ -2637,7 +2642,8 @@ void bind_webtransport_h3(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 fin);
           },
-          nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("fin") = false,
           nb::sig("def send_stream_data(self, stream_id: int, data: "
                   "bytes, fin: bool = False) -> None"),
           "WebTransport ストリームにデータを送信")
@@ -2648,86 +2654,93 @@ void bind_webtransport_h3(nb::module_& m) {
                 session_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
-          nb::arg("session_id"), nb::arg("data"),
+          nb::lock_self(), nb::arg("session_id"), nb::arg("data"),
           nb::sig("def send_datagram(self, session_id: int, data: bytes) "
                   "-> None"),
           "WebTransport データグラムを送信")
-      .def("close_stream", &H3Session::close_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("close_stream", &H3Session::close_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
                    "0) -> int"),
            "WebTransport ストリームを閉じる (nghttp3 に通知)。戻り値は"
            "リセットされたストリームが属するセッション ID。復元できない"
            "場合は -1")
-      .def("reset_stream", &H3Session::reset_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("reset_stream", &H3Session::reset_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "WebTransport ストリームをリセットする (nghttp3 に通知。"
            "データストリームは WT_APPLICATION_ERROR へリマップ)")
       .def("map_send_error_code", &H3Session::map_send_error_code,
-           nb::arg("stream_id"), nb::arg("error_code"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("error_code"),
            nb::sig("def map_send_error_code(self, stream_id: int, "
                    "error_code: int) -> int"),
            "送信時のエラーコードをワイヤ用に変換する "
            "(データストリームは WT_APPLICATION_ERROR へリマップ)")
-      .def("close_session", &H3Session::close_session, nb::arg("session_id"),
-           nb::arg("error_code") = 0, nb::arg("error_message") = "",
+      .def("close_session", &H3Session::close_session, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("error_code") = 0,
+           nb::arg("error_message") = "",
            nb::sig("def close_session(self, session_id: int, error_code: int = "
                    "0, error_message: str = '') -> None"),
            "WebTransport セッションを閉じる")
-      .def("next_event", &H3Session::next_event,
+      .def("next_event", &H3Session::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
       .def("get_required_streams", &H3Session::get_required_streams,
+           nb::lock_self(),
            nb::sig("def get_required_streams(self) -> list[tuple[str, bool]]"),
            "必要な QUIC ストリーム ID のリストを取得")
-      .def("is_closed", &H3Session::is_closed,
+      .def("is_closed", &H3Session::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
-      .def("get_session_ids", &H3Session::get_session_ids,
+      .def("get_session_ids", &H3Session::get_session_ids, nb::lock_self(),
            nb::sig("def get_session_ids(self) -> list[int]"),
            "確立されたセッション ID のリストを取得")
       .def("get_session_streams", &H3Session::get_session_streams,
-           nb::arg("session_id"),
+           nb::lock_self(), nb::arg("session_id"),
            nb::sig("def get_session_streams(self, session_id: int) -> "
                    "list[StreamInfo]"),
            "セッションに属するストリームを取得")
       .def("set_max_client_streams_bidi",
-           &H3Session::set_max_client_streams_bidi, nb::arg("max_streams"),
+           &H3Session::set_max_client_streams_bidi, nb::lock_self(),
+           nb::arg("max_streams"),
            nb::sig("def set_max_client_streams_bidi(self, max_streams: int) -> "
                    "None"),
            "クライアントからの双方向ストリームの最大数を設定 "
            "(単調増加のみ。減少値は ValueError)")
-      .def("_has_stream_buffer", &H3Session::has_stream_buffer,
+      .def("_has_stream_buffer", &H3Session::has_stream_buffer, nb::lock_self(),
            nb::arg("stream_id"),
            nb::sig("def _has_stream_buffer(self, stream_id: int) -> "
                    "bool | None"),
            "テスト専用: ストリームの送信バッファエントリの有無を確認")
       .def("_has_pending_qpack_blocked_fin_stream",
-           &H3Session::has_pending_qpack_blocked_fin_stream,
+           &H3Session::has_pending_qpack_blocked_fin_stream, nb::lock_self(),
            nb::arg("stream_id"),
            nb::sig("def _has_pending_qpack_blocked_fin_stream(self, "
                    "stream_id: int) -> bool | None"),
            "テスト専用: QPACK ブロック中 fin の保留記録の有無を確認")
-      .def("stream_writable", &H3Session::stream_writable, nb::arg("stream_id"),
+      .def("stream_writable", &H3Session::stream_writable, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
            "ストリームが書き込み可能か確認")
-      .def("stream_flushed", &H3Session::stream_flushed, nb::arg("stream_id"),
+      .def("stream_flushed", &H3Session::stream_flushed, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
            "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
       .def("stream_wt_session_id", &H3Session::stream_wt_session_id,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def stream_wt_session_id(self, stream_id: int) -> "
                    "int | None"),
            "ストリームが属する WebTransport セッション ID を取得")
-      .def("block_stream", &H3Session::block_stream, nb::arg("stream_id"),
+      .def("block_stream", &H3Session::block_stream, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def block_stream(self, stream_id: int) -> None"),
            "ストリームの QUIC フロー制御ブロックを通知")
-      .def("unblock_stream", &H3Session::unblock_stream, nb::arg("stream_id"),
+      .def("unblock_stream", &H3Session::unblock_stream, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def unblock_stream(self, stream_id: int) -> bool"),
            "ストリームの QUIC フロー制御ブロック解除を通知")
       .def("max_concurrent_streams", &H3Session::max_concurrent_streams,
-           nb::arg("n"),
+           nb::lock_self(), nb::arg("n"),
            nb::sig("def max_concurrent_streams(self, n: int) -> None"),
            "同時ストリーム数のヒントを設定");
 }

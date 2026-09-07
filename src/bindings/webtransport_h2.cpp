@@ -2477,7 +2477,8 @@ void bind_webtransport_h2(nb::module_& m) {
             return s.receive(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
-          nb::arg("data"), nb::sig("def receive(self, data: bytes) -> int"),
+          nb::lock_self(), nb::arg("data"),
+          nb::sig("def receive(self, data: bytes) -> int"),
           "受信したデータを処理")
       .def(
           "send",
@@ -2489,26 +2490,28 @@ void bind_webtransport_h2(nb::module_& m) {
             return nb::bytes(reinterpret_cast<const char*>(data->data()),
                              data->size());
           },
-          nb::sig("def send(self) -> bytes | None"), "送信すべきデータを取得")
-      .def("connect", &H2Session::connect, nb::arg("url"),
+          nb::lock_self(), nb::sig("def send(self) -> bytes | None"),
+          "送信すべきデータを取得")
+      .def("connect", &H2Session::connect, nb::lock_self(), nb::arg("url"),
            nb::arg("origin") = "",
            nb::sig("def connect(self, url: str, origin: str = '') -> int"),
            "WebTransport セッションを開始 (クライアント用)")
       .def("is_webtransport_ready", &H2Session::is_webtransport_ready,
-           nb::sig("def is_webtransport_ready(self) -> bool"),
+           nb::lock_self(), nb::sig("def is_webtransport_ready(self) -> bool"),
            "対向 SETTINGS で WebTransport over HTTP/2 が有効か")
-      .def("accept_session", &H2Session::accept_session, nb::arg("session_id"),
+      .def("accept_session", &H2Session::accept_session, nb::lock_self(),
+           nb::arg("session_id"),
            nb::sig("def accept_session(self, session_id: int) -> bool"),
            "WebTransport セッションを受理 (サーバー用)")
-      .def("reject_session", &H2Session::reject_session, nb::arg("session_id"),
-           nb::arg("status_code"),
+      .def("reject_session", &H2Session::reject_session, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("status_code"),
            nb::sig("def reject_session(self, session_id: int, status_code: "
                    "int) -> None"),
            "WebTransport セッションを拒否 (サーバー用。status_code は "
            "200-599 (実質 300-599 用)。1xx と 3 桁未満・4 桁以上・600 以上は "
            "ValueError)")
-      .def("open_stream", &H2Session::open_stream, nb::arg("session_id"),
-           nb::arg("is_unidirectional"),
+      .def("open_stream", &H2Session::open_stream, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("is_unidirectional"),
            nb::sig("def open_stream(self, session_id: int, is_unidirectional: "
                    "bool) -> int"),
            "WebTransport ストリームを開く")
@@ -2521,19 +2524,19 @@ void bind_webtransport_h2(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 fin);
           },
-          nb::arg("session_id"), nb::arg("stream_id"), nb::arg("data"),
-          nb::arg("fin") = false,
+          nb::lock_self(), nb::arg("session_id"), nb::arg("stream_id"),
+          nb::arg("data"), nb::arg("fin") = false,
           nb::sig("def send_stream_data(self, session_id: int, stream_id: int, "
                   "data: bytes, fin: bool = False) -> None"),
           "WebTransport ストリームにデータを送信")
-      .def("reset_stream", &H2Session::reset_stream, nb::arg("session_id"),
-           nb::arg("stream_id"), nb::arg("error_code"),
+      .def("reset_stream", &H2Session::reset_stream, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("stream_id"), nb::arg("error_code"),
            nb::arg("reliable_size") = 0,
            nb::sig("def reset_stream(self, session_id: int, stream_id: int, "
                    "error_code: int, reliable_size: int = 0) -> None"),
            "WebTransport ストリームをリセット")
-      .def("stop_sending", &H2Session::stop_sending, nb::arg("session_id"),
-           nb::arg("stream_id"), nb::arg("error_code"),
+      .def("stop_sending", &H2Session::stop_sending, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("stream_id"), nb::arg("error_code"),
            nb::sig("def stop_sending(self, session_id: int, stream_id: int, "
                    "error_code: int) -> None"),
            "送信停止を要求")
@@ -2544,29 +2547,32 @@ void bind_webtransport_h2(nb::module_& m) {
                 session_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
-          nb::arg("session_id"), nb::arg("data"),
+          nb::lock_self(), nb::arg("session_id"), nb::arg("data"),
           nb::sig(
               "def send_datagram(self, session_id: int, data: bytes) -> None"),
           "データグラムを送信")
-      .def("close_session", &H2Session::close_session, nb::arg("session_id"),
-           nb::arg("error_code") = 0, nb::arg("error_message") = "",
+      .def("close_session", &H2Session::close_session, nb::lock_self(),
+           nb::arg("session_id"), nb::arg("error_code") = 0,
+           nb::arg("error_message") = "",
            nb::sig("def close_session(self, session_id: int, error_code: int = "
                    "0, error_message: str = '') -> None"),
            "WebTransport セッションを閉じる")
-      .def("drain_session", &H2Session::drain_session, nb::arg("session_id"),
+      .def("drain_session", &H2Session::drain_session, nb::lock_self(),
+           nb::arg("session_id"),
            nb::sig("def drain_session(self, session_id: int) -> None"),
            "セッションのドレインを開始")
-      .def("next_event", &H2Session::next_event,
+      .def("next_event", &H2Session::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
-      .def("want_write", &H2Session::want_write,
+      .def("want_write", &H2Session::want_write, nb::lock_self(),
            nb::sig("def want_write(self) -> bool"), "送信待ちデータがあるか")
-      .def("is_closed", &H2Session::is_closed,
+      .def("is_closed", &H2Session::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
-      .def("get_session_ids", &H2Session::get_session_ids,
+      .def("get_session_ids", &H2Session::get_session_ids, nb::lock_self(),
            nb::sig("def get_session_ids(self) -> list[int]"),
            "確立されたセッション ID のリストを取得")
-      .def("get_stream_ids", &H2Session::get_stream_ids, nb::arg("session_id"),
+      .def("get_stream_ids", &H2Session::get_stream_ids, nb::lock_self(),
+           nb::arg("session_id"),
            nb::sig("def get_stream_ids(self, session_id: int) -> list[int]"),
            "セッションに属するストリーム ID を取得");
 }

@@ -2533,6 +2533,19 @@ int QuicConnection::new_session_cb(SSL* ssl, SSL_SESSION* session) {
 
 ssl_verify_result_t QuicConnection::custom_verify_cb(SSL* ssl,
                                                      uint8_t* out_alert) {
+  // 再入デッドロックの解析: 公開 API から Python コールバックに到達する
+  // 経路は verify_callback の発火のみである (nghttp2 / nghttp3 を含む他
+  // 4 クラスのコールバックは C++ 内部で完結し、Python に到達しない)。
+  // 証明書処理はピア受信データの処理で発火するため、発火元は receive()
+  // に限定される (例外の再送出は receive() / send() の双方で行う)。
+  // receive() は nb::lock_self() で排他するため、コールバックが同一
+  // Connection のメソッドを呼ぶと非再帰ロックでデッドロックする。
+  // コールバックには証明書バイト列のみを渡してオブジェクトを渡さない配置
+  // とし、呼び出し側は同一 Connection のメソッドを呼ばない契約とする。
+  // 確定の競合 abort を解消することを優先し、病的再入は契約で回避する
+  // 判断とする。なお nanobind は Python API 呼び出し時に critical
+  // section を一時解放し得るため、厳密にはデッドロックではなく再入競合
+  // になる場合もある。いずれも未定義動作のため契約で禁止する
   (void)out_alert;
   auto* conn_ref = static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
   if (conn_ref == nullptr) {
@@ -3027,7 +3040,8 @@ void bind_quic(nb::module_& m) {
                   const std::vector<std::vector<uint8_t>>&)>>(obj);
             }
           },
-          "ピア証明書検証コールバック (list[bytes] -> bool) または None")
+          "ピア証明書検証コールバック (list[bytes] -> bool) または None。"
+          "コールバック内で同一 Connection のメソッドを呼ばないこと")
       .def_rw("enable_datagram", &QuicConfig::enable_datagram,
               "Datagram を有効にするか")
       .def_rw("max_datagram_frame_size", &QuicConfig::max_datagram_frame_size,
@@ -3180,7 +3194,8 @@ void bind_quic(nb::module_& m) {
                 local_addr.first, local_addr.second, remote_addr.first,
                 remote_addr.second);
           },
-          nb::arg("data"), nb::arg("local_addr"), nb::arg("remote_addr"),
+          nb::lock_self(), nb::arg("data"), nb::arg("local_addr"),
+          nb::arg("remote_addr"),
           nb::sig("def receive(self, data: bytes, local_addr: tuple[str, int], "
                   "remote_addr: tuple[str, int]) -> int"),
           "受信したデータを処理")
@@ -3193,7 +3208,8 @@ void bind_quic(nb::module_& m) {
             }
             return nb::none();
           },
-          nb::sig("def send(self) -> Packet | None"), "送信すべきデータを取得")
+          nb::lock_self(), nb::sig("def send(self) -> Packet | None"),
+          "送信すべきデータを取得")
       .def(
           "initiate_migration",
           [](QuicConnection& self, std::pair<std::string, uint16_t> local_addr,
@@ -3202,7 +3218,7 @@ void bind_quic(nb::module_& m) {
                                            remote_addr.first,
                                            remote_addr.second);
           },
-          nb::arg("local_addr"), nb::arg("remote_addr"),
+          nb::lock_self(), nb::arg("local_addr"), nb::arg("remote_addr"),
           nb::sig("def initiate_migration(self, local_addr: tuple[str, int], "
                   "remote_addr: tuple[str, int]) -> bool"),
           "コネクションマイグレーションを開始する")
@@ -3213,7 +3229,7 @@ void bind_quic(nb::module_& m) {
             return nb::bytes(reinterpret_cast<const char*>(ticket.data()),
                              ticket.size());
           },
-          nb::sig("def export_session_ticket(self) -> bytes"),
+          nb::lock_self(), nb::sig("def export_session_ticket(self) -> bytes"),
           "セッションチケット (DER) を取得")
       .def(
           "export_0rtt_transport_params",
@@ -3222,53 +3238,56 @@ void bind_quic(nb::module_& m) {
             return nb::bytes(reinterpret_cast<const char*>(params.data()),
                              params.size());
           },
+          nb::lock_self(),
           nb::sig("def export_0rtt_transport_params(self) -> bytes"),
           "0-RTT トランスポートパラメータを取得")
       .def("is_early_data_accepted", &QuicConnection::is_early_data_accepted,
-           nb::sig("def is_early_data_accepted(self) -> bool"),
+           nb::lock_self(), nb::sig("def is_early_data_accepted(self) -> bool"),
            "0-RTT early data が受理されたか")
       .def("was_early_data_attempted",
-           &QuicConnection::was_early_data_attempted,
+           &QuicConnection::was_early_data_attempted, nb::lock_self(),
            nb::sig("def was_early_data_attempted(self) -> bool"),
            "0-RTT early data を試みたか")
-      .def("get_timeout", &QuicConnection::get_timeout_ns,
+      .def("get_timeout", &QuicConnection::get_timeout_ns, nb::lock_self(),
            nb::sig("def get_timeout(self) -> int | None"),
            "次のタイムアウトまでの時間を取得 (ナノ秒)")
-      .def("handle_timeout", &QuicConnection::handle_timeout,
+      .def("handle_timeout", &QuicConnection::handle_timeout, nb::lock_self(),
            nb::sig("def handle_timeout(self) -> None"), "タイムアウトを処理")
-      .def("open_stream", &QuicConnection::open_stream,
+      .def("open_stream", &QuicConnection::open_stream, nb::lock_self(),
            nb::arg("bidirectional") = true,
            nb::sig("def open_stream(self, bidirectional: bool = True) -> int"),
            "ストリームを開く")
       .def_prop_ro("streams_bidi_left", &QuicConnection::streams_bidi_left,
+                   nb::lock_self(),
                    nb::sig("def streams_bidi_left(self) -> int | None"),
                    "開設可能な残り双方向ストリーム数")
       .def_prop_ro("streams_uni_left", &QuicConnection::streams_uni_left,
+                   nb::lock_self(),
                    nb::sig("def streams_uni_left(self) -> int | None"),
                    "開設可能な残り単方向ストリーム数")
       .def("keep_alive_timeout", &QuicConnection::keep_alive_timeout,
-           nb::arg("timeout_ns"),
+           nb::lock_self(), nb::arg("timeout_ns"),
            nb::sig("def keep_alive_timeout(self, timeout_ns: int) -> None"),
            "keep-alive タイムアウトを設定 (ナノ秒。UINT64_MAX で無効化)")
       .def("initiate_key_update", &QuicConnection::initiate_key_update,
-           nb::sig("def initiate_key_update(self) -> bool"),
+           nb::lock_self(), nb::sig("def initiate_key_update(self) -> bool"),
            "鍵更新を開始 (成功で True)")
       .def("extend_max_offset", &QuicConnection::extend_max_offset,
-           nb::arg("datalen"),
+           nb::lock_self(), nb::arg("datalen"),
            nb::sig("def extend_max_offset(self, datalen: int) -> None"),
            "コネクション全体のフロー制御を拡張 (バイト)")
       .def("extend_max_stream_offset",
-           &QuicConnection::extend_max_stream_offset, nb::arg("stream_id"),
-           nb::arg("datalen"),
+           &QuicConnection::extend_max_stream_offset, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("datalen"),
            nb::sig("def extend_max_stream_offset(self, stream_id: int, "
                    "datalen: int) -> bool"),
            "ストリームのフロー制御を拡張 (バイト。成功で True)")
       .def("extend_max_streams_bidi", &QuicConnection::extend_max_streams_bidi,
-           nb::arg("n"),
+           nb::lock_self(), nb::arg("n"),
            nb::sig("def extend_max_streams_bidi(self, n: int) -> None"),
            "双方向ストリーム上限を拡張")
       .def("extend_max_streams_uni", &QuicConnection::extend_max_streams_uni,
-           nb::arg("n"),
+           nb::lock_self(), nb::arg("n"),
            nb::sig("def extend_max_streams_uni(self, n: int) -> None"),
            "単方向ストリーム上限を拡張")
       .def(
@@ -3280,22 +3299,23 @@ void bind_quic(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 fin);
           },
-          nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("fin") = false,
           nb::sig("def send_stream_data(self, stream_id: int, data: bytes, "
                   "fin: bool = False) -> None"),
           "ストリームにデータを送信")
-      .def("close_stream", &QuicConnection::close_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("close_stream", &QuicConnection::close_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "ストリームを閉じる (RESET_STREAM + STOP_SENDING)")
-      .def("stop_sending", &QuicConnection::stop_sending, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("stop_sending", &QuicConnection::stop_sending, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def stop_sending(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "STOP_SENDING を送出する")
-      .def("reset_stream", &QuicConnection::reset_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("reset_stream", &QuicConnection::reset_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "RESET_STREAM を送出する")
@@ -3305,25 +3325,25 @@ void bind_quic(nb::module_& m) {
             self.send_datagram(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
-          nb::arg("data"),
+          nb::lock_self(), nb::arg("data"),
           nb::sig("def send_datagram(self, data: bytes) -> None"),
           "Datagram を送信")
       .def(
-          "close", &QuicConnection::close, nb::arg("error_code") = 0,
-          nb::arg("reason") = "",
+          "close", &QuicConnection::close, nb::lock_self(),
+          nb::arg("error_code") = 0, nb::arg("reason") = "",
           nb::sig(
               "def close(self, error_code: int = 0, reason: str = '') -> None"),
           "接続を閉じる")
-      .def("next_event", &QuicConnection::next_event,
+      .def("next_event", &QuicConnection::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
-      .def("is_established", &QuicConnection::is_established,
+      .def("is_established", &QuicConnection::is_established, nb::lock_self(),
            nb::sig("def is_established(self) -> bool"),
            "接続が確立されているか")
-      .def("is_closed", &QuicConnection::is_closed,
+      .def("is_closed", &QuicConnection::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
       .def("is_handshake_completed", &QuicConnection::is_handshake_completed,
-           nb::sig("def is_handshake_completed(self) -> bool"),
+           nb::lock_self(), nb::sig("def is_handshake_completed(self) -> bool"),
            "ハンドシェイクが完了したか")
       .def(
           "get_connection_id",
@@ -3332,79 +3352,85 @@ void bind_quic(nb::module_& m) {
             return nb::bytes(reinterpret_cast<const char*>(cid.data()),
                              cid.size());
           },
-          nb::sig("def get_connection_id(self) -> bytes"), "接続 ID を取得")
-      .def_prop_ro("latest_rtt", &QuicConnection::latest_rtt,
+          nb::lock_self(), nb::sig("def get_connection_id(self) -> bytes"),
+          "接続 ID を取得")
+      .def_prop_ro("latest_rtt", &QuicConnection::latest_rtt, nb::lock_self(),
                    nb::sig("def latest_rtt(self) -> int | None"),
                    "最新の RTT (ナノ秒)")
-      .def_prop_ro("min_rtt", &QuicConnection::min_rtt,
+      .def_prop_ro("min_rtt", &QuicConnection::min_rtt, nb::lock_self(),
                    nb::sig("def min_rtt(self) -> int | None"),
                    "最小の RTT (ナノ秒)")
       .def_prop_ro("smoothed_rtt", &QuicConnection::smoothed_rtt,
+                   nb::lock_self(),
                    nb::sig("def smoothed_rtt(self) -> int | None"),
                    "平滑化された RTT (ナノ秒)")
-      .def_prop_ro("rttvar", &QuicConnection::rttvar,
+      .def_prop_ro("rttvar", &QuicConnection::rttvar, nb::lock_self(),
                    nb::sig("def rttvar(self) -> int | None"),
                    "RTT の平均偏差 (ナノ秒)")
-      .def_prop_ro("cwnd", &QuicConnection::cwnd,
+      .def_prop_ro("cwnd", &QuicConnection::cwnd, nb::lock_self(),
                    nb::sig("def cwnd(self) -> int | None"),
                    "輻輳ウィンドウ (バイト)")
-      .def_prop_ro("ssthresh", &QuicConnection::ssthresh,
+      .def_prop_ro("ssthresh", &QuicConnection::ssthresh, nb::lock_self(),
                    nb::sig("def ssthresh(self) -> int | None"),
                    "スロー スタート閾値 (バイト)")
       .def_prop_ro("bytes_in_flight", &QuicConnection::bytes_in_flight,
+                   nb::lock_self(),
                    nb::sig("def bytes_in_flight(self) -> int | None"),
                    "送信中で未 ACK のバイト数")
-      .def_prop_ro("pkt_sent", &QuicConnection::pkt_sent,
+      .def_prop_ro("pkt_sent", &QuicConnection::pkt_sent, nb::lock_self(),
                    nb::sig("def pkt_sent(self) -> int | None"),
                    "送信したパケット数")
-      .def_prop_ro("bytes_sent", &QuicConnection::bytes_sent,
+      .def_prop_ro("bytes_sent", &QuicConnection::bytes_sent, nb::lock_self(),
                    nb::sig("def bytes_sent(self) -> int | None"),
                    "送信したバイト数")
-      .def_prop_ro("pkt_recv", &QuicConnection::pkt_recv,
+      .def_prop_ro("pkt_recv", &QuicConnection::pkt_recv, nb::lock_self(),
                    nb::sig("def pkt_recv(self) -> int | None"),
                    "受信したパケット数 (破棄パケット除外)")
-      .def_prop_ro("bytes_recv", &QuicConnection::bytes_recv,
+      .def_prop_ro("bytes_recv", &QuicConnection::bytes_recv, nb::lock_self(),
                    nb::sig("def bytes_recv(self) -> int | None"),
                    "受信したバイト数 (破棄パケット除外)")
-      .def_prop_ro("pkt_lost", &QuicConnection::pkt_lost,
+      .def_prop_ro("pkt_lost", &QuicConnection::pkt_lost, nb::lock_self(),
                    nb::sig("def pkt_lost(self) -> int | None"),
                    "損失したパケット数 (PMTUD パケット除外)")
-      .def_prop_ro("bytes_lost", &QuicConnection::bytes_lost,
+      .def_prop_ro("bytes_lost", &QuicConnection::bytes_lost, nb::lock_self(),
                    nb::sig("def bytes_lost(self) -> int | None"),
                    "損失したバイト数 (PMTUD パケット除外)")
-      .def_prop_ro("ping_recv", &QuicConnection::ping_recv,
+      .def_prop_ro("ping_recv", &QuicConnection::ping_recv, nb::lock_self(),
                    nb::sig("def ping_recv(self) -> int | None"),
                    "受信した PING フレーム数")
       .def_prop_ro("pkt_discarded", &QuicConnection::pkt_discarded,
+                   nb::lock_self(),
                    nb::sig("def pkt_discarded(self) -> int | None"),
                    "破棄したパケット数")
-      .def_prop_ro("pto", &QuicConnection::pto,
+      .def_prop_ro("pto", &QuicConnection::pto, nb::lock_self(),
                    nb::sig("def pto(self) -> int | None"),
                    "PTO (プローブタイムアウト) (ナノ秒)")
-      .def_prop_ro("cwnd_left", &QuicConnection::cwnd_left,
+      .def_prop_ro("cwnd_left", &QuicConnection::cwnd_left, nb::lock_self(),
                    nb::sig("def cwnd_left(self) -> int | None"),
                    "輻輳ウィンドウ残量 (バイト)")
       .def_prop_ro("max_data_left", &QuicConnection::max_data_left,
+                   nb::lock_self(),
                    nb::sig("def max_data_left(self) -> int | None"),
                    "コネクション全体のフロー制御残量 (バイト)")
       .def("max_stream_data_left", &QuicConnection::max_stream_data_left,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig(
                "def max_stream_data_left(self, stream_id: int) -> int | None"),
            "ストリームごとのフロー制御残量 (バイト)")
       .def("stream_loss_count", &QuicConnection::stream_loss_count,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def stream_loss_count(self, stream_id: int) -> int | None"),
            "STREAM フレームを含む損失パケット数 (スプリアス損失を含む)")
       .def_prop_ro("send_quantum", &QuicConnection::send_quantum,
+                   nb::lock_self(),
                    nb::sig("def send_quantum(self) -> int | None"),
                    "送信クォンタム (バイト)")
       .def_prop_ro(
           "path_max_tx_udp_payload_size",
-          &QuicConnection::path_max_tx_udp_payload_size,
+          &QuicConnection::path_max_tx_udp_payload_size, nb::lock_self(),
           nb::sig("def path_max_tx_udp_payload_size(self) -> int | None"),
           "現在パスの最大 UDP ペイロードサイズ (バイト)")
-      .def_prop_ro("error_code", &QuicConnection::error_code,
+      .def_prop_ro("error_code", &QuicConnection::error_code, nb::lock_self(),
                    nb::sig("def error_code(self) -> int | None"),
                    "コネクションエラーのコード (エラーが無い場合は None)")
       .def_prop_ro(
@@ -3420,114 +3446,124 @@ void bind_quic(nb::module_& m) {
                 reason->c_str(), static_cast<Py_ssize_t>(reason->size()),
                 "surrogateescape"));
           },
-          nb::sig("def reason(self) -> str | None"),
+          nb::lock_self(), nb::sig("def reason(self) -> str | None"),
           "コネクションエラーの理由 (エラーが無い場合は None)")
       .def_prop_ro(
-          "tls_error", &QuicConnection::tls_error,
+          "tls_error", &QuicConnection::tls_error, nb::lock_self(),
           nb::sig("def tls_error(self) -> int"),
           "TLS 処理時に ngtcp2 が記録した内部エラーコード (無ければ 0)")
-      .def_prop_ro("tls_alert", &QuicConnection::tls_alert,
+      .def_prop_ro("tls_alert", &QuicConnection::tls_alert, nb::lock_self(),
                    nb::sig("def tls_alert(self) -> int"),
                    "TLS アラート (エラーが無い場合は 0)")
       .def_prop_ro("remote_max_idle_timeout",
-                   &QuicConnection::remote_max_idle_timeout,
+                   &QuicConnection::remote_max_idle_timeout, nb::lock_self(),
                    nb::sig("def remote_max_idle_timeout(self) -> int | None"),
                    "ピアのアイドルタイムアウト (ナノ秒)")
       .def_prop_ro(
           "remote_max_udp_payload_size",
-          &QuicConnection::remote_max_udp_payload_size,
+          &QuicConnection::remote_max_udp_payload_size, nb::lock_self(),
           nb::sig("def remote_max_udp_payload_size(self) -> int | None"),
           "ピアの最大 UDP ペイロードサイズ (バイト)")
       .def_prop_ro("remote_initial_max_data",
-                   &QuicConnection::remote_initial_max_data,
+                   &QuicConnection::remote_initial_max_data, nb::lock_self(),
                    nb::sig("def remote_initial_max_data(self) -> int | None"),
                    "ピアのコネクション全体のフロー制御上限")
       .def_prop_ro(
           "remote_initial_max_stream_data_bidi_local",
           &QuicConnection::remote_initial_max_stream_data_bidi_local,
+          nb::lock_self(),
           nb::sig("def remote_initial_max_stream_data_bidi_local(self) -> int "
                   "| None"),
           "ピアの双方向ストリーム (ローカル開始) のフロー制御上限")
       .def_prop_ro(
           "remote_initial_max_stream_data_bidi_remote",
           &QuicConnection::remote_initial_max_stream_data_bidi_remote,
+          nb::lock_self(),
           nb::sig("def remote_initial_max_stream_data_bidi_remote(self) -> "
                   "int | None"),
           "ピアの双方向ストリーム (リモート開始) のフロー制御上限")
       .def_prop_ro(
           "remote_initial_max_stream_data_uni",
-          &QuicConnection::remote_initial_max_stream_data_uni,
+          &QuicConnection::remote_initial_max_stream_data_uni, nb::lock_self(),
           nb::sig("def remote_initial_max_stream_data_uni(self) -> int | None"),
           "ピアの単方向ストリームのフロー制御上限")
       .def_prop_ro(
           "remote_initial_max_streams_bidi",
-          &QuicConnection::remote_initial_max_streams_bidi,
+          &QuicConnection::remote_initial_max_streams_bidi, nb::lock_self(),
           nb::sig("def remote_initial_max_streams_bidi(self) -> int | None"),
           "ピアの双方向ストリーム並列数上限")
       .def_prop_ro(
           "remote_initial_max_streams_uni",
-          &QuicConnection::remote_initial_max_streams_uni,
+          &QuicConnection::remote_initial_max_streams_uni, nb::lock_self(),
           nb::sig("def remote_initial_max_streams_uni(self) -> int | None"),
           "ピアの単方向ストリーム並列数上限")
       .def_prop_ro(
           "remote_max_datagram_frame_size",
-          &QuicConnection::remote_max_datagram_frame_size,
+          &QuicConnection::remote_max_datagram_frame_size, nb::lock_self(),
           nb::sig("def remote_max_datagram_frame_size(self) -> int | None"),
           "ピアの Datagram フレームサイズ上限")
       .def_prop_ro("remote_reset_stream_at",
-                   &QuicConnection::remote_reset_stream_at,
+                   &QuicConnection::remote_reset_stream_at, nb::lock_self(),
                    nb::sig("def remote_reset_stream_at(self) -> bool | None"),
                    "ピアが reset_stream_at transport parameter を送信したか")
       .def_prop_ro("local_max_idle_timeout",
-                   &QuicConnection::local_max_idle_timeout,
+                   &QuicConnection::local_max_idle_timeout, nb::lock_self(),
                    nb::sig("def local_max_idle_timeout(self) -> int"),
                    "ローカルのアイドルタイムアウト (ナノ秒)")
       .def_prop_ro("local_max_udp_payload_size",
-                   &QuicConnection::local_max_udp_payload_size,
+                   &QuicConnection::local_max_udp_payload_size, nb::lock_self(),
                    nb::sig("def local_max_udp_payload_size(self) -> int"),
                    "ローカルの最大 UDP ペイロードサイズ (バイト)")
       .def_prop_ro("local_initial_max_data",
-                   &QuicConnection::local_initial_max_data,
+                   &QuicConnection::local_initial_max_data, nb::lock_self(),
                    nb::sig("def local_initial_max_data(self) -> int"),
                    "ローカルのコネクション全体のフロー制御上限")
       .def_prop_ro(
           "local_initial_max_stream_data_bidi_local",
           &QuicConnection::local_initial_max_stream_data_bidi_local,
+          nb::lock_self(),
           nb::sig("def local_initial_max_stream_data_bidi_local(self) -> int"),
           "ローカルの双方向ストリーム (ローカル開始) のフロー制御上限")
       .def_prop_ro(
           "local_initial_max_stream_data_bidi_remote",
           &QuicConnection::local_initial_max_stream_data_bidi_remote,
+          nb::lock_self(),
           nb::sig("def local_initial_max_stream_data_bidi_remote(self) -> int"),
           "ローカルの双方向ストリーム (リモート開始) のフロー制御上限")
       .def_prop_ro(
           "local_initial_max_stream_data_uni",
-          &QuicConnection::local_initial_max_stream_data_uni,
+          &QuicConnection::local_initial_max_stream_data_uni, nb::lock_self(),
           nb::sig("def local_initial_max_stream_data_uni(self) -> int"),
           "ローカルの単方向ストリームのフロー制御上限")
       .def_prop_ro("local_initial_max_streams_bidi",
                    &QuicConnection::local_initial_max_streams_bidi,
+                   nb::lock_self(),
                    nb::sig("def local_initial_max_streams_bidi(self) -> int"),
                    "ローカルの双方向ストリーム並列数上限")
       .def_prop_ro("local_initial_max_streams_uni",
                    &QuicConnection::local_initial_max_streams_uni,
+                   nb::lock_self(),
                    nb::sig("def local_initial_max_streams_uni(self) -> int"),
                    "ローカルの単方向ストリーム並列数上限")
       .def_prop_ro("local_max_datagram_frame_size",
                    &QuicConnection::local_max_datagram_frame_size,
+                   nb::lock_self(),
                    nb::sig("def local_max_datagram_frame_size(self) -> int"),
                    "ローカルの Datagram フレームサイズ上限")
       .def_prop_ro("negotiated_version", &QuicConnection::negotiated_version,
+                   nb::lock_self(),
                    nb::sig("def negotiated_version(self) -> int"),
                    "ネゴシエーションされた QUIC バージョン (未確定なら 0)")
       .def_prop_ro("client_chosen_version",
-                   &QuicConnection::client_chosen_version,
+                   &QuicConnection::client_chosen_version, nb::lock_self(),
                    nb::sig("def client_chosen_version(self) -> int"),
                    "クライアントが選択した QUIC バージョン")
       .def_prop_ro("in_closing_period", &QuicConnection::in_closing_period,
+                   nb::lock_self(),
                    nb::sig("def in_closing_period(self) -> bool"),
                    "CLOSING 状態か")
       .def_prop_ro("in_draining_period", &QuicConnection::in_draining_period,
+                   nb::lock_self(),
                    nb::sig("def in_draining_period(self) -> bool"),
                    "DRAINING 状態か")
       .def_prop_ro(
@@ -3540,7 +3576,7 @@ void bind_quic(nb::module_& m) {
             }
             return result;
           },
-          nb::sig("def scid(self) -> list[bytes]"),
+          nb::lock_self(), nb::sig("def scid(self) -> list[bytes]"),
           "送信元接続 ID (SCID) の一覧")
       .def_prop_ro(
           "active_dcid",
@@ -3552,7 +3588,7 @@ void bind_quic(nb::module_& m) {
             }
             return result;
           },
-          nb::sig("def active_dcid(self) -> list[bytes]"),
+          nb::lock_self(), nb::sig("def active_dcid(self) -> list[bytes]"),
           "アクティブな宛先接続 ID (DCID) の一覧 (ハンドシェイク完了前は空)");
 
   // ngtcp2 バージョン情報

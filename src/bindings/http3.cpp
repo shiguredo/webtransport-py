@@ -1201,7 +1201,8 @@ void bind_http3(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 fin);
           },
-          nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("fin") = false,
           nb::sig("def receive_stream_data(self, stream_id: int, data: bytes, "
                   "fin: bool = False) -> int"),
           "QUIC ストリームからデータを受信")
@@ -1219,30 +1220,33 @@ void bind_http3(nb::module_& m) {
             }
             return result;
           },
+          nb::lock_self(),
           nb::sig(
               "def get_streams_to_send(self) -> list[tuple[int, bytes, bool]]"),
           "送信すべきストリームデータを取得")
       .def("bind_control_stream", &Http3Connection::bind_control_stream,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def bind_control_stream(self, stream_id: int) -> None"),
            "コントロールストリームを設定")
       .def("bind_qpack_encoder_stream",
-           &Http3Connection::bind_qpack_encoder_stream, nb::arg("stream_id"),
+           &Http3Connection::bind_qpack_encoder_stream, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig(
                "def bind_qpack_encoder_stream(self, stream_id: int) -> None"),
            "QPACK エンコーダーストリームを設定")
       .def("bind_qpack_decoder_stream",
-           &Http3Connection::bind_qpack_decoder_stream, nb::arg("stream_id"),
+           &Http3Connection::bind_qpack_decoder_stream, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig(
                "def bind_qpack_decoder_stream(self, stream_id: int) -> None"),
            "QPACK デコーダーストリームを設定")
-      .def("submit_request", &Http3Connection::submit_request,
+      .def("submit_request", &Http3Connection::submit_request, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_request(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> bool"),
            "リクエストを送信")
       .def("submit_response", &Http3Connection::submit_response,
-           nb::arg("stream_id"), nb::arg("headers"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_response(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> bool"),
            "レスポンスを送信")
@@ -1255,93 +1259,99 @@ void bind_http3(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 fin);
           },
-          nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("fin") = false,
           nb::sig("def send_data(self, stream_id: int, data: bytes, fin: bool "
                   "= False) -> None"),
           "ストリームにデータを送信")
-      .def("reset_stream", &Http3Connection::reset_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("reset_stream", &Http3Connection::reset_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "ストリームをリセット")
-      .def("close_stream", &Http3Connection::close_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("close_stream", &Http3Connection::close_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "QUIC ストリーム終了を nghttp3 に通知する")
-      .def("goaway", &Http3Connection::goaway, nb::arg("id") = 0,
-           nb::sig("def goaway(self, id: int = 0) -> None"), "GOAWAY を送信")
+      .def("goaway", &Http3Connection::goaway, nb::lock_self(),
+           nb::arg("id") = 0, nb::sig("def goaway(self, id: int = 0) -> None"),
+           "GOAWAY を送信")
       .def("submit_trailers", &Http3Connection::submit_trailers,
-           nb::arg("stream_id"), nb::arg("headers"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_trailers(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> bool"),
            "トレーラを送信")
-      .def("submit_info", &Http3Connection::submit_info, nb::arg("stream_id"),
-           nb::arg("headers"),
+      .def("submit_info", &Http3Connection::submit_info, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_info(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> bool"),
            "1xx レスポンスを送信 (サーバーのみ)")
       .def("submit_shutdown_notice", &Http3Connection::submit_shutdown_notice,
-           nb::sig("def submit_shutdown_notice(self) -> bool"),
+           nb::lock_self(), nb::sig("def submit_shutdown_notice(self) -> bool"),
            "graceful shutdown の開始通知を送信 (サーバーのみ)")
       .def("shutdown_stream_write", &Http3Connection::shutdown_stream_write,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def shutdown_stream_write(self, stream_id: int) -> None"),
            "ストリームの書き込み側をシャットダウン")
-      .def("next_event", &Http3Connection::next_event,
+      .def("next_event", &Http3Connection::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
       .def("get_required_streams", &Http3Connection::get_required_streams,
+           nb::lock_self(),
            nb::sig("def get_required_streams(self) -> list[tuple[str, bool]]"),
            "必要な QUIC ストリームのリストを取得")
-      .def("is_closed", &Http3Connection::is_closed,
+      .def("is_closed", &Http3Connection::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
       .def("stream_writable", &Http3Connection::stream_writable,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
            "ストリームが書き込み可能か確認")
-      .def("stream_flushed", &Http3Connection::stream_flushed,
+      .def("stream_flushed", &Http3Connection::stream_flushed, nb::lock_self(),
            nb::arg("stream_id"),
            nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
            "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
       .def(
           "frame_payload_left", &Http3Connection::frame_payload_left,
-          nb::arg("stream_id"),
+          nb::lock_self(), nb::arg("stream_id"),
           nb::sig("def frame_payload_left(self, stream_id: int) -> int | None"),
           "受信中フレームのペイロード残量を取得")
-      .def_prop_ro("drained", &Http3Connection::drained,
+      .def_prop_ro("drained", &Http3Connection::drained, nb::lock_self(),
                    nb::sig("def drained(self) -> bool | None"),
                    "ドレイン状態か確認 (サーバーのみ)")
       .def("stream_priority", &Http3Connection::stream_priority,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def stream_priority(self, stream_id: int) -> "
                    "tuple[int, bool] | None"),
            "ストリームの優先度を取得 (サーバーのみ)")
       .def("set_max_client_streams_bidi",
-           &Http3Connection::set_max_client_streams_bidi,
+           &Http3Connection::set_max_client_streams_bidi, nb::lock_self(),
            nb::arg("max_streams"),
            nb::sig("def set_max_client_streams_bidi(self, "
                    "max_streams: int) -> None"),
            "クライアントからの双方向ストリームの最大数を設定 (サーバーのみ)")
       .def("client_stream_priority", &Http3Connection::client_stream_priority,
-           nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("urgency"),
+           nb::arg("incremental"),
            nb::sig("def client_stream_priority(self, stream_id: int, "
                    "urgency: int, incremental: bool) -> bool"),
            "クライアント起動双方向ストリームの優先度を設定 (クライアントのみ)")
       .def("server_stream_priority", &Http3Connection::server_stream_priority,
-           nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("urgency"),
+           nb::arg("incremental"),
            nb::sig("def server_stream_priority(self, stream_id: int, "
                    "urgency: int, incremental: bool) -> bool"),
            "クライアント起動双方向ストリームの優先度を設定 (サーバーのみ)")
-      .def("block_stream", &Http3Connection::block_stream, nb::arg("stream_id"),
+      .def("block_stream", &Http3Connection::block_stream, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def block_stream(self, stream_id: int) -> None"),
            "ストリームの QUIC フロー制御ブロックを通知")
-      .def("unblock_stream", &Http3Connection::unblock_stream,
+      .def("unblock_stream", &Http3Connection::unblock_stream, nb::lock_self(),
            nb::arg("stream_id"),
            nb::sig("def unblock_stream(self, stream_id: int) -> bool"),
            "ストリームの QUIC フロー制御ブロック解除を通知")
       .def("max_concurrent_streams", &Http3Connection::max_concurrent_streams,
-           nb::arg("n"),
+           nb::lock_self(), nb::arg("n"),
            nb::sig("def max_concurrent_streams(self, n: int) -> None"),
            "同時ストリーム数のヒントを設定");
 

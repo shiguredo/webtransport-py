@@ -239,6 +239,8 @@
   - @voluntas
 - [FIX] QUIC の検証コールバックが例外を送出するとプロセスが異常終了する問題を修正する
   - @voluntas
+- [FIX] free-threading 環境で同一接続を複数スレッドから触るとプロセスが異常終了する問題を修正する
+  - @voluntas
 
 ### misc
 
