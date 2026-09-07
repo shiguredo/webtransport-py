@@ -1,6 +1,7 @@
 """webtransport.http2 高レベル API テスト"""
 
 import asyncio
+import time
 
 import pytest
 
@@ -431,3 +432,55 @@ async def test_client_run_continues_after_goaway_injection(test_certificates):
     assert run_task.done() is True
 
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_while_client_connected(test_certificates):
+    """クライアント接続中に stop() が復帰する"""
+    from webtransport.http2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+    assert client.is_connected is True
+
+    async def run_client() -> None:
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+        except OSError:
+            # サーバー停止による TCP 切断も終了として扱う
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    # タスクが起動して接続中であることを確認する (停止後の終了と区別する)
+    await asyncio.sleep(0.05)
+    assert not client_task.done()
+    try:
+        # 接続中の stop() は 500 ms 以内に復帰する
+        start = time.monotonic()
+        await server.stop()
+        assert time.monotonic() - start < 0.5
+
+        # クライアントは TCP 切断を検知して run() が終了する
+        await asyncio.wait_for(client_task, timeout=5.0)
+    finally:
+        if not client_task.done():
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+        try:
+            await client.close()
+        except OSError:
+            pass

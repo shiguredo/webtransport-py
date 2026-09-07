@@ -245,6 +245,8 @@
   - @voluntas
 - [FIX] UDP 系サーバーが idle timeout 後の接続を回収せずリークする問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 と HTTP/2 のサーバーがクライアント接続中に停止しない問題を修正する
+  - @voluntas
 
 ### misc
 
