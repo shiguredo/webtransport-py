@@ -1,7 +1,7 @@
 # QUIC の verify_callback が Python 例外を送出するとプロセスが abort する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-verify-callback-exception-abort
 - Polished: 2026-09-07
 
@@ -31,3 +31,13 @@
 - 低レベル `next_event()` の `ConnectionClosed` イベントの `reason` に例外情報が含まれること
 - `Client.connect()` が `False` を返して復帰すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `QuicConnection::custom_verify_cb` の全体を try / catch で囲み、Python 境界を出る前に全例外を捕捉する。証明書リストの構築も try の内側で行う
+- 通常例外は型名とメッセージを新規メンバーに保持し、`ssl_verify_invalid` を返す。保持は 1024 バイトで UTF-8 境界切り詰めする (QUIC の reason に切り詰め契約は無いため、他層の上限に揃えた意図的選択とする)
+- 割り込み系 3 種は例外オブジェクトを保持し、`receive()` / `send()` の Python 境界で再送出する。即時 throw は C フレームを巻き戻して終了させるため遅延させる (二重発火で異常終了することを再現確認した)
+- 保持した例外情報はハンドシェイク失敗時の低レベル `ConnectionClosed` イベントの `reason` に設定し、使い切りで破棄する。ハンドシェイク成功時は破棄する
+- 記録処理自体の送出も外側で受け止め、詳細不明として検証失敗に丸める
+- `tests/test_quic_error_handling.py` に 3 例外の継続と reason 含有・割り込み 3 種の再送出・切り詰め境界のテスト、`tests/test_e2e_quic_advanced.py` に `Client.connect()` の `False` 復帰テストを追加する
+- 全 868 件のテストが通過することと、レビュー 4 周で致命的と重要が 0 件であることを確認した
