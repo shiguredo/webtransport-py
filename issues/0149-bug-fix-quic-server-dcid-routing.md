@@ -1,7 +1,7 @@
 # quic.Server が未知アドレスからの short header パケット 1 発で既存接続のアドレスキーを誤って張り替える
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-quic-server-dcid-routing
 - Polished: 2026-09-07
 
@@ -34,3 +34,15 @@
 - 未知アドレスからのパケットに対する走査コストが O(N) から O(1) 相当になること (DCID インデックス経由)
 - `tests/` に「未知アドレスからの short header 1 発では既存接続が変わらない」「NAT リバインドを模した receive 元アドレス変化で既存接続が保持される」の回帰テストを追加すること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `QuicConnection::receive` の戻り値を enum (`ReceiveResult`、受理・破棄・終了) に変える。ngtcp2 の受信カウンタ前後差分で受理と破棄を区別する (破棄はカウンタが進まない)。終了系の契約は維持する
+- `quic.Server.run` の未知アドレス short header 経路を DCID 索引 (`_dcid_index`) による O(1) 照合に置き換える。DCID は short header の [1:9] の 8 バイト固定で取り出す (RFC 9000 Section 5.2 に従い照合を試みる)。受理時のみ正当な Migration として張り替え、破棄・終了では張り替えない
+- 発行 SCID は既存 `scid` プロパティで照会し、接触のたびに索引を最新化する (送信後とタイムアウト後を含む)。8 バイト以外は登録せず安全側に破棄する。退役残りは試し受信で破棄判定のため無害である
+- キー張り替えは逆引き辞書で O(1) にし、終了時はイベント drain と登録外しを行う。タイムアウト時の終了も即時通知と除去の対象にする
+- 退役検知の remove_connection_id 新規配線は行わず、ngtcp2 の正規集合の照会で代替する (重複状態を持たず、観測挙動は同等になる)
+- h3 / http3 Server の追随は不要であった (戻り値を無視しているため互換性に影響しない)
+- 破棄時は呼び出し元アドレスによる内部汚染を戻す
+- `tests/test_quic_server_routing.py` に張り替え防止・正当 Migration・spray 無接触・タイムアウト通知の回帰テスト、`tests/test_quic_error_handling.py` に重複破棄テストを追加し、既存の戻り値利用を enum に追随させる
+- 全 878 件のテストが通過することと、レビュー 4 周で致命的と重要が 0 件であることを確認した
