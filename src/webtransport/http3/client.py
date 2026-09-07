@@ -72,6 +72,8 @@ class Client:
         self._socket: socket.socket | None = None
         # bind 後のローカルアドレス (host, port)
         self._local_addr: tuple[str, int] | None = None
+        # 接続中のリモートアドレス (数値 IP。試行ごとに設定する)
+        self._remote_addr: tuple[str, int] | None = None
         self._running = False
         self._connected = False
         self._control_stream_id = -1
@@ -159,6 +161,10 @@ class Client:
         """パケットの送信先アドレスを決める"""
         if packet.remote_host and packet.remote_port:
             return (packet.remote_host, packet.remote_port)
+        # 数値リモートがあればそれを使い、なければホスト名にフォールバック
+        # する (C++ 側で解決されるが family 食い違いの余地が残る)
+        if self._remote_addr is not None:
+            return self._remote_addr
         return (self._host, self._port)
 
     async def _send_pending(self) -> None:
@@ -253,14 +259,36 @@ class Client:
             decoder_stream_id = self._quic_connection.open_stream(False)
             self._http3_connection.bind_qpack_decoder_stream(decoder_stream_id)
 
+    async def _resolve_remote(self, host: str, port: int) -> list[tuple[socket.AddressFamily, str]]:
+        """ホストを解決して (family, 数値 IP) の候補列を返す
+
+        getaddrinfo の順序を保ち、重複を除く。TLS の server_name には元の
+        ホスト名を使い続けるため、ここでは数値 IP のみを取り出す。
+        """
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        candidates: list[tuple[socket.AddressFamily, str]] = []
+        seen: set[tuple[socket.AddressFamily, str]] = set()
+        for family, _, _, _, sockaddr in infos:
+            ip = sockaddr[0]
+            if not isinstance(ip, str):
+                continue
+            candidate = (family, ip)
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+        return candidates
+
     async def connect(self, timeout: float = 10.0) -> None:
         """サーバーに接続する
 
-        deadline ベースで bounded に動作する。成功時は例外なしで復帰し、
-        失敗時は具体例外で理由を通知する (h3 / h2 対称の例外送出型)。
+        候補ごとに試行し、各試行は deadline ベースで bounded に動作する。
+        成功時は例外なしで復帰し、失敗時は具体例外で理由を通知する
+        (h3 / h2 対称の例外送出型)。
 
         Args:
-            timeout: 接続確立の打ち切り秒数。0 以下では即座に
+            timeout: 各候補への試行の打ち切り秒数。候補ごとに適用される
+                ため、合計は候補数倍になり得る。0 以下では即座に
                 ConnectTimeoutError を送出する
 
         Raises:
@@ -272,8 +300,6 @@ class Client:
                 `CONNECTION_CLOSE` が届いた場合 (ハンドシェイク完了前の
                 失敗は TLS 由来とみなす)
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
         if timeout <= 0:
             raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
         quic_config = quic_low.Config()
@@ -289,17 +315,86 @@ class Client:
         http3_config = http3_low.Config()
         http3_config.is_server = False
 
+        # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
+        # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
         try:
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            candidates = await self._resolve_remote(self._host, self._port)
+        except OSError as exc:
+            raise ConnectRefusedError(
+                f"failed to resolve {self._host}:{self._port}: {exc}"
+            ) from exc
+        if not candidates:
+            raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
+
+        # 候補ごとに試す (逐次フォールバック)。各試行は timeout 全体で
+        # 駆動する (先頭候補の無応答で予算を使い切ると次候補へ進めない
+        # ため、予算は分割しない)。応答なしのタイムアウト失敗時のみ次候補
+        # へ進み、明示失敗は即座に送出する
+        loop = asyncio.get_running_loop()
+        last_error: ConnectTimeoutError | None = None
+        for family, ip in candidates:
+            try:
+                await self._connect_one(
+                    family, ip, quic_config, http3_config, timeout, loop.time() + timeout
+                )
+                return
+            except ConnectTimeoutError as exc:
+                last_error = exc
+                await self._abandon_attempt()
+                continue
+        if last_error is not None:
+            raise last_error
+        raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
+
+    async def _abandon_attempt(self) -> None:
+        """失敗試行の後始末をして次候補に備える
+
+        ソケットを閉じて参照を破棄する。制御ストリーム ID も戻し、次試行
+        の _setup_http3_streams が再設定するようにする。
+        """
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+        self._quic_connection = None
+        self._http3_connection = None
+        self._local_addr = None
+        self._remote_addr = None
+        self._control_stream_id = -1
+        self._running = False
+        self._connected = False
+
+    async def _connect_one(
+        self,
+        family: socket.AddressFamily,
+        ip: str,
+        quic_config: quic_low.Config,
+        http3_config: http3_low.Config,
+        timeout: float,
+        deadline: float,
+    ) -> None:
+        """単一候補への接続を試みる。失敗時は具体例外を送出する
+
+        Args:
+            family: ソケット family
+            ip: 接続先の数値 IP (TLS 検証には元のホスト名を使う)
+            quic_config: QUIC 設定 (family 非依存のため呼び出し側で生成)
+            http3_config: HTTP/3 設定 (同上)
+            timeout: 打ち切り秒数 (メッセージ用)
+            deadline: 打ち切り時刻
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            self._socket = socket.socket(family, socket.SOCK_DGRAM)
             self._socket.setblocking(False)
-            self._socket.bind(("0.0.0.0", 0))
+            self._socket.bind(("::", 0) if family == socket.AF_INET6 else ("0.0.0.0", 0))
             self._local_addr = self._normalize_addr(self._socket.getsockname())
+            self._remote_addr = (ip, self._port)
 
             try:
                 self._quic_connection = quic_low.Connection.create_client(
                     quic_config,
                     self._local_addr,
-                    (self._host, self._port),
+                    (ip, self._port),
                 )
                 self._http3_connection = http3_low.Connection.create_client(http3_config)
             except RuntimeError as exc:
@@ -355,14 +450,10 @@ class Client:
             ) from exc
         except (OSError, WebTransportConnectError) as exc:
             # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は
-            # ConnectRefusedError に寄せて具体例外の契約を保つ。失敗パスの
-            # 後始末は best-effort であり、完全な切断は呼び出し側の close()
-            # が担う
-            self._running = False
-            self._connected = False
-            if self._socket is not None:
-                self._socket.close()
-                self._socket = None
+            # ConnectRefusedError に寄せて具体例外の契約を保つ。参照の破棄
+            # は _abandon_attempt と同形に行い、完全な切断は呼び出し側の
+            # close() が担う
+            await self._abandon_attempt()
             if isinstance(exc, WebTransportConnectError):
                 raise
             raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
