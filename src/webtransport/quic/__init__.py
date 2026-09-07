@@ -8,6 +8,7 @@ Sans-IO 低レベル API と asyncio 高レベル API を提供する。
     - Event: イベント
     - EventType: イベント種別
     - Packet: パス情報付き UDP パケット
+    - ReceiveResult: 受信結果 (受理 / 破棄 / 終了)
 
 高レベル API (asyncio + UDP):
     - Server: QUIC サーバー
@@ -15,7 +16,13 @@ Sans-IO 低レベル API と asyncio 高レベル API を提供する。
 
 Usage:
     # 低レベル API
-    from webtransport.quic import Config, Connection, EventType, Packet
+    from webtransport.quic import (
+        Config,
+        Connection,
+        EventType,
+        Packet,
+        ReceiveResult,
+    )
 
     # 高レベル API
     from webtransport.quic import Server, Client
@@ -29,6 +36,7 @@ from webtransport.webtransport_ext.quic import (
     Event,
     EventType,
     Packet,
+    ReceiveResult,
     get_version,
 )
 
@@ -39,6 +47,7 @@ __all__ = [
     "Event",
     "EventType",
     "Packet",
+    "ReceiveResult",
     "Server",
     "get_version",
 ]

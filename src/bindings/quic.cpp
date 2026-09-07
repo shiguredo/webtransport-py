@@ -1198,11 +1198,11 @@ bool QuicConnection::closing_period_expired() const {
   return get_timestamp_ns() >= *closing_expiry_ns_;
 }
 
-size_t QuicConnection::receive(const std::vector<uint8_t>& data,
-                               const std::string& local_host,
-                               uint16_t local_port,
-                               const std::string& remote_host,
-                               uint16_t remote_port) {
+ReceiveResult QuicConnection::receive(const std::vector<uint8_t>& data,
+                                      const std::string& local_host,
+                                      uint16_t local_port,
+                                      const std::string& remote_host,
+                                      uint16_t remote_port) {
   // 保留中の verify 割り込み例外があれば先に再送出する (closed_ 等の状態に
   // かかわらず握りつぶさない)
   throw_pending_verify_interrupt();
@@ -1236,22 +1236,36 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
   // パケットは同一ピア由来)。クライアントは ngtcp2 のパス照合が先行し、未知パス
   // からのパケットには応答しない (破棄される)。
   if (!conn_ || (closed_ && !pending_close_packet_)) {
-    return 0;
+    return ReceiveResult::Closed;
   }
 
-  // CLOSING 期間の満了後は、受信パケットを ngtcp2 に渡さず 0 を返して再送を
-  // 停止する。再アームも ConnectionClosed イベントの push も行わない
+  // CLOSING 期間の満了後は、受信パケットを ngtcp2 に渡さず再送を停止する。
+  // 再アームも ConnectionClosed イベントの push も行わない
   // (「close() 起因の closing ではイベントを push しない」契約を維持する)。
   // 再送停止は handle_timeout による破棄に依存せず、満了時刻を独立に判定する
   // (RFC 9000 Section 10.2)。
   if (closing_period_expired()) {
-    return 0;
+    return ReceiveResult::Closed;
   }
 
   if (!update_path_addresses(local_host, local_port, remote_host,
                              remote_port)) {
-    return 0;
+    return ReceiveResult::Discarded;
   }
+
+  // 破棄時に呼び出し元アドレスによる汚染を戻せるよう記録する。復元に
+  // より破棄パケット送信元への後続誤送を防ぐ。受理済みパケットの応答経路
+  // は ngtcp2 内部状態に基づき保たれる
+  const sockaddr_storage saved_local_addr = local_addr_;
+  const socklen_t saved_local_addrlen = local_addrlen_;
+  const sockaddr_storage saved_remote_addr = remote_addr_;
+  const socklen_t saved_remote_addrlen = remote_addrlen_;
+  const auto restore_path_addresses = [&]() {
+    local_addr_ = saved_local_addr;
+    local_addrlen_ = saved_local_addrlen;
+    remote_addr_ = saved_remote_addr;
+    remote_addrlen_ = saved_remote_addrlen;
+  };
 
   // OpenSSL エラーキューをクリア
   ERR_clear_error();
@@ -1260,6 +1274,12 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
 
   ngtcp2_path path{};
   fill_ngtcp2_path(&path);
+
+  // 受理判定用に受信カウンタを記録する。ngtcp2 は破棄したパケットを
+  // 含めないため、呼び出し前後の差分で受理の有無が分かる
+  // (ngtcp2 v1.24.90 の conn_info 定義による。vendored ヘッダ参照)
+  ngtcp2_conn_info info_before{};
+  ngtcp2_conn_get_conn_info2(conn_, &info_before);
 
   ngtcp2_pkt_info pi{};
   int rv = ngtcp2_conn_read_pkt(conn_, &path, &pi, data.data(), data.size(),
@@ -1274,7 +1294,8 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     false,
                     0,
                     "connection draining"});
-        break;
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Closed;
       case NGTCP2_ERR_CLOSING:
         // close() 起因の closing (保持パケットが存在する状態) では、受信パケット
         // への応答として CONNECTION_CLOSE を再送するため再アームする。アプリが
@@ -1287,6 +1308,10 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
         // イベントを push する。
         if (pending_close_packet_ && !in_draining_period()) {
           close_packet_armed_ = true;
+          // 再アームは応答再送のためであり、新規受信としては扱わない
+          restore_path_addresses();
+          throw_pending_verify_interrupt();
+          return ReceiveResult::Discarded;
         } else {
           closed_ = true;
           push_event({QuicEventType::ConnectionClosed,
@@ -1295,8 +1320,9 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                       false,
                       0,
                       "connection closing"});
+          throw_pending_verify_interrupt();
+          return ReceiveResult::Closed;
         }
-        break;
       case NGTCP2_ERR_DROP_CONN:
         closed_ = true;
         push_event({QuicEventType::ConnectionClosed,
@@ -1305,7 +1331,8 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     false,
                     0,
                     "connection dropped"});
-        break;
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Closed;
       case NGTCP2_ERR_RETRY:
         // Retry 送出は RFC 9000 Section 8.1.2 が許可する (can) アドレス検証の
         // 応答だが、本ライブラリのサーバーには送出手段が無く継続不能なため、
@@ -1317,7 +1344,8 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     false,
                     0,
                     "retry required"});
-        break;
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Closed;
       case NGTCP2_ERR_CRYPTO:
         closed_ = true;
         push_event({QuicEventType::ConnectionClosed,
@@ -1329,13 +1357,18 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     // 保持した例外情報を reason にする (使い切りで破棄する)。
                     // それ以外の暗号エラーは従来どおりとする
                     consume_verify_error("crypto error")});
-        break;
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Closed;
       case NGTCP2_ERR_DECRYPT:
         // 復号エラーは無視（パケット破棄）
-        break;
+        restore_path_addresses();
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Discarded;
       case NGTCP2_ERR_DISCARD_PKT:
         // パケット破棄は無視
-        break;
+        restore_path_addresses();
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Discarded;
       default:
         // その他のエラーは接続を閉じる
         if (rv < NGTCP2_ERR_FATAL) {
@@ -1346,17 +1379,26 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                       false,
                       0,
                       "fatal error: " + std::string(ngtcp2_strerror(rv))});
+          throw_pending_verify_interrupt();
+          return ReceiveResult::Closed;
         }
-        break;
+        restore_path_addresses();
+        throw_pending_verify_interrupt();
+        return ReceiveResult::Discarded;
     }
-    // 処理中に verify 割り込み例外を保持した場合はここで再送出する
-    throw_pending_verify_interrupt();
-    return 0;
   }
 
+  // 正常復帰でも破棄と受理を区別する。ngtcp2 が破棄したパケットは受信
+  // カウンタが進まないため、差分がなければ破棄と判定する
+  ngtcp2_conn_info info_after{};
+  ngtcp2_conn_get_conn_info2(conn_, &info_after);
   // 正常処理後も保留があれば再送出する
   throw_pending_verify_interrupt();
-  return data.size();
+  if (info_after.pkt_recv != info_before.pkt_recv) {
+    return ReceiveResult::Accepted;
+  }
+  restore_path_addresses();
+  return ReceiveResult::Discarded;
 }
 
 std::optional<QuicPacket> QuicConnection::send() {
@@ -3090,6 +3132,11 @@ void bind_quic(nb::module_& m) {
       .value("PATH_VALIDATED", QuicEventType::PathValidated)
       .value("PATH_VALIDATION_FAILED", QuicEventType::PathValidationFailed);
 
+  nb::enum_<ReceiveResult>(quic_m, "ReceiveResult", "QUIC パケットの受信結果")
+      .value("ACCEPTED", ReceiveResult::Accepted)
+      .value("DISCARDED", ReceiveResult::Discarded)
+      .value("CLOSED", ReceiveResult::Closed);
+
   // QuicEvent
   nb::class_<QuicEvent>(quic_m, "Event", "QUIC イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
@@ -3197,7 +3244,7 @@ void bind_quic(nb::module_& m) {
           nb::lock_self(), nb::arg("data"), nb::arg("local_addr"),
           nb::arg("remote_addr"),
           nb::sig("def receive(self, data: bytes, local_addr: tuple[str, int], "
-                  "remote_addr: tuple[str, int]) -> int"),
+                  "remote_addr: tuple[str, int]) -> ReceiveResult"),
           "受信したデータを処理")
       .def(
           "send",

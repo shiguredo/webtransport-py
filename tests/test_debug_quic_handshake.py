@@ -9,7 +9,7 @@ from conftest import (
 
 def test_quic_lowlevel_handshake():
     """低レベル QUIC API ハンドシェイクテスト"""
-    from webtransport.quic import Config, Connection
+    from webtransport.quic import Config, Connection, ReceiveResult
 
     certfile, keyfile = create_test_certificates()
 
@@ -76,7 +76,7 @@ def test_quic_lowlevel_handshake():
             print(
                 f"Client is_established: {client.is_established()}, is_handshake_completed: {client.is_handshake_completed()}"
             )
-            if result == 0:
+            if result != ReceiveResult.ACCEPTED:
                 print("Client receive failed!")
                 # イベントを確認
                 while True:
@@ -100,7 +100,7 @@ def test_quic_lowlevel_handshake():
             print(
                 f"Server is_established: {server.is_established()}, is_handshake_completed: {server.is_handshake_completed()}"
             )
-            if result == 0:
+            if result != ReceiveResult.ACCEPTED:
                 print("Server receive failed!")
                 break
         else:

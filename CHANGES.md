@@ -241,6 +241,8 @@
   - @voluntas
 - [FIX] free-threading 環境で同一接続を複数スレッドから触るとプロセスが異常終了する問題を修正する
   - @voluntas
+- [FIX] QUIC サーバーが未知アドレスからの short header で既存接続のアドレスキーを張り替える問題を修正する
+  - @voluntas
 
 ### misc
 

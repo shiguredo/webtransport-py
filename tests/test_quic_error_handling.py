@@ -14,7 +14,7 @@ from conftest import (
     perform_handshake,
 )
 
-from webtransport.quic import Config, Connection, EventType
+from webtransport.quic import Config, Connection, EventType, ReceiveResult
 
 
 def test_close_nonexistent_stream():
@@ -89,8 +89,8 @@ def test_receive_after_close():
     # クローズ後にパケットを受信
     result = client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
     # close() で CONNECTION_CLOSE を生成できた場合は受信処理が走り、
-    # NGTCP2_ERR_CLOSING で 0 が返る (クラッシュしない)
-    assert result == 0
+    # NGTCP2_ERR_CLOSING で破棄 (再アーム) になる (クラッシュしない)
+    assert result == ReceiveResult.DISCARDED
 
     # 受信パケットへの応答として、初回と同じ CONNECTION_CLOSE が再アームされ
     # て返る (RFC 9000 Section 10.2.1 の同一パケット再送)
@@ -151,7 +151,7 @@ def test_connection_close_retransmission_on_receive():
 
     # サーバーがそのパケットを受信すると CONNECTION_CLOSE が再アームされる
     result = server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
-    assert result == 0
+    assert result == ReceiveResult.DISCARDED
 
     # 受信パケットへの応答として、初回と同じ CONNECTION_CLOSE が再送される
     # (RFC 9000 Section 10.2.1 の同一パケット再送)
@@ -166,7 +166,7 @@ def test_connection_close_retransmission_on_receive():
     client.send_stream_data(stream_id, b"world", False)
     client_packet = client.send()
     assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
     retransmitted_again = server.send()
     assert retransmitted_again is not None
     assert retransmitted_again.data == close_packet.data
@@ -201,7 +201,7 @@ def test_connection_close_retransmission_stops_after_closing_period():
     client.send_stream_data(stream_id, b"hello", False)
     client_packet = client.send()
     assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
     retransmitted = server.send()
     assert retransmitted is not None
     assert retransmitted.data == close_packet.data
@@ -211,7 +211,7 @@ def test_connection_close_retransmission_stops_after_closing_period():
     client.send_stream_data(stream_id, b"world", False)
     client_packet = client.send()
     assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
 
     # CLOSING 期間の満了まで実時間待ちする (get_timeout() が残り時間を返す)
     timeout = server.get_timeout()
@@ -226,12 +226,12 @@ def test_connection_close_retransmission_stops_after_closing_period():
     # 依存しないことを確認)
     assert server.send() is None
 
-    # 満了後は受信パケットにも応答しない。receive() は 0 を返し、再アームも
+    # 満了後は受信パケットにも応答しない。receive() は終了を返し、再アームも
     # ConnectionClosed イベントの push も行わない
     client.send_stream_data(stream_id, b"again", False)
     client_packet = client.send()
     assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.CLOSED
     assert server.send() is None
     assert server.next_event() is None
 
@@ -669,3 +669,24 @@ def test_verify_callback_truncation_boundaries():
         reason = _connection_closed_reason(client)
         assert len(reason.encode("utf-8")) == expected_length
         assert "ValueError" in reason
+
+
+def test_duplicate_packet_discarded():
+    """重複パケットの二重受信は破棄になる"""
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet)
+
+    # ストリームデータを積んだ正規パケットを用意する
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+    client.send_stream_data(stream_id, b"hello", False)
+    client_packet = client.send()
+    assert client_packet is not None
+
+    # 初回は受理される
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.ACCEPTED
+    before = server.pkt_recv
+
+    # 同一パケットの二重受信は破棄され、受信カウンタは進まない
+    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    assert server.pkt_recv == before

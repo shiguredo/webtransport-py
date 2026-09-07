@@ -94,10 +94,14 @@ def prop_client_receive_arbitrary_data(data: bytes):
     conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
 
     # 任意のデータを受信してもクラッシュしない
-    processed = conn.receive(data, CLIENT_ADDR, SERVER_ADDR)
+    result = conn.receive(data, CLIENT_ADDR, SERVER_ADDR)
 
-    # 処理バイト数は入力長以下
-    assert processed <= len(data)
+    # 受理・破棄・終了のいずれかになる
+    assert result in (
+        quic.ReceiveResult.ACCEPTED,
+        quic.ReceiveResult.DISCARDED,
+        quic.ReceiveResult.CLOSED,
+    )
 
     conn.close()
 
