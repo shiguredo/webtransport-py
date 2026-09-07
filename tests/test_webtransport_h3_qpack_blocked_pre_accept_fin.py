@@ -365,7 +365,7 @@ def test_qpack_blocked_pipelined_wtclose_then_fin_closes_once(same_read: bool) -
     SessionClosed が 1 回だけ発火する。後続 FIN は終了済みのため無視され、
     二重に SessionClosed は発火しない (ブロックなしと同一)。
     """
-    client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+    _client, server, headers, encoder_parts = _create_qpack_blocked_setup()
 
     # 正常な WT_CLOSE_SESSION (error_code 0、空メッセージ) を DATA 化する
     capsule = _encode_wt_close_session_capsule(0, b"")
