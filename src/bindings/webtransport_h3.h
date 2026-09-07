@@ -660,6 +660,25 @@ class H3Session {
   // 戻った後 (アプリ呼び出しのため直接実行できる) の両方から呼ばれる
   void discard_stale_2xx();
 
+  // nghttp3 への読み取りと負値時の共通処理。WT_CLOSE_SESSION 由来の
+  // ストリームエラー分離・Error イベント push・closed_ 設定を行う。
+  // 戻り値は nghttp3_conn_read_stream2 の戻り値そのもの
+  nghttp3_ssize read_from_nghttp3(int64_t stream_id,
+                                  const uint8_t* data,
+                                  size_t length,
+                                  bool fin);
+
+  // nghttp3 からの復帰後の共通処理。受理前 FIN 検知・QPACK ブロック中 FIN
+  // 検知と移行・保留 FIN の後始末・遅延 2xx 破棄を行う。read_from_nghttp3
+  // の後と、保持データの投入後に呼ぶ
+  void process_after_read(int64_t stream_id, bool fin);
+
+  // 保持した HEADERS 後続バイトのうち、QPACK デコード完了 (pending_headers_
+  // に含まれない) で投入可能になったものを順序を保って nghttp3 へ投入する。
+  // エンコーダーストリーム到着によるブロック解除と、同一読み取り内の
+  // HEADERS 即時デコードの両方に対応する。コールバック内からは呼ばない
+  void flush_unblocked_held_data();
+
   // WT_CLOSE_SESSION の Application Error Message が不正 (1024 バイト超・
   // 4 バイト未満の不正な長さ・不正 UTF-8) の検知を保留したセッション ID。recv_wt_close_session_cb が
   // コールバック内で nghttp3 を呼べない (再入防止) ため検知のみを行い、
@@ -713,15 +732,66 @@ class H3Session {
   // close_stream で後始末する
   std::set<int64_t> pending_pre_accept_fin_session_ids_;
 
-  // QPACK デコードブロック中に fin を検知した CONNECT ストリーム候補の
-  // ストリーム ID。ヘッダー未処理 (begin_headers_cb 発火済み・end_headers_cb
-  // 未発火) のためセッション ID に確定していない。receive_stream_data の
-  // fin 引数で記録し、ブロック解除後の読み取りで CONNECT 判定 (session_ids_
-  // への挿入) を確認して pending_pre_accept_fin_session_ids_ へ移行する
-  // (詳細は receive_stream_data の実装コメント)。セッション確定に至らな
-  // かったストリーム (非 CONNECT・Origin 検証失敗を含む) は end_headers_cb
-  // で、ブロック中にリセットされたストリームは close_stream で除去する
+  // QPACK デコードブロック中の受理前 FIN の検知 (サーバー側の CONNECT
+  // ストリームに限定)。上記の検知はヘッダー処理完了 (= end_headers_cb
+  // 実行済み) に依存し、ヘッダーが QPACK デコードブロック中に fin 付き
+  // データが届くとヘッダー未処理のため検知が成立しない。
+  //
+  // ブロック中の nghttp3 の挙動: ブロック中のデータは inq にバッファされ、
+  // ブロック解除後の再処理 (process_blocked_stream_data) で inq の最後の
+  // チャンクに READ_EOF が fin として伝播される (フィールドセクションのみ
+  // がバッファされる場合)。しかし read_bidi がヘッダー完了後に「Server has
+  // not submitted response」の分岐で WT_SESSION_BLOCKED を立てて早期
+  // return するため、almost_done の fin 処理 (end_stream コールバック) に
+  // 到達せず fin は喪失する。
+  //
+  // ここでは fin 引数で「fin が渡ったが session_ids_ に未挿入 (ヘッダー未
+  // 処理) かつ pending_headers_ に含まれる (begin_headers_cb 発火済み・
+  // end_headers_cb 未発火) ストリーム」を保留集合に一時記録し、ブロック
+  // 解除後の読み取りで CONNECT 判定 (session_ids_ への挿入) を確認して
+  // pending_pre_accept_fin_session_ids_ へ移行する (下記の移行処理)。
+  // 記録条件は上記の検知条件 (count > 0) と排他 (count == 0) であり、
+  // QPACK ブロックなしの同一読み取り (ヘッダー + FIN) は上記で検知される
+  // ため二重検知しない。pending_headers_ のメンバーシップで CONNECT 以外の
+  // ストリーム (WT データストリーム・ヘッダー処理済みの通常リクエスト・
+  // 制御ストリーム等) の FIN を記録から除外する。セッション確定に至らな
+  // かったストリームの記録は end_headers_cb で、ブロック中にリセットされた
+  // ストリームの記録は close_stream で除去する (どちらも除去できない場合
+  // は接続終了まで残留する既知の制約)。クライアント側 (is_server_ ==
+  // false) は受理前 FIN の概念がないため対象外
   std::set<int64_t> pending_qpack_blocked_fin_stream_ids_;
+
+  // QPACK デコードブロック中の DATA パイプラインによるヒープ破壊を防ぐ
+  // フレーム境界ガードの per-stream 状態。nghttp3 は QPACK デコードブロック
+  // 検知時にフィールドセクションより後ろの残バイト (DATA フレーム等) を
+  // ストリーム内部の inq へ取り込み、ブロック解除時の再処理で異常挙動
+  // (ヒープ破壊・無限ループ) を起こす。バインディング側で HEADERS フレーム
+  // 境界より後ろのバイトを保持し、QPACK デコード完了 (end_headers_cb 発火
+  // 後) に投入することで inq への混入を排除する。詳細は receive_stream_data
+  // の実装コメントを参照
+  struct HeadersFrameGuard {
+    // 先頭フレームの種別・長さの解釈が完了したか
+    bool header_parsed = false;
+    // 先頭フレームが HEADERS (0x01) か (header_parsed が true のとき有効)
+    bool is_headers = false;
+    // HEADERS フレーム全体の長さ (種別 varint + 長さ varint + ペイロード)。
+    // is_headers が true のとき有効
+    uint64_t headers_total_len = 0;
+    // 当該ストリームで nghttp3 へ転送済みの HEADERS バイト数
+    size_t headers_forwarded = 0;
+    // 先頭フレーム未解釈の間に届いた先頭バイトの蓄積 (フレームヘッダーの
+    // 分割到着に備える。解釈完了後は空になる)
+    std::vector<uint8_t> parse_prefix;
+    // HEADERS 境界より後ろの保持バイト (ブロック解除後に順序を保って投入)
+    std::vector<uint8_t> held_data;
+    // 保持バイトとともに届いた fin (保持データの末尾に付随する)
+    bool held_fin = false;
+  };
+  // フレーム境界ガードの per-stream 管理。確立済み CONNECT (session_ids_)・
+  // WT データストリーム (stream_info_)・制御/QPACK ストリームは対象外で、
+  // 新規のクライアント起点双方向ストリームのみがエントリを持つ。CONNECT
+  // 判定されなかったストリームとリセットされたストリームのエントリは除去する
+  std::map<int64_t, HeadersFrameGuard> headers_guards_;
 
   // 受理前 FIN を検知したセッションのうち、accept_session で受理済みの
   // セッション ID。2xx レスポンスの書き出し完了 (stream_flushed) を
