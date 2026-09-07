@@ -3,11 +3,11 @@
 - Created: 2026-09-07
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-h3-client-settings-received-detection
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-07
 
 ## 目的
 
-`h3.Client.connect` は SETTINGS 受信完了を「サーバー制御ストリーム = stream_id 3 のデータ受信」で判定するが、RFC 9114 は制御ストリームの ID を固定せず、サーバーが QPACK エンコーダーを先に開けば stream_id 3 は QPACK エンコーダーになる。加えてストリームタイプ 1 バイトのみ到達時にも真になり、`nghttp3_conn_submit_wt_request` が `conn_wt_enabled` 偽で失敗して `HandshakeFailedError("failed to send CONNECT request")` になる経路が開く。`H3Session::recv_settings2_cb` は no-op で SETTINGS 受信をアプリに通知しない。draft-ietf-webtrans-http3-16 Section 3.1「Clients MUST NOT attempt to establish WebTransport sessions ... until they have received the setting indicating WebTransport support」に照らして、明示的な SETTINGS 受信判定に置き換える。
+`h3.Client.connect` は SETTINGS 受信完了を「サーバー制御ストリーム = stream_id 3 のデータ受信」で判定するが、RFC 9114 Section 6.2.1 は制御ストリームの ID を固定せず、サーバーが QPACK エンコーダーを先に開けば stream_id 3 は QPACK エンコーダーになる。加えてストリームタイプ 1 バイトのみ到達時にも真になり、`nghttp3_conn_submit_wt_request` が `conn_wt_enabled` 偽で失敗して `HandshakeFailedError("failed to send CONNECT request")` になる経路が開く。`H3Session::recv_settings2_cb` は no-op で SETTINGS 受信をアプリに通知しない。draft-ietf-webtrans-http3-16 Section 3.1「Clients MUST NOT attempt to establish WebTransport sessions ... until they have received the setting indicating WebTransport support」に照らして、明示的な SETTINGS 受信判定に置き換える。
 
 ## 現状
 
@@ -21,15 +21,19 @@
 ## 設計方針
 
 - `H3Session::recv_settings2_cb` で SETTINGS 受信フラグを立てる
-- `H3Session::is_webtransport_ready()` (仮) を追加し、SETTINGS の `wt_enabled` / `enable_connect_protocol` / `h3_datagram` が全て 1 かを確認するアクセサを公開する (h2 と対称)
-- `h3.Client.connect` の 2 段目のループを `while not self._webtransport_session.is_webtransport_ready() and self._running and loop.time() < deadline:` に置き換える
-- `tests/test_e2e_webtransport_h3.py` の `_LowLevelClient` と `tests/test_debug_webtransport_h3.py` の複製を新 API に置き換える (`test_debug_*` の削除計画とも整合)
-- 既存 issue 0122 の該当項目を closed にする (refresh 経由)
+- `H3Session::is_webtransport_ready()` を追加し、SETTINGS の `wt_enabled` / `enable_connect_protocol` / `h3_datagram` が全て 1 かを確認するアクセサを公開する。3 フラグ照合の根拠は nghttp3 の `conn_wt_enabled` (クライアント側で上記 3 設定を要求する) であり、h2 と対称なのは命名・アクセサ形状のみである (h2 は 2 フラグ照合のため内容は非対称)
+- `h3.Client.connect` の 2 段目ループは本体 (STREAM_DATA 供給と CONNECTION_CLOSED 処理) を維持し、条件式のみ `while not self._webtransport_session.is_webtransport_ready() and self._running and loop.time() < deadline:` に置き換える。本体を変更すると nghttp3 へ SETTINGS が供給されなくなるため置換しない。session は `_setup_streams` 済みのため None 対応は型検査用の assert に留める
+- `tests/test_e2e_webtransport_h3.py` の `_LowLevelClient` の複製のみ新 API に置き換える (`tests/test_debug_webtransport_h3.py` は 0188 の削除に委ねて触らない)
+- 変更対象は `src/bindings/webtransport_h3.cpp` (フラグ設定と `bind_webtransport_h3` 内の nanobind `.def` 公開) と `src/bindings/webtransport_h3.h` (フラグ保管・ムーブ引継ぎ・`is_webtransport_ready` 宣言) と `h3.pyi` 更新、`src/webtransport/h3/client.py` (条件式置換)、テスト、`CHANGES.md` とする
+
+## 依存関係
+
+- open issue 0122 項目 3 (イベント方式の `SettingsReceived` 案) と同一不具合を扱う。本 issue のアクセサ方式を採用し、0122 項目 3 の設計は陳腐化する。0122 本文の更新は 0122 側の作業として残る
 
 ## 完了条件
 
 - `h3.Client.connect` が制御ストリームの ID に依存せず SETTINGS 受信を判定できること
 - サーバーが QPACK エンコーダーを先に開いた場合でも接続が成立すること
 - `H3Session.is_webtransport_ready()` が Python から観測できること
-- `tests/` に SETTINGS 受信タイミング (ストリーム開設順が異なる) の回帰テストを追加すること
-- 既存のテスト全 822 件が引き続き通過すること
+- `tests/test_webtransport_h3_settings_ready.py` を新規作成し、Sans-IO でサーバー QPACK エンコーダーを制御より先に開設する順序で、エンコーダーのみ到着時は偽・制御到着後に真になる回帰テストを追加すること
+- 既存のテスト全 834 件が引き続き通過すること
