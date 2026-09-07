@@ -3,7 +3,7 @@
 - Created: 2026-09-06
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-h3-connect-handle-timeout
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-07
 
 ## 目的
 
@@ -13,23 +13,21 @@
 
 - `src/webtransport/h3/client.py` の `Client.connect` の 3 つの待ちループ (ハンドシェイク・SETTINGS・2xx) はいずれも `get_timeout()` / `handle_timeout()` を呼ばない
 - 同じ `Client` の `run()` は `handle_timeout()` を呼ぶ経路がある
-- `src/webtransport/http3/client.py` の `Client.connect` は `async def connect(self) -> bool` で timeout 引数無し、`while self._running:` のみで打ち切り条件なし → 応答の無い宛先で無限待ち
-- 実験 (UDP リレーでクライアント → サーバー方向の最初の 1 パケットを落とす): `h3.Client.connect(timeout=6.0)` が 6.03 秒後に `ConnectTimeoutError`。リレーのカウンタは `c2s=2` で PTO 再送が起きていない
-- 対照実験 (サーバー → クライアント方向を 1 パケット落とす): 0.24 秒で回復 (`_deps/ngtcp2/reliable-stream-reset/source/lib/ngtcp2_conn.c` の `conn_recv_pkt` がハンドシェイク未完了時に loss detection timer を自前で駆動するため)
-- `http3.Client.connect` は閉塞ポート宛の実験で 5 秒以上ハング
-- issues/pending/0054 「ハンドシェイク損失下でも接続が完了することを LossyRelay で検証する」は関連するがテスト追加のみで、このバグ自体は追跡していない
+- `src/webtransport/http3/client.py` の `Client.connect` は `async def connect(self) -> bool` で timeout 引数無し、`while self._running:` のみで `get_timeout()` / `handle_timeout()` も呼ばない。`CONNECTION_CLOSED` 受信時は `False` 復帰するが、応答の無い宛先ではそのイベントも届かず実質無限待ちになる
+- 実験 (UDP リレーでクライアント → サーバー方向の最初の 1 パケットを落とす。検証済み): `h3.Client.connect(timeout=6.0)` が 6.07 秒後に `ConnectTimeoutError`。落とした 1 発以外の中継は 1 発のみで PTO 再送が起きていない
+- 対照の報告 (サーバー → クライアント方向を 1 パケット落とすと 0.24 秒で回復する) は手順の記録がなく未検証のため、実装時に再測定する
+- `http3.Client.connect` は閉塞ポート宛では応答が無くハングする (上記の無限待ち構造に従う)
+- issues/0054 は quic 層の LossyRelay テスト基盤であり未完了である。本 issue の回帰テストは 0054 の完成を待たず、本 issue 側で UDP リレー器具を用意する (器具の重複は 0054 側で整理する)
 
 ## 設計方針
 
-- `h3.Client.connect` の 3 つの待ちループそれぞれで、`await self._receive()` / `_send_pending()` の間に `timeout = self._quic_connection.get_timeout(); if timeout is not None and timeout <= 0: self._quic_connection.handle_timeout()` を追加する (`run()` の 807-809 行と同じ形)
-- `http3.Client.connect` に `timeout: float = 10.0` 引数と deadline 制御を追加する
-- `http3.Client.connect` の戻り値と例外契約を h3.Client / h2.Client と揃えるかは別 issue (`0159` 相当) に分離する。本 issue はタイマー駆動の修正に絞る
-- issues/pending/0054 の LossyRelay 経由テストで本修正の回帰ピンを取ることを想定する
+- `h3.Client.connect` の 3 つの待ちループそれぞれで、`_send_pending()` 呼び出し直後 (sleep 前) に `run()` 内のタイマー駆動箇所と同形の `get_timeout()` / `handle_timeout()` 呼び出しを追加する
+- `http3.Client.connect` にも同形のタイマー駆動呼び出しを追加する。加えて `timeout: float = 10.0` 引数と deadline 制御 (`loop.time()` + timeout による h2 前例準拠の形式) を追加し、期限到達時は `ConnectTimeoutError` を送出する例外送出型 (h3 / h2 対称) に変える。戻り値 `bool` 契約の変更を含むが、timeout 引数の意味のために不可分であり本 issue 内で完結させる
+- 回帰テストは新規 `tests/test_connect_loss_recovery.py` に h3 / http3 分を追加し、UDP リレー器具 (最初の中継 1 発を落とす) を同梱する
 
 ## 完了条件
 
-- `h3.Client.connect(timeout=6.0)` がクライアント送信 1 パケットのロスから ~0.5 秒以内に回復し接続が完了すること
-- `http3.Client.connect(timeout=6.0)` が同条件で回復すること
-- 応答の無い宛先で `http3.Client.connect(timeout=6.0)` が 6 秒程度で `ConnectTimeoutError` を送出すること
-- `tests/` に「クライアント → サーバー方向のハンドシェイクパケット 1 つのロス下で connect が完了する」テストを h3 / http3 に追加すること
-- 既存のテスト全 822 件が引き続き通過すること
+- `h3.Client.connect(timeout=6.0)` がクライアント送信 1 パケットのロス下で PTO 再送により deadline 到達前に接続を完了すること (再送発生はリレーカウンタ増加で確認する)
+- `http3.Client.connect(timeout=6.0)` が同条件で回復し、無応答宛先では期限超過後の初回反復で `ConnectTimeoutError` を送出すること
+- `tests/test_connect_loss_recovery.py` に上記 2 件のテストを追加すること
+- 既存のテスト全 834 件が引き続き通過すること
