@@ -234,8 +234,7 @@ async def test_server_client_communication(test_certificates):
     client.on_headers(on_client_headers)
     client.on_data(on_client_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/")
     assert stream_id >= 0
@@ -324,8 +323,7 @@ async def test_server_client_post_with_body(test_certificates):
 
     client.on_data(on_client_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("POST", "/echo")
     assert stream_id >= 0
@@ -412,8 +410,7 @@ async def test_multiple_http3_requests(test_certificates):
 
     client.on_data(on_client_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     for path in expected_paths:
         stream_id = await client.request("GET", path)
@@ -485,8 +482,7 @@ async def test_server_resets_http3_stream(test_certificates):
 
     client.on_stream_reset(on_client_stream_reset)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/reset-me")
     assert stream_id >= 0
@@ -555,8 +551,7 @@ async def test_client_resets_http3_stream(test_certificates):
         verify_peer=False,
     )
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/will-reset")
     assert stream_id >= 0
@@ -637,8 +632,7 @@ async def test_stream_end_callback(test_certificates):
     client.on_data(on_data)
     client.on_stream_end(on_stream_end)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/end")
     assert stream_id >= 0
@@ -713,8 +707,7 @@ async def test_custom_request_headers(test_certificates):
 
     client.on_data(on_client_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request(
         "GET",
@@ -805,8 +798,7 @@ async def test_not_found_status(test_certificates):
     client.on_headers(on_headers)
     client.on_data(on_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/missing")
     assert stream_id >= 0
@@ -881,8 +873,7 @@ async def test_chunked_response_body(test_certificates):
     client.on_data(on_data)
     client.on_stream_end(on_stream_end)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/chunked")
     assert stream_id >= 0
@@ -969,8 +960,7 @@ async def test_large_post_body(test_certificates):
 
     client.on_data(on_client_data)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("POST", "/large")
     assert stream_id >= 0
@@ -1030,8 +1020,7 @@ async def test_http3_client_run_exits_on_client_close(test_certificates):
         port=server.actual_port,
         verify_peer=False,
     )
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     # run() をバックグラウンドで起動、少し待ってから close を呼ぶ
     run_task = asyncio.create_task(client.run())
@@ -1080,8 +1069,7 @@ async def test_http3_server_removes_client_on_client_close(test_certificates):
         port=server.actual_port,
         verify_peer=False,
     )
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     # ハンドシェイクとクライアント登録を確定させるためリクエストを 1 本送る
     stream_id = await client.request("GET", "/")
@@ -1169,8 +1157,7 @@ async def test_stream_end_callback_bodyless_response(test_certificates):
 
     client.on_stream_end(on_stream_end)
 
-    connected = await client.connect()
-    assert connected is True
+    await client.connect()
 
     stream_id = await client.request("GET", "/end")
     assert stream_id >= 0
@@ -1250,8 +1237,7 @@ async def test_server_run_continues_on_non_initial_packet(test_certificates):
         from webtransport.http3 import Client
 
         client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
-        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
-        assert connected is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
         await client.close()
     finally:
         server_task.cancel()
@@ -1297,8 +1283,7 @@ async def test_server_stop_delivers_connection_close(test_certificates):
 
         server_task = asyncio.create_task(run_server())
 
-        connected = await asyncio.wait_for(client.connect(), timeout=5.0)
-        assert connected is True
+        await asyncio.wait_for(client.connect(), timeout=5.0)
 
         async def run_client():
             try:
@@ -1361,8 +1346,7 @@ async def test_idle_timeout_reaps_client(test_certificates):
             port=server.actual_port,
             verify_peer=False,
         )
-        connected = await client.connect()
-        assert connected is True
+        await client.connect()
 
         async def run_client():
             try:

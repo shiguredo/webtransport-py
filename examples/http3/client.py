@@ -6,6 +6,7 @@
 import asyncio
 
 from webtransport import http3
+from webtransport.exceptions import WebTransportConnectError
 
 
 async def main() -> None:
@@ -31,8 +32,9 @@ async def main() -> None:
     client.on_data(on_data)
     client.on_stream_end(on_stream_end)
 
-    connected = await client.connect()
-    if not connected:
+    try:
+        await client.connect()
+    except WebTransportConnectError:
         print("接続失敗")
         return
 

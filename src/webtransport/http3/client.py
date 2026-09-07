@@ -9,6 +9,12 @@ import asyncio
 import socket
 from typing import TYPE_CHECKING, Self
 
+from webtransport.exceptions import (
+    ConnectRefusedError,
+    ConnectTimeoutError,
+    HandshakeFailedError,
+    WebTransportConnectError,
+)
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
@@ -247,12 +253,29 @@ class Client:
             decoder_stream_id = self._quic_connection.open_stream(False)
             self._http3_connection.bind_qpack_decoder_stream(decoder_stream_id)
 
-    async def connect(self) -> bool:
+    async def connect(self, timeout: float = 10.0) -> None:
         """サーバーに接続する
 
-        Returns:
-            接続に成功した場合は True
+        deadline ベースで bounded に動作する。成功時は例外なしで復帰し、
+        失敗時は具体例外で理由を通知する (h3 / h2 対称の例外送出型)。
+
+        Args:
+            timeout: 接続確立の打ち切り秒数。0 以下では即座に
+                ConnectTimeoutError を送出する
+
+        Raises:
+            ConnectTimeoutError: 待機中にハンドシェイク完了イベントが届かず
+                deadline に達した場合
+            ConnectRefusedError: 生成失敗時・確立中の OSError 時など、前段
+                での接続拒否の場合
+            HandshakeFailedError: 待機中に QUIC 側の明示的な
+                `CONNECTION_CLOSE` が届いた場合 (ハンドシェイク完了前の
+                失敗は TLS 由来とみなす)
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        if timeout <= 0:
+            raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
         quic_config = quic_low.Config()
         quic_config.alpn_protocols = ["h3"]
         quic_config.idle_timeout_ns = self._idle_timeout_ns
@@ -266,43 +289,83 @@ class Client:
         http3_config = http3_low.Config()
         http3_config.is_server = False
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.setblocking(False)
-        self._socket.bind(("0.0.0.0", 0))
-        self._local_addr = self._normalize_addr(self._socket.getsockname())
+        try:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.setblocking(False)
+            self._socket.bind(("0.0.0.0", 0))
+            self._local_addr = self._normalize_addr(self._socket.getsockname())
 
-        self._quic_connection = quic_low.Connection.create_client(
-            quic_config,
-            self._local_addr,
-            (self._host, self._port),
-        )
-        self._http3_connection = http3_low.Connection.create_client(http3_config)
-
-        await self._send_pending()
-        self._running = True
-
-        while self._running:
-            await self._receive()
-
-            while True:
-                quic_event = self._quic_connection.next_event()
-                if quic_event is None:
-                    break
-
-                if quic_event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
-                    self._connected = True
-                    self._setup_http3_streams()
-                    await self._send_pending()
-                    return True
-
-                elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
-                    self._running = False
-                    return False
+            try:
+                self._quic_connection = quic_low.Connection.create_client(
+                    quic_config,
+                    self._local_addr,
+                    (self._host, self._port),
+                )
+                self._http3_connection = http3_low.Connection.create_client(http3_config)
+            except RuntimeError as exc:
+                # 生成自体の失敗は接続拒否に寄せる (アドレス解決失敗などの
+                # TLS ハンドシェイク前段での接続拒否。内部生成 Config は
+                # 固定値のため、実質的にはアドレス起因である)
+                raise ConnectRefusedError(
+                    f"failed to create QUIC client connection: {exc}"
+                ) from exc
 
             await self._send_pending()
-            await asyncio.sleep(0.01)
+            self._running = True
 
-        return False
+            while self._running and loop.time() < deadline:
+                await self._receive()
+
+                while True:
+                    quic_event = self._quic_connection.next_event()
+                    if quic_event is None:
+                        break
+
+                    if quic_event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
+                        self._connected = True
+                        self._setup_http3_streams()
+                        await self._send_pending()
+                        return
+
+                    elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
+                        self._running = False
+                        raise HandshakeFailedError("QUIC handshake failed before completion")
+
+                await self._send_pending()
+                # 損失検出タイマーを駆動する (h3 の connect と同形)。送受信だけでは
+                # 再送が起きず、1 パケットのロスで確立が止まる
+                quic_timeout = self._quic_connection.get_timeout()
+                if quic_timeout is not None and quic_timeout <= 0:
+                    self._quic_connection.handle_timeout()
+                await asyncio.sleep(0.01)
+
+            self._running = False
+            raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
+        except TimeoutError as exc:
+            # 現状 try 内で wait_for を使うのは _receive のみであり、そこは
+            # 吸収済みである。将来の経路追加に備え、漏れた TimeoutError は
+            # deadline 到達として明示的に受ける (h3 と同形)
+            self._running = False
+            self._connected = False
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            raise ConnectTimeoutError(
+                f"QUIC handshake did not complete within {timeout} seconds"
+            ) from exc
+        except (OSError, WebTransportConnectError) as exc:
+            # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は
+            # ConnectRefusedError に寄せて具体例外の契約を保つ。失敗パスの
+            # 後始末は best-effort であり、完全な切断は呼び出し側の close()
+            # が担う
+            self._running = False
+            self._connected = False
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            if isinstance(exc, WebTransportConnectError):
+                raise
+            raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
 
     async def request(
         self,
