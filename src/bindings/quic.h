@@ -87,6 +87,20 @@ struct QuicConfig {
 };
 
 /**
+ * QUIC パケットの受信結果
+ *
+ * 受理 (Accepted) は ngtcp2 が受信カウンタを進めて消費したこと、破棄
+ * (Discarded) は進めず無視したこと、終了 (Closed) は接続が利用できない
+ * ことを表す。受理と破棄で戻り値が異なるため、所属判定にバイト数を
+ * 使わず本 enum を使うこと
+ */
+enum class ReceiveResult {
+  Accepted,
+  Discarded,
+  Closed,
+};
+
+/**
  * QUIC イベント種別
  */
 enum class QuicEventType {
@@ -199,16 +213,21 @@ class QuicConnection {
   /**
    * 受信したデータを処理
    *
+   * 戻り値は受理 / 破棄 / 終了を区別する。ngtcp2 が破棄したパケットでも
+   * 従来は全長を返していたが、現行は破棄 (Discarded) を返すため、所属
+   * 判定にバイト数を使わないこと。
+   *
    * close() が CONNECTION_CLOSE を生成できた接続 (保持パケットがある状態) では、
    * closed_ 後も受信パケットを処理し、受信パケットへの応答として CONNECTION_CLOSE
    * を再送する (RFC 9000 Section 10.2.1)。このとき ConnectionClosed イベントは
    * push しない (アプリが自ら close() を呼んだため)。close() でパケットを生成
    * できなかった接続、および受信経路で終了した接続では、受信パケットは処理されず
-   * 0 を返す。再アーム経路でも ngtcp2 が NGTCP2_ERR_CLOSING を返すため 0 を返す
-   * (処理失敗ではなく、受信パケットへの応答として消費した扱い)。
+   * 終了 (Closed) を返す。再アーム経路でも ngtcp2 が NGTCP2_ERR_CLOSING を返すため
+   * 破棄 (Discarded) を返す (処理失敗ではなく、受信パケットへの応答として
+   * 消費した扱い)。
    *
    * CLOSING 期間 (close() 時刻 + 3×PTO、RFC 9000 Section 10.2) の満了後は、
-   * 受信パケットを ngtcp2 に渡さず 0 を返して再送を停止する。再アームも
+   * 受信パケットを ngtcp2 に渡さず終了 (Closed) を返して再送を停止する。再アームも
    * ConnectionClosed イベントの push も行わない。再送停止は破棄 (handle_timeout)
    * に依存せず、満了時刻を独立に判定する。
    * @param data 受信した UDP パケット
@@ -216,13 +235,13 @@ class QuicConnection {
    * @param local_port ローカルポート
    * @param remote_host リモートアドレス
    * @param remote_port リモートポート
-   * @return 処理されたバイト数
+   * @return 受信結果 (受理 / 破棄 / 終了)
    */
-  size_t receive(const std::vector<uint8_t>& data,
-                 const std::string& local_host,
-                 uint16_t local_port,
-                 const std::string& remote_host,
-                 uint16_t remote_port);
+  ReceiveResult receive(const std::vector<uint8_t>& data,
+                        const std::string& local_host,
+                        uint16_t local_port,
+                        const std::string& remote_host,
+                        uint16_t remote_port);
 
   /**
    * 送信すべきデータを取得

@@ -64,6 +64,18 @@ class Server:
         # bind 後のローカルアドレス (host, port)
         self._local_addr: tuple[str, int] | None = None
         self._connections: dict[tuple[str, int], quic_low.Connection] = {}
+        # DCID から接続を引く索引 (未知アドレスからの short header 用)。
+        # RFC 9000 Section 5.2 に従い DCID での照合を試みる。自側の発行
+        # CID は 8 バイト固定のため short header の [1:9] で照合する
+        # (zero-length CID の例外は非該当)。試し受信の O(N) 走査は行わず、
+        # 索引照会と張り替えは O(1) である
+        self._dcid_index: dict[bytes, quic_low.Connection] = {}
+        # 接続ごとの発行済み SCID 集合 (自側 SCID = ピアから見た DCID)。
+        # 索引の更新と破棄に使う
+        self._conn_dcids: dict[quic_low.Connection, set[bytes]] = {}
+        # 接続からアドレスを引く逆引き (キー張り替えを O(1) にする)。
+        # Connection は identity hash のためキーに使える
+        self._conn_addr: dict[quic_low.Connection, tuple[str, int]] = {}
         self._running = False
         self._actual_port = 0
 
@@ -170,6 +182,9 @@ class Server:
                     logger.warning("failed to send connection close: %s", exc)
         finally:
             self._connections.clear()
+            self._dcid_index.clear()
+            self._conn_dcids.clear()
+            self._conn_addr.clear()
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
@@ -212,7 +227,74 @@ class Server:
         )
         connection.receive(initial_packet, self._local_addr, addr)
         self._connections[addr] = connection
+        self._conn_addr[connection] = addr
+        self._refresh_dcid_index(connection)
         return connection
+
+    def _refresh_dcid_index(self, connection: quic_low.Connection) -> None:
+        """接続の発行済み SCID を索引に反映する
+
+        自側 SCID (= ピアから見た DCID) の新規発行分を登録し、退役で消えた分を破棄する。退役 CID の索引残り
+        は無害である (受信結果で破棄と判定され張り替えない) が、接触の
+        たびに最新化して残存期間を抑える。8 バイト以外の CID は索引の
+        照会形式と合わないため登録しない (現行は 8 バイトに揃う。初期
+        SCID 長起点であり、将来の非 8 バイトは安全側に破棄される)。
+        """
+        # 未登録の接続には何もしない (除去直後の再登録を防ぐ防御)
+        if connection not in self._conn_addr:
+            return
+        current = {cid for cid in connection.scid if len(cid) == 8}
+        previous = self._conn_dcids.get(connection, set())
+        for retired in previous - current:
+            if self._dcid_index.get(retired) is connection:
+                del self._dcid_index[retired]
+        for issued in current - previous:
+            self._dcid_index[issued] = connection
+        self._conn_dcids[connection] = current
+
+    def _drop_dcid_index(self, connection: quic_low.Connection) -> None:
+        """接続の索引登録を全て破棄する"""
+        for cid in self._conn_dcids.pop(connection, set()):
+            if self._dcid_index.get(cid) is connection:
+                del self._dcid_index[cid]
+
+    def _remove_connection(self, connection: quic_low.Connection) -> None:
+        """接続の登録を全て外す (アドレス・逆引き・索引)"""
+        old_addr = self._conn_addr.pop(connection, None)
+        if old_addr is not None and self._connections.get(old_addr) is connection:
+            del self._connections[old_addr]
+        self._drop_dcid_index(connection)
+
+    async def _drain_connection_events(
+        self, addr: tuple[str, int], connection: quic_low.Connection
+    ) -> None:
+        """受信後のイベントを処理する。終了時は登録を外す"""
+        while True:
+            event = connection.next_event()
+            if event is None:
+                break
+
+            if event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
+                if self._on_handshake_completed is not None:
+                    await self._on_handshake_completed(addr)
+
+            elif event.type == quic_low.EventType.STREAM_DATA:
+                if self._on_stream_data is not None:
+                    await self._on_stream_data(
+                        event.stream_id,
+                        event.data,
+                        event.fin,
+                        addr,
+                    )
+
+            elif event.type == quic_low.EventType.DATAGRAM:
+                if self._on_datagram is not None:
+                    await self._on_datagram(event.data, addr)
+
+            elif event.type == quic_low.EventType.CONNECTION_CLOSED:
+                if self._on_connection_closed is not None:
+                    await self._on_connection_closed(addr)
+                self._remove_connection(connection)
 
     async def _send_to(self, addr: tuple[str, int], connection: quic_low.Connection) -> None:
         """接続の送信待ちパケットを 1 つ送出する
@@ -235,6 +317,9 @@ class Server:
 
         loop = asyncio.get_running_loop()
         await loop.sock_sendto(self._socket, packet.data, dest)
+
+        # 送信経路の CID 発行に追従するため、送出後に索引を最新化する
+        self._refresh_dcid_index(connection)
 
     async def open_stream(
         self,
@@ -313,22 +398,42 @@ class Server:
                 connection = self._connections.get(addr)
                 if connection is None:
                     # Connection Migration 後は送信元ポートが変わる。
-                    # Short header のみ既存接続へ試し、Long header (Initial 等) は
-                    # 新規 accept する。
+                    # Short header は DCID 索引で既存接続を O(1) で引く
+                    # (RFC 9000 Section 5.2 に従い DCID での照合を試みる)。
+                    # Long header (Initial 等) は新規 accept する。
                     is_long_header = bool(data) and (data[0] & 0x80) != 0
-                    if not is_long_header:
-                        for old_addr, existing in list(self._connections.items()):
-                            processed = existing.receive(
+                    if not is_long_header and len(data) >= 9:
+                        # DCID は short header の [1:9] にある 8 バイト固定
+                        # とする (自側の発行 CID は初期 SCID 長に揃う)。
+                        # 一致しなければ破棄し、試し受信の走査は行わない
+                        candidate = self._dcid_index.get(bytes(data[1:9]))
+                        if candidate is not None:
+                            result = candidate.receive(
                                 data,
                                 self._local_addr,
                                 addr,
                             )
-                            if processed > 0:
+                            if result == quic_low.ReceiveResult.ACCEPTED:
+                                # 正当な Migration としてアドレスキーを張り替える
+                                old_addr = self._conn_addr.get(candidate)
                                 if old_addr != addr:
-                                    del self._connections[old_addr]
-                                    self._connections[addr] = existing
-                                connection = existing
-                                break
+                                    if (
+                                        old_addr is not None
+                                        and self._connections.get(old_addr) is candidate
+                                    ):
+                                        del self._connections[old_addr]
+                                    self._connections[addr] = candidate
+                                    self._conn_addr[candidate] = addr
+                                self._refresh_dcid_index(candidate)
+                                connection = candidate
+                            elif result == quic_low.ReceiveResult.CLOSED:
+                                # 終了時は後処理 (イベント drain と登録外し)
+                                # のために drain する。通知先は登録済みの旧
+                                # アドレスにする。破棄時は何もしない
+                                # (滞留イベントの誤帰属を防ぐ)
+                                await self._drain_connection_events(
+                                    self._conn_addr.get(candidate, addr), candidate
+                                )
                     if connection is None:
                         try:
                             connection = self._accept_connection(addr, data)
@@ -338,35 +443,11 @@ class Server:
 
                 else:
                     connection.receive(data, self._local_addr, addr)
+                    # CID ローテーションに追従するため、接触のたびに索引を
+                    # 最新化する
+                    self._refresh_dcid_index(connection)
 
-                while True:
-                    event = connection.next_event()
-                    if event is None:
-                        break
-
-                    if event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
-                        if self._on_handshake_completed is not None:
-                            await self._on_handshake_completed(addr)
-
-                    elif event.type == quic_low.EventType.STREAM_DATA:
-                        if self._on_stream_data is not None:
-                            await self._on_stream_data(
-                                event.stream_id,
-                                event.data,
-                                event.fin,
-                                addr,
-                            )
-
-                    elif event.type == quic_low.EventType.DATAGRAM:
-                        if self._on_datagram is not None:
-                            await self._on_datagram(event.data, addr)
-
-                    elif event.type == quic_low.EventType.CONNECTION_CLOSED:
-                        if self._on_connection_closed is not None:
-                            await self._on_connection_closed(addr)
-                        if addr in self._connections:
-                            del self._connections[addr]
-
+                await self._drain_connection_events(addr, connection)
                 await self._send_to(addr, connection)
 
             except TimeoutError:
@@ -377,5 +458,6 @@ class Server:
                 if timeout is not None and timeout <= 0:
                     connection.handle_timeout()
                     await self._send_to(addr, connection)
+                    await self._drain_connection_events(addr, connection)
 
             await asyncio.sleep(0.001)

@@ -337,7 +337,7 @@ Connection.create_server(config: Config) -> Connection
 Connection.accept(config: Config, initial_packet: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]) -> Connection
 
 # 入出力
-def receive(data: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]) -> int
+def receive(data: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]) -> ReceiveResult  # 受理 / 破棄 / 終了を区別する。所属判定にバイト数を使わないこと
 def send() -> Packet | None  # 1 回の呼び出しで 1 パケット
 def next_event() -> Event | None
 

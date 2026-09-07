@@ -13,7 +13,7 @@ from conftest import (
     perform_handshake,
 )
 
-from webtransport.quic import Config, Connection, EventType
+from webtransport.quic import Config, Connection, EventType, ReceiveResult
 
 # デフォルト設定の値 (quic.h の QuicConfig の初期値)
 DEFAULT_IDLE_TIMEOUT_NS = 30_000_000_000
@@ -319,9 +319,9 @@ def test_conn_state_after_retry():
     # され、ngtcp2 はアドレス検証の要求として NGTCP2_ERR_RETRY を返す
     # (ngtcp2_conn_read_pkt のドキュメント: Server must perform address validation
     # by sending Retry packet [...] and discard the connection state.)。
-    assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0, (
+    assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.CLOSED, (
         "2 つ目の Initial 受信で RETRY 経路に入らず、パケット正常処理 "
-        "(data.size() を返す) または別のエラー経路に入った"
+        "(受理を返す) または別のエラー経路に入った"
     )
 
     # 本ライブラリには Retry パケット送出手段が無いため接続は継続不能として
@@ -365,11 +365,11 @@ def test_conn_state_after_retry():
     # タイムアウトも閉じているため取得できない
     assert server.get_timeout() is None
 
-    # 以後の送受信は無効になる (receive は 0 を返し、send は None)。
-    # 2 つ目の Initial を再送しても closed_ ガードで処理されず 0 が返り、
+    # 以後の送受信は無効になる (receive は終了を返し、send は None)。
+    # 2 つ目の Initial を再送しても closed_ ガードで処理されず終了が返り、
     # 新たなイベントも push されない (修正前は RETRY が再発して 2 つ目の
     # ConnectionClosed イベントが push されていた)
-    assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.CLOSED
     assert server.next_event() is None
     assert server.send() is None
 
@@ -469,8 +469,8 @@ def test_close_before_handshake():
     assert client.send() is None
 
     # 保持パケットが無いため、close() 後の受信は従来どおり closed_ ガードで
-    # 処理されず 0 を返す (再アームも発生しない)
-    assert client.receive(b"\x00" * 10, CLIENT_ADDR, SERVER_ADDR) == 0
+    # 処理されず終了を返す (再アームも発生しない)
+    assert client.receive(b"\x00" * 10, CLIENT_ADDR, SERVER_ADDR) == ReceiveResult.CLOSED
     assert client.send() is None
 
     # サーバー Initial 未受信の close() (accept 直後で receive 前)
@@ -484,8 +484,8 @@ def test_close_before_handshake():
     assert server.in_closing_period is False
     assert server.send() is None
 
-    # サーバー側も保持パケットが無いため、close() 後の受信は 0 を返す
-    assert server.receive(b"\x00" * 10, SERVER_ADDR, CLIENT_ADDR) == 0
+    # サーバー側も保持パケットが無いため、close() 後の受信は終了を返す
+    assert server.receive(b"\x00" * 10, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.CLOSED
     assert server.send() is None
 
 
@@ -564,7 +564,7 @@ def test_close_mid_handshake_retransmits_connection_close():
 
     # ピア (クライアント) が応答を受け取れず Initial を再送してきた場合、
     # サーバーは CONNECTION_CLOSE を再送する
-    assert server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR) == 0
+    assert server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
 
     # 再送されるパケットは初回と同じもの (同一パケット再送)
     retransmitted = server.send()
