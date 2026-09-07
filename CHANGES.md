@@ -247,6 +247,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 と HTTP/2 のサーバーがクライアント接続中に停止しない問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/3 のクライアント接続確立が 1 パケットのロスで失敗する問題を修正する
+  - @voluntas
 
 ### misc
 

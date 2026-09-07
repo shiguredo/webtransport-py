@@ -324,11 +324,18 @@ class Client:
             self._socket.bind(("0.0.0.0", 0))
             self._local_addr = self._normalize_addr(self._socket.getsockname())
 
-            self._quic_connection = quic.Connection.create_client(
-                quic_config,
-                self._local_addr,
-                (self._host, self._port),
-            )
+            try:
+                self._quic_connection = quic.Connection.create_client(
+                    quic_config,
+                    self._local_addr,
+                    (self._host, self._port),
+                )
+            except RuntimeError as exc:
+                # アドレス解決失敗など、生成自体の失敗は接続拒否に寄せる
+                # (TLS ハンドシェイク前段での接続拒否)
+                raise ConnectRefusedError(
+                    f"failed to create QUIC client connection: {exc}"
+                ) from exc
             self._webtransport_session = h3_low.Session.create_client(webtransport_config)
 
             await self._send_pending()
@@ -351,6 +358,11 @@ class Client:
                         raise HandshakeFailedError("QUIC handshake failed before completion")
 
                 await self._send_pending()
+                # 損失検出タイマーを駆動する (run() と同形)。送受信だけでは
+                # 再送が起きず、1 パケットのロスで確立が止まる
+                quic_timeout = self._quic_connection.get_timeout()
+                if quic_timeout is not None and quic_timeout <= 0:
+                    self._quic_connection.handle_timeout()
                 await asyncio.sleep(0.01)
 
             if not handshake_done:
@@ -402,6 +414,11 @@ class Client:
                         )
 
                 await self._send_pending()
+                # 損失検出タイマーを駆動する (run() と同形)。送受信だけでは
+                # 再送が起きず、1 パケットのロスで確立が止まる
+                quic_timeout = self._quic_connection.get_timeout()
+                if quic_timeout is not None and quic_timeout <= 0:
+                    self._quic_connection.handle_timeout()
                 await asyncio.sleep(0.01)
 
             if not settings_received:
@@ -485,6 +502,11 @@ class Client:
                                 "QUIC connection closed while waiting for 2xx response"
                             )
                     await self._send_pending()
+                    # 損失検出タイマーを駆動する (run() と同形)。送受信だけでは
+                    # 再送が起きず、1 パケットのロスで確立が止まる
+                    quic_timeout = self._quic_connection.get_timeout()
+                    if quic_timeout is not None and quic_timeout <= 0:
+                        self._quic_connection.handle_timeout()
                     await asyncio.sleep(0.01)
                 if not accepted:
                     # 応答なし (応答が 2xx でも非 2xx でもなく deadline 到達) で
