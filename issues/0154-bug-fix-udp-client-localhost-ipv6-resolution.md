@@ -1,7 +1,7 @@
 # UDP 系の高レベルクライアント API が host="localhost" 指定で解決順先頭の family とソケット family が食い違う
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-udp-client-localhost-ipv6-resolution
 - Polished: 2026-09-07
 
@@ -33,3 +33,11 @@
 - QUIC 系 examples (`examples/quic/client.py` / `examples/quic/server.py` / `examples/http3/client.py` / `examples/http3/server.py` / `examples/webtransport/h3_client.py` / `examples/webtransport/h3_server.py` の 6 件。`examples/http3/client.py` の既定接続先 `www.google.com` は本検証の対象外とする) が既定引数で動作すること
 - `tests/test_udp_resolution.py` を新規作成し、IPv4 / IPv6 の localhost 解決テストを追加すること。解決順は環境依存のため、順序自体ではなく family 一致での接続成功を表明する
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- 3 クライアントの接続時に名前解決を Python 側で非同期に行い、family 順の候補列を作る。C++ 側には数値 IP を渡し、TLS 検証には元のホスト名を使い続ける
+- 候補ごとに試し、応答なしの失敗時のみ次候補へ逐次フォールバックする (各試行は打ち切り秒数全体で駆動する)。試行の後始末をして次候補に備える
+- migrate は現接続と同一 family で新ソケットを作り、接続時の数値 IP を使い回す
+- `tests/test_udp_resolution.py` に family 一致の接続テストを追加する
+- 全 892 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
