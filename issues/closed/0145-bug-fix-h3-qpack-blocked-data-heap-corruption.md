@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 で QPACK デコードブロック中の受理前 CONNECT ストリームに DATA フレームが pipeline されるとヒープ破壊で SIGABRT する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-07
 - Branch: feature/fix-h3-qpack-blocked-data-heap-corruption
 - Polished: 2026-09-07
 
@@ -36,3 +36,13 @@ WebTransport over HTTP/3 サーバーで、クライアントが正当なワイ�
 - QPACK ブロック解除後に保持していたデータが正しく nghttp3 に投入され、ブロックが無い場合 (QPACK エンコーダーストリームの方が先に届いた場合) と同一のイベント列・同一回数で処理されること (`SessionReady` / `SessionClosed` の発火回数と `error_code` に差異が無いこと。`SessionClosed` が二重に発火しないこと)。DATA を伴わない通常のセッション確立は影響を受けないこと
 - `tests/test_webtransport_h3_qpack_blocked_pre_accept_fin.py` に、QPACK ブロック中に DATA フレーム / WT_CLOSE_SESSION が後続する受理前経路の Sans-IO テストを追加する (同一読み取り・別読み取り、カプセル種別、FIN の有無を含む。モックやスタブは使わない)。`RuleBasedStateMachine` によるステートフル PBT は open issue 0187 が `prop_h3_qpack_blocked_pipelined_data_no_abort` として予定済みのため重複実装せず、本 issue は上記の決定的テストを回帰ピンとする
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.h` にフレーム境界ガードの per-stream 状態 (`HeadersFrameGuard`) を追加した。HEADERS フレーム全体長・転送済みバイト数・未解釈 prefix・保持バイトと fin をストリーム単位で持つ
+- `src/bindings/webtransport_h3.cpp` の `receive_stream_data` で、新規のクライアント起点双方向ストリームの先頭バイトから HTTP/3 フレーム種別と長さを解釈し、先頭が HEADERS の場合は HEADERS フレーム全体だけを nghttp3 へ渡して境界より後ろを保持する。先頭が HEADERS でないストリームは一括で渡す。フレームヘッダー分割到着に備えて解釈状態を保持する
+- 保持データは当該ストリームの `end_headers_cb` 発火後 (QPACK デコード完了後) に `flush_unblocked_held_data` で順序を保って投入する。データ長 0 の FIN は保持対象外とし既存どおり通す
+- 既存の負値処理と FIN 検知・移行・保留後始末を `read_from_nghttp3` と `process_after_read` に分離し、転送時と保持投入時の両方で同一処理を行う
+- ガード対象はクライアント起点双方向 (`%4==0`) のみとし、サーバー起点双方向のパリティ違反は既存の接続エラー検知に委ねる。`close_stream` でガード状態を除去する
+- `tests/test_webtransport_h3_qpack_blocked_pre_accept_fin.py` に 12 ケース (9 関数) を追加した。3 バリアント (空 DATA + FIN / WT_CLOSE_SESSION + FIN / WT_CLOSE_SESSION のみ) の同一読み取り・別読み取り 6 件と、フレームヘッダー分割・ペイロード途中分割・複数セッション同時パイプライン・FIN 付き不完全到着・非 HEADERS 素通し・巨大長宣言各 1 件の回帰ピンである。いずれも Sans-IO 構成でモックなしである
+- 全 834 件のテストが通過することを確認した

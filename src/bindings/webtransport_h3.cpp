@@ -85,6 +85,44 @@ constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 // 受信時の CONNECT ストリームのリセットに使う (draft-16 Section 6 の MUST)
 constexpr uint64_t kH3MessageError = NGHTTP3_H3_MESSAGE_ERROR;
 
+// HTTP/3 フレーム種別 HEADERS (RFC 9114 Section 7.2.2)
+constexpr uint64_t kH3FrameTypeHeaders = 0x01;
+
+// HTTP/3 フレームヘッダー (種別 varint + 長さ varint) の解釈を試みる。
+// RFC 9000 Section 16 の可変長整数に基づき、先頭バイトの上位 2 ビットで
+// varint 長が決まるため、nghttp3_get_uvarintlen で必要バイト数が分かる。
+// バッファ不足の場合は false を返し、呼び出し側は蓄積して再試行する。
+// パース成功時は種別・ペイロード長・ヘッダー長 (種別 varint 長 + 長さ
+// varint 長) を返す。ペイロード長は RFC 9000 Section 16 の上限 (2^62-1)
+// のため、ヘッダー長 (最大 16) との加算は 64 bit でオーバーフローしない
+bool try_parse_h3_frame_header(const uint8_t* data,
+                               size_t length,
+                               uint64_t* frame_type,
+                               uint64_t* payload_length,
+                               size_t* header_length) {
+  if (length == 0) {
+    return false;
+  }
+  size_t type_length = nghttp3_get_uvarintlen(data);
+  // 長さ varint の先頭 1 バイトが無ければ範囲外読み出しになるため、
+  // 不足として扱う
+  if (length <= type_length) {
+    return false;
+  }
+  size_t length_length = nghttp3_get_uvarintlen(data + type_length);
+  if (length < type_length + length_length) {
+    return false;
+  }
+  uint64_t parsed_type = 0;
+  uint64_t parsed_length = 0;
+  nghttp3_get_uvarint(&parsed_type, data);
+  nghttp3_get_uvarint(&parsed_length, data + type_length);
+  *frame_type = parsed_type;
+  *payload_length = parsed_length;
+  *header_length = type_length + length_length;
+  return true;
+}
+
 }  // namespace
 
 // ========== H3Session 実装 ==========
@@ -113,6 +151,7 @@ H3Session::H3Session(H3Session&& other) noexcept
           std::move(other.pending_pre_accept_fin_session_ids_)),
       pending_qpack_blocked_fin_stream_ids_(
           std::move(other.pending_qpack_blocked_fin_stream_ids_)),
+      headers_guards_(std::move(other.headers_guards_)),
       pre_accept_fin_accepted_session_ids_(
           std::move(other.pre_accept_fin_accepted_session_ids_)),
       pending_stale_2xx_discard_session_ids_(
@@ -147,6 +186,7 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
         std::move(other.pending_pre_accept_fin_session_ids_);
     pending_qpack_blocked_fin_stream_ids_ =
         std::move(other.pending_qpack_blocked_fin_stream_ids_);
+    headers_guards_ = std::move(other.headers_guards_);
     pre_accept_fin_accepted_session_ids_ =
         std::move(other.pre_accept_fin_accepted_session_ids_);
     pending_stale_2xx_discard_session_ids_ =
@@ -222,18 +262,15 @@ bool H3Session::initialize() {
   return rv == 0;
 }
 
-size_t H3Session::receive_stream_data(int64_t stream_id,
-                                      const std::vector<uint8_t>& data,
-                                      bool fin) {
-  if (!conn_ || closed_) {
-    return 0;
-  }
-
+nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
+                                           const uint8_t* data,
+                                           size_t length,
+                                           bool fin) {
   // タイムスタンプを 0 にして read_stream2 を使用
   // nghttp3 は WebTransport データストリームのヘッダを自動的にパースし、
   // recv_wt_data コールバックを呼び出す
-  nghttp3_ssize consumed = nghttp3_conn_read_stream2(
-      conn_, stream_id, data.data(), data.size(), fin ? 1 : 0, 0);
+  nghttp3_ssize consumed =
+      nghttp3_conn_read_stream2(conn_, stream_id, data, length, fin ? 1 : 0, 0);
 
   if (consumed < 0) {
     // WT_CLOSE_SESSION 関連のストリームエラー検知時の分離処理:
@@ -283,7 +320,10 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
       closed_ = true;
     }
   }
+  return consumed;
+}
 
+void H3Session::process_after_read(int64_t stream_id, bool fin) {
   // 受理前 FIN の検知 (サーバー側の CONNECT ストリームに限定)。
   // 受理前 FIN (サーバーが応答を送信する前に CONNECT ストリームが FIN で
   // 閉じられた) では、nghttp3 がストリームを WT_SESSION_BLOCKED にして
@@ -311,8 +351,9 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
   // がバッファされる場合)。しかし read_bidi がヘッダー完了後に「Server has
   // not submitted response」の分岐で WT_SESSION_BLOCKED を立てて早期
   // return するため、almost_done の fin 処理 (end_stream コールバック) に
-  // 到達せず fin は喪失する (フィールドセクションに後続データが混在する
-  // 読み取りは nghttp3 側の既知の異常挙動のため対象外)。
+  // 到達せず fin は喪失する。フィールドセクションに後続データ (DATA
+  // フレーム等) が混在する読み取りは、フレーム境界ガードが HEADERS 境界で
+  // 分割して保持するため inq に混入しない (ガードなしでは異常挙動する)。
   //
   // ここでは fin 引数で「fin が渡ったが session_ids_ に未挿入 (ヘッダー未
   // 処理) かつ pending_headers_ に含まれる (begin_headers_cb 発火済み・
@@ -378,12 +419,339 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
   // コメント。accept_session が confirm から戻った直後に同処理を実行済み
   // の場合は保留集合が空のため何もしない (二重 close_stream は発生しない)
   discard_stale_2xx();
+}
 
-  if (consumed < 0) {
+void H3Session::flush_unblocked_held_data() {
+  // 二段階走査で投入する。先に対象 ID 群を確定し、投入ごとに再検索・再検証
+  // するため、投入中の close_stream による erase と競合しない
+  std::vector<int64_t> targets;
+  targets.reserve(headers_guards_.size());
+  for (const auto& pair : headers_guards_) {
+    const int64_t guarded_stream_id = pair.first;
+    const HeadersFrameGuard& guard = pair.second;
+    if (!guard.header_parsed || !guard.is_headers) {
+      continue;
+    }
+    if (guard.held_data.empty()) {
+      continue;
+    }
+    if (guard.headers_forwarded !=
+        static_cast<size_t>(guard.headers_total_len)) {
+      continue;
+    }
+    if (pending_headers_.count(guarded_stream_id) > 0) {
+      continue;
+    }
+    targets.push_back(guarded_stream_id);
+  }
+  for (int64_t target_stream_id : targets) {
+    if (closed_ || conn_ == nullptr) {
+      break;
+    }
+    auto it = headers_guards_.find(target_stream_id);
+    if (it == headers_guards_.end()) {
+      continue;
+    }
+    if (it->second.held_data.empty()) {
+      continue;
+    }
+    if (pending_headers_.count(target_stream_id) > 0) {
+      continue;
+    }
+    // close_stream によるガード除去に備え、投入前に保持を取り出す。
+    // move 後の vector は空になるため clear は不要である
+    std::vector<uint8_t> held = std::move(it->second.held_data);
+    bool held_fin = it->second.held_fin;
+    it->second.held_fin = false;
+    (void)read_from_nghttp3(target_stream_id, held.data(), held.size(),
+                            held_fin);
+    process_after_read(target_stream_id, held_fin);
+  }
+}
+
+size_t H3Session::receive_stream_data(int64_t stream_id,
+                                      const std::vector<uint8_t>& data,
+                                      bool fin) {
+  if (!conn_ || closed_) {
     return 0;
   }
 
-  return static_cast<size_t>(consumed);
+  // フレーム境界ガードの対象外判定。対象外は既存どおり一括で nghttp3 へ渡す
+  // - 空データ (空 FIN を含む。FIN 単体の保持は既存の fin 引数検知が担い、
+  //   DATA を伴わないため inq 混入が起きない)
+  // - 不正な負のストリーム ID (nghttp3 側で接続エラーとして扱う)
+  // - クライアント起点双方向 (%4==0) 以外のストリーム。CONNECT は常に
+  //   クライアント起点双方向であり、サーバー起点双方向 (%4==1) の受信は
+  //   パリティ違反として nghttp3 が接続エラーを返す経路のため、ガードで
+  //   吸収せず既存のエラー検知に委ねる。単方向 (制御・QPACK・WT 単方向)
+  //   もここに含まれる
+  // - 確立済み WT データストリーム (stream_info_ 登録済み。CONNECT ではない)
+  // - バインド済みの制御/QPACK ストリーム (防御的な二重化)
+  bool bypass_guard = false;
+  if (data.empty()) {
+    bypass_guard = true;
+  } else if (stream_id < 0) {
+    bypass_guard = true;
+  } else if (stream_id % 4 != 0) {
+    bypass_guard = true;
+  } else if (stream_id == control_stream_id_ ||
+             stream_id == qpack_encoder_stream_id_ ||
+             stream_id == qpack_decoder_stream_id_) {
+    bypass_guard = true;
+  } else if (stream_info_.count(stream_id) > 0) {
+    bypass_guard = true;
+  }
+
+  if (bypass_guard) {
+    nghttp3_ssize consumed =
+        read_from_nghttp3(stream_id, data.data(), data.size(), fin);
+    process_after_read(stream_id, fin);
+    flush_unblocked_held_data();
+    if (consumed < 0) {
+      return 0;
+    }
+    return static_cast<size_t>(consumed);
+  }
+
+  // 新規の双方向ストリームの先頭フレーム境界を解釈し、HEADERS フレーム全体
+  // だけを nghttp3 へ渡して後続バイトを保持する。nghttp3 は QPACK デコード
+  // ブロック検知時にフィールドセクション以降のバイトを自前の inq へ取り込
+  // み、ブロック解除時の再処理でヒープ破壊を起こすため、「ブロック確定後に
+  // 届いたチャンクを保留する」だけでは同一読み取り内の混在を防げない
+  HeadersFrameGuard& guard = headers_guards_[stream_id];
+  const uint8_t* forward_ptr = nullptr;
+  size_t forward_length = 0;
+  bool forward_fin = false;
+  // nghttp3 へ渡さず保持に回したか (全量保持の場合を含む)
+  bool fully_held = false;
+  // 結合バッファ (フレームヘッダー分割時のみ使用。常用経路では複写しない)
+  std::vector<uint8_t> combined_buffer;
+
+  if (!guard.header_parsed) {
+    // 先頭フレーム未解釈の経路。解釈完了までは転送済みバイトが無いため、
+    // parse_prefix と今回データを合わせた先頭でフレームヘッダーを解釈する
+    if (guard.parse_prefix.empty()) {
+      uint64_t frame_type = 0;
+      uint64_t payload_length = 0;
+      size_t header_length = 0;
+      bool parsed =
+          try_parse_h3_frame_header(data.data(), data.size(), &frame_type,
+                                    &payload_length, &header_length);
+      if (!parsed) {
+        // フレームヘッダー分割到着の前半。部分転送すると次回読み取りの
+        // 先頭解釈がずれるため転送せず蓄積して待つ。FIN 付きの不完全到着は
+        // プロトコルエラーとして nghttp3 に判定させる。ガードは残す
+        // (参照のダングリング防止と、FIN 後の到着なしのため実害なし)
+        if (fin) {
+          forward_ptr = data.data();
+          forward_length = data.size();
+          forward_fin = true;
+          guard.parse_prefix.clear();
+        } else {
+          guard.parse_prefix.assign(data.begin(), data.end());
+          guard.held_fin = false;
+          // fin なしの部分到着は fin 検知の対象外のため後段処理は不要だが、
+          // 移行・保留 FIN 後始末の整合のため process_after_read は行う
+          process_after_read(stream_id, false);
+          return data.size();
+        }
+      } else if (frame_type != kH3FrameTypeHeaders) {
+        // 先頭が HEADERS でないストリーム (WT データストリーム等) は現行
+        // どおり一括で渡す。以後はガード対象外として素通しする
+        guard.header_parsed = true;
+        guard.is_headers = false;
+        guard.parse_prefix.clear();
+        forward_ptr = data.data();
+        forward_length = data.size();
+        forward_fin = fin;
+      } else {
+        uint64_t total_length = header_length + payload_length;
+        guard.header_parsed = true;
+        guard.is_headers = true;
+        guard.headers_total_len = total_length;
+        guard.parse_prefix.clear();
+        if (static_cast<uint64_t>(data.size()) <= total_length) {
+          forward_ptr = data.data();
+          forward_length = data.size();
+          forward_fin = fin;
+          guard.headers_forwarded = data.size();
+        } else {
+          forward_ptr = data.data();
+          forward_length = static_cast<size_t>(total_length);
+          forward_fin = false;
+          guard.headers_forwarded = static_cast<size_t>(total_length);
+          guard.held_data.assign(
+              data.begin() + static_cast<std::ptrdiff_t>(total_length),
+              data.end());
+          guard.held_fin = fin;
+        }
+      }
+    } else {
+      // フレームヘッダー分割の後半。先頭最大 16 バイトで解釈を試みる
+      // (種別・長さとも最大 8 バイト varint のため 16 バイトで足りる)
+      size_t prefix_size = guard.parse_prefix.size();
+      size_t take_from_data = 0;
+      if (prefix_size < 16) {
+        take_from_data = std::min(data.size(), 16 - prefix_size);
+      }
+      combined_buffer.reserve(prefix_size + take_from_data);
+      combined_buffer.insert(combined_buffer.end(), guard.parse_prefix.begin(),
+                             guard.parse_prefix.end());
+      combined_buffer.insert(
+          combined_buffer.end(), data.begin(),
+          data.begin() + static_cast<std::ptrdiff_t>(take_from_data));
+      uint64_t frame_type = 0;
+      uint64_t payload_length = 0;
+      size_t header_length = 0;
+      bool parsed = try_parse_h3_frame_header(
+          combined_buffer.data(), combined_buffer.size(), &frame_type,
+          &payload_length, &header_length);
+      if (!parsed) {
+        if (fin) {
+          // 不完全のまま FIN。到着済み全量を nghttp3 に判定させる。ガードは
+          // 残す (参照のダングリング防止。FIN 後の到着なしのため実害なし)
+          combined_buffer.clear();
+          combined_buffer.reserve(prefix_size + data.size());
+          combined_buffer.insert(combined_buffer.end(),
+                                 guard.parse_prefix.begin(),
+                                 guard.parse_prefix.end());
+          combined_buffer.insert(combined_buffer.end(), data.begin(),
+                                 data.end());
+          guard.parse_prefix.clear();
+          // 結合バッファの寿命に注意して後段で read_from_nghttp3 に渡す
+          // (forward_ptr は combined_buffer を指す)
+          guard.header_parsed = false;
+          guard.is_headers = false;
+          forward_ptr = combined_buffer.data();
+          forward_length = combined_buffer.size();
+          forward_fin = true;
+        } else {
+          guard.parse_prefix.insert(guard.parse_prefix.end(), data.begin(),
+                                    data.end());
+          process_after_read(stream_id, false);
+          return data.size();
+        }
+      } else if (frame_type != kH3FrameTypeHeaders) {
+        combined_buffer.clear();
+        combined_buffer.reserve(prefix_size + data.size());
+        combined_buffer.insert(combined_buffer.end(),
+                               guard.parse_prefix.begin(),
+                               guard.parse_prefix.end());
+        combined_buffer.insert(combined_buffer.end(), data.begin(), data.end());
+        guard.parse_prefix.clear();
+        guard.header_parsed = true;
+        guard.is_headers = false;
+        forward_ptr = combined_buffer.data();
+        forward_length = combined_buffer.size();
+        forward_fin = fin;
+      } else {
+        uint64_t total_length = header_length + payload_length;
+        uint64_t available = static_cast<uint64_t>(prefix_size + data.size());
+        // 蓄積済み prefix と今回データの結合がストリーム先頭からの全量となる。
+        // 結合の組立後に prefix を消去する (先に消すと蓄積が失われる)
+        guard.header_parsed = true;
+        guard.is_headers = true;
+        guard.headers_total_len = total_length;
+        if (available <= total_length) {
+          // 全量が HEADERS 範囲内。結合して転送する
+          combined_buffer.clear();
+          combined_buffer.reserve(prefix_size + data.size());
+          combined_buffer.insert(combined_buffer.end(),
+                                 guard.parse_prefix.begin(),
+                                 guard.parse_prefix.end());
+          combined_buffer.insert(combined_buffer.end(), data.begin(),
+                                 data.end());
+          guard.parse_prefix.clear();
+          guard.headers_forwarded = prefix_size + data.size();
+          forward_ptr = combined_buffer.data();
+          forward_length = combined_buffer.size();
+          forward_fin = fin;
+        } else {
+          // HEADERS 境界を越える。先頭 total_length を転送し、残りを保持する
+          size_t need_from_data =
+              static_cast<size_t>(total_length - prefix_size);
+          combined_buffer.clear();
+          combined_buffer.reserve(static_cast<size_t>(total_length));
+          combined_buffer.insert(combined_buffer.end(),
+                                 guard.parse_prefix.begin(),
+                                 guard.parse_prefix.end());
+          combined_buffer.insert(
+              combined_buffer.end(), data.begin(),
+              data.begin() + static_cast<std::ptrdiff_t>(need_from_data));
+          guard.parse_prefix.clear();
+          guard.headers_forwarded = static_cast<size_t>(total_length);
+          guard.held_data.assign(
+              data.begin() + static_cast<std::ptrdiff_t>(need_from_data),
+              data.end());
+          guard.held_fin = fin;
+          forward_ptr = combined_buffer.data();
+          forward_length = combined_buffer.size();
+          forward_fin = false;
+        }
+      }
+    }
+  } else if (!guard.is_headers) {
+    forward_ptr = data.data();
+    forward_length = data.size();
+    forward_fin = fin;
+  } else {
+    uint64_t total_length = guard.headers_total_len;
+    uint64_t forwarded = static_cast<uint64_t>(guard.headers_forwarded);
+    if (forwarded < total_length) {
+      uint64_t remaining = total_length - forwarded;
+      if (static_cast<uint64_t>(data.size()) <= remaining) {
+        forward_ptr = data.data();
+        forward_length = data.size();
+        forward_fin = fin;
+        guard.headers_forwarded += data.size();
+      } else {
+        forward_ptr = data.data();
+        forward_length = static_cast<size_t>(remaining);
+        forward_fin = false;
+        guard.headers_forwarded = static_cast<size_t>(total_length);
+        guard.held_data.assign(
+            data.begin() + static_cast<std::ptrdiff_t>(remaining), data.end());
+        guard.held_fin = fin;
+      }
+    } else {
+      if (pending_headers_.count(stream_id) > 0) {
+        guard.held_data.insert(guard.held_data.end(), data.begin(), data.end());
+        guard.held_fin = guard.held_fin || fin;
+        fully_held = true;
+      } else {
+        forward_ptr = data.data();
+        forward_length = data.size();
+        forward_fin = fin;
+      }
+    }
+  }
+
+  if (fully_held) {
+    process_after_read(stream_id, fin);
+    flush_unblocked_held_data();
+    return data.size();
+  }
+
+  // 転送対象が空で FIN もない場合は nghttp3 呼び出しを省略する
+  // (全量保持の場合は上で return 済みのため、ここに来るのは空データ等の
+  //  no-op のみ)
+  nghttp3_ssize consumed = 0;
+  bool did_read = false;
+  if (forward_ptr != nullptr && (forward_length > 0 || forward_fin)) {
+    // 結合バッファ経路では forward_ptr が combined_buffer を指し、
+    // forward_length は combined 全量と一致させてある
+    consumed =
+        read_from_nghttp3(stream_id, forward_ptr, forward_length, forward_fin);
+    did_read = true;
+  }
+  // fin の検知は転送した fin で行い、保持に託した fin は投入時に検知する
+  // (契約の詳細は宣言コメントを参照)
+  process_after_read(stream_id, forward_fin);
+  flush_unblocked_held_data();
+  if (did_read && consumed < 0) {
+    return 0;
+  }
+  return data.size();
 }
 
 void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
@@ -1193,6 +1561,10 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   // まで残留する。ここで除去する (移行済みのストリームは既に erase 済み
   // のため no-op)
   pending_qpack_blocked_fin_stream_ids_.erase(stream_id);
+  // フレーム境界ガードの per-stream 状態も除去する。ブロック中にリセット
+  // されたストリームの保持データと解釈状態が残留すると、接続終了まで
+  // 無界に残る。移行済み・投入済みのストリームは空のため no-op
+  headers_guards_.erase(stream_id);
 
   // セッション ID の復元とバッファ削除は nghttp3 呼び出しより前に行う
   // (nghttp3_conn_close_stream は同期実行される stream_close_cb を呼び、
