@@ -3552,3 +3552,70 @@ async def test_connect_timeout_on_blackhole():
         assert client.is_connected is False
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_reaps_connection(test_certificates):
+    """アイドルタイムアウトで接続が回収されセッション終了は一斉発火しない"""
+    from webtransport.h3 import Client, Server
+
+    closed_sessions: list[int] = []
+
+    async def on_session_closed(session_id: int, addr: tuple[str, int]) -> None:
+        closed_sessions.append(session_id)
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        idle_timeout_ns=1_000_000_000,
+    )
+    server.on_session_closed(on_session_closed)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    try:
+        # セッションを確立して沈黙させる
+        client = Client(
+            url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+            verify_peer=False,
+        )
+        await client.connect()
+
+        async def run_client() -> None:
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+        try:
+            # 接続されるまで待ってから検証する
+            deadline = time.monotonic() + 5.0
+            while len(server._clients) != 1 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert len(server._clients) == 1
+
+            # アイドルタイムアウト後に登録が外れる。削除されるまで待って
+            # から検証する (CI 負荷のばらつきで偽失敗しないため)
+            deadline = time.monotonic() + 5.0
+            while server._clients != {} and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert server._clients == {}
+            # 確立中セッションへの一斉通知は行わない
+            assert closed_sessions == []
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await server.stop()

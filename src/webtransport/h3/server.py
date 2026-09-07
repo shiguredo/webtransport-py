@@ -720,5 +720,18 @@ class Server:
                     if timeout is not None and timeout <= 0:
                         client.quic_connection.handle_timeout()
                         await self._send_to(addr, client)
+                        # 受信経路と同様に QUIC イベントを処理する。
+                        # CONNECTION_CLOSED 到達では送信して削除し、確立中
+                        # セッションへの一斉通知は行わない (WT 層の後続処理
+                        # を飛ばすのは受信経路と同様)。タイムアウト発火で
+                        # 上位層の新規イベントは生じないため、末尾送信と
+                        # is_closed 回収は省略する
+                        connection_alive = await self._process_quic_events(addr, client)
+                        if not connection_alive:
+                            await self._send_to(addr, client)
+                            if addr in self._clients:
+                                del self._clients[addr]
+                            continue
+                        await self._process_webtransport_events(addr, client)
 
             await asyncio.sleep(0.001)
