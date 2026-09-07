@@ -243,6 +243,8 @@
   - @voluntas
 - [FIX] QUIC サーバーが未知アドレスからの short header で既存接続のアドレスキーを張り替える問題を修正する
   - @voluntas
+- [FIX] UDP 系サーバーが idle timeout 後の接続を回収せずリークする問題を修正する
+  - @voluntas
 
 ### misc
 

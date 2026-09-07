@@ -314,6 +314,44 @@ class Server:
         if addr in self._clients:
             del self._clients[addr]
 
+    async def _drain_quic_events(self, addr: tuple[str, int], client: ClientConnection) -> None:
+        """QUIC イベントを処理する (受信経路とタイマー経路の共通処理)
+
+        CONNECTION_CLOSED 到達では呼び出し元の addr キーで登録を外す。
+        呼び出し側は quic_connection と http3_connection が非 None である
+        ことを保証すること。
+        """
+        assert client.quic_connection is not None
+        assert client.http3_connection is not None
+        while True:
+            quic_event = client.quic_connection.next_event()
+            if quic_event is None:
+                break
+
+            if quic_event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
+                # ハンドシェイク完了時に HTTP/3 ストリームを設定する
+                # (クライアントからの PRIORITY_UPDATE を最初の
+                # フライトで受信できるように、ストリームデータの
+                # 処理より前に呼ぶ)
+                client.setup_http3_streams()
+            elif quic_event.type == quic_low.EventType.STREAM_DATA:
+                client.http3_connection.receive_stream_data(
+                    quic_event.stream_id,
+                    quic_event.data,
+                    quic_event.fin,
+                )
+            elif quic_event.type == quic_low.EventType.STREAM_RESET:
+                if self._on_stream_reset is not None:
+                    await self._on_stream_reset(
+                        quic_event.stream_id,
+                        quic_event.error_code,
+                        addr,
+                    )
+            elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
+                if addr in self._clients:
+                    del self._clients[addr]
+                continue
+
     async def submit_response(
         self,
         addr: tuple[str, int],
@@ -416,34 +454,7 @@ class Server:
                 if client.quic_connection is None or client.http3_connection is None:
                     continue
 
-                while True:
-                    quic_event = client.quic_connection.next_event()
-                    if quic_event is None:
-                        break
-
-                    if quic_event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
-                        # ハンドシェイク完了時に HTTP/3 ストリームを設定する
-                        # (クライアントからの PRIORITY_UPDATE を最初の
-                        # フライトで受信できるように、ストリームデータの
-                        # 処理より前に呼ぶ)
-                        client.setup_http3_streams()
-                    elif quic_event.type == quic_low.EventType.STREAM_DATA:
-                        client.http3_connection.receive_stream_data(
-                            quic_event.stream_id,
-                            quic_event.data,
-                            quic_event.fin,
-                        )
-                    elif quic_event.type == quic_low.EventType.STREAM_RESET:
-                        if self._on_stream_reset is not None:
-                            await self._on_stream_reset(
-                                quic_event.stream_id,
-                                quic_event.error_code,
-                                addr,
-                            )
-                    elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
-                        if addr in self._clients:
-                            del self._clients[addr]
-                        continue
+                await self._drain_quic_events(addr, client)
 
                 while True:
                     http3_event = client.http3_connection.next_event()
@@ -500,6 +511,12 @@ class Server:
                     if timeout is not None and timeout <= 0:
                         client.quic_connection.handle_timeout()
                         await self._send_to(client_addr, client)
+                        # 受信経路と同様に QUIC イベントを処理し、終了時は
+                        # 登録を外す (イベント滞留によるリークを防ぐ)。
+                        # タイムアウト発火で HTTP/3 層の新規イベントは生じ
+                        # ないため、HTTP/3 層の drain は受信経路に委ねる
+                        if client.http3_connection is not None:
+                            await self._drain_quic_events(client_addr, client)
                 # HTTP/3 プロトコルエラーで自主クローズした client を回収する。
                 # 受信成功後分岐と対称に close 前に _send_to を通し、
                 # HTTP/3 が生成した残存バイト列を吐き切ってから CONNECTION_CLOSE を送る

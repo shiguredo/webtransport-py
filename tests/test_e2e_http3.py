@@ -1331,3 +1331,64 @@ async def test_server_stop_delivers_connection_close(test_certificates):
         if client is not None:
             await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_reaps_client(test_certificates):
+    """アイドルタイムアウトでクライアント登録が外れる"""
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        idle_timeout_ns=1_000_000_000,
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+    try:
+        # 接続して沈黙させる
+        client = Client(
+            host="127.0.0.1",
+            port=server.actual_port,
+            verify_peer=False,
+        )
+        connected = await client.connect()
+        assert connected is True
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+        try:
+            # 接続されるまで待ってから検証する
+            deadline = time.monotonic() + 5.0
+            while len(server._clients) != 1 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert len(server._clients) == 1
+
+            # アイドルタイムアウト後に登録が外れる。削除されるまで待って
+            # から検証する (CI 負荷のばらつきで偽失敗しないため)
+            deadline = time.monotonic() + 5.0
+            while server._clients != {} and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert server._clients == {}
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await server.stop()
