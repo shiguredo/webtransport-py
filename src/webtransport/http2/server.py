@@ -157,6 +157,10 @@ class Server:
         """サーバーを停止する"""
         self._running = False
         if self._server is not None:
+            # 処理中のクライアント transport を閉じてハンドラを起こす。
+            # wait_closed() は全接続の終了を待つため、先に閉じないと
+            # アクティブ接続がある限り復帰しない
+            self._server.close_clients()
             self._server.close()
             await self._server.wait_closed()
 
@@ -187,7 +191,7 @@ class Server:
             await writer.drain()
 
         try:
-            while True:
+            while self._running:
                 try:
                     received = await asyncio.wait_for(reader.read(65535), timeout=0.1)
                     if not received:

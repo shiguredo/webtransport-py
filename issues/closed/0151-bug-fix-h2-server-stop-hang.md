@@ -1,7 +1,7 @@
 # h2.Server.stop() / http2.Server.stop() がアクティブ接続中に復帰しない
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-h2-server-stop-hang
 - Polished: 2026-09-07
 
@@ -30,3 +30,12 @@
 - 停止時にクライアントが TCP 切断を検知できること
 - `tests/` に「クライアント接続中に stop() が復帰する」テストを h2 / http2 に追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `_handle_client` の受信ループ条件を `while True` から `while self._running` に変える。既存の break 条件 (TCP EOF / `is_closed()`) は維持する
+- `stop()` は `_running = False` の後に `close_clients()` で全クライアント transport を閉じてから `close()` と `wait_closed()` を行う
+- 停止時の GOAWAY 送出は行わない (TCP 切断による検知で足りる)
+- `tests/test_e2e_webtransport_h2.py` と `tests/test_e2e_http2.py` に接続中の停止復帰テストを追加する (500 ms 以内の復帰は完了条件の指定どおりに断言する)
+- http2 側も同型不具合のため同時修正する
+- 全 882 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
