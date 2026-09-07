@@ -93,6 +93,14 @@ std::unique_ptr<Http3Connection> Http3Connection::create_server(
 }
 
 bool Http3Connection::initialize() {
+  // 異常な Config 値で nghttp3 の assert に到達する前に生成失敗にする
+  // (RFC 9000 Section 16 の varint 上限 2^62 - 1)
+  constexpr uint64_t max_varint = (1ULL << 62) - 1;
+  if (config_.max_field_section_size > max_varint ||
+      config_.qpack_max_dtable_capacity > max_varint ||
+      config_.qpack_blocked_streams > max_varint) {
+    return false;
+  }
   nghttp3_callbacks callbacks{};
   callbacks.acked_stream_data = acked_stream_data_cb;
   callbacks.stream_close = stream_close_cb;
@@ -139,7 +147,22 @@ bool Http3Connection::initialize() {
 size_t Http3Connection::receive_stream_data(int64_t stream_id,
                                             const std::vector<uint8_t>& data,
                                             bool fin) {
+  // 負値や varint 上限超えは nghttp3 の assert に到達するため ValueError で
+  // 拒否する (RFC 9000 Section 16 の varint 上限 2^62 - 1)
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    throw std::invalid_argument("stream_id out of range");
+  }
   if (!conn_ || closed_) {
+    return 0;
+  }
+
+  // バインド済みの自起点単方向ストリーム (制御・QPACK) への受信は
+  // nghttp3 の assert に到達するため黙って無視する。自単方向ストリームは
+  // 送信専用であり、ピアが正規に応答を返すことはない
+  if (stream_id == control_stream_id_ ||
+      stream_id == qpack_encoder_stream_id_ ||
+      stream_id == qpack_decoder_stream_id_) {
     return 0;
   }
 
@@ -222,6 +245,27 @@ void Http3Connection::bind_control_stream(int64_t stream_id) {
     return;
   }
 
+  // ストリーム ID の検証内容は H3Session::bind_control_stream と同じ
+  // (拒否方式は本 API の契約に従い ValueError で拒否する)。
+  // varint 上限超えや非単方向ストリームは nghttp3 の assert に到達する
+  // ため ValueError で拒否する
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    throw std::invalid_argument("stream_id out of range");
+  }
+  // 単方向ストリームかチェック (クライアント: %4==2, サーバー: %4==3)
+  if (is_server_) {
+    if (stream_id % 4 != 3) {
+      throw std::invalid_argument(
+          "control stream must be server-initiated unidirectional");
+    }
+  } else {
+    if (stream_id % 4 != 2) {
+      throw std::invalid_argument(
+          "control stream must be client-initiated unidirectional");
+    }
+  }
+
   control_stream_id_ = stream_id;
   nghttp3_conn_bind_control_stream(conn_, stream_id);
 }
@@ -229,6 +273,24 @@ void Http3Connection::bind_control_stream(int64_t stream_id) {
 void Http3Connection::bind_qpack_encoder_stream(int64_t stream_id) {
   if (!conn_ || closed_) {
     return;
+  }
+
+  // ストリーム ID の検証内容は H3Session::bind_qpack_encoder_stream と同じ
+  // (H3 側と同様に不正値は黙って無視する)。未検証のまま
+  // nghttp3_conn_bind_qpack_streams へ渡すと assert に到達するため、
+  // 単方向ストリームかチェックする
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return;
+  }
+  if (is_server_) {
+    if (stream_id % 4 != 3) {
+      return;
+    }
+  } else {
+    if (stream_id % 4 != 2) {
+      return;
+    }
   }
 
   qpack_encoder_stream_id_ = stream_id;
@@ -242,6 +304,24 @@ void Http3Connection::bind_qpack_encoder_stream(int64_t stream_id) {
 void Http3Connection::bind_qpack_decoder_stream(int64_t stream_id) {
   if (!conn_ || closed_) {
     return;
+  }
+
+  // ストリーム ID の検証内容は H3Session::bind_qpack_decoder_stream と同じ
+  // (H3 側と同様に不正値は黙って無視する)。未検証のまま
+  // nghttp3_conn_bind_qpack_streams へ渡すと assert に到達するため、
+  // 単方向ストリームかチェックする
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return;
+  }
+  if (is_server_) {
+    if (stream_id % 4 != 3) {
+      return;
+    }
+  } else {
+    if (stream_id % 4 != 2) {
+      return;
+    }
   }
 
   qpack_decoder_stream_id_ = stream_id;
@@ -261,6 +341,13 @@ bool Http3Connection::submit_request(
   // QPACK ストリームがバインドされていない場合は false を返す
   // nghttp3 は tx.qenc が設定されていることを assert する
   if (qpack_encoder_stream_id_ < 0 || qpack_decoder_stream_id_ < 0) {
+    return false;
+  }
+
+  // 自起点のクライアント双方向ストリーム (%4==0) のみ許可する。
+  // 非自起点 ID は nghttp3 の assert に到達するため false で拒否する
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint || stream_id % 4 != 0) {
     return false;
   }
 
@@ -297,6 +384,12 @@ bool Http3Connection::submit_response(
     int64_t stream_id,
     const std::vector<std::pair<std::string, std::string>>& headers) {
   if (!conn_ || closed_ || !is_server_) {
+    return false;
+  }
+
+  // QPACK ストリームがバインドされていない場合は false を返す
+  // (submit_request と対称。nghttp3 は tx.qenc の設定を assert する)
+  if (qpack_encoder_stream_id_ < 0 || qpack_decoder_stream_id_ < 0) {
     return false;
   }
 
@@ -354,6 +447,14 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
     return;
   }
 
+  // 範囲外のストリーム ID は nghttp3 の assert に到達するため黙って無視
+  // する (send_data / close_stream / shutdown_stream_write と同じ契約)。
+  // nghttp3_conn_shutdown_stream_read は範囲を assert で検証する
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return;
+  }
+
   // nghttp3 に読み取り停止を伝え、高レベル側で QUIC RESET_STREAM を送出する
   nghttp3_conn_shutdown_stream_read(conn_, stream_id);
   stream_buffers_.erase(stream_id);
@@ -385,6 +486,16 @@ void Http3Connection::goaway(int64_t id) {
   // コントロールストリームがバインドされていない場合は何もしない
   // nghttp3 は tx.ctrl が設定されていることを assert する
   if (control_stream_id_ < 0) {
+    return;
+  }
+
+  // 二重送信は nghttp3 の assert に到達するため黙って無視する。
+  // nghttp3_conn_shutdown は受信済み最大ストリームから GOAWAY ID を再計算
+  // するため、受信済み最大値が進んだ後の 2 回目の呼び出しは単調性を破り
+  // assert に違反する (C++ 側の shutdown_commenced_ によるガードは
+  // submit_shutdown_notice と同じ)。同値再送も抑止するが、安全側の
+  // 扱いとして許容する
+  if (shutdown_commenced_) {
     return;
   }
 
@@ -494,8 +605,8 @@ bool Http3Connection::submit_shutdown_notice() {
 
   // goaway() 済みの場合は false を返す。shutdown notice の GOAWAY ID は
   // shutdown の GOAWAY ID より大きいため、単調減少に違反する
-  // (RFC 9114 5.2 節の MUST NOT。Release ビルドでは assert が
-  // 無効化されるため C++ 側でガードする)
+  // (RFC 9114 5.2 節の MUST NOT。依存 3 ライブラリは Release ビルドでも
+  // -DNDEBUG が除去され assert が本番でも有効なため、C++ 側でガードする)
   if (shutdown_commenced_) {
     return false;
   }
@@ -573,9 +684,9 @@ std::optional<uint64_t> Http3Connection::frame_payload_left(
   if (!conn_ || closed_) {
     return std::nullopt;
   }
-  // nghttp3 は assert で stream_id の範囲を検証する (Release ビルドでは
-  // 無効化されるため C++ 側でガードする。 NGHTTP3_MAX_VARINT は非公開
-  // マクロ )
+  // nghttp3 は assert で stream_id の範囲を検証する (依存 3 ライブラリは
+  // Release ビルドでも -DNDEBUG が除去され assert が本番でも有効なため、
+  // C++ 側でガードする。NGHTTP3_MAX_VARINT は非公開マクロ)
   constexpr int64_t max_varint = (1LL << 62) - 1;
   if (stream_id < 0 || stream_id > max_varint) {
     return 0;
@@ -588,8 +699,9 @@ std::optional<bool> Http3Connection::drained() const {
     return std::nullopt;
   }
   // nghttp3 は assert でサーバーセッションを要求し、制御ストリームを
-  // 無条件に参照する (Release ビルドでは assert が無効化されるため
-  // C++ 側でガードする。 goaway() と同じガード条件)
+  // 無条件に参照する (依存 3 ライブラリは Release ビルドでも -DNDEBUG が
+  // 除去され assert が本番でも有効なため、C++ 側でガードする。goaway() と
+  // 同じガード条件)
   if (control_stream_id_ < 0) {
     return std::nullopt;
   }
@@ -601,9 +713,9 @@ std::optional<std::pair<uint32_t, bool>> Http3Connection::stream_priority(
   if (!conn_ || closed_ || !is_server_) {
     return std::nullopt;
   }
-  // nghttp3 は assert で stream_id の範囲を検証する (Release ビルドでは
-  // 無効化されるため C++ 側でガードする。 NGHTTP3_MAX_VARINT は非公開
-  // マクロ )
+  // nghttp3 は assert で stream_id の範囲を検証する (依存 3 ライブラリは
+  // Release ビルドでも -DNDEBUG が除去され assert が本番でも有効なため、
+  // C++ 側でガードする。NGHTTP3_MAX_VARINT は非公開マクロ)
   constexpr int64_t max_varint = (1LL << 62) - 1;
   if (stream_id < 0 || stream_id > max_varint) {
     return std::nullopt;
@@ -621,8 +733,9 @@ void Http3Connection::set_max_client_streams_bidi(uint64_t max_streams) {
   if (!conn_ || closed_ || !is_server_) {
     return;
   }
-  // 累積最大数は単調増加のみ許可される (nghttp3 は assert で検証するが
-  // Release ビルドでは無効化されるため C++ 側で減算を防ぐ)
+  // 累積最大数は単調増加のみ許可される (nghttp3 は assert で検証するが、
+  // 依存 3 ライブラリは Release ビルドでも -DNDEBUG が除去され assert が
+  // 本番でも有効なため、C++ 側で減算を防ぐ)
   if (max_streams < max_client_streams_bidi_) {
     return;
   }
@@ -645,8 +758,9 @@ bool Http3Connection::client_stream_priority(int64_t stream_id,
   }
 
   // nghttp3 は assert で stream_id と urgency の範囲を検証する
-  // (Release ビルドでは無効化されるため C++ 側でガードする。
-  // NGHTTP3_MAX_VARINT は非公開マクロ )
+  // (依存 3 ライブラリは Release ビルドでも -DNDEBUG が除去され assert が
+  // 本番でも有効なため、C++ 側でガードする。NGHTTP3_MAX_VARINT は非公開
+  // マクロ)
   constexpr int64_t max_varint = (1LL << 62) - 1;
   if (stream_id < 0 || stream_id > max_varint) {
     return false;
@@ -676,8 +790,9 @@ bool Http3Connection::server_stream_priority(int64_t stream_id,
   }
 
   // nghttp3 は assert で stream_id と urgency の範囲を検証する
-  // (Release ビルドでは無効化されるため C++ 側でガードする。
-  // NGHTTP3_MAX_VARINT は非公開マクロ )
+  // (依存 3 ライブラリは Release ビルドでも -DNDEBUG が除去され assert が
+  // 本番でも有効なため、C++ 側でガードする。NGHTTP3_MAX_VARINT は非公開
+  // マクロ)
   constexpr int64_t max_varint = (1LL << 62) - 1;
   if (stream_id < 0 || stream_id > max_varint) {
     return false;

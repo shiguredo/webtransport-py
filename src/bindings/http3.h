@@ -221,7 +221,11 @@ class Http3Connection {
 
   /**
    * GOAWAY を送信
-   * @param id GOAWAY ID
+   *
+   * GOAWAY ID は nghttp3 が受信済み最大ストリームから自動計算するため、
+   * 引数の id は無視される。二重呼び出しは黙って無視する (同値再送も
+   * 抑止する)。
+   * @param id GOAWAY ID (現状は無視される)
    */
   void goaway(int64_t id = 0);
 
@@ -357,8 +361,9 @@ class Http3Connection {
    * QUIC 層が MAX_STREAMS で許可するクライアント起動双方向ストリームの
    * 累積数を nghttp3 に伝える。設定しない場合、PRIORITY_UPDATE フレーム
    * が H3_ID_ERROR で拒否される。累積最大数は単調増加のみ許可され、
-   * 減らす呼び出しは nghttp3 の assert に違反する (Release ビルドでは
-   * 無効化されるため C++ 側で減算を防ぐ)。
+   * 減らす呼び出しは nghttp3 の assert に違反する (依存 3 ライブラリは
+   * Release ビルドでも -DNDEBUG が除去され assert が本番でも有効なため、
+   * C++ 側で減算を防ぐ)。
    * @param max_streams クライアント起動双方向ストリームの累積最大数
    */
   void set_max_client_streams_bidi(uint64_t max_streams);

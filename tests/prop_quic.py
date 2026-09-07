@@ -173,3 +173,121 @@ def prop_close_arbitrary_reason(reason: str):
     conn.close(0, reason)
 
     assert conn.is_closed() is True
+
+
+# ========== トランスポートパラメータ Config の生成時検証テスト ==========
+
+
+@given(
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**62 - 1),
+    st.integers(min_value=0, max_value=2**64 - 2),
+)
+@settings(max_examples=100)
+def prop_config_transport_params_valid_no_abort(
+    max_data: int,
+    max_stream_data_bidi_local: int,
+    max_stream_data_bidi_remote: int,
+    max_stream_data_uni: int,
+    max_streams_bidi: int,
+    max_streams_uni: int,
+    max_datagram_frame_size: int,
+    idle_timeout_ns: int,
+):
+    """有効範囲内のトランスポートパラメータで接続生成が abort しない
+
+    フロー制御値は RFC 9000 Section 16 の varint 上限 (2^62 - 1) 以下、
+    idle_timeout_ns は UINT64_MAX 未満が有効範囲である。max_streams 系と
+    max_datagram_frame_size もエンコード経路の assert に到達するため、
+    同じ上限で検証する。依存ライブラリは Release ビルドでも assert が
+    有効なため、バインディング側で事前検証する
+    """
+    # 有効範囲内の値を設定する
+    config = quic.Config()
+    config.alpn_protocols = ["h3"]
+    config.server_name = "localhost"
+    config.max_data = max_data
+    config.max_stream_data_bidi_local = max_stream_data_bidi_local
+    config.max_stream_data_bidi_remote = max_stream_data_bidi_remote
+    config.max_stream_data_uni = max_stream_data_uni
+    config.max_streams_bidi = max_streams_bidi
+    config.max_streams_uni = max_streams_uni
+    config.max_datagram_frame_size = max_datagram_frame_size
+    config.idle_timeout_ns = idle_timeout_ns
+
+    # 生成が成功する (abort も RuntimeError も起きない)
+    conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
+    conn.close()
+
+
+@given(
+    st.integers(min_value=2**62, max_value=UINT64_MAX),
+)
+@settings(max_examples=100)
+def prop_config_max_data_invalid_raises(max_data: int):
+    """varint 上限超えの max_data では接続生成が RuntimeError になる"""
+    # 上限超えの値を設定する
+    config = quic.Config()
+    config.alpn_protocols = ["h3"]
+    config.server_name = "localhost"
+    config.max_data = max_data
+
+    # 生成失敗は RuntimeError で扱う (abort しない)
+    try:
+        conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
+    except RuntimeError:
+        return
+    conn.close()
+    raise AssertionError("上限超えの max_data で生成失敗しませんでした")
+
+
+@given(st.integers(min_value=2**62, max_value=UINT64_MAX))
+@settings(max_examples=100)
+def prop_config_streams_datagram_invalid_raises(value: int):
+    """varint 上限超えのストリーム数・データグラム値では生成が RuntimeError になる
+
+    max_streams_bidi / max_streams_uni / max_datagram_frame_size のいずれか
+    1 つに上限超えを設定し、生成失敗が RuntimeError で扱われる (abort
+    しない) ことを検証する。エンコード経路の assert に到達するため、
+    フロー制御値と同じ上限で検証する
+    """
+    # 上限超えの値を各フィールドに設定して生成する
+    for field in (
+        "max_streams_bidi",
+        "max_streams_uni",
+        "max_datagram_frame_size",
+    ):
+        config = quic.Config()
+        config.alpn_protocols = ["h3"]
+        config.server_name = "localhost"
+        setattr(config, field, value)
+
+        # 生成失敗は RuntimeError で扱う (abort しない)
+        try:
+            conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
+        except RuntimeError:
+            continue
+        conn.close()
+        raise AssertionError("上限超えの値で生成失敗しませんでした")
+
+
+def test_config_idle_timeout_max_raises() -> None:
+    """idle_timeout_ns が UINT64_MAX では接続生成が RuntimeError になる"""
+    # UINT64_MAX は ngtcp2 の assert に到達するため拒否される
+    config = quic.Config()
+    config.alpn_protocols = ["h3"]
+    config.server_name = "localhost"
+    config.idle_timeout_ns = UINT64_MAX
+
+    # 生成失敗は RuntimeError で扱う (abort しない)
+    try:
+        conn = quic.Connection.create_client(config, CLIENT_ADDR, SERVER_ADDR)
+    except RuntimeError:
+        return
+    conn.close()
+    raise AssertionError("UINT64_MAX の idle_timeout_ns で生成失敗しませんでした")

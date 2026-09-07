@@ -235,6 +235,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 が "webtransport" トークンの CONNECT を拒否し実ブラウザとセッション確立できない問題を修正する
   - @voluntas
+- [FIX] 公開 Sans-IO API の引数だけで依存ライブラリの assert に到達しプロセスが異常終了する経路をバインディング側の検証で塞ぐ
+  - @voluntas
 
 ### misc
 
