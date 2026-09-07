@@ -3,11 +3,11 @@
 - Created: 2026-09-07
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-http3-add-ack-offset-not-called
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-07
 
 ## 目的
 
-`Http3Connection::get_streams_to_send` は `nghttp3_conn_add_write_offset` のみを呼び `nghttp3_conn_add_ack_offset` を呼ばない (`H3Session::get_streams_to_send` は両方呼ぶ)。`acked_stream_data_cb` が永久に到達不能で、`stream_buffers_` は `stream_close_cb` / `reset_stream_cb` まで解放されない。高レベル層は `close_stream` を一度も呼ばないため、nghttp3 のストリームオブジェクトも接続終了まで蓄積する。`read_data_cb` の O(n²) 走査も発生する。
+`Http3Connection::get_streams_to_send` は `nghttp3_conn_add_write_offset` のみを呼び `nghttp3_conn_add_ack_offset` を呼ばない (`H3Session::get_streams_to_send` は両方呼ぶ)。`acked_stream_data_cb` が永久に到達不能で、`stream_buffers_` は `stream_close_cb` / `reset_stream_cb` まで解放されない。高レベル層は `close_stream` を一度も呼ばないため、送信バッファがストリーム寿命まで残留する。`read_data_cb` の先頭走査も残留エントリ分だけ延びる。本 issue の対象はバインディング層の ACK 対称化のみとし、高レベル層の `close_stream` 追加は行わない (既存の DATA 欠落回避コメントを覆す根拠がないため)。closed issue 0013 は `Http3Connection` を対象外として `H3Session` のみ対応した経緯があり、本 issue はその残件を扱う。
 
 ## 現状
 
@@ -20,15 +20,16 @@
 
 ## 設計方針
 
-- `Http3Connection::get_streams_to_send` に `nghttp3_conn_add_ack_offset(conn_, stream_id, total)` を追加する (`H3Session::get_streams_to_send` と対称)
-- `acked_stream_data_cb` の部分 ACK 分岐を `front.data.size()` ベースに直す (`H3Session::acked_stream_data_cb` と対称)
-- `read_data_cb` の O(n²) は本修正で消費済みエントリが acked_stream_data_cb で pop されるようになるため解消するが、念のため確認する
-- 高レベル `http3/client.py` / `http3/server.py` は QUIC の `STREAM_CLOSED` イベントで `close_stream` を呼ぶよう修正する (`nghttp3_conn_close_stream` はデータ配送が終わってから呼べば DATA 欠落は起きない)
+- `Http3Connection::get_streams_to_send` に `nghttp3_conn_add_ack_offset` を追加する。データあり経路は `total` で、FIN のみ経路は `0` で呼ぶ (`H3Session::get_streams_to_send` と対称)。安全性の前提は H3 側と同一であり、Http3 の送信連鎖 (`http3.cpp` の `nb::bytes` コピー → `client.py` / `server.py` の `send_stream_data` 受け渡し) も QUIC 層の再送保持に依存するため QUIC が再送用データを保持する点は変わらない
+- `acked_stream_data_cb` を `H3Session::acked_stream_data_cb` と同形に書き換える (`data.size()` 比較 + 部分 ACK 時の部分 erase。`offset` フィールドの扱いも H3 に倣い無視する。変数名 `buffer` は現状維持)
+- `read_data_cb` に H3 同形の空 FIN エントリ除去を追加する (データ量 0 で FIN 付きの読み出し済みエントリは `acked` 経路で解放されないため)
+- `read_data_cb` の走査はコード変更せず、消費済みエントリが残留しないことを構造確認する
+- 変更対象は `src/bindings/http3.cpp` と `src/bindings/http3.h` (テスト専用アクセサの追加を含む) のみとし、Python 高レベル層の変更は行わない
 
 ## 完了条件
 
-- `Http3Connection` のストリーム送信バッファが `acked_stream_data_cb` 経由で解放されること
-- 長時間の HTTP/3 転送で `stream_buffers_` のサイズが有界であること
-- `read_data_cb` の走査コストが O(n) になること
-- `tests/` に長時間転送でのメモリ増加が有界であることを検証するテストを追加すること
-- 既存のテスト全 822 件が引き続き通過すること
+- `Http3Connection` のストリーム送信バッファが `acked_stream_data_cb` 経由で解放されること (テスト専用アクセサで確認する)
+- 長時間の HTTP/3 転送で `stream_buffers_` のエントリ数が同時送信ストリーム数以下に収まること
+- 消費済みエントリが `read_data_cb` の走査に残留しないこと (構造確認)
+- `tests/test_http3_ack_offset.py` を新規作成し、送信バッファ解放と空 FIN 除去を検証すること (H3 側の `test_webtransport_h3_ack_offset.py` と対称の形式)
+- 既存のテスト全 834 件が引き続き通過すること
