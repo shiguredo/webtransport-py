@@ -14,9 +14,30 @@ receive_stream_data の fin 引数による保留記録と、ブロック解除�
 from __future__ import annotations
 
 import pytest
-from conftest import _accept_session, _create_session_pair, _drain_events, _pump
+from conftest import (
+    _accept_session,
+    _create_session_pair,
+    _drain_events,
+    _encode_varint,
+    _pump,
+)
 
 from webtransport import h3
+
+
+def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
+    """Type / Length / Payload のカプセルバイト列を組み立てる"""
+    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
+
+
+def _encode_h3_data_frame(payload: bytes) -> bytes:
+    """H3 DATA フレーム (Type 0x00) のワイヤバイト列を組み立てる"""
+    return _encode_varint(0x00) + _encode_varint(len(payload)) + payload
+
+
+def _encode_wt_close_session_capsule(error_code: int, message: bytes) -> bytes:
+    """WT_CLOSE_SESSION capsule (Type 0x2843) のワイヤバイト列を組み立てる"""
+    return _encode_capsule(0x2843, error_code.to_bytes(4, "big") + message)
 
 
 def _create_qpack_blocked_setup() -> tuple[h3.Session, h3.Session, bytes, list[bytes]]:
@@ -278,3 +299,197 @@ def test_qpack_blocked_normal_session_unaffected() -> None:
     # セッションが確立されたまま残り、SessionClosed は発火しない
     assert server.get_session_ids() == [0]
     assert all(event.type != h3.EventType.SESSION_CLOSED for event in _drain_events(server))
+
+
+@pytest.mark.parametrize(
+    "same_read",
+    [True, False],
+    ids=["same_read", "separate_read"],
+)
+def test_qpack_blocked_pipelined_data_then_fin_closes_session(same_read: bool) -> None:
+    """QPACK ブロック中の HEADERS + DATA + FIN がクラッシュせず終了検知されることを確認
+
+    正当なワイヤ列 (HEADERS フレーム + 空 DATA フレーム + FIN) が QPACK
+    デコードブロック中に届いても、サーバーが SIGABRT せずハングもしない。
+    ブロック解除後に保持データが投入され、受理前 FIN として SessionClosed
+    が error_code 0 で 1 回だけ発火する (ブロックなしの同一ワイヤ列と同一)。
+    """
+    client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+
+    # 空 DATA フレームを後続させる (カプセルなしのため終了検知は FIN 経路のみ)
+    pipelined = _encode_h3_data_frame(b"")
+
+    # ブロック中に HEADERS + DATA (+ FIN) を渡す (ここで旧実装は SIGABRT した)
+    if same_read:
+        server.receive_stream_data(0, headers + pipelined, True)
+    else:
+        server.receive_stream_data(0, headers, False)
+        server.receive_stream_data(0, pipelined, True)
+    # 接続エラーにならず生存している (クラッシュせずに戻ったことの確認)
+    assert server.is_closed() is False
+
+    # ブロック解除で SESSION_READY が 1 回だけ発火する
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1
+    assert server.get_session_ids() == [0]
+
+    # 受理して 2xx を書き出すと遅延クローズで後始末される
+    assert server.accept_session(0) is True
+    streams = server.get_streams_to_send()
+    assert any(stream_id == 0 for stream_id, _data, _fin in streams)
+
+    # 書き出した 2xx をクライアントに渡すと確立が認識される
+    for stream_id, data, fin in streams:
+        client.receive_stream_data(stream_id, data, fin)
+    assert len([e for e in _drain_events(client) if e.type == h3.EventType.SESSION_READY]) == 1
+
+    # SessionClosed が error_code 0 で 1 回だけ発火し、二重発火しない
+    assert server.get_session_ids() == []
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == 0
+    assert closed_events[0].error_code == 0
+
+
+@pytest.mark.parametrize(
+    "same_read",
+    [True, False],
+    ids=["same_read", "separate_read"],
+)
+def test_qpack_blocked_pipelined_wtclose_then_fin_closes_once(same_read: bool) -> None:
+    """QPACK ブロック中の HEADERS + WT_CLOSE_SESSION + FIN で二重終了しないことを確認
+
+    受理前にバッファされた WT_CLOSE_SESSION は confirm 時に処理され、
+    SessionClosed が 1 回だけ発火する。後続 FIN は終了済みのため無視され、
+    二重に SessionClosed は発火しない (ブロックなしと同一)。
+    """
+    client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+
+    # 正常な WT_CLOSE_SESSION (error_code 0、空メッセージ) を DATA 化する
+    capsule = _encode_wt_close_session_capsule(0, b"")
+    pipelined = _encode_h3_data_frame(capsule)
+
+    # ブロック中に HEADERS + WT_CLOSE_SESSION (+ FIN) を渡す
+    if same_read:
+        server.receive_stream_data(0, headers + pipelined, True)
+    else:
+        server.receive_stream_data(0, headers, False)
+        server.receive_stream_data(0, pipelined, True)
+    assert server.is_closed() is False
+
+    # ブロック解除で SESSION_READY が発火する
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1
+
+    # 受理する。confirm 時にバッファされた WT_CLOSE_SESSION が処理される
+    assert server.accept_session(0) is True
+
+    # SessionClosed が 1 回だけ発火し、未送信 2xx は破棄される
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == 0
+    assert server.get_session_ids() == []
+    streams = server.get_streams_to_send()
+    assert all(stream_id != 0 for stream_id, _data, _fin in streams)
+
+
+@pytest.mark.parametrize(
+    "same_read",
+    [True, False],
+    ids=["same_read", "separate_read"],
+)
+def test_qpack_blocked_pipelined_wtclose_no_fin_closes_once(same_read: bool) -> None:
+    """QPACK ブロック中の HEADERS + WT_CLOSE_SESSION (FIN なし) で終了することを確認
+
+    FIN なし変種でも、ブロック解除後の保持データ投入と confirm 時の処理で
+    SessionClosed が 1 回だけ発火する。FIN 検知経路 (受理前 FIN) とは独立に
+    WT_CLOSE_SESSION 経路で終了するため、FIN の有無で挙動が変わらない。
+    """
+    _client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+
+    # FIN なしの WT_CLOSE_SESSION を DATA 化する
+    capsule = _encode_wt_close_session_capsule(0, b"")
+    pipelined = _encode_h3_data_frame(capsule)
+
+    # ブロック中に HEADERS + WT_CLOSE_SESSION (FIN なし) を渡す
+    if same_read:
+        server.receive_stream_data(0, headers + pipelined, False)
+    else:
+        server.receive_stream_data(0, headers, False)
+        server.receive_stream_data(0, pipelined, False)
+    assert server.is_closed() is False
+
+    # ブロック解除で SESSION_READY が発火する
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1
+
+    # 受理する。confirm 時に WT_CLOSE_SESSION が処理される
+    assert server.accept_session(0) is True
+
+    # SessionClosed が 1 回だけ発火する
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    assert closed_events[0].session_id == 0
+    assert server.get_session_ids() == []
+
+
+def test_qpack_blocked_split_frame_header_then_data_fin() -> None:
+    """HEADERS フレームヘッダー分割到着でもクラッシュせず終了検知されることを確認
+
+    フレーム種別・長さの varint が STREAM_DATA イベントを跨いで分割される
+    ケースに備える。先頭 1 バイトだけを先に渡し、残り HEADERS + 空 DATA +
+    FIN を後続で渡しても、バインディング側の解釈状態で境界を復元し、
+    nghttp3 には HEADERS のみが渡る。ブロック解除後は通常の受理前 FIN と
+    同じく SessionClosed が error_code 0 で 1 回だけ発火する。
+    """
+    client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+    assert len(headers) >= 2, "CONNECT ヘッダーが短すぎます"
+
+    pipelined = _encode_h3_data_frame(b"")
+
+    # 先頭 1 バイトだけを先に渡す (フレームヘッダー不完全のため保持される)
+    server.receive_stream_data(0, headers[:1], False)
+    # 残り HEADERS + DATA + FIN を渡す
+    server.receive_stream_data(0, headers[1:] + pipelined, True)
+    assert server.is_closed() is False
+
+    # ブロック解除で SESSION_READY が発火する
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1
+
+    # 受理して 2xx を書き出すと遅延クローズで後始末される
+    assert server.accept_session(0) is True
+    streams = server.get_streams_to_send()
+    assert any(stream_id == 0 for stream_id, _data, _fin in streams)
+    for stream_id, data, fin in streams:
+        client.receive_stream_data(stream_id, data, fin)
+
+    # SessionClosed が 1 回だけ発火する
+    assert server.get_session_ids() == []
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    assert closed_events[0].error_code == 0
