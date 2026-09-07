@@ -1,7 +1,7 @@
 # UDP 系サーバー 3 種が idle timeout 起因の終了後にイベントを drain せず接続がリークする
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-server-idle-timeout-connection-leak
 - Polished: 2026-09-07
 
@@ -33,3 +33,10 @@
 - リーク判定はエントリ残留ゼロとイベント滞留ゼロで行い、RSS 実測は行わない (CI 環境変動のため)
 - `tests/` に idle timeout での接続回収テストを quic / h3 / http3 の 3 モジュールに追加すること (高レベル Server + `idle_timeout_ns` 短縮 + クライアント沈黙の手順)
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- タイマー分岐で `handle_timeout` 後にイベント drain を実行し、`CONNECTION_CLOSED` 到達で close コールバックを発火させ、同一反復内で登録を外す共通順序にする
+- quic.Server は 0149 の対応で充足しており、本 issue では h3 / http3 Server を修正する。h3 は既存の 2 処理をタイマー分岐から呼び、http3 は QUIC イベント drain を共通化して呼び出す。確立中セッションへの一斉通知は行わない
+- `tests/test_e2e_webtransport_h3.py` と `tests/test_e2e_http3.py` に idle timeout での接続回収テストを追加する (quic は既存の回帰テストで充足する)
+- 全 880 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
