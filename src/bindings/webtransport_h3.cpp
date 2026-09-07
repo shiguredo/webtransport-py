@@ -89,12 +89,12 @@ constexpr uint64_t kH3MessageError = NGHTTP3_H3_MESSAGE_ERROR;
 constexpr uint64_t kH3FrameTypeHeaders = 0x01;
 
 // HTTP/3 フレームヘッダー (種別 varint + 長さ varint) の解釈を試みる。
-// RFC 9000 の可変長整数に基づき、先頭バイトの上位 2 ビットで varint 長が
-// 決まるため、nghttp3_get_uvarintlen で必要バイト数が分かる。バッファ不足
-// の場合は false を返し、呼び出し側は蓄積して再試行する。パース成功時は
-// 種別・ペイロード長・ヘッダー長 (種別 varint 長 + 長さ varint 長) を返す。
-// ペイロード長の加算オーバーフローは巨大値として飽和させ、呼び出し側が
-// 全バイトを HEADERS として扱う (安全側への倒し方)
+// RFC 9000 Section 16 の可変長整数に基づき、先頭バイトの上位 2 ビットで
+// varint 長が決まるため、nghttp3_get_uvarintlen で必要バイト数が分かる。
+// バッファ不足の場合は false を返し、呼び出し側は蓄積して再試行する。
+// パース成功時は種別・ペイロード長・ヘッダー長 (種別 varint 長 + 長さ
+// varint 長) を返す。ペイロード長は RFC 9000 Section 16 の上限 (2^62-1)
+// のため、ヘッダー長 (最大 16) との加算は 64 bit でオーバーフローしない
 bool try_parse_h3_frame_header(const uint8_t* data,
                                size_t length,
                                uint64_t* frame_type,
@@ -104,7 +104,9 @@ bool try_parse_h3_frame_header(const uint8_t* data,
     return false;
   }
   size_t type_length = nghttp3_get_uvarintlen(data);
-  if (length < type_length) {
+  // 長さ varint の先頭 1 バイトが無ければ範囲外読み出しになるため、
+  // 不足として扱う
+  if (length <= type_length) {
     return false;
   }
   size_t length_length = nghttp3_get_uvarintlen(data + type_length);
@@ -420,12 +422,8 @@ void H3Session::process_after_read(int64_t stream_id, bool fin) {
 }
 
 void H3Session::flush_unblocked_held_data() {
-  // 保持データの投入は nghttp3 コールバック外でのみ行う (再入防止)。
-  // ブロック解除 (QPACK エンコーダー到着による end_headers_cb) と同一読み
-  // 取り内の即時デコードの両方で、pending_headers_ から消えたストリームの
-  // 保持データを順序を保って投入する。投入は read_from_nghttp3 と
-  // process_after_read の組み合わせで行い、WT_CLOSE_SESSION 由来の
-  // SessionClosed や受理前 FIN の検知を通常経路と同じく処理する
+  // 二段階走査で投入する。先に対象 ID 群を確定し、投入ごとに再検索・再検証
+  // するため、投入中の close_stream による erase と競合しない
   std::vector<int64_t> targets;
   targets.reserve(headers_guards_.size());
   for (const auto& pair : headers_guards_) {
@@ -460,10 +458,10 @@ void H3Session::flush_unblocked_held_data() {
     if (pending_headers_.count(target_stream_id) > 0) {
       continue;
     }
-    // close_stream によるガード除去に備え、投入前に保持を複写して消去する
+    // close_stream によるガード除去に備え、投入前に保持を取り出す。
+    // move 後の vector は空になるため clear は不要である
     std::vector<uint8_t> held = std::move(it->second.held_data);
     bool held_fin = it->second.held_fin;
-    it->second.held_data.clear();
     it->second.held_fin = false;
     (void)read_from_nghttp3(target_stream_id, held.data(), held.size(),
                             held_fin);
@@ -649,20 +647,21 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
       } else {
         uint64_t total_length = header_length + payload_length;
         uint64_t available = static_cast<uint64_t>(prefix_size + data.size());
-        // 蓄積済み prefix と今回データの結合がストリーム先頭からの全量となる
-        std::vector<uint8_t> prefix_copy = guard.parse_prefix;
+        // 蓄積済み prefix と今回データの結合がストリーム先頭からの全量となる。
+        // 結合の組立後に prefix を消去する (先に消すと蓄積が失われる)
         guard.header_parsed = true;
         guard.is_headers = true;
         guard.headers_total_len = total_length;
-        guard.parse_prefix.clear();
         if (available <= total_length) {
           // 全量が HEADERS 範囲内。結合して転送する
           combined_buffer.clear();
           combined_buffer.reserve(prefix_size + data.size());
-          combined_buffer.insert(combined_buffer.end(), prefix_copy.begin(),
-                                 prefix_copy.end());
+          combined_buffer.insert(combined_buffer.end(),
+                                 guard.parse_prefix.begin(),
+                                 guard.parse_prefix.end());
           combined_buffer.insert(combined_buffer.end(), data.begin(),
                                  data.end());
+          guard.parse_prefix.clear();
           guard.headers_forwarded = prefix_size + data.size();
           forward_ptr = combined_buffer.data();
           forward_length = combined_buffer.size();
@@ -673,11 +672,13 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
               static_cast<size_t>(total_length - prefix_size);
           combined_buffer.clear();
           combined_buffer.reserve(static_cast<size_t>(total_length));
-          combined_buffer.insert(combined_buffer.end(), prefix_copy.begin(),
-                                 prefix_copy.end());
+          combined_buffer.insert(combined_buffer.end(),
+                                 guard.parse_prefix.begin(),
+                                 guard.parse_prefix.end());
           combined_buffer.insert(
               combined_buffer.end(), data.begin(),
               data.begin() + static_cast<std::ptrdiff_t>(need_from_data));
+          guard.parse_prefix.clear();
           guard.headers_forwarded = static_cast<size_t>(total_length);
           guard.held_data.assign(
               data.begin() + static_cast<std::ptrdiff_t>(need_from_data),
@@ -736,22 +737,15 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
   //  no-op のみ)
   nghttp3_ssize consumed = 0;
   bool did_read = false;
-  if (forward_ptr != nullptr &&
-      (forward_length > 0 || forward_fin || !combined_buffer.empty())) {
+  if (forward_ptr != nullptr && (forward_length > 0 || forward_fin)) {
     // 結合バッファ経路では forward_ptr が combined_buffer を指し、
     // forward_length は combined 全量と一致させてある
     consumed =
         read_from_nghttp3(stream_id, forward_ptr, forward_length, forward_fin);
     did_read = true;
-  } else if (forward_ptr == nullptr) {
-    // 防御: 未設定の転送は行わず、保持として扱う
-    process_after_read(stream_id, fin);
-    flush_unblocked_held_data();
-    return data.size();
   }
-  // forward_fin と元 fin の差異に注意: 分割時は forward_fin=false で
-  // 保持側に fin を託すため、fin 検知は保持投入時に行う。ここでは転送した
-  // fin (forward_fin) で検知し、保持側の fin は flush 時に検知する
+  // fin の検知は転送した fin で行い、保持に託した fin は投入時に検知する
+  // (契約の詳細は宣言コメントを参照)
   process_after_read(stream_id, forward_fin);
   flush_unblocked_held_data();
   if (did_read && consumed < 0) {

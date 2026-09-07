@@ -272,3 +272,5 @@
   - @voluntas
 - [FIX] ブラウザテストの conftest.py を ruff format の整形に適合させる
   - @voluntas
+- [FIX] WebTransport over HTTP/3 で QPACK デコードブロック中の CONNECT ストリームに DATA フレームが後続するとサーバーが異常終了する問題を修正する
+  - @voluntas

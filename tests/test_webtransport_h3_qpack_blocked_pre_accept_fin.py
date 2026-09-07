@@ -18,16 +18,12 @@ from conftest import (
     _accept_session,
     _create_session_pair,
     _drain_events,
+    _encode_capsule,
     _encode_varint,
     _pump,
 )
 
 from webtransport import h3
-
-
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Type / Length / Payload のカプセルバイト列を組み立てる"""
-    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
 
 
 def _encode_h3_data_frame(payload: bytes) -> bytes:
@@ -493,3 +489,173 @@ def test_qpack_blocked_split_frame_header_then_data_fin() -> None:
     ]
     assert len(closed_events) == 1
     assert closed_events[0].error_code == 0
+
+
+def test_qpack_blocked_split_headers_payload_then_data_fin() -> None:
+    """HEADERS ペイロード途中分割でもクラッシュせず終了検知されることを確認
+
+    QUIC の STREAM_DATA 分割は任意位置で起こるため、HEADERS フレームの
+    フィールドセクション途中で分割され、後半に DATA + FIN が続く経路も
+    到達可能である。前半は HEADERS の継続として転送され、後半は境界で分割
+    して保持される。ブロック解除後は通常の受理前 FIN と同じく
+    SessionClosed が error_code 0 で 1 回だけ発火する。
+    """
+    client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+    assert len(headers) >= 4, "CONNECT ヘッダーが短すぎます"
+
+    # HEADERS をフィールドセクション途中で分割する
+    split_at = len(headers) // 2
+    pipelined = _encode_h3_data_frame(b"")
+
+    # 前半 (HEADERS の継続) を渡す
+    server.receive_stream_data(0, headers[:split_at], False)
+    # 後半 HEADERS + DATA + FIN を渡す
+    server.receive_stream_data(0, headers[split_at:] + pipelined, True)
+    assert server.is_closed() is False
+
+    # ブロック解除で SESSION_READY が発火する
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1
+
+    # 受理して 2xx を書き出すと遅延クローズで後始末される
+    assert server.accept_session(0) is True
+    streams = server.get_streams_to_send()
+    assert any(stream_id == 0 for stream_id, _data, _fin in streams)
+    for stream_id, data, fin in streams:
+        client.receive_stream_data(stream_id, data, fin)
+
+    # SessionClosed が 1 回だけ発火する
+    assert server.get_session_ids() == []
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+    assert closed_events[0].error_code == 0
+
+
+def test_qpack_blocked_pipelined_data_multiple_sessions() -> None:
+    """複数セッションの同時パイプラインでも各セッションが 1 回ずつ終了することを確認
+
+    2 セッションが同時に QPACK ブロック中 DATA + FIN を pipeline して解除
+    されると、保持投入が複数ストリームで連続実行される。各セッションの
+    SessionClosed が 1 回ずつ (計 2 回) 発火し、二重発火や取りこぼしがない。
+    """
+    client, server = _create_session_pair()
+
+    # 2 つの CONNECT を送信し、両方のヘッダーを QPACK ブロック中に届ける
+    assert client.connect(0, "https://localhost/webtransport") is True
+    assert client.connect(4, "https://localhost/webtransport") is True
+    headers_by_stream: dict[int, bytes] = {}
+    encoder_parts: list[bytes] = []
+    for _ in range(64):
+        streams = client.get_streams_to_send()
+        if not streams:
+            break
+        for stream_id, data, fin in streams:
+            if stream_id in (0, 4):
+                headers_by_stream[stream_id] = headers_by_stream.get(stream_id, b"") + data
+            elif stream_id == 6:
+                encoder_parts.append(data)
+            else:
+                server.receive_stream_data(stream_id, data, fin)
+    assert set(headers_by_stream) == {0, 4}
+
+    # 両方のセッションをブロック中に HEADERS + DATA + FIN で届ける
+    pipelined = _encode_h3_data_frame(b"")
+    for stream_id in (0, 4):
+        server.receive_stream_data(stream_id, headers_by_stream[stream_id] + pipelined, True)
+    assert server.is_closed() is False
+
+    # ブロック解除で両セッションがデコードされる
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 2
+    assert {event.session_id for event in ready_events} == {0, 4}
+
+    # 両方のセッションを受理して 2xx を書き出すと、それぞれ後始末される
+    for event in ready_events:
+        assert server.accept_session(event.session_id) is True
+    streams = server.get_streams_to_send()
+    assert {stream_id for stream_id, _data, _fin in streams if stream_id in (0, 4)} == {0, 4}
+    for stream_id, data, fin in streams:
+        client.receive_stream_data(stream_id, data, fin)
+
+    # 各セッションで SessionClosed が 1 回ずつ発火する
+    assert server.get_session_ids() == []
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 2
+    assert {event.session_id for event in closed_events} == {0, 4}
+    assert all(event.error_code == 0 for event in closed_events)
+
+
+def test_qpack_guard_incomplete_headers_with_fin_is_connection_error() -> None:
+    """FIN 付き不完全 HEADERS 到着が接続エラーとして扱われることを確認
+
+    フレームヘッダー解釈に足りない 1 バイトだけが FIN 付きで届いた場合、
+    ガードは蓄積せず nghttp3 に判定を委ねる。不完全な HEADERS フレームの
+    終端はプロトコルエラーであり、接続エラーとして closed_ になる。
+    """
+    _client, server, _headers, _encoder_parts = _create_qpack_blocked_setup()
+
+    # 種別のみ (長さ varint なし) の 1 バイトを FIN 付きで渡す
+    ret = server.receive_stream_data(4, b"\x01", True)
+
+    # nghttp3 が負値を返し、接続エラーとして処理される
+    assert ret == 0
+    assert server.is_closed() is True
+    assert any(event.type == h3.EventType.ERROR for event in _drain_events(server))
+
+
+def test_qpack_guard_non_headers_first_frame_passes_through() -> None:
+    """先頭が HEADERS でない新規ストリームが素通しされることを確認
+
+    WebTransport データストリーム (先頭がストリーム種別ヘッダー) は
+    ガードの保持対象外であり、一括で nghttp3 へ渡される。以後の読み取りも
+    素通しされ、セッション確立や接続状態に影響しない。
+    """
+    _client, server, _headers, _encoder_parts = _create_qpack_blocked_setup()
+
+    # WT 双方向データストリームの先頭 (種別 0x41 + セッション ID + 欠片)
+    first = b"\x40\x41" + _encode_varint(0) + b"hello"
+
+    # 1 回目の読み取り (先頭解釈で非 HEADERS 確定) と 2 回目の読み取り
+    # (素通し) のどちらでも異常にならない
+    server.receive_stream_data(4, first, False)
+    assert server.is_closed() is False
+    server.receive_stream_data(4, b"world", False)
+    assert server.is_closed() is False
+
+    # セッションは確立されず、イベントも発火しない
+    assert server.get_session_ids() == []
+    assert _drain_events(server) == []
+
+
+def test_qpack_guard_huge_headers_length_rejected_gracefully() -> None:
+    """巨大な HEADERS 長さ宣言が優雅に拒否されることを確認
+
+    Length に varint 最大級の値を宣言した HEADERS は、到着済み全量が
+    HEADERS 範囲内として転送される (安全側への倒し方)。nghttp3 側で
+    復元不能として接続エラーになり、Error イベントとともに closed_ になる。
+    クラッシュもハングもせず、既存の負値処理経路で扱われる。
+    """
+    _client, server, _headers, _encoder_parts = _create_qpack_blocked_setup()
+
+    # HEADERS (0x01) + 8 バイト varint の巨大長 + 少量ペイロード
+    huge_length = (0xC000000000000000 | ((1 << 62) - 1)).to_bytes(8, "big")
+    data = b"\x01" + huge_length + b"\x00" * 10
+
+    ret = server.receive_stream_data(4, data, False)
+
+    # nghttp3 が負値を返し、接続エラーとして処理される
+    assert ret == 0
+    assert server.is_closed() is True
+    assert any(event.type == h3.EventType.ERROR for event in _drain_events(server))

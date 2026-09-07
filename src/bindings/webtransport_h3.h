@@ -151,7 +151,9 @@ class H3Session {
    * @param stream_id ストリーム ID
    * @param data 受信データ
    * @param fin ストリーム終了フラグ
-   * @return 処理されたバイト数
+   * @return 処理されたバイト数。HEADERS 境界で分割した場合は nghttp3 への
+   *   転送分とバインディング側の保持分を合わせた全量を返す。負値を返した
+   *   場合は 0 を返す
    */
   size_t receive_stream_data(int64_t stream_id,
                              const std::vector<uint8_t>& data,
@@ -662,21 +664,22 @@ class H3Session {
 
   // nghttp3 への読み取りと負値時の共通処理。WT_CLOSE_SESSION 由来の
   // ストリームエラー分離・Error イベント push・closed_ 設定を行う。
-  // 戻り値は nghttp3_conn_read_stream2 の戻り値そのもの
+  // 戻り値は nghttp3_conn_read_stream2 の戻り値そのものであり、呼び出し側で
+  // 負値を 0 に正規化する
   nghttp3_ssize read_from_nghttp3(int64_t stream_id,
                                   const uint8_t* data,
                                   size_t length,
                                   bool fin);
 
   // nghttp3 からの復帰後の共通処理。受理前 FIN 検知・QPACK ブロック中 FIN
-  // 検知と移行・保留 FIN の後始末・遅延 2xx 破棄を行う。read_from_nghttp3
-  // の後と、保持データの投入後に呼ぶ
+  // 検知と移行・保留 FIN の後始末・遅延 2xx 破棄を行う。fin には実際に
+  // nghttp3 へ渡した fin を渡す。保持に託した fin では呼ばず、保持投入時に
+  // 保持の fin で別途呼ぶ。read_from_nghttp3 の後と保持データの投入後に呼ぶ
   void process_after_read(int64_t stream_id, bool fin);
 
-  // 保持した HEADERS 後続バイトのうち、QPACK デコード完了 (pending_headers_
-  // に含まれない) で投入可能になったものを順序を保って nghttp3 へ投入する。
-  // エンコーダーストリーム到着によるブロック解除と、同一読み取り内の
-  // HEADERS 即時デコードの両方に対応する。コールバック内からは呼ばない
+  // 保持した HEADERS 後続バイトのうち投入可能になったものを nghttp3 へ
+  // 投入する。コールバック外からのみ呼ぶ。closed_ または接続なしでは何も
+  // しない。順序保証は同一ストリーム内のバイト順のみである
   void flush_unblocked_held_data();
 
   // WT_CLOSE_SESSION の Application Error Message が不正 (1024 バイト超・
@@ -782,15 +785,20 @@ class H3Session {
     // 先頭フレーム未解釈の間に届いた先頭バイトの蓄積 (フレームヘッダーの
     // 分割到着に備える。解釈完了後は空になる)
     std::vector<uint8_t> parse_prefix;
-    // HEADERS 境界より後ろの保持バイト (ブロック解除後に順序を保って投入)
+    // HEADERS 境界より後ろの保持バイト (ブロック解除後に順序を保って投入)。
+    // 代入は HEADERS 完結時の初回分割のみで行い、以降は追記のみのため
+    // 上書き喪失はない
     std::vector<uint8_t> held_data;
     // 保持バイトとともに届いた fin (保持データの末尾に付随する)
     bool held_fin = false;
   };
-  // フレーム境界ガードの per-stream 管理。確立済み CONNECT (session_ids_)・
-  // WT データストリーム (stream_info_)・制御/QPACK ストリームは対象外で、
-  // 新規のクライアント起点双方向ストリームのみがエントリを持つ。CONNECT
-  // 判定されなかったストリームとリセットされたストリームのエントリは除去する
+  // フレーム境界ガードの per-stream 管理。対象はクライアント起点双方向
+  // (%4==0) の新規ストリームのみである。先頭が HEADERS でないストリーム
+  // (WT データ等) のエントリも、後続読み取りの素通し判定に使うため
+  // close_stream まで保持する。除去は close_stream でのみ行うため、
+  // close されずに放置されるストリーム (拒否済み・非 CONNECT 等) の
+  // 小規模エントリは接続終了まで残留する (同時並行数ではなく lifetime
+  // total では無界になり得る既知の制約)
   std::map<int64_t, HeadersFrameGuard> headers_guards_;
 
   // 受理前 FIN を検知したセッションのうち、accept_session で受理済みの
