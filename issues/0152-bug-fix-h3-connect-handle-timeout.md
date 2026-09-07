@@ -1,7 +1,7 @@
 # h3.Client.connect() と http3.Client.connect() の待ちループが QUIC タイマー処理を呼ばず、ハンドシェイクパケット 1 つのロスで永久失敗する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-h3-connect-handle-timeout
 - Polished: 2026-09-07
 
@@ -31,3 +31,11 @@
 - `http3.Client.connect(timeout=6.0)` が同条件で回復し、無応答宛先では期限超過後の初回反復で `ConnectTimeoutError` を送出すること
 - `tests/test_connect_loss_recovery.py` に上記 2 件のテストを追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `h3.Client.connect` の 3 つの待ちループに損失検出タイマーの駆動を追加する (run() と同形、送出直後・休止前)
+- `http3.Client.connect` にタイマー駆動を追加し、`timeout` 引数付き例外送出型 (h3 / h2 対称) に変える。生成失敗と確立中の素の失敗は接続拒否に寄せ、ハンドシェイク前の終了は握手失敗に寄せる。h3 側の生成失敗も対称に寄せる
+- 呼び出し側 (テストと examples) を例外送出型に追随させる
+- `tests/test_connect_loss_recovery.py` に UDP リレー器具と 4 件のテスト (h3 / http3 の回復、無応答の期限切れ、名前解決失敗の拒否) を追加する
+- 全 887 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
