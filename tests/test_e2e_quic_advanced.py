@@ -255,6 +255,46 @@ async def test_custom_verify_callback_reject(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_custom_verify_callback_exception(test_certificates):
+    """例外を送出する検証コールバックでも abort せず接続失敗になる"""
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    def verify_callback(certs: list[bytes]) -> bool:
+        logger.info("カスタム検証: 例外を送出する")
+        raise ValueError("test-verify-error")
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=True,
+        verify_callback=verify_callback,
+    )
+    # 例外送出でもプロセスは継続し、接続失敗として False が返る
+    connected = await asyncio.wait_for(client.connect(), timeout=5.0)
+    assert connected is False, "検証コールバックの例外では接続できないべき"
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_session_ticket_and_0rtt(test_certificates):
     """初回接続で ticket を取得し、再接続で 0-RTT を試行できることを確認する"""
 

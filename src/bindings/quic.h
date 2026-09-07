@@ -832,6 +832,23 @@ class QuicConnection {
   SSL_CTX* create_ssl_ctx();
   int setup_initial_crypto();
   void rebind_conn_ref();
+  // 保留中の verify 割り込み例外があれば送出する。保留がなければ何も
+  // しない。送出された例外は呼び出し元を巻き戻して Python 境界へ伝播する
+  // (呼び出し側での追加処理は不要)
+  void throw_pending_verify_interrupt();
+  // 保持した verify 例外情報を取り出して破棄する。詳細不明印がある場合は
+  // 固定文言を返し、保持がなければ fallback を返す。いずれも使い切りで
+  // 破棄する
+  std::string consume_verify_error(const std::string& fallback);
+  // verify 失敗情報を全て破棄する (送出しない操作のため noexcept)
+  void clear_verify_error() noexcept;
+  // Python 例外の送出内容を記録する (割り込み系は再送出用に保持し、それ
+  // 以外は型名とメッセージを 1024 バイトで UTF-8 境界切り詰めして保持する)
+  void remember_verify_python_error(nb::python_error& error);
+  // 文字列化済みの送出内容を記録する (1024 バイトで UTF-8 境界切り詰めする)
+  void remember_verify_error(std::string text);
+  // verify_callback の送出例外が割り込み系かどうか判定する
+  static bool is_verify_interrupt(const nb::python_error& error);
 
   bool is_server_;
   QuicConfig config_;
@@ -861,6 +878,28 @@ class QuicConnection {
   // 接続状態
   bool handshake_completed_ = false;
   bool closed_ = false;
+
+  // verify_callback が送出した通常例外の型名とメッセージ (ハンドシェイク
+  // 失敗時の ConnectionClosed イベントの reason に設定する)。BoringSSL と
+  // ngtcp2 の C フレームを巻き戻すとプロセスが終了するため、Python 境界を
+  // 出る前に捕捉して保持する。呼び出し側が receive() / send() を直列化
+  // すること (既存メンバーと同一の前提) のもと、書き込みも読み出しも
+  // receive() 呼び出しスタック内で完結するため、追加の同期機構は設けない
+  std::optional<std::string> verify_error_;
+
+  // verify_callback が送出した割り込み系例外 (KeyboardInterrupt /
+  // SystemExit / asyncio.CancelledError)。握りつぶさず、receive() /
+  // send() の Python 境界で再送出する。即時 throw は C フレームを巻き戻し
+  // てプロセスを終了させるため、境界まで遅延させる。対象は上記 3 種に
+  // 限定し、それ以外の BaseException 系は通常例外として検証失敗に丸める
+  // 意図的選択とする
+  std::optional<nb::python_error> pending_verify_interrupt_;
+
+  // verify_callback の送出詳細を記録できなかった印 (検証自体の失敗では
+  // なく記録失敗の印)。記録処理自体の送出 (メモリ確保失敗など) を C
+  // フレームに漏らさず検証失敗に丸めるための最終手段であり、reason には
+  // 固定文言を使う
+  bool verify_failed_ = false;
 
   // ハンドシェイク完了後の 1RTT パケット (short header) の書き出し記録。
   // クライアントの initiate_key_update ガードに使う (ngtcp2 内部の assert

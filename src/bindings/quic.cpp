@@ -64,6 +64,75 @@ std::vector<uint8_t> build_alpn(const std::vector<std::string>& protocols) {
   return alpn;
 }
 
+// verify 例外メッセージの保持上限 (バイト)。ConnectionClosed の reason に
+// QUIC 固有の切り詰め契約は無いため、無界の保持を避ける意図的な上限と
+// する。上限値は WebTransport over HTTP/2 のエラーメッセージ上限 1024
+// バイトに合わせる (リポジトリ内の他層と上限を揃えて運用を単純にする
+// ための意図的選択であり、H2 仕様への準拠ではない)
+constexpr size_t kMaxVerifyErrorBytes = 1024;
+
+// UTF-8 文字境界で切り詰める。切り詰め位置が文字の途中だった場合、
+// 不完全な末尾シーケンス (継続バイト列と期待長に満たない先行バイト)
+// まで除去する。末尾文字が完全な場合は切り詰め位置を戻して全保持する
+std::string truncate_verify_message(std::string text) {
+  if (text.size() <= kMaxVerifyErrorBytes) {
+    return text;
+  }
+  text.resize(kMaxVerifyErrorBytes);
+  const size_t original = text.size();
+  size_t cut = text.size();
+  while (cut > 0 && (static_cast<uint8_t>(text[cut - 1]) & 0xC0) == 0x80) {
+    --cut;
+  }
+  if (cut > 0) {
+    const uint8_t lead = static_cast<uint8_t>(text[cut - 1]);
+    size_t expected = 0;
+    if ((lead & 0x80) == 0) {
+      expected = 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+      expected = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+      expected = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+      expected = 4;
+    } else {
+      // 不正な先行バイト自体を除去する
+      --cut;
+    }
+    if (expected > 0) {
+      if (text.size() - (cut - 1) < expected) {
+        // 期待長に満たない先行バイトも除去する
+        --cut;
+      } else {
+        // 文字が完全な場合は全保持する
+        cut = original;
+      }
+    }
+  }
+  text.resize(cut);
+  return text;
+}
+
+// Python 例外を「型名: メッセージ」の文字列にする。整形自体が失敗した
+// 場合は型名のみ、双方だめな場合は固定文言にする
+std::string format_verify_python_error(const nb::python_error& error) {
+  try {
+    std::string name = nb::cast<std::string>(error.type().attr("__name__"));
+    std::string message;
+    try {
+      message = nb::cast<std::string>(nb::str(error.value()));
+    } catch (...) {
+      return name;
+    }
+    if (message.empty()) {
+      return name;
+    }
+    return name + ": " + message;
+  } catch (...) {
+    return "unknown exception";
+  }
+}
+
 // QUIC トランスポートパラメータの生成時検証 (RFC 9000 Section 16 の
 // varint 上限と ngtcp2 の assert 条件)。依存ライブラリは
 // Release ビルドでも -DNDEBUG が除去され assert が本番でも有効なため、
@@ -226,6 +295,9 @@ QuicConnection::QuicConnection(QuicConnection&& other) noexcept
       datagram_queue_(std::move(other.datagram_queue_)),
       handshake_completed_(other.handshake_completed_),
       closed_(other.closed_),
+      verify_error_(std::move(other.verify_error_)),
+      pending_verify_interrupt_(std::move(other.pending_verify_interrupt_)),
+      verify_failed_(other.verify_failed_),
       post_handshake_write_done_(other.post_handshake_write_done_),
       pending_close_packet_(std::move(other.pending_close_packet_)),
       close_packet_armed_(other.close_packet_armed_),
@@ -268,6 +340,15 @@ QuicConnection& QuicConnection::operator=(QuicConnection&& other) noexcept {
     datagram_queue_ = std::move(other.datagram_queue_);
     handshake_completed_ = other.handshake_completed_;
     closed_ = other.closed_;
+    verify_error_ = std::move(other.verify_error_);
+    // python_error は move 代入不可のため、破棄してから move 構築する
+    pending_verify_interrupt_.reset();
+    if (other.pending_verify_interrupt_.has_value()) {
+      pending_verify_interrupt_.emplace(
+          std::move(other.pending_verify_interrupt_.value()));
+      other.pending_verify_interrupt_.reset();
+    }
+    verify_failed_ = other.verify_failed_;
     post_handshake_write_done_ = other.post_handshake_write_done_;
     pending_close_packet_ = std::move(other.pending_close_packet_);
     close_packet_armed_ = other.close_packet_armed_;
@@ -1122,6 +1203,9 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                                uint16_t local_port,
                                const std::string& remote_host,
                                uint16_t remote_port) {
+  // 保留中の verify 割り込み例外があれば先に再送出する (closed_ 等の状態に
+  // かかわらず握りつぶさない)
+  throw_pending_verify_interrupt();
   // close() で CONNECTION_CLOSE を生成できた場合 (保持パケットが存在する場合)
   // は、closed_ でも受信パケットを処理する。closing 状態のエンドポイントは
   // 受信パケットに応答して CONNECTION_CLOSE を再送する (RFC 9000 Section
@@ -1241,7 +1325,10 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
                     {},
                     false,
                     0,
-                    "crypto error"});
+                    // verify_callback の例外でハンドシェイクが失敗した場合は
+                    // 保持した例外情報を reason にする (使い切りで破棄する)。
+                    // それ以外の暗号エラーは従来どおりとする
+                    consume_verify_error("crypto error")});
         break;
       case NGTCP2_ERR_DECRYPT:
         // 復号エラーは無視（パケット破棄）
@@ -1262,13 +1349,21 @@ size_t QuicConnection::receive(const std::vector<uint8_t>& data,
         }
         break;
     }
+    // 処理中に verify 割り込み例外を保持した場合はここで再送出する
+    throw_pending_verify_interrupt();
     return 0;
   }
 
+  // 正常処理後も保留があれば再送出する
+  throw_pending_verify_interrupt();
   return data.size();
 }
 
 std::optional<QuicPacket> QuicConnection::send() {
+  // 保留中の verify 割り込み例外があれば先に再送出する。verify はピア
+  // 証明書の処理で発火し、送信経路では発火しないため、開始時確認で十分
+  // である
+  throw_pending_verify_interrupt();
   // close() が生成した CONNECTION_CLOSE を返す。初回配送 (close() 直後の最初の
   // send()) は満了判定の対象外で必ず返し、返した後は receive() が受信パケット
   // への応答として再アームするまで nullopt を返す (RFC 9000 Section 10.2.1)。
@@ -2453,20 +2548,117 @@ ssl_verify_result_t QuicConnection::custom_verify_cb(SSL* ssl,
     return ssl_verify_invalid;
   }
 
-  std::vector<std::vector<uint8_t>> certificates;
-  const size_t count = sk_CRYPTO_BUFFER_num(chain);
-  certificates.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    const CRYPTO_BUFFER* buffer = sk_CRYPTO_BUFFER_value(chain, i);
-    const uint8_t* data = CRYPTO_BUFFER_data(buffer);
-    size_t length = CRYPTO_BUFFER_len(buffer);
-    certificates.emplace_back(data, data + length);
-  }
+  // Python コールバックの例外を BoringSSL と ngtcp2 の C フレームの外で
+  // 受け止める。C フレームを巻き戻すとプロセスが終了するため、Python 境界
+  // (receive() / send()) を出る前に全例外を捕捉する。証明書リストの構築
+  // も送出可能 (メモリ確保の失敗など) のため try の内側で行う。記録処理
+  // 自体の送出も外側で受け止め、詳細不明として検証失敗に丸める
+  try {
+    std::vector<std::vector<uint8_t>> certificates;
+    const size_t count = sk_CRYPTO_BUFFER_num(chain);
+    certificates.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      const CRYPTO_BUFFER* buffer = sk_CRYPTO_BUFFER_value(chain, i);
+      const uint8_t* data = CRYPTO_BUFFER_data(buffer);
+      size_t length = CRYPTO_BUFFER_len(buffer);
+      certificates.emplace_back(data, data + length);
+    }
 
-  if (self->config_.verify_callback(certificates)) {
-    return ssl_verify_ok;
+    try {
+      if (self->config_.verify_callback(certificates)) {
+        self->clear_verify_error();
+        return ssl_verify_ok;
+      }
+      // 明示拒否では直前の保持は陳腐なため破棄する (単発呼び出しが前提
+      // であり、通常は保持自体が存在しない)
+      self->clear_verify_error();
+    } catch (nb::python_error& error) {
+      self->remember_verify_python_error(error);
+    } catch (const std::exception& error) {
+      self->remember_verify_error("verify callback failed: " +
+                                  std::string(error.what()));
+    } catch (...) {
+      self->remember_verify_error("verify callback failed: unknown exception");
+    }
+  } catch (...) {
+    // 記録処理自体の送出も C フレームに漏らさない。詳細は残せないため
+    // 不明として検証失敗に丸める
+    self->clear_verify_error();
+    self->verify_failed_ = true;
   }
   return ssl_verify_invalid;
+}
+
+void QuicConnection::clear_verify_error() noexcept {
+  verify_error_.reset();
+  pending_verify_interrupt_.reset();
+  verify_failed_ = false;
+}
+
+void QuicConnection::remember_verify_python_error(nb::python_error& error) {
+  if (is_verify_interrupt(error)) {
+    // 割り込み系は握りつぶさず、Python 境界で再送出するために保持する。
+    // 即時 throw は C フレームを巻き戻してプロセスを終了させるため、
+    // 境界まで遅延させる (python_error は move 代入不可のため emplace
+    // で move 構築する)
+    verify_error_.reset();
+    verify_failed_ = false;
+    pending_verify_interrupt_.reset();
+    pending_verify_interrupt_.emplace(std::move(error));
+  } else {
+    pending_verify_interrupt_.reset();
+    verify_failed_ = false;
+    verify_error_ = truncate_verify_message("verify callback failed: " +
+                                            format_verify_python_error(error));
+  }
+}
+
+void QuicConnection::remember_verify_error(std::string text) {
+  pending_verify_interrupt_.reset();
+  verify_failed_ = false;
+  verify_error_ = truncate_verify_message(std::move(text));
+}
+
+bool QuicConnection::is_verify_interrupt(const nb::python_error& error) {
+  if (error.matches(nb::handle(PyExc_KeyboardInterrupt)) ||
+      error.matches(nb::handle(PyExc_SystemExit))) {
+    return true;
+  }
+  // asyncio.CancelledError の照合。照合自体が失敗した場合は割り込み系と
+  // 断定できないため、abort しないことを優先して false (通常例外扱い)
+  // にする
+  try {
+    nb::object cancelled =
+        nb::module_::import_("asyncio").attr("CancelledError");
+    return error.matches(cancelled);
+  } catch (...) {
+    return false;
+  }
+}
+
+void QuicConnection::throw_pending_verify_interrupt() {
+  if (!pending_verify_interrupt_.has_value()) {
+    return;
+  }
+  // 保持した例外オブジェクトをそのまま送出する (トレースバックを維持する)。
+  // 送出先は Python 境界直下の nanobind 呼び出しであり、C フレームを
+  // 巻き戻さない
+  nb::python_error error = std::move(pending_verify_interrupt_.value());
+  pending_verify_interrupt_.reset();
+  throw error;
+}
+
+std::string QuicConnection::consume_verify_error(const std::string& fallback) {
+  if (verify_failed_) {
+    verify_failed_ = false;
+    return "verify callback failed: unknown exception";
+  }
+  if (!verify_error_.has_value()) {
+    return fallback;
+  }
+  std::string reason = std::move(verify_error_.value());
+  verify_error_.reset();
+  return reason;
 }
 
 int QuicConnection::client_initial_cb(ngtcp2_conn* conn, void* user_data) {
@@ -2657,6 +2849,11 @@ int QuicConnection::recv_datagram_cb(ngtcp2_conn* conn,
 int QuicConnection::handshake_completed_cb(ngtcp2_conn* conn, void* user_data) {
   auto* self = static_cast<QuicConnection*>(user_data);
   self->handshake_completed_ = true;
+
+  // ハンドシェイクが成功したため、verify 失敗情報の保持は不要になる
+  // (失敗時は保持したまま ConnectionClosed の reason に使う)。割り込みの
+  // 保留も含めて全破棄し、陳腐化した情報が以降に混入しないようにする
+  self->clear_verify_error();
 
   // 早期データ拒否のフォールバック検出 (RFC 9001 Section 4.6.2。
   // 将来改訂される可能性がある)。BoringSSL 統合層が
