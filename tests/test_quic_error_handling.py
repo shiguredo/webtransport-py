@@ -6,11 +6,15 @@ ngtcp2 API のエラー処理が正しく動作することを確認するテス
 import time
 
 from conftest import (
+    CERTFILE,
     CLIENT_ADDR,
+    KEYFILE,
     SERVER_ADDR,
     create_client_server_pair,
     perform_handshake,
 )
+
+from webtransport.quic import Config, Connection, EventType
 
 
 def test_close_nonexistent_stream():
@@ -386,3 +390,282 @@ def test_datagram_after_close():
     # CONNECTION_CLOSE パケットが返る
     result = client.send()
     assert result is not None
+
+
+class _CustomVerifyError(Exception):
+    """検証コールバック用の独自例外"""
+
+
+def _pump_until_client_closed(client: Connection, server: Connection) -> None:
+    """クライアントが閉じるまでパケットを交換する"""
+    # 証明書検証の失敗でハンドシェイクが進まなくなり、クライアントが閉じる
+    for _ in range(20):
+        server_packet = server.send()
+        if server_packet:
+            client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+
+        client_packet = client.send()
+        if client_packet:
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+        if client.is_closed():
+            break
+
+
+def _connect_with_raising_callback(callback) -> Connection:
+    """例外を送出する検証コールバックでハンドシェイクを試みる"""
+    # 検証コールバックに例外を送出するクライアントを用意する
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.server_name = "localhost"
+    client_config.verify_callback = callback
+
+    # 自己署名証明書のサーバーを用意する
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+    initial_packet = client.send()
+    assert initial_packet is not None
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    # 送出してもプロセスは継続し、クライアントが閉じる
+    _pump_until_client_closed(client, server)
+    assert client.is_closed()
+    return client
+
+
+def _connection_closed_reason(client: Connection) -> str:
+    """クライアントの ConnectionClosed イベントの reason を返す"""
+    # ハンドシェイク失敗に伴う終了イベントを探す
+    reasons = []
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        if event.type == EventType.CONNECTION_CLOSED:
+            reasons.append(event.reason)
+    assert len(reasons) == 1
+    return reasons[0]
+
+
+def test_verify_callback_value_error():
+    """検証コールバックの ValueError でプロセスが継続する"""
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise ValueError("test-value-error")
+
+    client = _connect_with_raising_callback(verify_callback)
+
+    # 終了イベントの reason に例外情報が含まれる
+    reason = _connection_closed_reason(client)
+    assert "ValueError" in reason
+    assert "test-value-error" in reason
+
+
+def test_verify_callback_runtime_error():
+    """検証コールバックの RuntimeError でプロセスが継続する"""
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise RuntimeError("test-runtime-error")
+
+    client = _connect_with_raising_callback(verify_callback)
+
+    # 終了イベントの reason に例外情報が含まれる
+    reason = _connection_closed_reason(client)
+    assert "RuntimeError" in reason
+    assert "test-runtime-error" in reason
+
+
+def test_verify_callback_custom_error():
+    """検証コールバックの独自例外でプロセスが継続する"""
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise _CustomVerifyError("test-custom-error")
+
+    client = _connect_with_raising_callback(verify_callback)
+
+    # 終了イベントの reason に例外情報が含まれる
+    reason = _connection_closed_reason(client)
+    assert "_CustomVerifyError" in reason
+    assert "test-custom-error" in reason
+
+
+def test_verify_callback_keyboard_interrupt():
+    """検証コールバックの KeyboardInterrupt は再送出される"""
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise KeyboardInterrupt("test-interrupt")
+
+    # 割り込み系は検証失敗に丸めず、呼び出し元へ再送出する
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.server_name = "localhost"
+    client_config.verify_callback = verify_callback
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+    initial_packet = client.send()
+    assert initial_packet is not None
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    # 受信処理で KeyboardInterrupt が送出され、プロセスは継続する
+    raised = False
+    for _ in range(20):
+        server_packet = server.send()
+        if server_packet:
+            try:
+                client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+            except KeyboardInterrupt:
+                raised = True
+                break
+
+        client_packet = client.send()
+        if client_packet:
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    assert raised
+
+    # 送出は使い切りで、二重送出しない
+    client.receive(b"\x00" * 100, CLIENT_ADDR, SERVER_ADDR)
+
+    # 割り込み系は通常例外に丸めないため、終了イベントの reason に検証
+    # 情報は含まれず、従来のフォールバックになる
+    assert _connection_closed_reason(client) == "crypto error"
+
+
+def test_verify_callback_system_exit():
+    """検証コールバックの SystemExit は再送出される"""
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise SystemExit("test-exit")
+
+    # 割り込み系は検証失敗に丸めず、呼び出し元へ再送出する
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.server_name = "localhost"
+    client_config.verify_callback = verify_callback
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+    initial_packet = client.send()
+    assert initial_packet is not None
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    # 受信処理で SystemExit が送出され、プロセスは継続する
+    raised = False
+    for _ in range(20):
+        server_packet = server.send()
+        if server_packet:
+            try:
+                client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+            except SystemExit:
+                raised = True
+                break
+
+        client_packet = client.send()
+        if client_packet:
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    assert raised
+
+
+def test_verify_callback_cancelled_error():
+    """検証コールバックの CancelledError は再送出される"""
+    import asyncio
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise asyncio.CancelledError("test-cancel")
+
+    # 割り込み系は検証失敗に丸めず、呼び出し元へ再送出する
+    client_config = Config()
+    client_config.alpn_protocols = ["h3"]
+    client_config.server_name = "localhost"
+    client_config.verify_callback = verify_callback
+
+    server_config = Config()
+    server_config.cert_file = CERTFILE
+    server_config.key_file = KEYFILE
+    server_config.alpn_protocols = ["h3"]
+
+    client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
+    initial_packet = client.send()
+    assert initial_packet is not None
+    server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+    server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    # 受信処理で CancelledError が送出され、プロセスは継続する
+    raised = False
+    for _ in range(20):
+        server_packet = server.send()
+        if server_packet:
+            try:
+                client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+            except asyncio.CancelledError:
+                raised = True
+                break
+
+        client_packet = client.send()
+        if client_packet:
+            server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+    assert raised
+
+
+def test_verify_callback_long_message_truncated():
+    """検証コールバックの長文メッセージは切り詰められて reason になる"""
+    # 1024 バイト超の ASCII とマルチバイトのメッセージを用意する
+    long_message = "x" * 2000 + "あ" * 500
+
+    def verify_callback(certificates: list[bytes]) -> bool:
+        raise ValueError(long_message)
+
+    client = _connect_with_raising_callback(verify_callback)
+
+    # reason は 1024 バイト以内に収まり、有効な UTF-8 である
+    reason = _connection_closed_reason(client)
+    assert len(reason.encode("utf-8")) <= 1024
+    assert "ValueError" in reason
+
+
+def test_verify_callback_truncation_boundaries():
+    """切り詰め境界がマルチバイト文字に当たっても reason が有効である"""
+    # reason 全体は "verify callback failed: ValueError: " (36 バイト) に続く
+    # 本文のため、1024 バイト境界の位置を本文側の文字種で調整する。期待値は
+    # 36 + 本文側の保持バイト数で、不完全な末尾文字は先行バイトごと除去し、
+    # 完全な末尾文字は全保持する
+    cases = [
+        # 境界が 3 バイト文字の途中に当たる (987 バイト保持で 1023 バイト)
+        ("あ" * 400, 1023),
+        # 境界が 3 バイト文字の切れ目に当たる (全保持で 1024 バイト)
+        ("あ" * 329 + "x" * 500, 1024),
+        # 境界が 2 バイト文字の途中に当たる (987 バイト保持で 1023 バイト)
+        ("x" + "é" * 600, 1023),
+        # 境界が 4 バイト文字の途中に当たる (985 バイト保持で 1021 バイト)
+        ("x" + "𝄞" * 300, 1021),
+    ]
+
+    for message, expected_length in cases:
+
+        def verify_callback(certificates: list[bytes], _message: str = message) -> bool:
+            raise ValueError(_message)
+
+        client = _connect_with_raising_callback(verify_callback)
+
+        # 不正な UTF-8 では reason 取得時に例外になるため、読めた時点で有効
+        reason = _connection_closed_reason(client)
+        assert len(reason.encode("utf-8")) == expected_length
+        assert "ValueError" in reason

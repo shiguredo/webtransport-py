@@ -237,6 +237,8 @@
   - @voluntas
 - [FIX] 公開 Sans-IO API の引数だけで依存ライブラリの assert に到達しプロセスが異常終了する経路をバインディング側の検証で塞ぐ
   - @voluntas
+- [FIX] QUIC の検証コールバックが例外を送出するとプロセスが異常終了する問題を修正する
+  - @voluntas
 
 ### misc
 
