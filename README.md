@@ -52,6 +52,7 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
 - Python [Free-Threading](https://docs.python.org/3/howto/free-threading-python.html) 対応
   - [PEP 703 – Making the Global Interpreter Lock Optional in CPython \| peps\.python\.org](https://peps.python.org/pep-0703/)
   - [Python Free\-Threading Guide](https://py-free-threading.github.io/)
+  - 同一オブジェクトへの並行アクセスはオブジェクト単位の排他で保護する (接続・セッション系クラスの公開メソッドが対象。生成系 static・設定・イベント等の値オブジェクトは対象外)。Config は単一スレッドで構築し、共有後の並行書き換えは行わないこと。quic.Config の検証コールバック内で同一 quic.Connection のメソッドを呼ばないこと
 - クロスプラットフォーム対応
   - Ubuntu x86_64 / arm64
   - macOS arm64

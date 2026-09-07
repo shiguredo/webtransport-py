@@ -1,7 +1,7 @@
 # free-threading (3.14t) で同一の QUIC / HTTP 接続を複数スレッドから触ると abort する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-free-threading-thread-safety
 - Polished: 2026-09-07
 
@@ -32,3 +32,11 @@
 - 3.14t 環境で 5 クラスの代表操作を 2 スレッドから並行して触るテストが abort しないこと
 - `tests/test_quic_free_threading.py` を新規作成し、`quic.Connection` の 2 スレッド hammer (確立済みペアに 5 秒間 `send()` / `receive()`) 回帰テストと、他 4 クラスの代表操作の並行テストを追加すること (`--timeout=30` で timeout 内に完了)
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- 5 バインディングクラス (`quic.Connection` / `http3.Connection` / `http2.Connection` / `h3.Session` / `h2.Session`) の全公開メソッド 187 箇所に `nb::lock_self()` を付与し、オブジェクト単位の排他を保証する。生成系 static 11 箇所はインスタンスがなく付与できないため除外する (新規生成のみで共有状態に触れない)
+- 再入デッドロックを解析し、Python 到達コールバックは `verify_callback` のみで発火元は `receive()` に限定されることを確認する。コールバックには証明書バイト列のみを渡し、同一オブジェクトのメソッドを呼ばない契約をコード・docstring・README に明記する。確定の競合 abort 解消を優先し、病的再入は契約で回避する判断とする
+- `tests/test_quic_free_threading.py` を新規作成し、確立済み接続への 2 スレッド hammer (QUIC は 5 秒、他 4 クラスは各 2 秒) を追加する。ワーカー例外は収集して呼び出し元へ再送出する
+- 実行時間の退行はなく、増加分は新規テスト自体の hammer 時間のみである
+- 全 873 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した

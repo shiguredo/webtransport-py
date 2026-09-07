@@ -1057,7 +1057,8 @@ void bind_http2(nb::module_& m) {
             return self.receive(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
-          nb::arg("data"), nb::sig("def receive(self, data: bytes) -> int"),
+          nb::lock_self(), nb::arg("data"),
+          nb::sig("def receive(self, data: bytes) -> int"),
           "受信したデータを処理")
       .def(
           "send",
@@ -1069,14 +1070,15 @@ void bind_http2(nb::module_& m) {
             }
             return nb::none();
           },
-          nb::sig("def send(self) -> bytes | None"), "送信すべきデータを取得")
-      .def("submit_request", &Http2Connection::submit_request,
+          nb::lock_self(), nb::sig("def send(self) -> bytes | None"),
+          "送信すべきデータを取得")
+      .def("submit_request", &Http2Connection::submit_request, nb::lock_self(),
            nb::arg("headers"),
            nb::sig("def submit_request(self, headers: list[tuple[str, str]]) "
                    "-> int"),
            "リクエストを送信 (終端は send_data の eof=True で行う)")
       .def("submit_response", &Http2Connection::submit_response,
-           nb::arg("stream_id"), nb::arg("headers"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_response(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> None"),
            "レスポンスを送信")
@@ -1089,105 +1091,116 @@ void bind_http2(nb::module_& m) {
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 eof);
           },
-          nb::arg("stream_id"), nb::arg("data"), nb::arg("eof") = false,
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("eof") = false,
           nb::sig("def send_data(self, stream_id: int, data: bytes, eof: bool "
                   "= False) -> None"),
           "ストリームにデータを送信")
-      .def("reset_stream", &Http2Connection::reset_stream, nb::arg("stream_id"),
-           nb::arg("error_code") = 0,
+      .def("reset_stream", &Http2Connection::reset_stream, nb::lock_self(),
+           nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "ストリームをリセット")
-      .def("goaway", &Http2Connection::goaway, nb::arg("error_code") = 0,
+      .def("goaway", &Http2Connection::goaway, nb::lock_self(),
+           nb::arg("error_code") = 0,
            nb::sig("def goaway(self, error_code: int = 0) -> None"),
            "GOAWAY を送信")
-      .def("ping", &Http2Connection::ping, nb::sig("def ping(self) -> None"),
-           "PING を送信")
+      .def("ping", &Http2Connection::ping, nb::lock_self(),
+           nb::sig("def ping(self) -> None"), "PING を送信")
       .def("terminate_session", &Http2Connection::terminate_session,
-           nb::arg("error_code") = 0, nb::arg("last_stream_id") = 0,
+           nb::lock_self(), nb::arg("error_code") = 0,
+           nb::arg("last_stream_id") = 0,
            nb::sig("def terminate_session(self, error_code: int = 0, "
                    "last_stream_id: int = 0) -> bool"),
            "GOAWAY を送信してセッションを即時終了")
       .def("set_local_window_size", &Http2Connection::set_local_window_size,
-           nb::arg("stream_id"), nb::arg("window_size"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("window_size"),
            nb::sig("def set_local_window_size(self, stream_id: int, "
                    "window_size: int) -> bool"),
            "ローカルウィンドウサイズを動的に変更")
-      .def("submit_trailer", &Http2Connection::submit_trailer,
+      .def("submit_trailer", &Http2Connection::submit_trailer, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_trailer(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> bool"),
            "トレーラを送信")
       .def("submit_priority_update", &Http2Connection::submit_priority_update,
-           nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("urgency"),
+           nb::arg("incremental"),
            nb::sig("def submit_priority_update(self, stream_id: int, "
                    "urgency: int, incremental: bool) -> bool"),
            "PRIORITY_UPDATE フレームを送信")
       .def("change_extpri_stream_priority",
-           &Http2Connection::change_extpri_stream_priority,
+           &Http2Connection::change_extpri_stream_priority, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("urgency"), nb::arg("incremental"),
            nb::sig("def change_extpri_stream_priority(self, stream_id: int, "
                    "urgency: int, incremental: bool) -> bool"),
            "ストリームの優先度を変更")
       .def("submit_push_promise", &Http2Connection::submit_push_promise,
-           nb::arg("stream_id"), nb::arg("headers"),
+           nb::lock_self(), nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_push_promise(self, stream_id: int, headers: "
                    "list[tuple[str, str]]) -> int"),
            "Server Push を宣言")
-      .def("next_event", &Http2Connection::next_event,
+      .def("next_event", &Http2Connection::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
-      .def("want_write", &Http2Connection::want_write,
+      .def("want_write", &Http2Connection::want_write, nb::lock_self(),
            nb::sig("def want_write(self) -> bool"), "送信待ちデータがあるか")
-      .def("is_closed", &Http2Connection::is_closed,
+      .def("is_closed", &Http2Connection::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
       .def_prop_ro(
-          "remote_settings", &Http2Connection::remote_settings,
+          "remote_settings", &Http2Connection::remote_settings, nb::lock_self(),
           nb::sig("def remote_settings(self) -> dict[str, int] | None"),
           "ピアの SETTINGS の値を取得")
       .def_prop_ro("local_settings", &Http2Connection::local_settings,
+                   nb::lock_self(),
                    nb::sig("def local_settings(self) -> dict[str, int] | None"),
                    "ローカルの SETTINGS の値を取得")
       .def_prop_ro("outbound_queue_size", &Http2Connection::outbound_queue_size,
+                   nb::lock_self(),
                    nb::sig("def outbound_queue_size(self) -> int | None"),
                    "送信キューのフレーム数を取得")
       .def_prop_ro("remote_window_size", &Http2Connection::remote_window_size,
+                   nb::lock_self(),
                    nb::sig("def remote_window_size(self) -> int | None"),
                    "コネクションのリモートウィンドウ残量を取得")
       .def_prop_ro("local_window_size", &Http2Connection::local_window_size,
+                   nb::lock_self(),
                    nb::sig("def local_window_size(self) -> int | None"),
                    "コネクションのローカルウィンドウ残量を取得")
       .def_prop_ro(
           "effective_recv_data_length",
-          &Http2Connection::effective_recv_data_length,
+          &Http2Connection::effective_recv_data_length, nb::lock_self(),
           nb::sig("def effective_recv_data_length(self) -> int | None"),
           "WINDOW_UPDATE 未送信の受信 DATA バイト数を取得")
       .def_prop_ro("request_allowed", &Http2Connection::request_allowed,
+                   nb::lock_self(),
                    nb::sig("def request_allowed(self) -> bool | None"),
                    "新しいリクエストを送信できるかを取得")
       .def("stream_remote_window_size",
-           &Http2Connection::stream_remote_window_size, nb::arg("stream_id"),
+           &Http2Connection::stream_remote_window_size, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def stream_remote_window_size(self, stream_id: int) -> "
                    "int | None"),
            "ストリームのリモートウィンドウ残量を取得")
       .def("stream_local_window_size",
-           &Http2Connection::stream_local_window_size, nb::arg("stream_id"),
+           &Http2Connection::stream_local_window_size, nb::lock_self(),
+           nb::arg("stream_id"),
            nb::sig("def stream_local_window_size(self, stream_id: int) -> "
                    "int | None"),
            "ストリームのローカルウィンドウ残量を取得")
       .def("stream_effective_recv_data_length",
-           &Http2Connection::stream_effective_recv_data_length,
+           &Http2Connection::stream_effective_recv_data_length, nb::lock_self(),
            nb::arg("stream_id"),
            nb::sig("def stream_effective_recv_data_length(self, stream_id: "
                    "int) -> int | None"),
            "ストリームの WINDOW_UPDATE 未送信の受信 DATA バイト数を取得")
       .def("stream_local_close", &Http2Connection::stream_local_close,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig(
                "def stream_local_close(self, stream_id: int) -> bool | None"),
            "ストリームのローカル側が half-closed かを取得")
       .def("stream_remote_close", &Http2Connection::stream_remote_close,
-           nb::arg("stream_id"),
+           nb::lock_self(), nb::arg("stream_id"),
            nb::sig(
                "def stream_remote_close(self, stream_id: int) -> bool | None"),
            "ストリームのリモート側が half-closed かを取得");
