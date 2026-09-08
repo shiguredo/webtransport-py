@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のフロー制御クレジット (WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS) を初期値の 1 回しか送らずセッション寿命の転送量が固定される
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/fix-h2-flow-control-credit-replenishment
 - Polished: 2026-09-07
 
@@ -34,3 +34,11 @@ WebTransport over HTTP/2 のフロー制御クレジット送出が初期値の 
 - 両ハーフ終端したストリームエントリがセッションから解放されること
 - `tests/` に 1 MiB 超・256 KiB 超・101 本の 3 経路に加え、BLOCKED 送出・再開とエントリ解放のテストを追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- 受信消費の 1/2 到達で `WT_MAX_DATA` と `WT_MAX_STREAM_DATA` を初期値分上乗せして送出し、`WT_MAX_STREAMS` はストリーム終了時に現広告値 + 1 で補充する (累積値のため)
+- 送信超過は自己クローズせず、残量分を部分送出して残りを保留キューへ積む。超過試行の初回のみ `BLOCKED` 系を送出し、対向の `MAX` 受信で自動送出を再開する。`open_stream` の上限超過時は従来どおり -1 を返し `WT_STREAMS_BLOCKED` を伴う
+- 両ハーフ終端 (単方向は使用側ハーフ) のストリームエントリを解放する。リセット時は保留を破棄し、FIN 後の送信は無視する。未知 ID は initiator 導出で `MAX_STREAMS` 水増しを防ぐ
+- `tests/test_webtransport_h2_flow_control_replenishment.py` に 14 件のテスト (1 MiB 超・256 KiB 超・101 本・BLOCKED 送出と再開・エントリ解放・部分 FIN 等) を追加し、旧自己クローズ期待の 4 件を新仕様に更新する
+- 全 906 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
