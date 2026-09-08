@@ -112,6 +112,12 @@ struct H2SessionConfig {
   // で拒否する。既定 65536 は max_datagram_frame_size 既定と整合する
   // 楽観的データグラム数発分の目安である
   uint64_t wt_pre_accept_buffer_limit = 65536;
+
+  // 単一カプセルのペイロード上限 (バイト) 。Length 解釈直後に検査し、
+  // 超過時は WT_ERROR でセッションを閉じる。既定 1 MiB。自実装の送信は
+  // 呼び出しごとに 1 カプセル化するため、1 MiB 超の単回送信はアプリ側で
+  // 分割する前提とする
+  uint64_t wt_max_capsule_payload_size = 1048576;
 };
 
 /**

@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の未完成カプセルバッファに長さ上限を設ける
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-h2-capsule-buffer-bound
 - Polished: 2026-09-07
 
@@ -27,3 +27,9 @@ WebTransport over HTTP/2 のサーバーで、ピアが Length を巨大にし�
 - 正当な分割転送 (複数カプセルに分割されたストリーム) が影響を受けないこと
 - `tests/` に長大 Length ヘッダー注入テストを追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `process_capsules` の Length 解釈直後に単一カプセルのペイロード上限 (新規 Config `wt_max_capsule_payload_size`、既定 1 MiB) を検査し、超過時は `WT_ERROR` でセッションを閉じる。全種別を対象とし、受理前蓄積の総量上限とは排他的に適用する
+- `tests/test_webtransport_h2_capsule_buffer_bound.py` に 8 件のテスト (長大 Length 即時遮断・閉鎖維持・境界値・カスタム上限・分割転送・排出時検査・同一受信遮断) を追加する
+- 全 923 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
