@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のサーバーが受理前に届いた楽観的カプセルを破棄する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-h2-pre-accept-capsule-buffered
 - Polished: 2026-09-07
 
@@ -32,3 +32,11 @@ WebTransport over HTTP/2 のサーバーは `on_data_chunk_recv_callback` で `i
 - 蓄積の上限を超えた場合は非 2xx (413) で拒否されること
 - `tests/test_webtransport_h2_datagram.py` に、受理前カプセルの配送テスト (同一 / 別 `receive`、`send_datagram` / `send_stream_data`、`SessionReady` 後の順序、上限超過の 413、`reject_session` 時の破棄、`WT_CLOSE_SESSION` の二重発火なし) を追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- サーバー側の受理前カプセルを既存 `capsule_buffer` に上限 (新規 Config `wt_pre_accept_buffer_limit`、既定 65536) 付きで蓄積し、`accept_session` の 2xx 送出後に遅延処理する。全種別を振り分けず処理する
+- `reject_session` では蓄積を破棄し、上限超過時は非 2xx (413) で拒否して接続を保つ。`accept_session` 失敗時も破棄する
+- 排出中のセッション削除に備えて `process_capsules` の取得を毎回取り直し、終了済みセッションに初期クレジットを送出しない
+- `tests/test_webtransport_h2_datagram.py` に 9 件のテスト (同一/別 receive・stream・順序・413・破棄・二重発火なし・接続生存・境界値・不正混入) を追加する
+- 全 915 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
