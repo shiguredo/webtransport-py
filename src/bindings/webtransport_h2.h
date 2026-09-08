@@ -191,6 +191,19 @@ struct WtStreamInfo {
   StreamState recv_state = StreamState::Recv;
   uint64_t bytes_received = 0;
   uint64_t max_stream_data_remote = 0;
+
+  // 送信保留キュー (フロー制御で塞がれた送信の待機列)。超過送信は
+  // セッションを閉じず、BLOCKED 送出後にここへ積み、対向の MAX 受信で
+  // 送出を再開する。既存の送信バッファとは別にストリーム単位で順序を
+  // 保つ。新規の無制限バッファに見えるが、フロー制御の窓で排出される
+  // 一時待機列であり、受信側の無制限蓄積とは性質が異なる
+  struct PendingSend {
+    std::vector<uint8_t> data;
+    bool fin = false;
+  };
+  std::deque<PendingSend> pending_sends;
+  // 同一制限値での WT_STREAM_DATA_BLOCKED の重複送出を抑止する印
+  bool stream_data_blocked_sent = false;
 };
 
 /**
@@ -260,6 +273,13 @@ struct WtSessionInfo {
   // 未知ストリームでも検出するため WtStreamInfo ではなくセッション単位の
   // 集合で持つ。セッション破棄まで残し、ストリーム単位では消さない
   std::set<uint64_t> received_stop_sending_stream_ids;
+
+  // 同一制限値での BLOCKED 系カプセルの重複送出を抑止する印。対向の
+  // MAX 受信で制限が増えたら戻す。送出自体は draft-15 Section 6.8 / 6.9 /
+  // 6.10 の SHOULD (任意) に従うもので、初回のみに絞るのは実装の選択である
+  bool data_blocked_sent = false;
+  bool streams_blocked_bidi_sent = false;
+  bool streams_blocked_uni_sent = false;
 };
 
 /**
@@ -641,6 +661,17 @@ class H2Session {
 
   // 検知した WT_ERROR をアプリへ通知してからセッションを閉じる
   void report_wt_error(int32_t session_id, const std::string& error_message);
+
+  // 受信消費に応じたクレジット補充 (draft-15 Section 4.4 の SHOULD)。
+  // 受信量が広告値の 1/2 を超えたら初期値分を上乗せして送出する
+  void maybe_send_max_data(int32_t session_id);
+  void maybe_send_max_stream_data(int32_t session_id, uint64_t stream_id);
+  // 終端したストリームエントリを解放し、対向開始分は
+  // WT_MAX_STREAMS を補充する (累積値のため現広告値 + 1)。双方向は
+  // 両ハーフ終端、単方向は使用側ハーフの終端で解放する
+  void maybe_release_stream(int32_t session_id, uint64_t stream_id);
+  // 保留送信をクレジットの範囲で送出する
+  void flush_pending_sends(int32_t session_id);
 
   bool is_server_;
   H2SessionConfig config_;

@@ -331,7 +331,10 @@ void H2Session::handle_wt_stream(int32_t session_id,
     }
     WtStreamInfo info;
     info.stream_id = stream_id;
-    info.is_local = false;
+    // QUIC 互換 ID の Bit 0 が initiator (0 = client, 1 = server)。
+    // 自起点 ID の受信は想定外だが、解放時の MAX_STREAMS 水増しを防ぐ
+    // ため正しく導出する (自起点扱いは送信終端なしでは解放されない)
+    info.is_local = ((stream_id & 0x01) != 0) == is_server_;
     info.is_unidirectional = (stream_id & 0x02) != 0;
     initialize_stream_send_credit(*wt_session, info);
     info.max_stream_data_remote = config_.wt_initial_max_stream_data;
@@ -391,11 +394,18 @@ void H2Session::handle_wt_stream(int32_t session_id,
   stream_info.bytes_received += data_len;
   wt_session->bytes_received += data_len;
 
+  // 受信消費に応じたクレジット補充 (draft-15 Section 4.4 の SHOULD)。
+  // 広告値の 1/2 を超えたら初期値分を上乗せする
+  maybe_send_max_data(session_id);
+  maybe_send_max_stream_data(session_id, stream_id);
+
   // FIN 受信で受信側を DataRecvd に遷移させる (draft-15 Section 5.2 の
   // QUIC 状態ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は冒頭の状態
   // 検証で stream error になる)
   if (fin) {
     stream_info.recv_state = StreamState::DataRecvd;
+    // 両ハーフ終端ならエントリを解放する
+    maybe_release_stream(session_id, stream_id);
   }
 }
 
@@ -465,7 +475,10 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     }
     WtStreamInfo info;
     info.stream_id = stream_id;
-    info.is_local = false;
+    // QUIC 互換 ID の Bit 0 が initiator (0 = client, 1 = server)。
+    // 自起点 ID の受信は想定外だが、解放時の MAX_STREAMS 水増しを防ぐ
+    // ため正しく導出する (自起点扱いは送信終端なしでは解放されない)
+    info.is_local = ((stream_id & 0x01) != 0) == is_server_;
     info.is_unidirectional = (stream_id & 0x02) != 0;
     initialize_stream_send_credit(*wt_session, info);
     info.max_stream_data_remote = config_.wt_initial_max_stream_data;
@@ -478,6 +491,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     event.stream_id = stream_id;
     event.error_code = static_cast<uint32_t>(error_code);
     push_event(std::move(event));
+    // 対向開始単方向は受信終端のみで解放対象になる
+    maybe_release_stream(session_id, stream_id);
     return;
   }
 
@@ -511,6 +526,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   // 受信側を ResetRecvd に遷移させる (draft-15 Section 5.2 の QUIC 状態
   // ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は stream error になる)
   stream_info.recv_state = StreamState::ResetRecvd;
+  // 両ハーフ終端ならエントリを解放する
+  maybe_release_stream(session_id, stream_id);
 
   H2Event event;
   event.type = H2EventType::StreamReset;
@@ -614,6 +631,9 @@ void H2Session::handle_wt_max_data(int32_t session_id,
   wt_session->received_max_data = max_data;
   if (max_data > wt_session->max_data_local) {
     wt_session->max_data_local = max_data;
+    // 制限が増えたら BLOCKED 抑止を戻し、保留送信を送出する
+    wt_session->data_blocked_sent = false;
+    flush_pending_sends(session_id);
   }
 }
 
@@ -667,6 +687,9 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   if (stream_it != wt_session->streams.end()) {
     if (max_data > stream_it->second.max_stream_data_local) {
       stream_it->second.max_stream_data_local = max_data;
+      // 制限が増えたら BLOCKED 抑止を戻し、保留送信を送出する
+      stream_it->second.stream_data_blocked_sent = false;
+      flush_pending_sends(session_id);
     }
   }
 }
@@ -705,6 +728,12 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
   received = max_streams;
   if (max_streams > credit) {
     credit = max_streams;
+    // 制限が増えたら BLOCKED 抑止を戻す (open はアプリが再試行する)
+    if (is_bidi) {
+      wt_session->streams_blocked_bidi_sent = false;
+    } else {
+      wt_session->streams_blocked_uni_sent = false;
+    }
   }
 }
 
@@ -1137,6 +1166,203 @@ void H2Session::report_wt_error(int32_t session_id,
   close_session(session_id, kWtError, error_message);
 }
 
+void H2Session::maybe_send_max_data(int32_t session_id) {
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+  // 広告値の 1/2 を超えたら初期値分を上乗せする (ヒステリシスで送出頻度を
+  // 抑える。draft-15 Section 4.4 の SHOULD「consume に応じて送る」)。
+  // 初期値 0 (未設定) では補充しない
+  if (config_.wt_initial_max_data == 0) {
+    return;
+  }
+  if (wt_session->bytes_received <= wt_session->max_data_remote / 2) {
+    return;
+  }
+  uint64_t updated = wt_session->bytes_received + config_.wt_initial_max_data;
+  constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
+  if (updated < wt_session->bytes_received || updated > kMaxVarint) {
+    updated = kMaxVarint;
+  }
+  if (updated <= wt_session->max_data_remote) {
+    return;
+  }
+  wt_session->max_data_remote = updated;
+  send_capsule(session_id, CapsuleType::WtMaxData, encode_varint(updated));
+}
+
+void H2Session::maybe_send_max_stream_data(int32_t session_id,
+                                           uint64_t stream_id) {
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it == wt_session->streams.end()) {
+    return;
+  }
+  auto& stream_info = stream_it->second;
+  if (config_.wt_initial_max_stream_data == 0) {
+    return;
+  }
+  if (stream_info.bytes_received <= stream_info.max_stream_data_remote / 2) {
+    return;
+  }
+  uint64_t updated =
+      stream_info.bytes_received + config_.wt_initial_max_stream_data;
+  constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
+  if (updated < stream_info.bytes_received || updated > kMaxVarint) {
+    updated = kMaxVarint;
+  }
+  if (updated <= stream_info.max_stream_data_remote) {
+    return;
+  }
+  stream_info.max_stream_data_remote = updated;
+  std::vector<uint8_t> payload = encode_varint(stream_id);
+  auto max_bytes = encode_varint(updated);
+  payload.insert(payload.end(), max_bytes.begin(), max_bytes.end());
+  send_capsule(session_id, CapsuleType::WtMaxStreamData, payload);
+}
+
+void H2Session::maybe_release_stream(int32_t session_id, uint64_t stream_id) {
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session) {
+    return;
+  }
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it == wt_session->streams.end()) {
+    return;
+  }
+  const auto& stream_info = stream_it->second;
+  bool send_done = (stream_info.send_state == StreamState::DataSent ||
+                    stream_info.send_state == StreamState::ResetSent);
+  bool recv_done = (stream_info.recv_state == StreamState::DataRecvd ||
+                    stream_info.recv_state == StreamState::ResetRecvd);
+  bool releasable = false;
+  if (stream_info.is_unidirectional) {
+    // 単方向は片側のみ使う。送信専用 (自起点) は送信終端で、受信専用
+    // (対向起点) は受信終端で解放する
+    if (stream_info.is_local) {
+      releasable = send_done;
+    } else {
+      releasable = recv_done;
+    }
+  } else {
+    releasable = send_done && recv_done;
+  }
+  if (!releasable) {
+    return;
+  }
+  bool peer_initiated = !stream_info.is_local;
+  bool is_uni = stream_info.is_unidirectional;
+  wt_session->streams.erase(stream_it);
+  // 対向開始分のみ広告値を補充する (累積値のため現広告値 + 1)。
+  // 自起点分は対向が補充する。上限 2^60 到達後は送出しない
+  if (peer_initiated) {
+    if (is_uni) {
+      if (wt_session->max_streams_uni_remote < kMaxStreamsLimit) {
+        wt_session->max_streams_uni_remote += 1;
+        send_capsule(session_id, CapsuleType::WtMaxStreamsUni,
+                     encode_varint(wt_session->max_streams_uni_remote));
+      }
+    } else {
+      if (wt_session->max_streams_bidi_remote < kMaxStreamsLimit) {
+        wt_session->max_streams_bidi_remote += 1;
+        send_capsule(session_id, CapsuleType::WtMaxStreamsBidi,
+                     encode_varint(wt_session->max_streams_bidi_remote));
+      }
+    }
+  }
+}
+
+void H2Session::flush_pending_sends(int32_t session_id) {
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+  // 保留がある限り繰り返す (セッションクレジット共有のため全走査で
+  // 進捗がなくなるまで続ける)。無限ループ防止のため進捗で打ち切る。
+  // 解放でエントリが消えるため ID 一覧の複写で走査する
+  for (;;) {
+    bool progressed = false;
+    std::vector<uint64_t> stream_ids;
+    stream_ids.reserve(wt_session->streams.size());
+    for (const auto& [stream_id, _] : wt_session->streams) {
+      stream_ids.push_back(stream_id);
+    }
+    for (uint64_t stream_id : stream_ids) {
+      auto stream_it = wt_session->streams.find(stream_id);
+      if (stream_it == wt_session->streams.end()) {
+        continue;
+      }
+      auto& stream_info = stream_it->second;
+      // 終了済みストリームの保留は送出しない (リセット後の MAX 到着等で
+      // flush が走っても終了後の送出にならないよう塞ぐ)
+      if (stream_info.send_state == StreamState::DataSent ||
+          stream_info.send_state == StreamState::ResetSent) {
+        stream_info.pending_sends.clear();
+        continue;
+      }
+      while (!stream_info.pending_sends.empty()) {
+        auto& pending = stream_info.pending_sends.front();
+        size_t session_avail = 0;
+        if (wt_session->bytes_sent <= wt_session->max_data_local) {
+          uint64_t remaining =
+              wt_session->max_data_local - wt_session->bytes_sent;
+          session_avail = remaining > pending.data.size()
+                              ? pending.data.size()
+                              : static_cast<size_t>(remaining);
+        }
+        size_t stream_avail = 0;
+        if (stream_info.bytes_sent <= stream_info.max_stream_data_local) {
+          uint64_t remaining =
+              stream_info.max_stream_data_local - stream_info.bytes_sent;
+          stream_avail = remaining > pending.data.size()
+                             ? pending.data.size()
+                             : static_cast<size_t>(remaining);
+        }
+        size_t sendable =
+            session_avail < stream_avail ? session_avail : stream_avail;
+        if (sendable == 0) {
+          break;
+        }
+        bool partial = sendable < pending.data.size();
+        std::vector<uint8_t> payload = encode_varint(stream_id);
+        payload.insert(
+            payload.end(), pending.data.begin(),
+            pending.data.begin() + static_cast<std::ptrdiff_t>(sendable));
+        // 部分送出時は FIN を付けない (残りに引き継ぐ)
+        CapsuleType type = (!partial && pending.fin) ? CapsuleType::WtStreamFin
+                                                     : CapsuleType::WtStream;
+        send_capsule(session_id, type, payload);
+        stream_info.bytes_sent += sendable;
+        wt_session->bytes_sent += sendable;
+        progressed = true;
+        if (partial) {
+          pending.data.erase(
+              pending.data.begin(),
+              pending.data.begin() + static_cast<std::ptrdiff_t>(sendable));
+          break;
+        }
+        bool was_fin = pending.fin;
+        stream_info.pending_sends.pop_front();
+        if (was_fin) {
+          // リセット済みの上書きはしない (中間の reset_stream との競合防止)
+          if (stream_info.send_state == StreamState::Ready) {
+            stream_info.send_state = StreamState::DataSent;
+          }
+          maybe_release_stream(session_id, stream_id);
+          break;
+        }
+      }
+    }
+    if (!progressed) {
+      return;
+    }
+  }
+}
+
 // ========== H2Session 実装 ==========
 
 H2Session::H2Session(bool is_server, const H2SessionConfig& config)
@@ -1552,13 +1778,24 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
     return -1;
   }
 
-  // ストリーム数制限チェック
+  // ストリーム数制限チェック。超過時は -1 を返し、初回のみ
+  // WT_STREAMS_BLOCKED を送出する (draft-15 Section 6.10 の SHOULD)
   if (is_unidirectional) {
     if (wt_session->streams_uni_opened >= wt_session->max_streams_uni_local) {
+      if (!wt_session->streams_blocked_uni_sent) {
+        send_capsule(session_id, CapsuleType::WtStreamsBlockedUni,
+                     encode_varint(wt_session->max_streams_uni_local));
+        wt_session->streams_blocked_uni_sent = true;
+      }
       return -1;
     }
   } else {
     if (wt_session->streams_bidi_opened >= wt_session->max_streams_bidi_local) {
+      if (!wt_session->streams_blocked_bidi_sent) {
+        send_capsule(session_id, CapsuleType::WtStreamsBlockedBidi,
+                     encode_varint(wt_session->max_streams_bidi_local));
+        wt_session->streams_blocked_bidi_sent = true;
+      }
       return -1;
     }
   }
@@ -1626,11 +1863,72 @@ void H2Session::send_stream_data(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.5 / 6.6: フロー制御超過はセッション閉鎖
-  if (wt_session->bytes_sent + data.size() > wt_session->max_data_local ||
-      stream_info.bytes_sent + data.size() >
-          stream_info.max_stream_data_local) {
-    report_flow_control_error(session_id, "flow control limit exceeded");
+  // 保留があるストリームへの新規送信は順序維持のため末尾へ積む
+  // (クレジットがあっても追い越さない)。末尾が FIN 付きなら FIN 後の
+  // 送信として無視する (draft-15 Section 6.4)
+  if (!stream_info.pending_sends.empty()) {
+    if (stream_info.pending_sends.back().fin) {
+      return;
+    }
+    WtStreamInfo::PendingSend pending;
+    pending.data = data;
+    pending.fin = fin;
+    stream_info.pending_sends.push_back(std::move(pending));
+    return;
+  }
+
+  // draft-15 Section 6.5 / 6.6: フロー制御超過分はセッション閉鎖せず
+  // 保留する。残量の範囲で部分送出し、残りは保留キューへ積む。超過時は
+  // BLOCKED を送出して対向の MAX 到着を待つ (送出自体は draft-15 Section
+  // 6.8 / 6.9 の SHOULD であり任意。実装は同一制限値での重複を抑止する
+  // ため初回のみ送る)
+  // オーバーフロー安全な残量計算 (bytes_sent > max なら残量 0)
+  size_t session_avail = 0;
+  if (wt_session->bytes_sent <= wt_session->max_data_local) {
+    uint64_t remaining = wt_session->max_data_local - wt_session->bytes_sent;
+    session_avail =
+        remaining > data.size() ? data.size() : static_cast<size_t>(remaining);
+  }
+  size_t stream_avail = 0;
+  if (stream_info.bytes_sent <= stream_info.max_stream_data_local) {
+    uint64_t remaining =
+        stream_info.max_stream_data_local - stream_info.bytes_sent;
+    stream_avail =
+        remaining > data.size() ? data.size() : static_cast<size_t>(remaining);
+  }
+  size_t sendable = session_avail < stream_avail ? session_avail : stream_avail;
+  if (sendable < data.size()) {
+    // 残量分があれば先に送出する (受信側の補充を進めるため全保留にしない)
+    if (sendable > 0) {
+      std::vector<uint8_t> prefix_payload = encode_varint(stream_id);
+      prefix_payload.insert(
+          prefix_payload.end(), data.begin(),
+          data.begin() + static_cast<std::ptrdiff_t>(sendable));
+      send_capsule(session_id, CapsuleType::WtStream, prefix_payload);
+      stream_info.bytes_sent += sendable;
+      wt_session->bytes_sent += sendable;
+    }
+    bool session_exceeded =
+        sendable < data.size() && session_avail <= stream_avail;
+    bool stream_exceeded =
+        sendable < data.size() && stream_avail <= session_avail;
+    if (session_exceeded && !wt_session->data_blocked_sent) {
+      send_capsule(session_id, CapsuleType::WtDataBlocked,
+                   encode_varint(wt_session->max_data_local));
+      wt_session->data_blocked_sent = true;
+    }
+    if (stream_exceeded && !stream_info.stream_data_blocked_sent) {
+      std::vector<uint8_t> payload = encode_varint(stream_id);
+      auto limit_bytes = encode_varint(stream_info.max_stream_data_local);
+      payload.insert(payload.end(), limit_bytes.begin(), limit_bytes.end());
+      send_capsule(session_id, CapsuleType::WtStreamDataBlocked, payload);
+      stream_info.stream_data_blocked_sent = true;
+    }
+    WtStreamInfo::PendingSend pending;
+    pending.data.assign(data.begin() + static_cast<std::ptrdiff_t>(sendable),
+                        data.end());
+    pending.fin = fin;
+    stream_info.pending_sends.push_back(std::move(pending));
     return;
   }
 
@@ -1651,6 +1949,8 @@ void H2Session::send_stream_data(int32_t session_id,
   // 塞がれる。空の起動 WT_STREAM_FIN (data 空 + fin=True) を含む
   if (fin) {
     stream_info.send_state = StreamState::DataSent;
+    // 両ハーフ終端ならエントリを解放する
+    maybe_release_stream(session_id, stream_id);
   }
 }
 
@@ -1707,12 +2007,16 @@ void H2Session::reset_stream(int32_t session_id,
   // (draft-15 Section 5.2 の QUIC 状態ミラー)。エントリを erase せず
   // send_state を ResetSent に更新して、受信側の追跡 (bytes_received /
   // recv_state) を維持する (erase すると以後のピアからの WT_STREAM が
-  // 新規作成として扱われ、受信追跡が失われる)。エントリは両ハーフ終端後も
-  // セッション終了まで保持する (get_stream_ids にはリセット済みストリーム
-  // も含まれるようになる)。以後の send_stream_data は send_state の確認で
-  // 塞がれる (draft-15 Section 6.4)
+  // 新規作成として扱われ、受信追跡が失われる)。両ハーフ終端後は
+  // maybe_release_stream で解放し、対向開始分は WT_MAX_STREAMS を補充する。
+  // 以後の send_stream_data は send_state の確認で塞がれる
+  // (draft-15 Section 6.4)。保留キューも破棄する (リセットは送信放棄の
+  // 意思表示であり、残すと flush で終了後の送出になる)
   if (stream_it != wt_session->streams.end()) {
     stream_it->second.send_state = StreamState::ResetSent;
+    stream_it->second.pending_sends.clear();
+    // 両ハーフ終端ならエントリを解放する
+    maybe_release_stream(session_id, stream_id);
   }
 }
 
@@ -1795,9 +2099,8 @@ void H2Session::close_session(int32_t session_id,
   // http2_stream_buffers_ に残留する)。終了を学習したセッション ID
   // (WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアントの
   // 非 2xx 拒否受信後) はエントリが削除されて塞がる (サーバー側の
-  // reject_session の 2xx 送出も同様)。send_stream_data のフロー制御違反時
-  // (FLOW_CONTROL_ERROR) の内部呼び出しは is_terminated が立つ前のため
-  // 塞がれない
+  // reject_session の 2xx 送出も同様)。送信側フロー制御超過は保留と
+  // BLOCKED 送出で待つため close_session の内部呼び出しは行わない
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
     return;

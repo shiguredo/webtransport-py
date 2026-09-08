@@ -10,8 +10,8 @@ is_terminated を立てるため、修正前は 2 回目以降の呼び出しで
 ため公開 API からは観測できない (stop_sending / drain_session のテスト
 docstring も同旨) ため、本テストは送出の有無と個数で検証する。生存セッション
 の 1 回の close_session は従来どおり送出される (回帰ピン)。
-send_stream_data のフロー制御違反時 (FLOW_CONTROL_ERROR) の内部 close_session
-呼び出しは is_terminated が立つ前のためガードで塞がれない (回帰ピン)。
+send_stream_data のフロー制御超過時はセッションを閉じず BLOCKED 送出と
+保留キューで待つ (回帰ピン)。
 WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアントの非 2xx 拒否
 受信後は close_session が修正前からエントリ不在 (get_wt_session の失敗) で
 塞がれており、本変更の対象経路ではない (既存テストでカバー済み)。サーバー側
@@ -26,6 +26,7 @@ from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
+    _encode_capsule,
     _encode_data_frame,
     _encode_varint,
     _h2_pump,
@@ -175,25 +176,45 @@ def test_close_session_alive_session_delivered() -> None:
 
 
 def test_close_session_flow_control_violation_internal_call_delivered() -> None:
-    """send_stream_data のフロー制御違反時の内部 close_session が送出されることを確認
+    """send_stream_data のフロー制御超過時は閉じずに保留することを確認
 
     send_stream_data はフロー制御超過 (draft-15 Section 6.5 / 6.6) を検知
-    すると FLOW_CONTROL_ERROR (0x50) で close_session を内部から呼ぶ。0x50 は
-    WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
-    draft で値が確定したら更新する。この呼び出しは is_terminated が立つ前に行われるため冒頭のガードで塞がれず、
-    WT_CLOSE_SESSION がワイヤへ送出される (回帰ピン)。既に終了済みの場合は
-    send_stream_data 冒頭のガードで内部呼び出し自体が発生しない。
+    するとセッションを閉じず、超過試行の初回に WT_STREAM_DATA_BLOCKED を
+    送出してデータを保留キューへ積む。対向の WT_MAX_STREAM_DATA 受信で
+    送出が再開される。旧仕様の FLOW_CONTROL_ERROR (0x50) による自己
+    クローズは行わない。
     """
     client, server = _create_h2_session_pair_with_server_stream_limit(4)
     session_id = _connect_h2_session(client, server)
     stream_id = client.open_stream(session_id, False)
     assert stream_id >= 0
 
-    # ストリーム送信クレジット 4 バイトを超えて送信するとフロー制御違反になる
+    # ストリーム送信クレジット 4 バイトを超えて送信しても閉じない
     client.send_stream_data(session_id, stream_id, b"012345")
+    assert client.get_session_ids() == [session_id]
     wire = client.send()
     assert wire is not None
-    assert _encode_wt_close_session_capsule(0x50, "flow control limit exceeded") in wire
+    # WT_CLOSE_SESSION (0x50) は送出されない
+    assert _encode_wt_close_session_capsule(0x50, "flow control limit exceeded") not in wire
+    # WT_STREAM_DATA_BLOCKED が送出される
+    assert _encode_capsule(0x190B4D42, _encode_varint(stream_id) + _encode_varint(4)) in wire
+
+    # 先行分 (残量内の 4 バイト) をサーバーへ配送する
+    server.receive(wire)
+
+    # 対向の WT_MAX_STREAM_DATA 受信で保留データの送出が再開される
+    # (ワイヤ注入で対向の付与を再現する)
+    client.receive(
+        _encode_data_frame(
+            session_id,
+            _encode_capsule(0x190B4D3E, _encode_varint(stream_id) + _encode_varint(1024)),
+        )
+    )
+    _h2_pump(client, server)
+    received = b"".join(
+        event.data for event in _drain_events(server) if event.type == h2.EventType.STREAM_DATA
+    )
+    assert received == b"012345"
 
 
 def test_close_session_truncates_at_utf8_boundary() -> None:
