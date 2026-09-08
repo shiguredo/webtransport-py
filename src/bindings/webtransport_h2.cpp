@@ -228,6 +228,17 @@ void H2Session::process_capsules(int32_t session_id,
     }
     auto [payload_len, length_len] = *length_result;
 
+    // 単一カプセルのペイロード上限を Length 解釈直後に検査する
+    // (draft-15 全種別対象。ペイロード待ちの無制限蓄積によるメモリ DoS を
+    // 防ぐ。 DATAGRAM も対象に含める)。超過時は WT_ERROR でセッションを
+    // 閉じる。受理前の蓄積時は総量上限のみを適用し、本検査は確立後
+    // (受理後の排出を含む) に適用するため、重複検査にならない
+    if (payload_len > config_.wt_max_capsule_payload_size) {
+      report_wt_error(session_id, "capsule payload exceeds limit");
+      wt_session->capsule_buffer.clear();
+      break;
+    }
+
     // ペイロードが揃っているかチェック
     size_t header_len = type_len + length_len;
     if (buf_len < header_len + payload_len) {
@@ -2758,7 +2769,9 @@ void bind_webtransport_h2(nb::module_& m) {
       .def_rw("wt_initial_max_streams_uni",
               &H2SessionConfig::wt_initial_max_streams_uni)
       .def_rw("wt_pre_accept_buffer_limit",
-              &H2SessionConfig::wt_pre_accept_buffer_limit);
+              &H2SessionConfig::wt_pre_accept_buffer_limit)
+      .def_rw("wt_max_capsule_payload_size",
+              &H2SessionConfig::wt_max_capsule_payload_size);
 
   // H2EventType
   nb::enum_<H2EventType>(h2_mod, "EventType",

@@ -255,6 +255,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のサーバーが受理前に届いた楽観的カプセルを破棄する問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の未完成カプセルバッファが無制限に蓄積される問題を修正する
+  - @voluntas
 
 ### misc
 
