@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のストリーム ID の initiator ビットと方向を検証せず ID 衝突で状態が壊れる
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-h2-stream-id-initiator-validation
 - Polished: 2026-09-07
 
@@ -38,3 +38,10 @@ WebTransport over HTTP/2 の実装は WT ストリーム ID の initiator ビッ
 - 既存の受理ロジック (双方向の送受信、自側送信専用への WT_STOP_SENDING 受信) が引き続き動作すること
 - `tests/test_webtransport_h2_initiator_validation.py` を新規作成し、上記 4 経路の回帰テスト (Sans-IO ワイヤ注入による正常系・異常系の表形式) を追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- QUIC 互換 ID の方向検証ヘルパー 2 本を追加し、送信者→受信者方向は自側送信専用への受信を、受信者→送信者方向は自側受信専用への受信を `WT_STREAM_STATE_ERROR` で拒否する
+- `send_stream_data` は受信専用への送信を黙殺し、`open_stream` は既存エントリの上書きを禁止する (カウンタ不消費)
+- `tests/test_webtransport_h2_initiator_validation.py` に 12 件のテスト (4 経路の正常系と異常系・両視点) を追加する
+- 全 935 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
