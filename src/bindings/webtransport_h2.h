@@ -106,6 +106,12 @@ struct H2SessionConfig {
 
   // WebTransport 初期ストリーム数制限 (単方向)
   uint64_t wt_initial_max_streams_uni = 100;
+
+  // 受理前楽観的カプセルの蓄積上限 (バイト) 。サーバーが受理前に届いた
+  // カプセルを capsule_buffer に保持する上限であり、超過時は非 2xx (413)
+  // で拒否する。既定 65536 は max_datagram_frame_size 既定と整合する
+  // 楽観的データグラム数発分の目安である
+  uint64_t wt_pre_accept_buffer_limit = 65536;
 };
 
 /**
