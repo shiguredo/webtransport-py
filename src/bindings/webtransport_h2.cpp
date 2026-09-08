@@ -40,6 +40,45 @@ constexpr uint32_t kWtError = 0x52;
 // draft-15 Section 6.12 の Application Error Message 上限 (バイト)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 
+// QUIC 互換ストリーム ID の方向検証 (draft-15 Section 5.2)。
+// Bit 0 が initiator (0 = client, 1 = server)、Bit 1 が方向
+// (0 = bidi, 1 = uni)。双方向 (%4==0/1) は両方向とも可
+// 送信者→受信者方向 (WT_STREAM / WT_RESET_STREAM) は自側送信専用
+// (自側 initiator + uni) のみ不可。クライアント受信では %4==2 のみ不可、
+// サーバー受信では %4==3 のみ不可
+bool is_receivable_data_capsule(uint64_t stream_id, bool is_server) {
+  if ((stream_id & 0x02) == 0) {
+    return true;
+  }
+  bool own_initiated = ((stream_id & 0x01) != 0) == is_server;
+  return !own_initiated;
+}
+
+// 受信者→送信者方向 (WT_STOP_SENDING / WT_MAX_STREAM_DATA) は自側受信専用
+// (ピア initiator + uni) のみ不可。クライアント受信では %4==3 のみ不可、
+// サーバー受信では %4==2 のみ不可
+bool is_receivable_flow_capsule(uint64_t stream_id, bool is_server) {
+  if ((stream_id & 0x02) == 0) {
+    return true;
+  }
+  bool own_initiated = ((stream_id & 0x01) != 0) == is_server;
+  return own_initiated;
+}
+
+// 送信対象として有効か (受信専用 = ピア initiator + uni には送らない)
+bool is_sendable_stream(bool is_local, bool is_unidirectional) {
+  return !(!is_local && is_unidirectional);
+}
+
+// QUIC 互換ストリーム ID の組み立て (Bit 0 = initiator、Bit 1 = 方向)
+uint64_t build_stream_id(bool is_server,
+                         bool is_unidirectional,
+                         uint64_t counter) {
+  uint64_t initiator_bit = is_server ? 1 : 0;
+  uint64_t dir_bit = is_unidirectional ? 2 : 0;
+  return (counter << 2) | dir_bit | initiator_bit;
+}
+
 // draft-15 Section 6.2 / 6.3 の Application Protocol Error Code 上限。
 // [WEBTRANSPORT-H3] Section 4.4 の unsigned 32-bit 範囲
 constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
@@ -334,6 +373,13 @@ void H2Session::handle_wt_stream(int32_t session_id,
     return;
   }
 
+  // 自側送信専用 (自側 initiator + uni) への受信は拒否する
+  if (!is_receivable_data_capsule(stream_id, is_server_)) {
+    report_stream_state_error(session_id, stream_id,
+                              "WT_STREAM received for local send-only stream");
+    return;
+  }
+
   // ストリームが存在しない場合は作成 (draft-15 Section 6.4 の暗黙作成)
   auto stream_it = wt_session->streams.find(stream_id);
   if (stream_it == wt_session->streams.end()) {
@@ -463,6 +509,15 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
+    return;
+  }
+
+  // 自側送信専用 (自側 initiator + uni) への受信は拒否する。完全
+  // デコードと存在確認の後に行い、4 ハンドラで順序を統一する
+  if (!is_receivable_data_capsule(stream_id, is_server_)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_RESET_STREAM received for local send-only stream");
     return;
   }
 
@@ -600,6 +655,14 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
     return;
   }
 
+  // 自側受信専用 (ピア initiator + uni) への受信は拒否する
+  if (!is_receivable_flow_capsule(stream_id, is_server_)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_STOP_SENDING received for local receive-only stream");
+    return;
+  }
+
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
     return;
@@ -674,6 +737,15 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
+    return;
+  }
+
+  // 自側受信専用 (ピア initiator + uni) への受信は拒否する。完全
+  // デコードと存在確認の後に行い、4 ハンドラで順序を統一する
+  if (!is_receivable_flow_capsule(stream_id, is_server_)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_MAX_STREAM_DATA received for local receive-only stream");
     return;
   }
 
@@ -922,17 +994,15 @@ uint64_t H2Session::allocate_stream_id(int32_t session_id,
   // QUIC 互換ストリーム ID
   // Bit 0: initiator (0 = client, 1 = server)
   // Bit 1: directionality (0 = bidi, 1 = uni)
-  uint64_t initiator_bit = is_server_ ? 1 : 0;
-  uint64_t dir_bit = is_unidirectional ? 2 : 0;
-
   uint64_t stream_id;
   if (is_unidirectional) {
-    stream_id = (wt_session->next_uni_stream_id << 2) | dir_bit | initiator_bit;
+    stream_id =
+        build_stream_id(is_server_, true, wt_session->next_uni_stream_id);
     wt_session->next_uni_stream_id++;
     wt_session->streams_uni_opened++;
   } else {
     stream_id =
-        (wt_session->next_bidi_stream_id << 2) | dir_bit | initiator_bit;
+        build_stream_id(is_server_, false, wt_session->next_bidi_stream_id);
     wt_session->next_bidi_stream_id++;
     wt_session->streams_bidi_opened++;
   }
@@ -1839,6 +1909,15 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   }
 
   // ストリーム ID を割り当て
+  // 払い出し予定 ID に既存エントリがあれば上書きせず -1 を返す
+  // (ピアの不正 ID で作成済みの場合。カウンタも消費しない)
+  uint64_t next_counter = is_unidirectional ? wt_session->next_uni_stream_id
+                                            : wt_session->next_bidi_stream_id;
+  uint64_t candidate_id =
+      build_stream_id(is_server_, is_unidirectional, next_counter);
+  if (wt_session->streams.find(candidate_id) != wt_session->streams.end()) {
+    return -1;
+  }
   uint64_t stream_id = allocate_stream_id(session_id, is_unidirectional);
   if (stream_id == UINT64_MAX) {
     return -1;
@@ -1887,6 +1966,13 @@ void H2Session::send_stream_data(int32_t session_id,
   }
 
   auto& stream_info = stream_it->second;
+
+  // 受信専用 (ピア initiator + uni) への送信は黙って無視する
+  // (セッションは閉じない)
+  if (!is_sendable_stream(stream_info.is_local,
+                          stream_info.is_unidirectional)) {
+    return;
+  }
 
   // リセット済み・FIN 送出済みストリームへの送信は塞ぐ (draft-15
   // Section 6.4 の「A WT_STREAM capsule MUST NOT be sent after a stream is

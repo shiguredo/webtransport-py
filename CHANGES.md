@@ -257,6 +257,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の未完成カプセルバッファが無制限に蓄積される問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 のストリーム ID の initiator と方向の検証漏れで状態が壊れる問題を修正する
+  - @voluntas
 
 ### misc
 
