@@ -253,6 +253,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のフロー制御クレジットが初期値の 1 回きりで転送量が固定される問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 のサーバーが受理前に届いた楽観的カプセルを破棄する問題を修正する
+  - @voluntas
 
 ### misc
 

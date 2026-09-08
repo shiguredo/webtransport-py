@@ -18,6 +18,8 @@ from conftest import (
     _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
+    _encode_data_frame,
+    _encode_varint,
     _h2_pump,
 )
 
@@ -248,3 +250,295 @@ def test_send_datagram_server_optimistic_delivered() -> None:
     ]
     assert len(datagram_events) == 1
     assert datagram_events[0].data == b"server-optimistic"
+
+
+def test_pre_accept_datagram_same_receive_delivered_after_accept() -> None:
+    """同一 receive で届いた楽観的データグラムが受理後に配信されることを確認
+
+    CONNECT (HEADERS) と DATAGRAM カプセル (DATA) が同一 receive で届くと、
+    受理前は蓄積され、accept_session 後に SessionReady に続いて Datagram が
+    発火する (draft-15 Section 3.2 の楽観送信) 。
+    """
+    client, server = _create_h2_session_pair()
+
+    # CONNECT 直後に楽観送信し、全出力を単一ワイヤでサーバーへ渡す (同一 receive)
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    client.send_datagram(session_id, b"optimistic-same")
+    wire_parts = []
+    while True:
+        part = client.send()
+        if part is None:
+            break
+        wire_parts.append(part)
+    assert wire_parts
+    server.receive(b"".join(wire_parts))
+
+    # 受理前は Datagram が発火しないが SessionReady は発火している
+    events = _drain_events(server)
+    assert [e for e in events if e.type == h2.EventType.SESSION_READY]
+    assert not [e for e in events if e.type == h2.EventType.DATAGRAM]
+
+    # 受理後に蓄積が配信される
+    assert server.accept_session(session_id) is True
+    datagram_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.DATAGRAM
+    ]
+    assert len(datagram_events) == 1
+    assert datagram_events[0].data == b"optimistic-same"
+
+
+def test_pre_accept_datagram_separate_receive_delivered_after_accept() -> None:
+    """別 receive で届いた楽観的データグラムが受理後に配信されることを確認
+
+    CONNECT と DATAGRAM が別 receive で届く変種。断片再構成と同一機構の
+    蓄積で扱う。
+    """
+    client, server = _create_h2_session_pair()
+
+    # CONNECT のみ先に渡す (全出力を集めて単一 receive にする)
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    wire_parts = []
+    while True:
+        part = client.send()
+        if part is None:
+            break
+        wire_parts.append(part)
+    assert wire_parts
+    server.receive(b"".join(wire_parts))
+
+    # 楽観送信を別の receive で渡す
+    client.send_datagram(session_id, b"optimistic-separate")
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+
+    # 受理前は Datagram が発火しない
+    events = _drain_events(server)
+    assert not [e for e in events if e.type == h2.EventType.DATAGRAM]
+
+    # 受理後に蓄積が配信される
+    assert server.accept_session(session_id) is True
+    datagram_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.DATAGRAM
+    ]
+    assert len(datagram_events) == 1
+    assert datagram_events[0].data == b"optimistic-separate"
+
+
+def test_pre_accept_stream_data_delivered_after_accept() -> None:
+    """受理前のストリームデータが受理後に配信されることを確認
+
+    ワイヤ注入で WT_STREAM カプセルを受理前に届け、accept_session 後に
+    SessionReady に続いて StreamData が発火することを検証する。
+    """
+    client, server = _create_h2_session_pair()
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+
+    # WT_STREAM カプセル (ストリーム 0、データ付き) を受理前に注入する
+    stream_payload = _encode_varint(0) + b"stream-early"
+    server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D3C, stream_payload)))
+
+    # 受理前は StreamData が発火しない
+    events = _drain_events(server)
+    assert not [e for e in events if e.type == h2.EventType.STREAM_DATA]
+
+    # 受理後に蓄積が配信される
+    assert server.accept_session(session_id) is True
+    stream_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STREAM_DATA
+    ]
+    assert len(stream_events) == 1
+    assert stream_events[0].data == b"stream-early"
+
+
+def test_pre_accept_buffer_rejected_on_discard() -> None:
+    """reject_session で蓄積が破棄されることを確認"""
+    client, server = _create_h2_session_pair()
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    client.send_datagram(session_id, b"optimistic-dropped")
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+
+    # 拒否すると蓄積は破棄され、以後の Datagram 配信はない
+    server.reject_session(session_id, 403)
+    datagram_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.DATAGRAM
+    ]
+    assert datagram_events == []
+
+
+def test_pre_accept_buffer_overflow_rejected_413() -> None:
+    """蓄積の上限超過で非 2xx (413) 拒否されることを確認"""
+    client = h2.Session.create_client(h2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_pre_accept_buffer_limit = 10
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    # 上限 10 バイトを超える楽観送信をする
+    client.send_datagram(session_id, b"0123456789ABCDEF")
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+
+    # 413 応答が送出され、セッションは確立しない
+    assert server.get_session_ids() == []
+    _h2_pump(server, client)
+    rejected = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_REJECTED]
+    assert len(rejected) == 1
+    assert rejected[0].status_code == 413
+
+
+def test_pre_accept_close_session_single_fire() -> None:
+    """受理前の WT_CLOSE_SESSION は二重発火しないことを確認"""
+    client, server = _create_h2_session_pair()
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+
+    # WT_CLOSE_SESSION を受理前に注入する
+    close_payload = (0).to_bytes(4, "big")
+    server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, close_payload)))
+
+    # 受理前は SessionClosed が発火しない
+    assert not [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+
+    # 受理で遅延処理され、SessionClosed が 1 回だけ発火する
+    assert server.accept_session(session_id) is True
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.SESSION_CLOSED
+    ]
+    assert len(closed_events) == 1
+
+    # 後続の送受信でも二重発火しない
+    _h2_pump(server, client)
+    _h2_pump(client, server)
+    closed_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.SESSION_CLOSED
+    ]
+    assert closed_events == []
+
+
+def test_pre_accept_buffer_overflow_keeps_connection() -> None:
+    """413 拒否後も同一接続で後続セッションを確立できることを確認
+
+    上限超過の拒否は接続を切らない。同一ペアで新規 CONNECT を送り、
+    受理できることを検証する。
+    """
+    client = h2.Session.create_client(h2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_pre_accept_buffer_limit = 10
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    # 上限超過で 413 拒否される
+    rejected_id = client.connect("https://localhost/webtransport")
+    assert rejected_id >= 0
+    client.send_datagram(rejected_id, b"0123456789ABCDEF")
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+    _h2_pump(server, client)
+    rejected = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_REJECTED]
+    assert len(rejected) == 1
+    assert rejected[0].status_code == 413
+
+    # 同一接続で後続セッションを確立できる (先行セッションの READY は
+    # 排水済みにする)
+    _drain_events(server)
+    session_id = client.connect("https://localhost/webtransport2")
+    assert session_id >= 0
+    _h2_pump(client, server)
+    ready = [
+        e
+        for e in _drain_events(server)
+        if e.type == h2.EventType.SESSION_READY and e.session_id == session_id
+    ]
+    assert len(ready) == 1
+    assert server.accept_session(session_id) is True
+    _h2_pump(server, client)
+    assert [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_READY]
+
+
+def test_pre_accept_buffer_boundary_accepted() -> None:
+    """蓄積量が上限ちょうどの場合は受理されることを確認"""
+    client = h2.Session.create_client(h2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_pre_accept_buffer_limit = 10
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    # DATAGRAM カプセル全体がちょうど 10 バイトになるよう調整する
+    # (Type 1 + Length 1 + 8 バイトペイロード)
+    client.send_datagram(session_id, b"12345678")
+    wire_parts = []
+    while True:
+        part = client.send()
+        if part is None:
+            break
+        wire_parts.append(part)
+    assert wire_parts
+    server.receive(b"".join(wire_parts))
+
+    # 上限ちょうどは拒否されず、受理後に配信される
+    assert server.accept_session(session_id) is True
+    datagram_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.DATAGRAM
+    ]
+    assert len(datagram_events) == 1
+    assert datagram_events[0].data == b"12345678"
+
+
+def test_pre_accept_error_capsule_skips_initial_credit() -> None:
+    """蓄積中の不正カプセルで終了しても初期クレジットを送出しないことを確認
+
+    受理前の蓄積に不正 WT_CLOSE_SESSION (メッセージ 1024 超) が混ざると、
+    排出時にセッションエラーで終了する。終了済みセッションに初期
+    WT_MAX_DATA / WT_MAX_STREAMS を送出しない。
+    """
+    client, server = _create_h2_session_pair()
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    wire_parts = []
+    while True:
+        part = client.send()
+        if part is None:
+            break
+        wire_parts.append(part)
+    assert wire_parts
+    server.receive(b"".join(wire_parts))
+
+    # 不正 WT_CLOSE_SESSION (メッセージ 1025 バイト) を受理前に注入する
+    bad_payload = (0).to_bytes(4, "big") + b"x" * 1025
+    server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, bad_payload)))
+
+    # 受理で排出されると Error が発火し、初期クレジットは送出されない
+    assert server.accept_session(session_id) is True
+    error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
+    assert len(error_events) == 1
+    wire = server.send()
+    assert wire is None or _encode_capsule(0x190B4D3D, _encode_varint(1048576)) not in wire

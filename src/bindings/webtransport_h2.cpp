@@ -182,14 +182,18 @@ void H2Session::process_capsules(int32_t session_id,
   }
 
   // バッファに追加
-  wt_session->capsule_buffer.insert(wt_session->capsule_buffer.end(), data,
-                                    data + length);
+  if (length > 0) {
+    wt_session->capsule_buffer.insert(wt_session->capsule_buffer.end(), data,
+                                      data + length);
+  }
 
   // Capsule をパース
   while (true) {
+    // ハンドラがセッションを削除し得る (WT_CLOSE_SESSION 受信等) ため、
+    // 毎回取り直す
     wt_session = get_wt_session(session_id);
     if (!wt_session) {
-      break;
+      return;
     }
     // 受信ハンドラ内で close_session が呼ばれた場合 (WT_STREAM_STATE_ERROR
     // 等のエラー検知) は is_terminated が立つため、同一 receive() 内の
@@ -1682,6 +1686,10 @@ bool H2Session::accept_session(int32_t session_id) {
   int rv = nghttp2_submit_response(session_, session_id, nva,
                                    sizeof(nva) / sizeof(nva[0]), &data_prd);
   if (rv != 0) {
+    // 応答送出に失敗したら蓄積を破棄する
+    if (auto* failed_session = get_wt_session(session_id)) {
+      failed_session->capsule_buffer.clear();
+    }
     return false;
   }
 
@@ -1692,6 +1700,23 @@ bool H2Session::accept_session(int32_t session_id) {
   }
 
   nghttp2_session_send(session_);
+
+  // 受理前の楽観的カプセルを遅延処理する (draft-15 Section 3.2) 。
+  // SessionReady push 後に Datagram / StreamData が発火するよう、
+  // 2xx 送出後に処理する。全種別を遅延処理し、振り分けは行わない。
+  // 追記なしの排出専用呼び出しのため空入力で呼ぶ
+  if (get_wt_session(session_id)) {
+    const uint8_t kEmptyByte = 0;
+    process_capsules(session_id, &kEmptyByte, 0);
+  }
+
+  // 蓄積の遅延処理で WT_CLOSE_SESSION を受けて閉じた場合と、蓄積中の
+  // 不正カプセルでセッションエラーになり終了した場合 (エントリは残るが
+  // 終了済み) は、初期クレジットを送出しない
+  auto* established_session = get_wt_session(session_id);
+  if (!established_session || established_session->is_terminated) {
+    return true;
+  }
 
   // 初期フロー制御 Capsule を送信
   std::vector<uint8_t> max_data_payload =
@@ -1767,6 +1792,8 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
     auto* wt_session = get_wt_session(session_id);
     if (wt_session) {
       wt_session->is_terminated = true;
+      // 蓄積も破棄する (以後処理しない)
+      wt_session->capsule_buffer.clear();
     }
   }
   // mem_recv コールバック中でも安全なよう、ここでは session_send しない
@@ -2553,12 +2580,34 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
 
   auto* h2_session = static_cast<H2Session*>(user_data);
 
-  // WebTransport セッションのデータとして Capsule を処理
+  // WebTransport セッションのデータとして Capsule を処理する。確立済みは
+  // 即時処理し、サーバー側の受理前は上限付きで蓄積して accept_session で
+  // 遅延処理する (draft-15 Section 3.2 の楽観送信) 。クライアント側の
+  // 受理前 (2xx 応答前) は排出契機がないため従来どおり破棄する
   auto* wt_session = h2_session->get_wt_session(stream_id);
-  if (wt_session && wt_session->is_established) {
-    h2_session->process_capsules(stream_id, data, len);
+  if (!wt_session || wt_session->is_terminated) {
+    return 0;
   }
-
+  if (len == 0) {
+    return 0;
+  }
+  if (wt_session->is_established) {
+    h2_session->process_capsules(stream_id, data, len);
+    return 0;
+  }
+  if (!h2_session->is_server_) {
+    return 0;
+  }
+  // 受理前蓄積の上限超過時は非 2xx (413) で拒否しバッファを破棄する
+  // (接続は切らない。reject_session は session_send しないため
+  // コールバック中でも安全である)
+  if (wt_session->capsule_buffer.size() + len >
+      h2_session->config_.wt_pre_accept_buffer_limit) {
+    h2_session->reject_session(stream_id, 413);
+    return 0;
+  }
+  wt_session->capsule_buffer.insert(wt_session->capsule_buffer.end(), data,
+                                    data + len);
   return 0;
 }
 
@@ -2707,7 +2756,9 @@ void bind_webtransport_h2(nb::module_& m) {
       .def_rw("wt_initial_max_streams_bidi",
               &H2SessionConfig::wt_initial_max_streams_bidi)
       .def_rw("wt_initial_max_streams_uni",
-              &H2SessionConfig::wt_initial_max_streams_uni);
+              &H2SessionConfig::wt_initial_max_streams_uni)
+      .def_rw("wt_pre_accept_buffer_limit",
+              &H2SessionConfig::wt_pre_accept_buffer_limit);
 
   // H2EventType
   nb::enum_<H2EventType>(h2_mod, "EventType",
