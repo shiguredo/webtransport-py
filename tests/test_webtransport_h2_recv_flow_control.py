@@ -131,7 +131,9 @@ def test_wt_stream_exceeds_flow_control_pushes_error_event() -> None:
 def test_wt_stream_cumulative_exceeds_max_stream_data_closes_session() -> None:
     """複数 WT_STREAM の累積がストリーム受信上限を超えたら閉じることを確認
 
-    上限 4 バイトに対して 3 バイトのあと 2 バイトを送り、2 回目で超過する。
+    上限 4 バイトに対して 3 バイトのあと 5 バイトを送り、2 回目で超過する。
+    1 回目の受信で補充 (3 + 4 = 7) が送出されるため、2 回目は 7 を超える
+    量で超過させる。
     """
     client, server = _create_server_with_recv_limits(max_data=1_048_576, max_stream_data=4)
     session_id = _connect_h2_session(client, server)
@@ -144,7 +146,7 @@ def test_wt_stream_cumulative_exceeds_max_stream_data_closes_session() -> None:
     assert stream_events[0].data == b"123"
     _assert_no_close_session_sent(server)
 
-    _inject_wt_stream(server, session_id, 0, b"45")
+    _inject_wt_stream(server, session_id, 0, b"45678")
     _assert_flow_control_error_sent(server)
 
 
@@ -152,7 +154,8 @@ def test_wt_stream_cumulative_exceeds_max_data_closes_session() -> None:
     """複数 WT_STREAM の累積がセッション受信上限を超えたら閉じることを確認
 
     セッション上限 4 バイト・ストリーム上限 100 バイトに対して 3 バイトの
-    あと 2 バイトを送り、2 回目でセッション上限を超える。
+    あと 5 バイトを送り、2 回目でセッション上限を超える。1 回目の受信で
+    補充 (3 + 4 = 7) が送出されるため、2 回目は 7 を超える量で超過させる。
     """
     client, server = _create_server_with_recv_limits(max_data=4, max_stream_data=100)
     session_id = _connect_h2_session(client, server)
@@ -165,7 +168,7 @@ def test_wt_stream_cumulative_exceeds_max_data_closes_session() -> None:
     assert stream_events[0].data == b"123"
     _assert_no_close_session_sent(server)
 
-    _inject_wt_stream(server, session_id, 0, b"45")
+    _inject_wt_stream(server, session_id, 0, b"45678")
     _assert_flow_control_error_sent(server)
 
 

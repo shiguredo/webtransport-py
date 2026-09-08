@@ -4,7 +4,7 @@ draft-15 Section 11.2 の「対向 SETTINGS が 0 (既定値) の場合、
 WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS カプセル到着まで送信不可」
 (Section 6.5 / 6.6 / 6.7 は非 0 値での MAY 伝達) に従い、0 を広告するピアへの
 送信はフォールバック (自側 config 値での送信) を行わない。送信を試みた場合は
-既存のフロー制御ガードで WT_FLOW_CONTROL_ERROR、ストリーム開設を試みた場合は
+保留キューで待ち BLOCKED を送出し、ストリーム開設を試みた場合は
 open_stream が -1 を返す。カプセル受信で送信クレジットが前進することを
 ワイヤ注入で検証する。
 """
@@ -132,15 +132,12 @@ def test_zero_peer_initial_uni_streams_limit_block_until_capsule() -> None:
 
 
 def test_zero_peer_initial_data_limit_send_raises_flow_control_error() -> None:
-    """対向 SETTINGS のデータクレジットが 0 の場合の送信試行で WT_FLOW_CONTROL_ERROR になることを確認
+    """対向 SETTINGS のデータクレジットが 0 の場合の送信試行は保留されることを確認
 
     ストリーム数上限が通常値 (100) のまま、データクレジットのみ 0 を広告
-    されたセッションでは open_stream は成功するが、send_stream_data が
-    既存のフロー制御ガード (draft-15 Section 6.5 / 6.6) で
-    WT_FLOW_CONTROL_ERROR (0x50) のセッションクローズになる。0x50 は
-    WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
-    draft で値が確定したら更新する。
-    フォールバックで送信できてしまう (修正前) に対するピン。
+    されたセッションでは open_stream は成功するが、send_stream_data は
+    送信せず保留キューで待ち、WT_DATA_BLOCKED を送出する。セッションは
+    閉じない。WT_MAX_DATA カプセル受信で送出が再開される。
     """
     client, server = _create_h2_session_pair_with_limits(0, 1024, 100, 100)
     session_id = _connect_h2_session(client, server)
@@ -149,6 +146,20 @@ def test_zero_peer_initial_data_limit_send_raises_flow_control_error() -> None:
     assert stream_id >= 0
 
     client.send_stream_data(session_id, stream_id, b"hello")
+    assert client.get_session_ids() == [session_id]
     wire = client.send()
     assert wire is not None
-    assert _encode_wt_close_session_capsule(0x50, "flow control limit exceeded") in wire
+    # WT_CLOSE_SESSION は送出されない
+    assert _encode_wt_close_session_capsule(0x50, "flow control limit exceeded") not in wire
+    # WT_DATA_BLOCKED が送出される
+    assert _encode_capsule(0x190B4D41, _encode_varint(0)) in wire
+
+    # WT_MAX_DATA 受信で保留データの送出が再開される (ワイヤ注入で
+    # 対向の付与を再現する。サーバー config 自体が 0 のため自然付与は
+    # 起きない。サーバーの受信上限も 0 のため配送までは行わず、送出の
+    # 再開をワイヤで確認する)
+    capsule = _encode_capsule(_WT_MAX_DATA, _encode_varint(1024))
+    _inject_capsule(client, session_id, capsule)
+    wire = client.send()
+    assert wire is not None
+    assert b"hello" in wire

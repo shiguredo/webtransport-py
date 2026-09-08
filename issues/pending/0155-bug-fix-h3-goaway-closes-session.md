@@ -43,3 +43,13 @@
 - 0131 由来の接続エラー注入テストが引き続き `is_closed()` 真を維持すること (回帰両立)
 - `tests/test_webtransport_h3_goaway.py` (新規) に GOAWAY フレーム注入による継続テスト (制御ストリームへ注入し、`is_closed()` 偽 + `GoAway` イベント + open / send 可を表明) を追加し、`tests/test_e2e_webtransport_h3.py` に `H3_GENERAL_PROTOCOL_ERROR` 不送出と `on_goaway` 発火のテストを追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## pending にした理由
+
+- 完了条件の「新規ストリームの open が可能」が達成できないため保留する。残りの条件は作業ブランチで満たせる見込みであり、切り分けを以下に記録する
+- 動作する範囲: GOAWAY 受信後に `is_closed()` が偽のままになること、`GoAway` イベントと `on_goaway` の初回のみ発火、確立済みストリームと datagram の送受信継続、`H3_GENERAL_PROTOCOL_ERROR` の不送出、接続エラー時の `is_closed()` 真の維持は、いずれも作業ブランチで確認済みである
+- nghttp3 側の制約: 同梱 nghttp3 は GOAWAY 受信後に `NGHTTP3_CONN_FLAG_GOAWAY_RECVED` を立て、新規 open 系 (`nghttp3_conn_open_wt_data_stream` と request 送出系) を一律 `NGHTTP3_ERR_CONN_CLOSING` で拒否する。ソース内の `TODO Check GOAWAY last stream ID` が示すとおり GOAWAY ID による可否判定は未実装であり、ID の値によらない一律拒否である。フォークは規約で禁止のため、こちら側で緩和できない
+- nghttp3 の一律拒否は仕様違反ではない。`refs/h3/rfc9114.txt` Section 5.2 は「Endpoints MUST NOT initiate new requests」と定めており、新規 open を拒否する実装はこの MUST に適合する。draft-ietf-webtrans-http3-16 Section 4.7 の「MAY open new WebTransport streams」は許容規定であり、拒否しても違反にならない
+- issue 側の判断ミス: 完了条件は上記 MAY を必須と読み違えていた。加えて GOAWAY ID の意味論の考慮が漏れていた。`refs/h3/rfc9114.txt` Section 5.2 は GOAWAY ID 以上の新規要求を拒否することを求めており、ID によっては新規 open が正当に拒否される。テストの注入値と表明の組み合わせでは ID 制約の分離ができていなかった
+- よって原因は両方である。nghttp3 の保守的な実装と、issue の完了条件の書き過ぎが重なっている。`shutdown_cb` が `closed_` を立てる本来の不具合 (protocol-error close) とは別の層の話であり、切り分けて記録する
+- 再開条件: nghttp3 上流が GOAWAY ID 考慮の open 可否に対応したら reopened にする。または完了条件を「既存継続と通知のみ」に絞り直し、新規 open を対象外として再開する。作業ブランチは残し、部分修正は再開時に流用する
