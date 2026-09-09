@@ -1463,3 +1463,282 @@ async def test_stop_while_client_connected(test_certificates):
             await client.close()
         except OSError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_goaway_notifies_server_and_keeps_session(test_certificates):
+    """GOAWAY 受信でサーバーに通知し既存セッションが継続することを確認
+
+    高レベル Server と Sans-IO クライアントで検証する。GOAWAY を 2 回
+    送っても on_goaway は 1 回のみ発火し、データグラムの送受信は継続する
+    (draft-15 Section 6.13 の graceful shutdown)。
+    """
+    from conftest import _encode_goaway_frame
+
+    async def allow_all(session_id, headers, addr):
+        return None
+
+    goaway_calls: list[tuple[int, int, tuple]] = []
+    goaway_event = asyncio.Event()
+    datagram_received: list[bytes] = []
+    datagram_event = asyncio.Event()
+
+    async def on_goaway(last_stream_id, error_code, addr):
+        goaway_calls.append((last_stream_id, error_code, addr))
+        goaway_event.set()
+
+    async def on_datagram(data: bytes, session_writer) -> None:
+        datagram_received.append(data)
+        datagram_event.set()
+
+    server, reader, writer, client, session_id = await _h2_server_with_sans_io_client(
+        test_certificates, allow_all
+    )
+    server.on_goaway(on_goaway)
+    server.on_datagram(on_datagram)
+    try:
+        # セッションを確立する
+        events = await _pump_sans_io_h2(
+            reader, writer, client, want_types={h2_low.EventType.SESSION_READY}
+        )
+        assert [e for e in events if e.type == h2_low.EventType.SESSION_READY]
+
+        # GOAWAY を 2 回送る。last_stream_id はサーバー起点ストリームを
+        # 指すため 0 とする (parity 不整合の値は nghttp2 が黙って無視するため)
+        writer.write(_encode_goaway_frame(0, 0))
+        await writer.drain()
+        writer.write(_encode_goaway_frame(0, 0))
+        await writer.drain()
+        await asyncio.wait_for(goaway_event.wait(), timeout=5.0)
+        await asyncio.sleep(0.3)
+
+        # 初回のみ 1 回発火する
+        assert len(goaway_calls) == 1
+        assert goaway_calls[0][0] == 0
+        assert goaway_calls[0][1] == 0
+        assert isinstance(goaway_calls[0][2], tuple)
+
+        # 既存セッションでデータグラムの受信が継続する
+        client.send_datagram(session_id, b"after-goaway")
+        _send_all_h2_data(client, writer)
+        await writer.drain()
+        await asyncio.wait_for(datagram_event.wait(), timeout=5.0)
+        assert datagram_received == [b"after-goaway"]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+async def _serve_fake_h2_goaway(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """最小応答の手続きサーバーで 1 接続を処理する
+
+    SETTINGS 交換と 2xx 応答の後、届いた DATA フレーム (ストリーム 1)
+    をそのまま返し、初回転送後に GOAWAY を 2 回送る (重複抑止の検証用)。
+    高レベル Client の GOAWAY 関連テストで共用する。
+    """
+    from conftest import _encode_goaway_frame
+
+    # クライアントの preface + SETTINGS を読む
+    try:
+        await asyncio.wait_for(reader.read(65535), timeout=5.0)
+    except TimeoutError:
+        writer.close()
+        return
+    # SETTINGS (空ではなく WebTransport 有効化) を返す
+    settings = (
+        (0x0008).to_bytes(2, "big")
+        + (1).to_bytes(4, "big")
+        + (0x2B60).to_bytes(2, "big")
+        + (1).to_bytes(4, "big")
+    )
+    writer.write(
+        len(settings).to_bytes(3, "big") + bytes([0x04, 0x00]) + (0).to_bytes(4, "big") + settings
+    )
+    await writer.drain()
+    # CONNECT を読む
+    try:
+        await asyncio.wait_for(reader.read(65535), timeout=5.0)
+    except TimeoutError:
+        writer.close()
+        return
+    # 2xx (:status 200) を返す
+    writer.write(
+        (1).to_bytes(3, "big") + bytes([0x01, 0x04]) + (1).to_bytes(4, "big") + bytes([0x88])
+    )
+    await writer.drain()
+    sent_goaway = False
+    buffer = b""
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(65535), timeout=5.0)
+            except TimeoutError:
+                continue
+            if not chunk:
+                break
+            buffer += chunk
+            # 届いた DATA フレーム (ストリーム 1) をそのまま返す
+            while len(buffer) >= 9:
+                length = int.from_bytes(buffer[0:3], "big")
+                frame_type = buffer[3]
+                stream_id = int.from_bytes(buffer[5:9], "big") & 0x7FFFFFFF
+                if len(buffer) < 9 + length:
+                    break
+                frame = buffer[: 9 + length]
+                buffer = buffer[9 + length :]
+                if frame_type == 0x00 and stream_id == 1 and length > 0:
+                    writer.write(frame)
+                    await writer.drain()
+                    # 初回 DATA 転送後に GOAWAY を 2 回送る (重複抑止の検証用)
+                    if not sent_goaway:
+                        sent_goaway = True
+                        writer.write(_encode_goaway_frame(1, 0))
+                        await writer.drain()
+                        writer.write(_encode_goaway_frame(1, 0))
+                        await writer.drain()
+    except ConnectionError, OSError:
+        pass
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_goaway_notifies_client_and_keeps_session(test_certificates):
+    """GOAWAY 受信でクライアントに通知し既存セッションが継続することを確認
+
+    高レベル Client と最小応答の手続きサーバーで検証する。手続き
+    サーバーは SETTINGS 交換と 2xx 応答と DATA 転送と GOAWAY 送出のみを
+    行う。GOAWAY 前後でデータグラムの往復が継続し、on_goaway は 1 回
+    のみ発火する。
+    """
+    from webtransport.h2 import Client
+
+    goaway_calls: list[tuple[int, int]] = []
+    echoes: list[bytes] = []
+    echo_event = asyncio.Event()
+
+    async def handle_fake_server(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        await _serve_fake_h2_goaway(reader, writer)
+
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(test_certificates["certfile"], test_certificates["keyfile"])
+    ssl_context.set_alpn_protocols(["h2"])
+    fake_server = await asyncio.start_server(handle_fake_server, "127.0.0.1", 0, ssl=ssl_context)
+    port = fake_server.sockets[0].getsockname()[1]
+    try:
+        client = Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
+
+        async def on_goaway(last_stream_id, error_code):
+            goaway_calls.append((last_stream_id, error_code))
+
+        async def on_datagram(data: bytes) -> None:
+            echoes.append(data)
+            echo_event.set()
+
+        client.on_goaway(on_goaway)
+        client.on_datagram(on_datagram)
+        await client.connect()
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+        try:
+            # GOAWAY 前の往復
+            await client.send_datagram(b"before-goaway")
+            await asyncio.wait_for(echo_event.wait(), timeout=5.0)
+            assert echoes == [b"before-goaway"]
+            echo_event.clear()
+
+            # GOAWAY 観測を待つ (2 回送付でも 1 回のみ発火する)
+            for _ in range(100):
+                if goaway_calls:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(goaway_calls) == 1
+            assert goaway_calls[0] == (1, 0)
+            await asyncio.sleep(0.3)
+            assert len(goaway_calls) == 1
+
+            # GOAWAY 後の往復が継続する
+            await client.send_datagram(b"after-goaway")
+            await asyncio.wait_for(echo_event.wait(), timeout=5.0)
+            assert echoes == [b"before-goaway", b"after-goaway"]
+            assert client._goaway_notified is True
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+    finally:
+        fake_server.close()
+        await fake_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_goaway_notified_again_after_reconnect(test_certificates):
+    """再接続後は GOAWAY 通知が再び発火することを確認
+
+    同一 Client インスタンスの使い回しで通知済み印が残らない。
+    """
+    from webtransport.h2 import Client
+
+    goaway_calls: list[tuple[int, int]] = []
+
+    async def handle_fake_server(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        await _serve_fake_h2_goaway(reader, writer)
+
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(test_certificates["certfile"], test_certificates["keyfile"])
+    ssl_context.set_alpn_protocols(["h2"])
+    fake_server = await asyncio.start_server(handle_fake_server, "127.0.0.1", 0, ssl=ssl_context)
+    port = fake_server.sockets[0].getsockname()[1]
+    try:
+        client = Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
+
+        async def on_goaway(last_stream_id, error_code):
+            goaway_calls.append((last_stream_id, error_code))
+
+        client.on_goaway(on_goaway)
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        # 1 本目の接続で GOAWAY を観測する
+        await client.connect()
+        client_task = asyncio.create_task(run_client())
+        try:
+            await client.send_datagram(b"first")
+            for _ in range(100):
+                if goaway_calls:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(goaway_calls) == 1
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+
+        # 再接続後も GOAWAY が通知される
+        await client.connect()
+        client_task = asyncio.create_task(run_client())
+        try:
+            await client.send_datagram(b"second")
+            for _ in range(100):
+                if len(goaway_calls) >= 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(goaway_calls) == 2
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+    finally:
+        fake_server.close()
+        await fake_server.wait_closed()

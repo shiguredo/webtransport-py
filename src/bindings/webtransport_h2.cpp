@@ -1482,7 +1482,8 @@ H2Session::H2Session(H2Session&& other) noexcept
       peer_wt_initial_max_streams_bidi_(
           other.peer_wt_initial_max_streams_bidi_),
       closed_(other.closed_),
-      goaway_sent_(other.goaway_sent_) {
+      goaway_sent_(other.goaway_sent_),
+      goaway_received_(other.goaway_received_) {
   other.session_ = nullptr;
 }
 
@@ -1513,6 +1514,7 @@ H2Session& H2Session::operator=(H2Session&& other) noexcept {
     peer_wt_initial_max_streams_bidi_ = other.peer_wt_initial_max_streams_bidi_;
     closed_ = other.closed_;
     goaway_sent_ = other.goaway_sent_;
+    goaway_received_ = other.goaway_received_;
     other.session_ = nullptr;
   }
   return *this;
@@ -1649,6 +1651,12 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
 
   // draft-15 Section 3.1: SETTINGS 受信前に CONNECT してはならない
   if (!is_webtransport_ready()) {
+    return -1;
+  }
+
+  // draft-15 Section 6.13: GOAWAY 受信後は新規 CONNECT 要求を抑止する。
+  // 既存セッションの送受信と WT ストリーム open は継続する
+  if (goaway_received_) {
     return -1;
   }
 
@@ -2640,9 +2648,18 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
       }
       break;
 
-    case NGHTTP2_GOAWAY:
-      h2_session->closed_ = true;
+    case NGHTTP2_GOAWAY: {
+      // draft-15 Section 6.13 の graceful shutdown: GOAWAY 受信後も既存
+      // セッションの送受信を継続する。closed_ にはせず、新規 CONNECT の
+      // 抑止のみを goaway_received_ で行う
+      H2Event event;
+      event.type = H2EventType::GoAway;
+      event.last_stream_id = frame->goaway.last_stream_id;
+      event.error_code = frame->goaway.error_code;
+      h2_session->push_event(std::move(event));
+      h2_session->goaway_received_ = true;
       break;
+    }
 
     default:
       break;
@@ -2870,7 +2887,8 @@ void bind_webtransport_h2(nb::module_& m) {
       .value("STOP_SENDING", H2EventType::StopSending)
       .value("DATAGRAM", H2EventType::Datagram)
       .value("ERROR", H2EventType::Error)
-      .value("SESSION_REJECTED", H2EventType::SessionRejected);
+      .value("SESSION_REJECTED", H2EventType::SessionRejected)
+      .value("GOAWAY", H2EventType::GoAway);
 
   // H2Event
   nb::class_<H2Event>(h2_mod, "Event", "WebTransport over HTTP/2 イベント")
@@ -2893,7 +2911,10 @@ void bind_webtransport_h2(nb::module_& m) {
               "(不正値・パース失敗は 0 に丸められる)")
       .def_ro("headers", &H2Event::headers,
               "SessionReady 発火時の受信 HTTP ヘッダー (疑似ヘッダー :status "
-              "等を含む)。他イベントでは空");
+              "等を含む)。他イベントでは空")
+      .def_ro(
+          "last_stream_id", &H2Event::last_stream_id,
+          "GoAway 発火時の GOAWAY フレームの last_stream_id。他イベントでは 0");
 
   // H2Session
   nb::class_<H2Session>(h2_mod, "Session",

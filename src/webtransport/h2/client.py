@@ -83,6 +83,8 @@ class Client:
         self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
         self._on_error: Callable[[int, str], Awaitable[None]] | None = None
+        self._on_goaway: Callable[[int, int], Awaitable[None]] | None = None
+        self._goaway_notified = False
 
     @property
     def url(self) -> str:
@@ -180,6 +182,20 @@ class Client:
             callback: async def callback(error_code: int, error_message: str) -> None
         """
         self._on_error = callback
+
+    def on_goaway(
+        self,
+        callback: Callable[[int, int], Awaitable[None]],
+    ) -> None:
+        """GOAWAY 受信時のコールバックを設定する
+
+        graceful shutdown の通知であり、既存セッションの送受信は継続する
+        (draft-15 Section 6.13)。初回受信のみ発火する。
+
+        Args:
+            callback: async def callback(last_stream_id: int, error_code: int) -> None
+        """
+        self._on_goaway = callback
 
     def _parse_url(self, url: str) -> tuple[str, int, str]:
         """URL をパースする"""
@@ -300,6 +316,8 @@ class Client:
             # 書き換えない。役割 (クライアント) は create_client が決める
             config = self._user_config if self._user_config is not None else h2_low.Config()
             self._session = h2_low.Session.create_client(config)
+            # 新規接続のため GOAWAY 通知済み印を戻す
+            self._goaway_notified = False
 
             await self._send_pending()
 
@@ -516,6 +534,11 @@ class Client:
 
                 elif event.type == h2_low.EventType.DATAGRAM and self._on_datagram is not None:
                     await self._on_datagram(event.data)
+
+                elif event.type == h2_low.EventType.GOAWAY and not self._goaway_notified:
+                    self._goaway_notified = True
+                    if self._on_goaway is not None:
+                        await self._on_goaway(event.last_stream_id, event.error_code)
 
                 # 0x50 (WT_FLOW_CONTROL_ERROR) のみ on_error へ渡す
                 elif (

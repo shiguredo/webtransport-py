@@ -250,6 +250,17 @@ def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool =
     )
 
 
+def _encode_goaway_frame(last_stream_id: int, error_code: int = 0) -> bytes:
+    """HTTP/2 GOAWAY フレームのワイヤバイト列を組み立てる
+
+    Type 0x7、ストリーム 0、ペイロードは last_stream_id (4 バイト) と
+    error_code (4 バイト) である (RFC 9113 Section 6.8)。h2 の公開 API
+    に送出手段が存在しないため、ワイヤ注入で再現する。
+    """
+    payload = last_stream_id.to_bytes(4, "big") + error_code.to_bytes(4, "big")
+    return len(payload).to_bytes(3, "big") + bytes([0x07, 0x00]) + (0).to_bytes(4, "big") + payload
+
+
 def _encode_wt_datagram(session_id: int, payload: bytes) -> bytes:
     """WebTransport データグラムのワイヤ形式を組み立てる
 
