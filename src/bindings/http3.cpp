@@ -227,9 +227,15 @@ Http3Connection::get_streams_to_send() {
     }
     if (total_len > 0) {
       nghttp3_conn_add_write_offset(conn_, stream_id, total_len);
+      // 書き出したデータを nghttp3 の送信バッファから解放する
+      // QUIC (ngtcp2) が再送用データを保持するため、ACK を待たずに
+      // 解放してよい。この呼び出しで acked_stream_data コールバックが
+      // 発火し、stream_buffers_ が解放される
+      nghttp3_conn_add_ack_offset(conn_, stream_id, total_len);
     } else if (fin) {
-      // FIN のみの場合も offset 0 を通知する
+      // FIN のみの場合も offset 0 を通知する (書き出し側との対称を保つため)
       nghttp3_conn_add_write_offset(conn_, stream_id, 0);
+      nghttp3_conn_add_ack_offset(conn_, stream_id, 0);
     }
 
     if (sveccnt == 0) {
@@ -679,6 +685,14 @@ std::optional<int> Http3Connection::stream_flushed(int64_t stream_id) const {
   return nghttp3_conn_is_stream_flushed(conn_, stream_id);
 }
 
+std::optional<bool> Http3Connection::has_stream_buffer(
+    int64_t stream_id) const {
+  if (stream_buffers_.find(stream_id) == stream_buffers_.end()) {
+    return std::nullopt;
+  }
+  return true;
+}
+
 std::optional<uint64_t> Http3Connection::frame_payload_left(
     int64_t stream_id) const {
   if (!conn_ || closed_) {
@@ -840,24 +854,35 @@ int Http3Connection::acked_stream_data_cb(nghttp3_conn* conn,
                                           void* stream_user_data) {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
-  // 送信済みデータを削除
+  // ACK されたデータを stream_buffers_ から削除する
+  // (H3Session::acked_stream_data_cb と同形。 offset フィールドの扱いも
+  // H3 に倣い無視し、 data.size() で比較する)
   auto it = self->stream_buffers_.find(stream_id);
-  if (it != self->stream_buffers_.end()) {
-    uint64_t remaining = datalen;
-    while (remaining > 0 && !it->second.empty()) {
-      auto& buffer = it->second.front();
-      if (buffer.offset >= remaining) {
-        // このバッファは全て ack された
-        it->second.pop_front();
-        remaining = 0;
-      } else {
-        remaining -= buffer.offset;
-        it->second.pop_front();
-      }
+  if (it == self->stream_buffers_.end()) {
+    return 0;
+  }
+
+  auto& buffers = it->second;
+  uint64_t remaining = datalen;
+
+  while (remaining > 0 && !buffers.empty()) {
+    auto& front = buffers.front();
+    if (front.data.size() <= remaining) {
+      remaining -= front.data.size();
+      buffers.pop_front();
+    } else {
+      // 部分的に ACK された場合 (通常は発生しないが念のため)
+      front.data.erase(front.data.begin(),
+                       front.data.begin() + static_cast<ptrdiff_t>(remaining));
+      // 残部が先頭になるため offset を戻す
+      front.offset = 0;
+      remaining = 0;
     }
-    if (it->second.empty()) {
-      self->stream_buffers_.erase(it);
-    }
+  }
+
+  // 空になったエントリを削除する
+  if (buffers.empty()) {
+    self->stream_buffers_.erase(it);
   }
 
   return 0;
@@ -1089,6 +1114,15 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
     if (remaining == 0) {
       if (buffer.fin) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        // 読み出し済みの空エントリを削除する
+        // データ量 0 のため acked_stream_data コールバックは発火せず、
+        // ACK 経路では解放されない
+        // ここでは vec を返していないため erase しても安全。
+        // 先頭とは限らないため位置のイテレータで消す
+        buffers.erase(itb);
+        if (buffers.empty()) {
+          self->stream_buffers_.erase(it);
+        }
         return 0;
       }
       continue;
@@ -1311,6 +1345,11 @@ void bind_http3(nb::module_& m) {
            nb::arg("stream_id"),
            nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
            "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
+      .def("_has_stream_buffer", &Http3Connection::has_stream_buffer,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def _has_stream_buffer(self, stream_id: int) -> "
+                   "bool | None"),
+           "テスト専用: ストリームの送信バッファエントリの有無を確認")
       .def(
           "frame_payload_left", &Http3Connection::frame_payload_left,
           nb::lock_self(), nb::arg("stream_id"),

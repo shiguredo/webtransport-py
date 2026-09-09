@@ -1526,8 +1526,9 @@ nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
         // 読み出し済みの空エントリを削除する
         // データ量 0 のため acked_stream_data コールバックは発火せず、
         // ACK 経路では解放されない
-        // ここでは vec を返していないため pop_front しても安全
-        buffers.pop_front();
+        // ここでは vec を返していないため erase しても安全。
+        // 先頭とは限らないため位置のイテレータで消す
+        buffers.erase(itb);
         if (buffers.empty()) {
           stream_buffers_.erase(it);
         }
@@ -1970,6 +1971,8 @@ int H3Session::acked_stream_data_cb(nghttp3_conn* /*conn*/,
       // 部分的に ACK された場合 (通常は発生しないが念のため)
       front.data.erase(front.data.begin(),
                        front.data.begin() + static_cast<ptrdiff_t>(remaining));
+      // 残部が先頭になるため offset を戻す
+      front.offset = 0;
       remaining = 0;
     }
   }
