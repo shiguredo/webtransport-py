@@ -27,3 +27,8 @@ draft-ietf-webtrans-http3-16 Section 4.7 の WT_DRAIN_SESSION (0x78ae) は、h2 
 - 受信で `on_session_draining` が発火すること
 - e2e テストを追加すること
 - 既存のテストがすべて通ること
+
+## pending にした理由
+
+- nghttp3 に WT_DRAIN_SESSION (0x78AE) の受信コールバックが無く、`nghttp3_conn.c` が内部で当該カプセルを消費するため、バインディング層から観測できない。CODEBASE.md の「nghttp3 をフォークしないこと」に従い、nghttp3 側の対応待ちとする
+- nghttp3 が受信経路を提供した時点で reopened にして設計方針を確定する
