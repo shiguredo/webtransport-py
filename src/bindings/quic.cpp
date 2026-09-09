@@ -1536,6 +1536,10 @@ std::optional<QuicPacket> QuicConnection::send() {
       }
 
       if (nwrite > 0) {
+        // pacing 契約のため確定書き出しの直後に呼ぶ (writev 系の直後に
+        // 更新する契約。MORE 継続要求時は呼ばない。nwrite == 0 は書出しが
+        // ないため更新も no-op で呼ばない)
+        ngtcp2_conn_update_pkt_tx_time(conn_, timestamp_ns_);
         return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
                            path);
       }
@@ -1596,6 +1600,10 @@ std::optional<QuicPacket> QuicConnection::send() {
     }
 
     if (nwrite > 0) {
+      // pacing 契約のため確定書き出しの直後に呼ぶ (writev 系の直後に
+      // 更新する契約。MORE 継続要求時は呼ばない。nwrite == 0 は書出しが
+      // ないため更新も no-op で呼ばない)
+      ngtcp2_conn_update_pkt_tx_time(conn_, timestamp_ns_);
       return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
                          path);
     }
@@ -1616,6 +1624,10 @@ std::optional<QuicPacket> QuicConnection::send() {
                                        send_buffer_.size(), &ndatalen, 0, -1,
                                        nullptr, 0, timestamp_ns_);
     if (nwrite > 0) {
+      // pacing 契約のため確定書き出しの直後に呼ぶ (writev 系の直後に
+      // 更新する契約。MORE 継続要求時は呼ばない。nwrite == 0 は書出しが
+      // ないため更新も no-op で呼ばない)
+      ngtcp2_conn_update_pkt_tx_time(conn_, timestamp_ns_);
       return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite),
                          path);
     }
@@ -1625,6 +1637,10 @@ std::optional<QuicPacket> QuicConnection::send() {
   nwrite = ngtcp2_conn_write_pkt(conn_, &path, &pi, send_buffer_.data(),
                                  send_buffer_.size(), timestamp_ns_);
   if (nwrite > 0) {
+    // pacing 契約のため確定書き出しの直後に呼ぶ (writev 系の直後に
+    // 更新する契約。MORE 継続要求時は呼ばない。nwrite == 0 は書出しが
+    // ないため更新も no-op で呼ばない)
+    ngtcp2_conn_update_pkt_tx_time(conn_, timestamp_ns_);
     return make_packet(send_buffer_.data(), static_cast<size_t>(nwrite), path);
   }
 

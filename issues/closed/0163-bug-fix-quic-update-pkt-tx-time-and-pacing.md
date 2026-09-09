@@ -1,7 +1,7 @@
 # QUIC バインディングが ngtcp2_conn_update_pkt_tx_time を呼ばず pacing 契約に違反する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-quic-update-pkt-tx-time-and-pacing
 - Polished: 2026-09-07
 
@@ -29,3 +29,10 @@
 - 大量送信直後に `get_timeout()` が未来の pacing 期限を返すこと (Sans-IO で観測する)
 - `tests/test_quic_pacing.py` を新規作成し、上記 2 件を検証すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `QuicConnection::send` の確定書き出し 4 経路の直後に `ngtcp2_conn_update_pkt_tx_time` を呼ぶ。継続要求時と未書き出し時は呼ばない
+- Sans-IO 駆動の共用補助に期限待ちを入れ、既存ポンプを pacing 対応にする
+- `tests/test_quic_pacing.py` に 2 件のテスト (確定書き出しの期限設定・大量送信の期限報告) を追加する
+- 全 958 件のテストが通過することと、レビュー 5 周で致命的と重要が 0 件であることを確認した

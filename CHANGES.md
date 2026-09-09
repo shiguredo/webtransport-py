@@ -261,6 +261,8 @@
   - @voluntas
 - [FIX] UDP 系サーバーが証明書の誤設定を黙殺して無言で接続を捨て続ける問題を修正する
   - @voluntas
+- [FIX] QUIC バインディングが pacing 契約に違反してバースト送信する問題を修正する
+  - @voluntas
 - [FIX] QUIC サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
   - @voluntas
 
