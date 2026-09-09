@@ -100,6 +100,13 @@ class Server:
         # 接続からアドレスを引く逆引き (キー張り替えを O(1) にする)。
         # Connection は identity hash のためキーに使える
         self._conn_addr: dict[quic_low.Connection, tuple[str, int]] = {}
+        # 接続ごとのアプリコールバック配送キューと実行タスク。
+        # 受信ループは drain したイベントを投入するのみで await しない。
+        # 同一接続内の順序保証のため接続ごとに単独タスクとする
+        self._connection_queues: dict[
+            quic_low.Connection, asyncio.Queue[tuple[tuple[str, int], quic_low.Event]]
+        ] = {}
+        self._connection_tasks: dict[quic_low.Connection, asyncio.Task[None]] = {}
         self._running = False
         self._actual_port = 0
 
@@ -195,6 +202,22 @@ class Server:
     async def stop(self) -> None:
         """サーバーを停止する"""
         self._running = False
+        # 接続タスクを先に止める (受信ループと並行する
+        # アプリコールバックが残らないようにする)。コールバック内から
+        # stop() された場合は自身を待たない (自己 await を避ける)
+        current_task = asyncio.current_task()
+        targets = [task for task in self._connection_tasks.values() if task is not current_task]
+        for task in targets:
+            task.cancel()
+        # gather で例外を値として回収する (blind except を避ける)
+        results = await asyncio.gather(*targets, return_exceptions=True)
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, BaseException):
+                logger.warning("connection task ended with error: %s", result)
+        self._connection_tasks.clear()
+        self._connection_queues.clear()
         try:
             for addr, connection in list(self._connections.items()):
                 connection.close()
@@ -242,6 +265,8 @@ class Server:
         """初期パケットから接続を作成する"""
         if self._local_addr is None:
             raise RuntimeError("server is not started")
+        if not self._running:
+            raise RuntimeError("server is stopped")
 
         config = self._create_config()
         connection = quic_low.Connection.accept(
@@ -290,36 +315,133 @@ class Server:
             del self._connections[old_addr]
         self._drop_dcid_index(connection)
 
-    async def _drain_connection_events(
+    def _discard_connection(self, connection: quic_low.Connection) -> None:
+        """終了済み接続の登録を全て外す (受信ループ側のみが呼ぶ)
+
+        ローカル close 済みで CONNECTION_CLOSED イベントが来ない接続用。
+        CLOSED 排水時は `_enqueue_connection_events` 内で既に外れるため、
+        ここには残らない
+        """
+        self._remove_connection(connection)
+        task = self._connection_tasks.pop(connection, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._connection_queues.pop(connection, None)
+
+    def _ensure_connection_task(self, connection: quic_low.Connection) -> None:
+        """接続の配送タスクがなければ生成する"""
+        if not self._running:
+            return
+        task = self._connection_tasks.get(connection)
+        if task is not None and not task.done():
+            return
+        # 残存キューがあれば再利用する (異常終了時の未処理分を失わない)
+        queue = self._connection_queues.get(connection)
+        if queue is None:
+            queue = asyncio.Queue()
+            self._connection_queues[connection] = queue
+        task = asyncio.create_task(self._run_connection_loop(connection, queue))
+        task.add_done_callback(
+            lambda done_task, conn=connection: self._on_connection_task_done(conn, done_task)
+        )
+        self._connection_tasks[connection] = task
+
+    def _on_connection_task_done(
+        self, connection: quic_low.Connection, task: asyncio.Task[None]
+    ) -> None:
+        """接続タスク終了時の後処理。例外時は記録後に当該接続を閉じる"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.exception("connection task failed, closing connection")
+        try:
+            connection.close()
+        except (OSError, RuntimeError) as close_exc:
+            logger.warning("failed to close connection: %s", close_exc)
+
+    def _enqueue_connection_events(
         self, addr: tuple[str, int], connection: quic_low.Connection
     ) -> None:
-        """受信後のイベントを処理する。終了時は登録を外す"""
+        """受信後のイベントをキューへ投入する。待たずに戻る
+
+        接続マッピングの削除は本関数 (受信ループ側) のみが行い、
+        キューとタスクの削除は `_run_connection_loop` の `finally` が行う。
+        アプリコールバックの実行は接続タスクに委ねる。
+        キューは無制限であり背圧をかけない (低速接続の洪水で膨らみ得る。
+        上限と溢れ方針は別途定める)
+        """
+        self._ensure_connection_task(connection)
+        queue = self._connection_queues.get(connection)
+        if queue is None:
+            return
         while True:
             event = connection.next_event()
             if event is None:
                 break
-
-            if event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
-                if self._on_handshake_completed is not None:
-                    await self._on_handshake_completed(addr)
-
-            elif event.type == quic_low.EventType.STREAM_DATA:
-                if self._on_stream_data is not None:
-                    await self._on_stream_data(
-                        event.stream_id,
-                        event.data,
-                        event.fin,
-                        addr,
-                    )
-
-            elif event.type == quic_low.EventType.DATAGRAM:
-                if self._on_datagram is not None:
-                    await self._on_datagram(event.data, addr)
-
-            elif event.type == quic_low.EventType.CONNECTION_CLOSED:
-                if self._on_connection_closed is not None:
-                    await self._on_connection_closed(addr)
+            queue.put_nowait((addr, event))
+            if event.type == quic_low.EventType.CONNECTION_CLOSED:
                 self._remove_connection(connection)
+
+    async def _dispatch_connection_event(
+        self, addr: tuple[str, int], event: quic_low.Event
+    ) -> bool:
+        """1 イベントを実行する。終了イベントなら True を返す"""
+        if event.type == quic_low.EventType.HANDSHAKE_COMPLETED:
+            if self._on_handshake_completed is not None:
+                await self._on_handshake_completed(addr)
+        elif event.type == quic_low.EventType.STREAM_DATA:
+            if self._on_stream_data is not None:
+                await self._on_stream_data(
+                    event.stream_id,
+                    event.data,
+                    event.fin,
+                    addr,
+                )
+        elif event.type == quic_low.EventType.DATAGRAM:
+            if self._on_datagram is not None:
+                await self._on_datagram(event.data, addr)
+        elif event.type == quic_low.EventType.CONNECTION_CLOSED:
+            if self._on_connection_closed is not None:
+                await self._on_connection_closed(addr)
+            return True
+        return False
+
+    async def _run_connection_loop(
+        self,
+        connection: quic_low.Connection,
+        queue: asyncio.Queue[tuple[tuple[str, int], quic_low.Event]],
+    ) -> None:
+        """接続ごとのアプリコールバック実行ループ
+
+        キューから取り出して順序どおりに実行する。コールバック例外時は
+        タスクを異常終了させ、終了コールバックが記録と接続 close を行う。
+        close() 後の送出と CONNECTION_CLOSED 通知は受信ループの
+        周期的走査に委ねる。終了時は自身の登録を外す (未処理分のある
+        キューは次タスクのために残す)
+        """
+        try:
+            while True:
+                queued_addr, event = await queue.get()
+                # 配送直前に現アドレスを解決する (Migration で張り替わるため。
+                # 削除済みは投入時アドレスへ退行する)
+                addr = self._conn_addr.get(connection, queued_addr)
+                finished = await self._dispatch_connection_event(addr, event)
+                if finished:
+                    break
+                # コールバック内から stop() された場合は自身も抜ける
+                # (登録は stop() 側で消えているため finally は無害)
+                if not self._running:
+                    break
+        finally:
+            # 未処理分のあるキューは次タスクのために残す
+            if queue.empty():
+                if self._connection_queues.get(connection) is queue:
+                    del self._connection_queues[connection]
+                current = self._connection_tasks.get(connection)
+                if current is asyncio.current_task():
+                    del self._connection_tasks[connection]
 
     async def _send_to(self, addr: tuple[str, int], connection: quic_low.Connection) -> None:
         """接続の送信待ちパケットを 1 つ送出する
@@ -327,8 +449,11 @@ class Server:
         パケットにリモートアドレスが埋まっていればそれを使い、
         未設定ならマップ上のクライアントアドレスにフォールバックする。
         send() の連続 drain は ACK 待ちが必要なケースでハングするため行わない。
+        削除済み接続への送信は何もしない (終了済み接続の残存送信物は送らない)
         """
         if self._socket is None:
+            return
+        if connection not in self._conn_addr:
             return
 
         packet = connection.send()
@@ -452,14 +577,18 @@ class Server:
                                 self._refresh_dcid_index(candidate)
                                 connection = candidate
                             elif result == quic_low.ReceiveResult.CLOSED:
-                                # 終了時は後処理 (イベント drain と登録外し)
-                                # のために drain する。通知先は登録済みの旧
-                                # アドレスにする。破棄時は何もしない
-                                # (滞留イベントの誤帰属を防ぐ)
-                                await self._drain_connection_events(
+                                # 終了時はイベント投入と登録外しのために
+                                # 投入する。通知先は登録済みの旧アドレスに
+                                # する。破棄時は何もしない (滞留イベントの
+                                # 誤帰属を防ぐ)
+                                self._enqueue_connection_events(
                                     self._conn_addr.get(candidate, addr), candidate
                                 )
                     if connection is None:
+                        # 停止競合時は新規受理せずループを抜ける (停止由来の
+                        # RuntimeError をパケット破棄ログに混ぜないため)
+                        if not self._running:
+                            break
                         try:
                             connection = self._accept_connection(addr, data)
                         except ValueError as exc:
@@ -493,17 +622,34 @@ class Server:
                     # 最新化する
                     self._refresh_dcid_index(connection)
 
-                await self._drain_connection_events(addr, connection)
-                await self._send_to(addr, connection)
+                # アプリコールバックを待たず投入のみ行い、送信は全接続走査に委ねる
+                self._enqueue_connection_events(addr, connection)
 
             except TimeoutError:
                 pass
 
-            for addr, connection in list(self._connections.items()):
-                timeout = connection.get_timeout()
-                if timeout is not None and timeout <= 0:
-                    connection.handle_timeout()
-                    await self._send_to(addr, connection)
-                    await self._drain_connection_events(addr, connection)
+            # 受信の有無にかかわらず全接続の送信とタイマーを処理する。
+            # 1 接続のコールバック実行中も他接続の ACK と再送が止まらない
+            # よう、受信ループ側は await するコールバックを持たない。
+            # 1 接続の失敗で他接続が止まらないよう接続ごとに例外を隔離する
+            # (低レベルが想定外の例外を送出しても run 全体を落とさない)
+            for connection in list(self._conn_addr.keys()):
+                try:
+                    current_addr = self._conn_addr.get(connection)
+                    if current_addr is None:
+                        continue
+                    timeout = connection.get_timeout()
+                    if timeout is not None and timeout <= 0:
+                        connection.handle_timeout()
+                    await self._send_to(current_addr, connection)
+                    current_addr = self._conn_addr.get(connection)
+                    if current_addr is None:
+                        continue
+                    self._enqueue_connection_events(current_addr, connection)
+                    # ローカル close 済みで CLOSED が来ない接続を回収する
+                    if connection.is_closed() and connection in self._conn_addr:
+                        self._discard_connection(connection)
+                except (OSError, RuntimeError) as exc:
+                    logger.warning("failed to send packet: %s", exc)
 
             await asyncio.sleep(0.001)
