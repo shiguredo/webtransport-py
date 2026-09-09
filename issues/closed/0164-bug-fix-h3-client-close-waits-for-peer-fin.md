@@ -1,7 +1,7 @@
 # h3.Client.close() にピア FIN 待機がなく WT_CLOSE_SESSION の best-effort 配信を損なう
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-h3-client-close-waits-for-peer-fin
 - Polished: 2026-09-07
 
@@ -39,3 +39,10 @@
 - ピアが応答しない場合は `close_wait_timeout` (既定 3 秒) で close が完了すること
 - `tests/test_e2e_webtransport_h3.py` に待機テスト (FIN 応答あり・なしの両変種) を追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `Client.close()` にピア終了待機を追加し、新規引数 `close_wait_timeout` (既定 3 秒) で上限を設ける。待機中は受信と送信とタイマーを回し、観測・中断・上限のいずれでも閉じる処理へ進む
+- FIN と RESET の観測は待機開始前も含めて常時記録し、後始末は例外時も必ず行う
+- `tests/test_e2e_webtransport_h3.py` に 5 件のテスト (終了観測・上限打ち切り・待機なし・リセット観測・冪等) を追加する
+- 全 964 件のテストが通過することと、レビュー 5 周で致命的と重要が 0 件であることを確認した

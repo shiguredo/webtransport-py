@@ -109,6 +109,23 @@ def _stall_timeout_with_room(client: Connection) -> int | None:
     return None
 
 
+def _prepare_and_stall() -> tuple[Connection, int]:
+    """準備と停滞捕捉を期限が得られるまで繰り返す
+
+    間隔設定はタイミング依存のため、捉えられない回は接続を作り直す
+    """
+    timeout = None
+    client = None
+    for _ in range(3):
+        client, _ = _prepare_paced()
+        timeout = _stall_timeout_with_room(client)
+        if timeout is not None:
+            break
+    assert timeout is not None
+    assert client is not None
+    return client, timeout
+
+
 def test_confirmed_write_sets_pacing_deadline() -> None:
     """
     確定書き出しで pacing 期限が設定されることを確認する
@@ -116,10 +133,7 @@ def test_confirmed_write_sets_pacing_deadline() -> None:
     輻輳ウィンドウに空きがあるのに送出が止まり、未来の期限が返る。
     期限待ち後に ack なしで送出が再開する。
     """
-    client, _ = _prepare_paced()
-    timeout = _stall_timeout_with_room(client)
-    # 停滞を捉えられた (空きがあるのに止まった)
-    assert timeout is not None
+    client, timeout = _prepare_and_stall()
     # 未来の期限である (アイドル期限 30 秒ではない)
     assert 0 < timeout < 1_000_000_000
     # 期限を過ぎると ack なしで送出が再開する
@@ -133,7 +147,5 @@ def test_bulk_send_reports_near_deadline() -> None:
 
     送出が止まった直後の get_timeout() が近い将来の期限を返す。
     """
-    client, _ = _prepare_paced()
-    timeout = _stall_timeout_with_room(client)
-    assert timeout is not None
+    _, timeout = _prepare_and_stall()
     assert 0 <= timeout < 1_000_000_000

@@ -12,9 +12,16 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from conftest import CLIENT_ADDR, SERVER_ADDR, create_client_server_pair, perform_handshake
+from conftest import (
+    CLIENT_ADDR,
+    PUMP_ATTEMPTS,
+    SERVER_ADDR,
+    create_client_server_pair,
+    perform_handshake,
+    wait_pacing_timeout,
+)
 
-from webtransport.quic import Client, EventType, Server
+from webtransport.quic import Client, Connection, EventType, Server
 
 
 async def _run_server(server: Server) -> None:
@@ -539,6 +546,30 @@ async def test_shutdown_stream_from_callback(test_certificates):
     await server.stop()
 
 
+def _drained_stream_data(server: Connection) -> bool:
+    """サーバー側の STREAM_DATA 受信済みなら真を返す (イベント消費つき)"""
+    received = False
+    while True:
+        event = server.next_event()
+        if event is None:
+            break
+        if event.type == EventType.STREAM_DATA:
+            received = True
+    return received
+
+
+def _drained_reset(server: Connection, stream_id: int):
+    """サーバー側の対象ストリームの STREAM_RESET を返す。なければ None"""
+    found = None
+    while True:
+        event = server.next_event()
+        if event is None:
+            break
+        if event.type == EventType.STREAM_RESET and event.stream_id == stream_id:
+            found = event
+    return found
+
+
 def test_close_stream_sends_reset_sans_io():
     """close_stream (shutdown_stream の送出元) がピアへ RESET_STREAM を送出することを確認する
 
@@ -553,35 +584,48 @@ def test_close_stream_sends_reset_sans_io():
     client, server, initial_packet = create_client_server_pair()
     assert perform_handshake(client, server, initial_packet)
 
-    # クライアントがストリームを開いて送信し、サーバーに届ける
+    # クライアントがストリームを開いて送信し、サーバーに届ける。
+    # pacing 期限待ちで空振りするため待って再試行する。サーバー側の
+    # 受信が確認できたら打ち切る (上限いっぱいの空転で制限時間に
+    # 達しないようにする)
     stream_id = client.open_stream(bidirectional=True)
     client.send_stream_data(stream_id, b"ping", fin=False)
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+        if _drained_stream_data(server):
+            break
+        if (
+            client_packet is None
+            and server_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     # shutdown_stream の送出元である close_stream を呼び、RESET_STREAM を送出する
+    reset_event = None
     client.close_stream(stream_id, 42)
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+        reset_event = _drained_reset(server, stream_id)
+        if reset_event is not None:
+            break
+        if (
+            client_packet is None
+            and server_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     # ピア側で STREAM_RESET イベントを受信している
-    saw_reset = False
-    while True:
-        event = server.next_event()
-        if event is None:
-            break
-        if event.type == EventType.STREAM_RESET:
-            saw_reset = True
-            assert event.stream_id == stream_id
-            assert event.error_code == 42
-    assert saw_reset, "close_stream で RESET_STREAM が送出されるべき"
+    assert reset_event is not None, "close_stream で RESET_STREAM が送出されるべき"
+    assert reset_event.error_code == 42
