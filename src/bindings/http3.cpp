@@ -1171,15 +1171,9 @@ void bind_http3(nb::module_& m) {
       .value("HEADERS", Http3EventType::Headers)
       .value("DATA", Http3EventType::Data)
       .value("STREAM_END", Http3EventType::StreamEnd)
-      .value("PUSH_PROMISE", Http3EventType::PushPromise)
       .value("GO_AWAY", Http3EventType::GoAway)
-      .value("RESET", Http3EventType::Reset)
       .value("RESET_STREAM", Http3EventType::ResetStream)
-      .value("STOP_SENDING", Http3EventType::StopSending)
-      .value("WEBTRANSPORT_SESSION_READY",
-             Http3EventType::WebTransportSessionReady)
-      .value("WEBTRANSPORT_STREAM_DATA", Http3EventType::WebTransportStreamData)
-      .value("WEBTRANSPORT_DATAGRAM", Http3EventType::WebTransportDatagram);
+      .value("STOP_SENDING", Http3EventType::StopSending);
 
   // Http3Event
   nb::class_<Http3Event>(http3_m, "Event", "HTTP/3 イベント")

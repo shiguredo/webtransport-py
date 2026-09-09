@@ -54,7 +54,6 @@ def test_quic_event_type():
     assert quic.EventType.STREAM_CLOSED is not None
     assert quic.EventType.STREAM_RESET is not None
     assert quic.EventType.DATAGRAM is not None
-    assert quic.EventType.CONNECTION_ID_RETIRED is not None
 
 
 def test_quic_connection_client():

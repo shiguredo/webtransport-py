@@ -274,6 +274,8 @@
 
 ### misc
 
+- [UPDATE] C++ バインディングの死にコードを削除する
+  - @voluntas
 - [UPDATE] WebTransport over HTTP/3 の低レベル API テストを別ファイルへ分割する
   - @voluntas
 - [UPDATE] RuntimeError メッセージを英語に統一し、C++ の英語コメントを日本語に直す

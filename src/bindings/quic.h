@@ -111,7 +111,6 @@ enum class QuicEventType {
   StreamClosed,
   StreamReset,
   DatagramReceived,
-  ConnectionIdRetired,
   SessionTicket,
   EarlyDataRejected,
   PathValidated,

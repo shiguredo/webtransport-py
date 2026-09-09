@@ -1482,7 +1482,6 @@ H2Session::H2Session(H2Session&& other) noexcept
       peer_wt_initial_max_streams_bidi_(
           other.peer_wt_initial_max_streams_bidi_),
       closed_(other.closed_),
-      goaway_sent_(other.goaway_sent_),
       goaway_received_(other.goaway_received_) {
   other.session_ = nullptr;
 }
@@ -1513,7 +1512,6 @@ H2Session& H2Session::operator=(H2Session&& other) noexcept {
     peer_wt_initial_max_streams_uni_ = other.peer_wt_initial_max_streams_uni_;
     peer_wt_initial_max_streams_bidi_ = other.peer_wt_initial_max_streams_bidi_;
     closed_ = other.closed_;
-    goaway_sent_ = other.goaway_sent_;
     goaway_received_ = other.goaway_received_;
     other.session_ = nullptr;
   }

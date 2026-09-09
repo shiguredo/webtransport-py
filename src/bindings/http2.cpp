@@ -983,8 +983,6 @@ void bind_http2(nb::module_& m) {
       .def_rw("max_header_list_size", &Http2Config::max_header_list_size,
               "最大ヘッダーリストサイズ")
       .def_rw("is_server", &Http2Config::is_server, "サーバーモード")
-      .def_rw("send_preface", &Http2Config::send_preface,
-              "HTTP/2 プリフェイスを送信するか")
       .def_rw("no_rfc7540_priorities", &Http2Config::no_rfc7540_priorities,
               "SETTINGS_NO_RFC7540_PRIORITIES を送信するか");
 

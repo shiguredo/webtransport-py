@@ -50,9 +50,6 @@ struct Http2Config {
   // サーバーモードかどうか
   bool is_server = false;
 
-  // HTTP/2 プリフェイスを送信するか
-  bool send_preface = true;
-
   // SETTINGS_NO_RFC7540_PRIORITIES を送信するか
   // (RFC 9218 の拡張優先度を有効にする。true にすると SETTINGS に
   // NO_RFC7540_PRIORITIES=1 が含まれる)
