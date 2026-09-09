@@ -1,7 +1,7 @@
 # UDP 系サーバー 3 種の except RuntimeError: continue が証明書パス誤設定を黙殺する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-udp-server-except-runtime-error-swallows-config-error
 - Polished: 2026-09-07
 
@@ -31,3 +31,11 @@
 - パケット不正 (Initial 以外・不正ヘッダー) は従来どおり破棄され、`run()` は継続し、WARNING ログが出ること
 - `tests/test_server_config_error.py` を新規作成し、3 Server の fail-fast と破棄継続・WARNING を検証すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- C++ 側の `QuicConnection::accept` で設定不正を `std::invalid_argument` (Python 側で `ValueError`) に分け、パケット不正と実行時失敗は `std::runtime_error` のままにした
+- 3 Server の `run()` は `ValueError` を警告後に再 raise して止め、`RuntimeError` のみ警告後に破棄継続する
+- 3 Server の `start()` で証明書と鍵の存在と可読性を事前検証し、`FileNotFoundError` と `PermissionError` で即時通知する
+- `tests/test_server_config_error.py` に 15 件のテスト (3 Server の fail-fast・破棄継続・再 raise・目録外経路) を追加する
+- 全 950 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
