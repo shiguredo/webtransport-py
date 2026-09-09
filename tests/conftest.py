@@ -3,6 +3,7 @@
 import datetime
 import ipaddress
 import tempfile
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -148,11 +149,21 @@ def create_client_server_pair():
     return client, server, initial_packet.data
 
 
+# pacing 期限待ち 1 回の上限 (秒)。遠い期限は再試行で刻んで待つ
+PACING_WAIT_CAP_SEC = 0.05
+# 送受信ポンプの試行上限。pacing 期限待ちを挟むため旧来の 20 回から増やす
+PUMP_ATTEMPTS = 200
+
+
 def perform_handshake(client: Connection, server: Connection, initial_packet: bytes) -> bool:
-    """QUIC ハンドシェイクを完了させる"""
+    """QUIC ハンドシェイクを完了させる
+
+    pacing 有効時は send() が期限待ちで空振りするため、両方空振りの
+    場合は get_timeout() の期限まで待って再試行する
+    """
     server.receive(initial_packet, SERVER_ADDR, CLIENT_ADDR)
 
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
@@ -164,10 +175,37 @@ def perform_handshake(client: Connection, server: Connection, initial_packet: by
         if client.is_handshake_completed() and server.is_handshake_completed():
             return True
 
-        if not server_packet and not client_packet:
+        if (
+            server_packet is None
+            and client_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
             break
 
     return False
+
+
+def wait_pacing_timeout(*connections: Connection) -> bool:
+    """空振り時に送信可能期限まで待つ。期限がなければ False を返す
+
+    pacing 有効時は send() が期限待ちで空振りするため、期限まで待って
+    再試行する。期限自体がない場合はこれ以上進まないため打ち切る。
+
+    Returns:
+        再試行する場合は True、打ち切る場合は False
+    """
+    timeouts = []
+    for connection in connections:
+        timeout = connection.get_timeout()
+        if timeout is not None:
+            timeouts.append(timeout)
+    if not timeouts:
+        return False
+    # 期限到来済みは即座に再試行し、未来の期限まで待つ (上限付き)
+    wait_ns = min((timeout for timeout in timeouts if timeout > 0), default=0)
+    if wait_ns > 0:
+        time.sleep(min(wait_ns / 1_000_000_000, PACING_WAIT_CAP_SEC))
+    return True
 
 
 def _encode_varint(value: int) -> bytes:

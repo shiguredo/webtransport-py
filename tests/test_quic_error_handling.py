@@ -9,9 +9,11 @@ from conftest import (
     CERTFILE,
     CLIENT_ADDR,
     KEYFILE,
+    PUMP_ATTEMPTS,
     SERVER_ADDR,
     create_client_server_pair,
     perform_handshake,
+    wait_pacing_timeout,
 )
 
 from webtransport.quic import Config, Connection, EventType, ReceiveResult
@@ -162,9 +164,16 @@ def test_connection_close_retransmission_on_receive():
     # 再送後は再び受信を挟まない限り None に戻る (受信データグラムごとに 1 回)
     assert server.send() is None
 
-    # 2 回目の受信でも同じパケットが再送される (再アームの繰り返し)
+    # 2 回目の受信でも同じパケットが再送される (再アームの繰り返し)。
+    # 直前の送出の pacing 期限待ちの可能性があるため待って再試行する
     client.send_stream_data(stream_id, b"world", False)
-    client_packet = client.send()
+    client_packet = None
+    for _ in range(PUMP_ATTEMPTS):
+        client_packet = client.send()
+        if client_packet is not None:
+            break
+        if not wait_pacing_timeout(client, server):
+            break
     assert client_packet is not None
     assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
     retransmitted_again = server.send()
@@ -207,9 +216,16 @@ def test_connection_close_retransmission_stops_after_closing_period():
     assert retransmitted.data == close_packet.data
 
     # 満了前に再アームしておく (満了後も再アーム済みのパケットを返さない
-    # ことを破棄に依存せず確認するため)
+    # ことを破棄に依存せず確認するため)。直前の送出の pacing 期限待ちの
+    # 可能性があるため待って再試行する
     client.send_stream_data(stream_id, b"world", False)
-    client_packet = client.send()
+    client_packet = None
+    for _ in range(PUMP_ATTEMPTS):
+        client_packet = client.send()
+        if client_packet is not None:
+            break
+        if not wait_pacing_timeout(client, server):
+            break
     assert client_packet is not None
     assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
 
@@ -397,9 +413,13 @@ class _CustomVerifyError(Exception):
 
 
 def _pump_until_client_closed(client: Connection, server: Connection) -> None:
-    """クライアントが閉じるまでパケットを交換する"""
+    """クライアントが閉じるまでパケットを交換する
+
+    pacing 有効時は send() が期限待ちで空振りするため、両方空振りの
+    場合は get_timeout() の期限まで待って再試行する
+    """
     # 証明書検証の失敗でハンドシェイクが進まなくなり、クライアントが閉じる
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
@@ -409,6 +429,13 @@ def _pump_until_client_closed(client: Connection, server: Connection) -> None:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
         if client.is_closed():
+            break
+
+        if (
+            server_packet is None
+            and client_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
             break
 
 
@@ -519,7 +546,7 @@ def test_verify_callback_keyboard_interrupt():
 
     # 受信処理で KeyboardInterrupt が送出され、プロセスは継続する
     raised = False
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         server_packet = server.send()
         if server_packet:
             try:
@@ -531,6 +558,14 @@ def test_verify_callback_keyboard_interrupt():
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+        # pacing 期限待ちで空振りするため待って再試行する
+        if (
+            server_packet is None
+            and client_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     assert raised
 
@@ -567,7 +602,7 @@ def test_verify_callback_system_exit():
 
     # 受信処理で SystemExit が送出され、プロセスは継続する
     raised = False
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         server_packet = server.send()
         if server_packet:
             try:
@@ -579,6 +614,14 @@ def test_verify_callback_system_exit():
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+        # pacing 期限待ちで空振りするため待って再試行する
+        if (
+            server_packet is None
+            and client_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     assert raised
 
@@ -609,7 +652,7 @@ def test_verify_callback_cancelled_error():
 
     # 受信処理で CancelledError が送出され、プロセスは継続する
     raised = False
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         server_packet = server.send()
         if server_packet:
             try:
@@ -621,6 +664,14 @@ def test_verify_callback_cancelled_error():
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
+
+        # pacing 期限待ちで空振りするため待って再試行する
+        if (
+            server_packet is None
+            and client_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     assert raised
 

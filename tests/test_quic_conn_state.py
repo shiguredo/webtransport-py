@@ -8,9 +8,11 @@ from conftest import (
     CERTFILE,
     CLIENT_ADDR,
     KEYFILE,
+    PUMP_ATTEMPTS,
     SERVER_ADDR,
     create_client_server_pair,
     perform_handshake,
+    wait_pacing_timeout,
 )
 
 from webtransport.quic import Config, Connection, EventType, ReceiveResult
@@ -255,7 +257,8 @@ def test_tls_alert_on_certificate_verification_failure():
     server.receive(initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
     # ハンドシェイクが失敗してクライアントが閉じるまでパケットを交換する
-    for _ in range(20):
+    # (pacing 有効時は期限待ちで空振りするため待って再試行する)
+    for _ in range(PUMP_ATTEMPTS):
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
@@ -265,6 +268,13 @@ def test_tls_alert_on_certificate_verification_failure():
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
 
         if client.is_closed():
+            break
+
+        if (
+            server_packet is None
+            and client_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
             break
 
     # 証明書検証失敗でクライアントの接続が閉じられる
@@ -305,7 +315,14 @@ def test_conn_state_after_retry():
     # 失敗するため、RETRY 経路が無検証のまま通過することはない。
     first_initial = client.send()
     assert first_initial is not None
-    second_initial = client.send()
+    # 2 パケット目は pacing 期限待ちの可能性があるため期限まで待って再試行する
+    second_initial = None
+    for _ in range(PUMP_ATTEMPTS):
+        second_initial = client.send()
+        if second_initial is not None:
+            break
+        if not wait_pacing_timeout(client):
+            break
     assert second_initial is not None, (
         "ClientHello が Initial 1 パケットに収まるため RETRY 経路を再現できない "
         "(ClientHello サイズが Initial パケットの実効容量を超える必要がある)"
@@ -504,12 +521,19 @@ def test_close_mid_handshake_replaces_error_code():
     client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
 
     # クライアントの Initial をサーバーに渡して Initial 交換済みの状態にする
-    # (ハンドシェイクは未完了)
+    # (ハンドシェイクは未完了)。2 パケット目は pacing 期限待ちの
+    # 可能性があるため待って再試行する
     first_initial = client.send()
     assert first_initial is not None
     server = Connection.accept(server_config, first_initial.data, SERVER_ADDR, CLIENT_ADDR)
     server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR)
-    second_initial = client.send()
+    second_initial = None
+    for _ in range(PUMP_ATTEMPTS):
+        second_initial = client.send()
+        if second_initial is not None:
+            break
+        if not wait_pacing_timeout(client):
+            break
     if second_initial:
         server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR)
     assert server.is_handshake_completed() is False
@@ -546,12 +570,19 @@ def test_close_mid_handshake_retransmits_connection_close():
 
     client = Connection.create_client(client_config, CLIENT_ADDR, SERVER_ADDR)
 
-    # クライアントの Initial をサーバーに渡して Initial 交換済みの状態にする
+    # クライアントの Initial をサーバーに渡して Initial 交換済みの状態にする。
+    # 2 パケット目は pacing 期限待ちの可能性があるため待って再試行する
     first_initial = client.send()
     assert first_initial is not None
     server = Connection.accept(server_config, first_initial.data, SERVER_ADDR, CLIENT_ADDR)
     server.receive(first_initial.data, SERVER_ADDR, CLIENT_ADDR)
-    second_initial = client.send()
+    second_initial = None
+    for _ in range(PUMP_ATTEMPTS):
+        second_initial = client.send()
+        if second_initial is not None:
+            break
+        if not wait_pacing_timeout(client):
+            break
     if second_initial:
         server.receive(second_initial.data, SERVER_ADDR, CLIENT_ADDR)
 
