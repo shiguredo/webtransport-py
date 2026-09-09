@@ -320,6 +320,14 @@ class Http3Connection {
   std::optional<int> stream_flushed(int64_t stream_id) const;
 
   /**
+   * ストリームの送信バッファエントリの有無を確認 (テスト専用)
+   *
+   * @param stream_id ストリーム ID
+   * @return エントリがあれば true、なければ nullopt
+   */
+  std::optional<bool> has_stream_buffer(int64_t stream_id) const;
+
+  /**
    * 受信中フレームのペイロード残量を取得
    *
    * クライアント双方向ストリームまたはリモート制御ストリーム以外は 0。

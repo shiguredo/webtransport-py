@@ -265,6 +265,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/3 のクライアント close() がピア終了を待たずに切断する問題を修正する
   - @voluntas
+- [FIX] HTTP/3 の送信バッファが ACK 通知なしで残留する問題を修正する
+  - @voluntas
 - [FIX] QUIC サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
   - @voluntas
 
