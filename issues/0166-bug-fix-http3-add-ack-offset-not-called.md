@@ -1,7 +1,7 @@
 # Http3Connection の get_streams_to_send が nghttp3_conn_add_ack_offset を呼ばず送信バッファがストリーム寿命まで解放されない
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-http3-add-ack-offset-not-called
 - Polished: 2026-09-07
 
@@ -33,3 +33,10 @@
 - 消費済みエントリが `read_data_cb` の走査に残留しないこと (構造確認)
 - `tests/test_http3_ack_offset.py` を新規作成し、送信バッファ解放と空 FIN 除去を検証すること (H3 側の `test_webtransport_h3_ack_offset.py` と対称の形式)
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- `get_streams_to_send` で書き出し直後に `add_ack_offset` を呼ぶ。データありは量で、FIN のみは 0 で呼ぶ
+- `acked_stream_data_cb` を量比較と部分消去に書き換え、空 FIN は読み出し側で除去する
+- `tests/test_http3_ack_offset.py` に 5 件のテスト (解放・複数・FIN のみ・同時送信数・往復) を追加する
+- 全 969 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
