@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の仕様追従の残りを対応する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/update-h3-spec-followups
 - Polished: 2026-08-26
 
@@ -70,3 +70,13 @@ draft-ietf-webtrans-http3-16 への追従のうち、細かい仕様逸脱・観
 
 - 項目 1 / 2 / 3 / 4 はいずれも独立して実装可能。1 PR ずつ順不同で進めてよい
 - 項目 4 の h2 側修正は h2 側の close() の既存 e2e テストの期待値変更を伴う可能性があるため、h2 テストの修正を同 PR に含める
+
+## 解決方法
+
+本 issue は項目ごとに事情が異なるため、残項目を個別 issue へ分割して closed にする。
+
+- 項目 1 (WT_DRAIN_SESSION の受信通知): nghttp3 に受信コールバックが無くバインディング層から観測できないため、issue 0198 として起票し pending にした (nghttp3 の対応待ち)
+- 項目 2 (バッファリング上限): issue 0197 として起票した
+- 項目 3 (SETTINGS 受信判定): 0180 がアクセサ方式 (`H3Session.is_webtransport_ready()`) で対応するため、本 issue からは外した
+- 項目 4 (close() の peer CONNECT クローズ待機): h3 側は closed の 0164 で対応済み。h2 側は issue 0196 として起票した
+- 完了条件の「1 項目 1 PR」は auto-resolve の 1 issue 1 PR と両立しないため、本 issue を分割して個別 issue 単位で対応する
