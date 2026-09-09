@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 が GOAWAY 受信で is_closed 化し既存セッションを継続できない
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/fix-h2-goaway-closes-session
 - Polished: 2026-09-07
 
@@ -42,3 +42,9 @@
 - 初回 GOAWAY 受信で `on_goaway` が 1 回発火すること
 - `tests/test_webtransport_h2_goaway.py` (新規) に GOAWAY フレーム注入による継続テスト (低レベル) を追加し、`tests/test_e2e_webtransport_h2.py` に継続と `on_goaway` 発火のテストを追加すること
 - 既存のテスト全 834 件が引き続き通過すること
+
+## 解決方法
+
+- GOAWAY 受信で閉じず GoAway 通知と継続印に変える。新規 CONNECT のみ抑止し、既存の送受信と WT 開放は続ける
+- 高レベル両面に初回のみの通知を足し、低レベルと高レベルに 7 件の試験を足す
+- 全 976 件のテストが通過することと、レビュー 3 周で致命的と重要が 0 件であることを確認した
