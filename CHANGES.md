@@ -263,6 +263,8 @@
   - @voluntas
 - [FIX] QUIC バインディングが pacing 契約に違反してバースト送信する問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 のクライアント close() がピア終了を待たずに切断する問題を修正する
+  - @voluntas
 - [FIX] QUIC サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
   - @voluntas
 

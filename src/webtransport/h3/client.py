@@ -23,6 +23,7 @@ from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from typing import Literal
 
 
 class Client:
@@ -50,6 +51,7 @@ class Client:
         ca_file: str | None = None,
         verify_callback: Callable[[list[bytes]], bool] | None = None,
         quic_config: quic.Config | None = None,
+        close_wait_timeout: float = 3.0,
     ) -> None:
         """クライアントを初期化する
 
@@ -65,6 +67,8 @@ class Client:
                 引数の値で接続時に上書きされる。enable_datagram /
                 enable_reset_stream_at を無効化すると WebTransport の要件を
                 満たさないピアを作れる (テスト用)
+            close_wait_timeout: close() 時に CONNECT ストリームのピア側
+                終了を待つ上限 (秒)。0 以下では待たない
         """
         self._url = url
         self._verify_peer = verify_peer
@@ -73,6 +77,7 @@ class Client:
         self._ca_file = ca_file
         self._verify_callback = verify_callback
         self._user_quic_config = quic_config
+        self._close_wait_timeout = close_wait_timeout
         self._host, self._port, self._path = self._parse_url(url)
 
         self._quic_connection: quic.Connection | None = None
@@ -89,6 +94,12 @@ class Client:
         # run() のイベントループ開始時に先に処理し、コールバック登録の
         # 順序に依存せず on_session_ready を発火させる
         self._pending_session_ready: int | None = None
+        # close() の待機対象セッション ID。待機中のみ設定される
+        self._close_wait_session_id: int | None = None
+        # 観測済みのピア側終了 CONNECT ストリーム ID 集合 (FIN / RESET)
+        self._peer_closed_session_ids: set[int] = set()
+        # 直近の close() の待機結果
+        self._close_wait_result: Literal["peer-closed", "timeout", "skipped", "none"] = "none"
 
         self._on_session_ready: Callable[[int], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
@@ -330,6 +341,9 @@ class Client:
         """
         if timeout <= 0:
             raise ConnectTimeoutError("connection attempt timed out immediately")
+
+        self._peer_closed_session_ids.clear()
+        self._close_wait_result = "none"
 
         quic_config = (
             self._user_quic_config if self._user_quic_config is not None else quic.Config()
@@ -772,6 +786,10 @@ class Client:
                 break
 
             if quic_event.type == quic.EventType.STREAM_DATA:
+                # CONNECT ストリームのピア側 FIN を記録する。待機開始前の
+                # 観測も拾うため、待機中に限らず常時記録する
+                if quic_event.fin and self._is_closing_connect_stream(quic_event.stream_id):
+                    self._peer_closed_session_ids.add(quic_event.stream_id)
                 self._webtransport_session.receive_stream_data(
                     quic_event.stream_id,
                     quic_event.data,
@@ -784,6 +802,9 @@ class Client:
                 is_connect_stream = (
                     quic_event.stream_id in self._webtransport_session.get_session_ids()
                 )
+                # 待機中の CONNECT ストリームのピア側リセットも終了とみなす
+                if self._is_closing_connect_stream(quic_event.stream_id):
+                    self._peer_closed_session_ids.add(quic_event.stream_id)
                 # 対向からの RESET_STREAM を nghttp3 に通知する
                 self._webtransport_session.close_stream(
                     quic_event.stream_id,
@@ -928,27 +949,94 @@ class Client:
 
             await asyncio.sleep(0.01)
 
+    def _is_closing_connect_stream(self, stream_id: int) -> bool:
+        """ピア側終了の観測対象 CONNECT ストリームかどうか
+
+        待機中のセッションか、確立済みセッションの CONNECT ストリームの
+        いずれかに一致する場合に真を返す。待機開始前の観測も拾うため、
+        待機中に限らず判定する
+        """
+        if self._webtransport_session is None:
+            return False
+        return (
+            stream_id == self._close_wait_session_id
+            or stream_id in self._webtransport_session.get_session_ids()
+        )
+
+    async def _wait_for_peer_close(self, session_id: int) -> bool:
+        """CONNECT ストリームのピア側終了を待つ。観測したら True を返す
+
+        draft-ietf-webtrans-http3-16 Section 6 末尾の SHOULD (ピアの
+        CONNECT ストリームクローズを待ってから CONNECTION_CLOSE を送り、
+        WT_CLOSE_SESSION を best-effort で届ける) に従う。将来改訂される
+        可能性がある。終了条件はピア終了の観測・CONNECTION_CLOSE 受信・
+        タイムアウトであり、いずれも呼び出し側は閉じる処理へ進む
+        """
+        if self._quic_connection is None or self._webtransport_session is None:
+            return False
+        if self._close_wait_timeout <= 0:
+            return session_id in self._peer_closed_session_ids
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._close_wait_timeout
+        while loop.time() < deadline:
+            await self._receive()
+            if not await self._process_quic_events():
+                return session_id in self._peer_closed_session_ids
+            # WebTransport 層イベントのコールバックは起こさない (close() 前の
+            # 従来動作を保ち、run() 並行時のコールバック再入を避ける。
+            # FIN / RESET の観測は _process_quic_events 側で行う。
+            # なお QUIC の _on_stream_reset は _process_quic_events 経由で
+            # 発火し得る)
+            await self._send_pending()
+            if session_id in self._peer_closed_session_ids:
+                return True
+            timeout = self._quic_connection.get_timeout()
+            if timeout is not None and timeout <= 0:
+                self._quic_connection.handle_timeout()
+        return session_id in self._peer_closed_session_ids
+
     async def close(self) -> None:
-        """接続を閉じる"""
+        """接続を閉じる
+
+        WT_CLOSE_SESSION 送出後に CONNECT ストリームのピア側終了を
+        close_wait_timeout の上限まで待ってから CONNECTION_CLOSE を送る
+        (draft-ietf-webtrans-http3-16 Section 6 の SHOULD による
+        best-effort 配信)。上限で打ち切った場合も閉じる処理へ進む。
+        待機中のユーザーコールバック例外時は後始末を終えてから送出する
+        """
         # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
         # セッション ID で発火させないため)
         self._pending_session_ready = None
         self._running = False
         self._connected = False
 
-        if self._webtransport_session is not None and self._session_id >= 0:
-            # WT_CLOSE_SESSION カプセルを先に送出してから QUIC を閉じる
-            self._webtransport_session.close_session(self._session_id)
-            await self._send_pending()
-            self._session_id = -1
-
-        if self._quic_connection is not None:
-            self._quic_connection.close()
-            await self._send_pending()
-
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        try:
+            if self._webtransport_session is not None and self._session_id >= 0:
+                # WT_CLOSE_SESSION カプセルを先に送出してから QUIC を閉じる
+                session_id = self._session_id
+                self._webtransport_session.close_session(session_id)
+                await self._send_pending()
+                self._session_id = -1
+                self._close_wait_session_id = session_id
+                try:
+                    if self._close_wait_timeout <= 0:
+                        self._close_wait_result = "skipped"
+                    elif await self._wait_for_peer_close(session_id):
+                        self._close_wait_result = "peer-closed"
+                    else:
+                        self._close_wait_result = "timeout"
+                finally:
+                    self._close_wait_session_id = None
+        finally:
+            # 待機の成否・例外・キャンセルにかかわらず閉じる処理へ進む
+            try:
+                if self._quic_connection is not None:
+                    self._quic_connection.close()
+                    await self._send_pending()
+            finally:
+                if self._socket is not None:
+                    self._socket.close()
+                    self._socket = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""

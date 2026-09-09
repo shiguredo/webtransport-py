@@ -12,7 +12,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from conftest import CLIENT_ADDR, SERVER_ADDR, create_client_server_pair, perform_handshake
+from conftest import (
+    CLIENT_ADDR,
+    PUMP_ATTEMPTS,
+    SERVER_ADDR,
+    create_client_server_pair,
+    perform_handshake,
+    wait_pacing_timeout,
+)
 
 from webtransport.quic import Client, EventType, Server
 
@@ -553,26 +560,39 @@ def test_close_stream_sends_reset_sans_io():
     client, server, initial_packet = create_client_server_pair()
     assert perform_handshake(client, server, initial_packet)
 
-    # クライアントがストリームを開いて送信し、サーバーに届ける
+    # クライアントがストリームを開いて送信し、サーバーに届ける。
+    # pacing 期限待ちで空振りするため待って再試行する
     stream_id = client.open_stream(bidirectional=True)
     client.send_stream_data(stream_id, b"ping", fin=False)
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+        if (
+            client_packet is None
+            and server_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     # shutdown_stream の送出元である close_stream を呼び、RESET_STREAM を送出する
     client.close_stream(stream_id, 42)
-    for _ in range(20):
+    for _ in range(PUMP_ATTEMPTS):
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
+        if (
+            client_packet is None
+            and server_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     # ピア側で STREAM_RESET イベントを受信している
     saw_reset = False
