@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の低レベル API テストを分割する
 
 - Created: 2026-08-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-09
 - Branch: feature/refactor-split-e2e-h3-tests
 - Polished: 2026-09-07
 
@@ -41,3 +41,10 @@
 
 - 上記の低レベル API を使うテスト・ヘルパーが `tests/test_e2e_webtransport_h3_low_level.py` へ移動し、`tests/test_e2e_webtransport_h3.py` が高レベル API のテストに集約される
 - 全テストが通る
+
+## 解決方法
+
+- `tests/test_e2e_webtransport_h3_low_level.py` を新設し、`_LowLevelClient` / `_ResetTestServerInfo` / `_start_reset_test_server` / `_cleanup_reset_test_server` / `_SessionClosedServerInfo` / `_start_session_closed_server` と低レベル API を使う 8 テスト、`from conftest import _encode_wt_datagram` を移動した
+- `tests/test_e2e_webtransport_h3.py` は高レベル API のテストだけを残し、モジュール docstring を分割後の構成に合わせて更新した
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した
+- 移動はトップレベル定義単位で行い、テスト本体・アサーション・デコレータは変更していない。`ruff check` / `ruff format --check` と全 976 テストの通過を確認した
