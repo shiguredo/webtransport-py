@@ -143,6 +143,10 @@ enum class H2EventType {
   // セッション拒否 (非 2xx 応答の受信。末尾に追加し既存バリアントの
   // 数値を変えない)
   SessionRejected,
+
+  // GOAWAY 受信 (graceful shutdown の通知。末尾に追加し既存バリアントの
+  // 数値を変えない)
+  GoAway,
 };
 
 /**
@@ -161,6 +165,9 @@ struct H2Event {
   // SessionReady 発火時にのみ意味を持つ受信 HTTP ヘッダー (受信順の
   // name / value)。他イベントでは空
   std::vector<std::pair<std::string, std::string>> headers;
+  // GoAway 発火時にのみ意味を持つ GOAWAY フレームの last_stream_id。
+  // 他イベントでは 0
+  int32_t last_stream_id = 0;
 };
 
 /**
@@ -722,6 +729,9 @@ class H2Session {
   // 接続状態
   bool closed_ = false;
   bool goaway_sent_ = false;
+  // GOAWAY 受信済み (graceful shutdown)。新規 CONNECT のみ抑止し、
+  // 既存セッションの送受信は継続する (draft-15 Section 6.13)
+  bool goaway_received_ = false;
 };
 
 // Python バインディングを定義

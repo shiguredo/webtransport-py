@@ -267,6 +267,8 @@
   - @voluntas
 - [FIX] HTTP/3 の送信バッファが ACK 通知なしで残留する問題を修正する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 が GOAWAY 受信で既存セッションを継続できない問題を修正する
+  - @voluntas
 - [FIX] QUIC サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
   - @voluntas
 

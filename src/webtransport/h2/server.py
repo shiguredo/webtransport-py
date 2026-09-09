@@ -165,6 +165,7 @@ class Server:
         self._on_stream_reset: Callable[[int, int, SessionWriter], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes, SessionWriter], Awaitable[None]] | None = None
         self._on_error: Callable[[int, str, SessionWriter], Awaitable[None]] | None = None
+        self._on_goaway: Callable[[int, int, tuple[object, ...]], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -286,6 +287,20 @@ class Server:
         """
         self._on_error = callback
 
+    def on_goaway(
+        self,
+        callback: Callable[[int, int, tuple[object, ...]], Awaitable[None]],
+    ) -> None:
+        """GOAWAY 受信時のコールバックを設定する
+
+        graceful shutdown の通知であり、既存セッションの送受信は継続する
+        (draft-15 Section 6.13)。接続ごとに初回受信のみ発火する。
+
+        Args:
+            callback: async def callback(last_stream_id: int, error_code: int, addr: tuple[object, ...]) -> None
+        """
+        self._on_goaway = callback
+
     async def start(self) -> None:
         """サーバーを開始する"""
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -337,6 +352,7 @@ class Server:
         session = h2_low.Session.create_server(config)
 
         session_writers: dict[int, SessionWriter] = {}
+        goaway_notified = False
 
         data = session.send()
         if data:
@@ -437,6 +453,17 @@ class Server:
                                 event.error_message,
                                 session_writer,
                             )
+
+                    elif event.type == h2_low.EventType.GOAWAY and not goaway_notified:
+                        if self._on_goaway is not None:
+                            peername = writer.get_extra_info("peername")
+                            if peername is not None:
+                                goaway_notified = True
+                                await self._on_goaway(
+                                    event.last_stream_id,
+                                    event.error_code,
+                                    peername,
+                                )
 
                 data = session.send()
                 if data:
