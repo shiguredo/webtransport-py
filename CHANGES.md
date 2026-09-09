@@ -259,6 +259,8 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のストリーム ID の initiator と方向の検証漏れで状態が壊れる問題を修正する
   - @voluntas
+- [FIX] UDP 系サーバーが証明書の誤設定を黙殺して無言で接続を捨て続ける問題を修正する
+  - @voluntas
 
 ### misc
 

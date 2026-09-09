@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 from typing import TYPE_CHECKING, Self
 
@@ -20,6 +21,29 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_cert_key_files(certfile: str | None, keyfile: str | None) -> None:
+    """証明書と鍵ファイルの存在と読み取り可能性を検証する
+
+    None は未設定として検証を素通りする (接続時に既定動作になる)。
+    起動後の削除・権限変更は run() 時の再 raise で検出する。
+
+    Args:
+        certfile: 証明書ファイルパス
+        keyfile: 秘密鍵ファイルパス
+
+    Raises:
+        FileNotFoundError: ファイルが存在しない場合
+        PermissionError: ファイルが読み取り不可の場合
+    """
+    for name, path in (("certfile", certfile), ("keyfile", keyfile)):
+        if path is None:
+            continue
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{name} not found: {path}")
+        if not os.access(path, os.R_OK):
+            raise PermissionError(f"{name} is not readable: {path}")
 
 
 class ClientConnection:
@@ -200,6 +224,7 @@ class Server:
 
     async def start(self) -> None:
         """サーバーを開始する"""
+        _validate_cert_key_files(self._certfile, self._keyfile)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._socket.bind((self._host, self._port))
@@ -666,12 +691,27 @@ class Server:
                 if addr not in self._clients:
                     try:
                         client = self._create_connection(addr, data)
-                    except RuntimeError:
-                        # 接続クローズ済みのアドレスからの追従パケット等、
-                        # 未知アドレスからの非 Initial パケットは新しい接続を
-                        # 開始できないため黙って破棄する (accept は Initial
-                        # パケット以外で RuntimeError を投げる)。サーバーの
-                        # run() を継続させる QUIC サーバーの標準挙動
+                    except ValueError as exc:
+                        # 設定不正は黙殺せず再 raise して run() を止める
+                        logger.warning(
+                            "failed to accept QUIC connection from %s:%d size %d first_byte %s: %s",
+                            addr[0],
+                            addr[1],
+                            len(data),
+                            data[:1].hex() if data else "none",
+                            exc,
+                        )
+                        raise
+                    except RuntimeError as exc:
+                        # パケット不正のみ破棄して継続する
+                        logger.warning(
+                            "discarding invalid QUIC packet from %s:%d size %d first_byte %s: %s",
+                            addr[0],
+                            addr[1],
+                            len(data),
+                            data[:1].hex() if data else "none",
+                            exc,
+                        )
                         continue
                 else:
                     client = self._clients[addr]

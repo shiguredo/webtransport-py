@@ -895,9 +895,12 @@ bool QuicConnection::initialize_server_from_packet(
     uint16_t local_port,
     const std::string& remote_host,
     uint16_t remote_port) {
-  // 異常な Config 値で ngtcp2 の assert に到達する前に生成失敗にする
+  // 異常な Config 値で ngtcp2 の assert に到達する前に生成失敗にする。
+  // 設定不正は ValueError (invalid_argument) で通知し、呼び出し側で
+  // 再 raise して黙殺しない。パケット不正は nullptr 経由の RuntimeError
+  // として破棄対象にするため、ここでは例外を投げず false を返す
   if (!is_valid_quic_config(config_)) {
-    return false;
+    throw std::invalid_argument("Invalid QUIC config values for server accept");
   }
   // ngtcp2_conn_server_new より先に path を実アドレスで埋める。
   // ゼロ path で生成したあと別アドレスで read_pkt すると DROP_CONN になる。
@@ -921,17 +924,22 @@ bool QuicConnection::initialize_server_from_packet(
 
   ssl_ctx_ = create_ssl_ctx();
   if (!ssl_ctx_) {
-    return false;
+    // cert / key 読み込み失敗が主因だが、メモリ不足等の実行時失敗も
+    // 同じ nullptr になる。黙殺より fail-loud を優先し設定エラー扱いにする
+    throw std::invalid_argument(
+        "Failed to create SSL context for QUIC server, check cert_file and "
+        "key_file");
   }
 
   // BoringSSL QUIC 設定を SSL_CTX に適用
   if (ngtcp2_crypto_boringssl_configure_server_context(ssl_ctx_) != 0) {
-    return false;
+    throw std::invalid_argument(
+        "Failed to configure TLS context for QUIC server");
   }
 
   ssl_ = SSL_new(ssl_ctx_);
   if (!ssl_) {
-    return false;
+    throw std::invalid_argument("Failed to create SSL object for QUIC server");
   }
 
   // ngtcp2 コールバックの設定
