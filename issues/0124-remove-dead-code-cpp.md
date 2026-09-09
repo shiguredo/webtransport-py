@@ -1,7 +1,7 @@
 # C++ バインディングの死にコードを削除する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/remove-dead-code-cpp
 - Polished: 2026-09-03
 
@@ -29,3 +29,13 @@ C++ バインディング層に残る死にコード (機能していない設�
 ## 完了条件
 
 - 上記の死にコードが削除され、参照側 (テスト・Python 層・pyi 生成物) の更新が済み、ビルド・全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.cpp` の `accept_session` から旧 draft 用ヘッダー `sec-webtransport-http3-draft: draft02` を削除した
+- 生成されない enum 値 (`H3EventType::StreamOpened` / `Http3EventType::PushPromise` / `Http3EventType::Reset` / `Http3EventType::WebTransport*` / `QuicEventType::ConnectionIdRetired`) と未使用フィールド (`H3Event::is_unidirectional` / `H2Session::goaway_sent_`) を削除した
+- 機能していない設定項目 `Http2Config::send_preface` と未使用の `StreamState` 値 (Send / SizeKnown / DataRead / ResetRead) を削除した
+- 参照側として `src/webtransport/http3/client.py` / `server.py` の `RESET` 分岐、`tests/test_http3.py` / `tests/test_quic.py` / `tests/test_webtransport.py` の enum 存在確認、`skills/webtransport-py/SKILL.md` の API 一覧を更新した
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した
+- `make develop` で再ビルドし、全 976 テストの通過を確認した
+- `QuicConnection::acked_stream_data_offset_cb` は open issue 0144 の担当のため対象外とした
