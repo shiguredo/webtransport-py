@@ -3,11 +3,11 @@
 - Created: 2026-09-07
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-h2-settings-uint64-truncation
-- Polished: 2026-09-07
+- Polished: 2026-09-09
 
 ## 目的
 
-`H2Session::initialize` は SETTINGS で `SETTINGS_WT_INITIAL_MAX_DATA` 等を送出する際に `static_cast<uint32_t>(config_.wt_initial_max_data)` を使う。HTTP/2 SETTINGS 値 (`nghttp2_settings_entry` の値は `uint32_t`) のため 32 ビットに収める必要があるが、`config_.wt_initial_max_data` は uint64 で 2^32 以上を設定すると黙って下位 32 ビットになる (実験: `wt_initial_max_stream_data = 2^32 + 5` を設定 → SETTINGS 値は 5、WebTransport-Init は 4294967301 で不一致。Init に載るのは stream_data 系のみのため stream_data で設定する)。受信側は Section 4.3 の greater 採用 (`record_received_limit` で実装済み) で吸収するが、黙った切り詰めは診断不能のため生成時に拒否する。上限検査で `ValueError` にする。
+`H2Session::initialize` は SETTINGS で `SETTINGS_WT_INITIAL_MAX_DATA` 等を送出する際に `static_cast<uint32_t>(config_.wt_initial_max_data)` を使う。HTTP/2 SETTINGS 値 (`nghttp2_settings_entry` の値は `uint32_t`) のため 32 ビットに収める必要があるが、`config_.wt_initial_max_data` は uint64 で 2^32 以上を設定すると黙って下位 32 ビットになる (実験: `wt_initial_max_stream_data = 2^32 + 5` を設定 → SETTINGS 値は 5、WebTransport-Init は 4294967301 で不一致。Init に載るのは stream_data 系のみのため stream_data で設定する)。受信側は大きい方を採用する実装 (stream_data は `record_received_limit`、max_data は `handle_wt_max_data`、max_streams は `handle_wt_max_streams`) のため機能的には吸収されるが、黙った切り詰めは診断不能のため生成時に拒否する。上限検査で `ValueError` にする。
 
 ## 現状
 
@@ -21,12 +21,12 @@
 ## 設計方針
 
 - `H2SessionConfig` の SETTINGS 送出対象 4 フィールド (`wt_initial_max_data` / `wt_initial_max_stream_data` / `wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni`) に 2^32 - 1 上限検査を導入する。`H2Session::initialize` 内で超過時に `std::invalid_argument` を投げる (create の `nullptr` 経路を経由せず直接伝播し、nanobind の既定翻訳で `ValueError` になる)。Config 分離案は採らない (greater 採用で受信側は吸収でき、生成時拒否で診断可能性が足りるため API 増設は過剰)
-- Config 型自体の見直し (uint64 → uint32 化等) は行わない (WT_MAX_DATA カプセル経路では 64 bit 値が正当なため)
+- Config 型自体の見直し (uint64 → uint32 化等) は行わない。SETTINGS の uint32 制約は生成時の値検査で扱い、型は uint64 のまま維持する。本検査により 4 フィールドの初期値は 2^32 - 1 以下に制限され、初期広告として送出する SETTINGS と初期 `WT_MAX_DATA` / `WT_MAX_STREAMS` カプセル / WebTransport-Init の値も同じ上限になる。一方、以後の補充カプセル (`WT_MAX_DATA` / `WT_MAX_STREAM_DATA` / `WT_MAX_STREAMS`) は受信量やストリーム開設に応じて 2^32 - 1 を超え得る (上限は `kMaxVarint` / `kMaxStreamsLimit`) ため、型は uint64 のまま維持する
 - issue 0175 (encode_varint 上限検査) とは別 PR で実装する (varint 検査と SETTINGS 上限は直交し、相互前提を持たない)。0175 側の統合言及と矛盾しない
 
 ## 完了条件
 
 - `wt_initial_max_stream_data = 2^32 + 5` を設定するとセッション作成時に `ValueError` になること
 - 32 bit 範囲内の値は従来どおり動作すること
-- `tests/prop_webtransport_h2.py` の Config 値 4 件の property test を 0 〜 2^32 - 1 許容に更新し、上限超過の拒否テストを追加すること
-- 既存のテスト全 834 件が引き続き通過すること
+- `tests/prop_webtransport_h2.py` の Config setter の property test 4 件は setter が uint64 全域を受け付ける現状のまま維持し、`create_client` / `create_server` で 2^32 - 1 は成功・2^32 は `ValueError` になる境界テストを `tests/test_webtransport_h2_settings_limit.py` (新規) に追加すること
+- 既存のテスト全 976 件が引き続き通過すること
