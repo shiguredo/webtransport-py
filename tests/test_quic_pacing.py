@@ -136,8 +136,9 @@ def test_confirmed_write_sets_pacing_deadline() -> None:
     client, timeout = _prepare_and_stall()
     # 未来の期限である (アイドル期限 30 秒ではない)
     assert 0 < timeout < 1_000_000_000
-    # 期限を過ぎると ack なしで送出が再開する
-    time.sleep(min(timeout / 1_000_000_000 + 0.005, 0.05))
+    # 期限を過ぎると ack なしで送出が再開する。期限が 50 ms を超える場合に
+    # 固定上限で待つと期限到達前に判定してしまうため、期限 + マージンまで待つ
+    time.sleep(timeout / 1_000_000_000 + 0.005)
     assert client.send() is not None
 
 
@@ -148,4 +149,7 @@ def test_bulk_send_reports_near_deadline() -> None:
     送出が止まった直後の get_timeout() が近い将来の期限を返す。
     """
     _, timeout = _prepare_and_stall()
-    assert 0 <= timeout < 1_000_000_000
+    # RTT 標本が膨らむと pacing 間隔も比例して膨らむため、CI ランナーの
+    # 負荷で 1 秒を超えることがある。アイドル期限 (30 秒) と区別できる
+    # 範囲で上限を設ける
+    assert 0 <= timeout < 5_000_000_000

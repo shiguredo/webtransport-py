@@ -164,8 +164,13 @@ async def test_nat_rebinding_keeps_connection(test_certificates) -> None:
         try:
             client = Connection.create_client(client_config, sock.getsockname(), server_addr)
             await _handshake_over_socket(client, sock, server_addr)
-            await asyncio.sleep(0.5)
             old_addr = sock.getsockname()
+            # サーバー側が接続を登録するまで上限付きで待つ (固定 sleep では
+            # 低速な CI ランナーで不足する)
+            for _ in range(100):
+                if set(server._connections) == {old_addr}:
+                    break
+                await asyncio.sleep(0.1)
             assert set(server._connections) == {old_addr}
 
             # 残余フライトを流して 1-RTT のみにする
@@ -193,7 +198,13 @@ async def test_nat_rebinding_keeps_connection(test_certificates) -> None:
                 new_addr = migrated.getsockname()
                 for payload in short_packets:
                     migrated.sendto(payload, server_addr)
-                await asyncio.sleep(1.0)
+
+                # DCID 一致かつ受理のためアドレスキーが張り替わるまで
+                # 上限付きで待つ (固定 sleep では低速な CI ランナーで不足する)
+                for _ in range(100):
+                    if set(server._connections) == {new_addr}:
+                        break
+                    await asyncio.sleep(0.1)
 
                 # DCID 一致かつ受理のためアドレスキーが張り替わる
                 assert set(server._connections) == {new_addr}

@@ -5,9 +5,11 @@ ngtcp2_conn_info やフロー制御残量など、接続統計取得 API の動�
 
 from conftest import (
     CLIENT_ADDR,
+    PUMP_ATTEMPTS,
     SERVER_ADDR,
     create_client_server_pair,
     perform_handshake,
+    wait_pacing_timeout,
 )
 
 from webtransport.quic import Config, Connection
@@ -64,7 +66,10 @@ def test_conn_stats_after_handshake():
     payload = b"hello" * 100
     client.send_stream_data(stream_id, payload)
 
-    for _ in range(5):
+    # フロー制御残量に送信が反映されるまで送受信を繰り返す。pacing 有効時は
+    # send() が期限待ちで空振りするため、両方向空振りなら期限まで待つ
+    sent_bytes = len(payload)
+    for _ in range(PUMP_ATTEMPTS):
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
@@ -73,9 +78,17 @@ def test_conn_stats_after_handshake():
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
+        if client.max_data_left == max_data_left_before - sent_bytes:
+            break
+        if (
+            client_packet is None
+            and server_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
+
     # データ送信でフロー制御残量が送信バイト数分だけ減る
     # (tx.offset は ACK に依存せず送信時に進むため決定論的。データ送信パスの証明)
-    sent_bytes = len(payload)
     assert client.max_data_left == max_data_left_before - sent_bytes
     assert client.max_stream_data_left(stream_id) == stream_max_data_left_before - sent_bytes
 
