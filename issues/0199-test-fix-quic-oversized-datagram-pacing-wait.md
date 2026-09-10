@@ -1,7 +1,7 @@
 # QUIC の過大データグラムテストを pacing 期限待ちに対応させる
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-quic-oversized-datagram-pacing-wait
 - Polished: {YYYY-MM-DD}
 
@@ -29,3 +29,10 @@
 - `tests/test_quic_oversized_datagram.py` の 3 テストがローカル (macOS 26 arm64 / Python 3.14.4) で安定して通過すること
 - 全テストが通過すること
 - CI (macos-26_arm64, 3.14) で通過すること
+
+## 解決方法
+
+- `tests/test_quic_oversized_datagram.py` の `_deliver_datagram` を conftest の `wait_pacing_timeout` に対応させた
+- 両方向空振りの場合は pacing 期限まで待って再試行し、`IDLE_LIMIT` 回待機しても送信されない場合のみ打ち切る
+- 試行上限は conftest の `PUMP_ATTEMPTS` に揃えた
+- 3 テストが 5 回連続で安定通過 (約 1.6 秒)、全 976 テストが通過することを確認した
