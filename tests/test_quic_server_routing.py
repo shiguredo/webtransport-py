@@ -196,15 +196,29 @@ async def test_nat_rebinding_keeps_connection(test_certificates) -> None:
             migrated.bind(("127.0.0.1", 0))
             try:
                 new_addr = migrated.getsockname()
-                for payload in short_packets:
-                    migrated.sendto(payload, server_addr)
-
-                # DCID 一致かつ受理のためアドレスキーが張り替わるまで
-                # 上限付きで待つ (固定 sleep では低速な CI ランナーで不足する)
-                for _ in range(100):
+                loop = asyncio.get_running_loop()
+                # サーバーが新しいアドレスを受理するまで、送信・応答処理・
+                # 再送を繰り返す。単発送信ではパケットが破棄 (重複・復号
+                # 失敗) された場合にマイグレーションが確定しない
+                for _ in range(50):
+                    for payload in short_packets:
+                        migrated.sendto(payload, server_addr)
+                    # サーバーからの応答をクライアントで処理し、
+                    # 新たに生成されたパケットを新しいアドレスから返す
+                    while True:
+                        try:
+                            data, _ = await asyncio.wait_for(
+                                loop.sock_recvfrom(migrated, 65535), timeout=0.05
+                            )
+                        except TimeoutError:
+                            break
+                        client.receive(data, new_addr, server_addr)
+                    packet = client.send()
+                    if packet is not None:
+                        migrated.sendto(packet.data, server_addr)
                     if set(server._connections) == {new_addr}:
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
 
                 # DCID 一致かつ受理のためアドレスキーが張り替わる
                 assert set(server._connections) == {new_addr}
