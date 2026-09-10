@@ -83,6 +83,16 @@ uint64_t build_stream_id(bool is_server,
 // [WEBTRANSPORT-H3] Section 4.4 の unsigned 32-bit 範囲
 constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
 
+// 受信系コンテナ (received_max_stream_data_by_id /
+// received_stop_sending_stream_ids) の固定上限。ピアが送る stream_id
+// ごとにコンテナが無制限に増えるメモリ DoS を防ぐ安全弁。上限超過の
+// 新規 ID は保持しない (既知の制約: 上限超過 ID では、未作成ストリーム
+// への WT_MAX_STREAM_DATA の事前クレジット広告と、未作成ストリームへの
+// 二重 WT_STOP_SENDING 検出が対象外になる)。実在ストリームへの
+// イベント通知・クレジット反映・二重受信検出は上限に関係なく維持する
+// (二重受信検出は WtStreamInfo のフラグで実現する)
+constexpr size_t kMaxReceivedMapEntries = 4096;
+
 // draft-15 Section 6.7: 同一タイプ・方向のより低い ID も暗黙オープン。
 // 閉じたストリームを含む累積数は (stream_id >> 2) + 1
 bool incoming_stream_exceeds_limit(const WtSessionInfo& wt_session,
@@ -669,13 +679,27 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   }
 
   // draft-15 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING は
-  // WT_STREAM_STATE_ERROR
-  if (wt_session->received_stop_sending_stream_ids.contains(stream_id)) {
+  // WT_STREAM_STATE_ERROR。実在ストリームは WtStreamInfo のフラグでも
+  // 記録し、セッション集合の安全弁上限に達しても検出を維持する
+  auto stream_it = wt_session->streams.find(stream_id);
+  const bool known_stream = stream_it != wt_session->streams.end();
+  if (wt_session->received_stop_sending_stream_ids.contains(stream_id) ||
+      (known_stream && stream_it->second.stop_sending_received)) {
     report_stream_state_error(session_id, stream_id,
                               "WT_STOP_SENDING received twice");
     return;
   }
-  wt_session->received_stop_sending_stream_ids.insert(stream_id);
+  if (known_stream) {
+    stream_it->second.stop_sending_received = true;
+  }
+  if (wt_session->received_stop_sending_stream_ids.size() <
+      kMaxReceivedMapEntries) {
+    wt_session->received_stop_sending_stream_ids.insert(stream_id);
+  } else if (!known_stream) {
+    // 安全弁の上限超過の未知 ID は保持せず無視する (上限超過分は
+    // 二重受信検出の対象外になる既知の制約)
+    return;
+  }
 
   H2Event event;
   event.type = H2EventType::StopSending;
@@ -754,6 +778,10 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   auto capsule_it = wt_session->received_max_stream_data_by_id.find(stream_id);
   if (capsule_it != wt_session->received_max_stream_data_by_id.end()) {
     previous = capsule_it->second;
+  } else if (stream_it != wt_session->streams.end()) {
+    // 実在ストリームは直前のクレジットを前回値とし、コンテナの安全弁
+    // 上限で保持しなかった場合も減少検出 (draft-15 Section 6.6) を維持する
+    previous = stream_it->second.max_stream_data_local;
   } else {
     // カプセル未受信なら SETTINGS / WebTransport-Init の初期値が
     // 「前回受信値」 (draft-15 Section 6.6)
@@ -770,7 +798,14 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
     return;
   }
 
-  wt_session->received_max_stream_data_by_id[stream_id] = max_data;
+  // 受信コンテナは安全弁の上限で有界にする。上限超過の新規 ID は保持
+  // しない。実在ストリームへのクレジット反映と減少検出は
+  // max_stream_data_local のフォールバックで維持する
+  if (capsule_it != wt_session->received_max_stream_data_by_id.end() ||
+      wt_session->received_max_stream_data_by_id.size() <
+          kMaxReceivedMapEntries) {
+    wt_session->received_max_stream_data_by_id[stream_id] = max_data;
+  }
   if (stream_it != wt_session->streams.end()) {
     if (max_data > stream_it->second.max_stream_data_local) {
       stream_it->second.max_stream_data_local = max_data;

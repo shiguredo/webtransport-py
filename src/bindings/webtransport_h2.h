@@ -216,6 +216,9 @@ struct WtStreamInfo {
   std::deque<PendingSend> pending_sends;
   // 同一制限値での WT_STREAM_DATA_BLOCKED の重複送出を抑止する印
   bool stream_data_blocked_sent = false;
+  // WT_STOP_SENDING を受信済みか (二重受信検出用)。セッション集合の
+  // 安全弁上限に達しても実在ストリームの検出を維持する
+  bool stop_sending_received = false;
 };
 
 /**
@@ -279,11 +282,14 @@ struct WtSessionInfo {
   std::optional<uint64_t> received_initial_max_stream_data_bidi_remote;
   // ストリーム未作成時も含め、 WT_MAX_STREAM_DATA で受信した直近値
   // (draft-15 Section 6.6 の「previously received value」)。
-  // セッション破棄まで残し、ストリーム単位では消さない
+  // セッション破棄まで残し、ストリーム単位では消さない。メモリ DoS
+  // 防止のため kMaxReceivedMapEntries を超える新規 ID は保持しない
   std::map<uint64_t, uint64_t> received_max_stream_data_by_id;
   // 受信済み WT_STOP_SENDING の Stream ID (draft-15 Section 6.3)。
   // 未知ストリームでも検出するため WtStreamInfo ではなくセッション単位の
-  // 集合で持つ。セッション破棄まで残し、ストリーム単位では消さない
+  // 集合で持つ。セッション破棄まで残し、ストリーム単位では消さない。
+  // メモリ DoS 防止のため kMaxReceivedMapEntries を超える新規 ID は
+  // 保持しない
   std::set<uint64_t> received_stop_sending_stream_ids;
 
   // 同一制限値での BLOCKED 系カプセルの重複送出を抑止する印。対向の
