@@ -65,11 +65,9 @@ def _deliver_datagram(client: Connection, server: Connection) -> list[bytes]:
     received: list[bytes] = []
     idle = 0
     for _ in range(PUMP_ATTEMPTS):
-        sent = False
         packet = client.send()
         if packet:
             server.receive(packet.data, SERVER_ADDR, CLIENT_ADDR)
-            sent = True
         # サーバーからの ACK をクライアントに返す
         ack = server.send()
         if ack:
@@ -81,7 +79,7 @@ def _deliver_datagram(client: Connection, server: Connection) -> list[bytes]:
                 break
             if event.type == EventType.DATAGRAM:
                 received.append(event.data)
-        if not sent:
+        if packet is None and ack is None:
             idle += 1
             # 待機を繰り返しても送信されない場合は、期限が pacing 以外
             # (idle タイムアウト等) で送信すべきデータが残っていないと
