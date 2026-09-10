@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のピア駆動マップに上限を設ける
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-h2-received-map-bound
 - Polished: 2026-09-09
 
@@ -33,4 +33,13 @@
 - 正規 churn (累積ストリーム予算内で多数のストリームを逐次利用) が打ち切られないこと
 - `tests/` に未知 ID 大量投入テストと churn テストを追加すること
 - `CHANGES.md` の develop に FIX エントリが追加されていること
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` / `src/bindings/webtransport_h2.h` の受信系コンテナ (`received_max_stream_data_by_id` / `received_stop_sending_stream_ids`) に固定の安全弁 `kMaxReceivedMapEntries` (4096) を設け、上限超過の新規 stream_id を保持しないようにした
+- 実在ストリームへのイベント通知とクレジット反映は上限に関係なく維持し、`WT_STOP_SENDING` の二重受信検出は `WtStreamInfo` のフラグで上限到達後も維持する
+- `WT_MAX_STREAM_DATA` の減少検出は既存エントリと実在ストリームの `max_stream_data_local` フォールバックで維持する
+- 実装中に判明した既知の制約: 上限超過の未作成 ID では、事前クレジット広告 (`WT_MAX_STREAM_DATA` の先行受信) と二重受信検出が対象外になる。メモリ有界化とのトレードオフであり、コードコメントに明記した
+- 当初の設計方針 (累積ストリーム予算への連動) は、ピアのストリーム churn (解放済み ID の再作成) で予算が無制限に水増しされることがレビューで判明したため、固定上限に変更した
+- `tests/test_webtransport_h2_received_map_bound.py` に 7 テスト (30 万 ID 大量投入・上限境界・実在ストリームの通知と二重検出維持・減少検出の維持と制約) を追加し、全 983 テストと WebKit ブラウザ E2E 8 件の通過を確認した
 - 既存のテスト全 976 件が引き続き通過すること
