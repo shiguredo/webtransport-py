@@ -12,11 +12,17 @@ from conftest import (
     CERTFILE,
     CLIENT_ADDR,
     KEYFILE,
+    PUMP_ATTEMPTS,
     SERVER_ADDR,
     perform_handshake,
+    wait_pacing_timeout,
 )
 
 from webtransport.quic import Config, Connection, EventType
+
+# pacing 期限待ちの再試行上限。待機を繰り返しても送信されない場合は
+# 送信すべきデータが残っていないとみなして打ち切る
+IDLE_LIMIT = 8
 
 
 def _create_handshaken_pair(
@@ -52,10 +58,13 @@ def _deliver_datagram(client: Connection, server: Connection) -> list[bytes]:
     """クライアントの送信パケットを全てサーバーへ渡し、受信結果を返す
 
     QUIC の ACK 往復 (クライアント → サーバー → サーバーからの ACK) を
-    繰り返し、サーバー側の DatagramReceived イベントを集める。
+    繰り返し、サーバー側の DatagramReceived イベントを集める。pacing
+    有効時は send() が期限待ちで空振りするため、両方向空振りの場合は
+    期限まで待って再試行する。
     """
     received: list[bytes] = []
-    for _ in range(64):
+    idle = 0
+    for _ in range(PUMP_ATTEMPTS):
         sent = False
         packet = client.send()
         if packet:
@@ -73,7 +82,14 @@ def _deliver_datagram(client: Connection, server: Connection) -> list[bytes]:
             if event.type == EventType.DATAGRAM:
                 received.append(event.data)
         if not sent:
-            break
+            idle += 1
+            # 待機を繰り返しても送信されない場合は、期限が pacing 以外
+            # (idle タイムアウト等) で送信すべきデータが残っていないと
+            # みなして打ち切る
+            if idle >= IDLE_LIMIT or not wait_pacing_timeout(client, server):
+                break
+        else:
+            idle = 0
     return received
 
 
