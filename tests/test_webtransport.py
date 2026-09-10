@@ -52,7 +52,6 @@ def test_h3_session_event_type():
 
     assert h3.EventType.SESSION_READY is not None
     assert h3.EventType.SESSION_CLOSED is not None
-    assert h3.EventType.STREAM_OPENED is not None
     assert h3.EventType.STREAM_DATA is not None
     assert h3.EventType.STREAM_CLOSED is not None
     assert h3.EventType.DATAGRAM is not None

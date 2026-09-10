@@ -516,10 +516,7 @@ class Server:
                                 addr,
                             )
 
-                    elif http3_event.type in (
-                        http3_low.EventType.RESET_STREAM,
-                        http3_low.EventType.RESET,
-                    ):
+                    elif http3_event.type == http3_low.EventType.RESET_STREAM:
                         client.quic_connection.reset_stream(
                             http3_event.stream_id,
                             http3_event.error_code,

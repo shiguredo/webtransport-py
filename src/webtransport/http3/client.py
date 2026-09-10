@@ -585,10 +585,7 @@ class Client:
                 # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
                 # 低レベル API の契約としてそのまま維持される
 
-                elif http3_event.type in (
-                    http3_low.EventType.RESET_STREAM,
-                    http3_low.EventType.RESET,
-                ):
+                elif http3_event.type == http3_low.EventType.RESET_STREAM:
                     self._quic_connection.reset_stream(
                         http3_event.stream_id,
                         http3_event.error_code,

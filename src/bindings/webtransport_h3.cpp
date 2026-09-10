@@ -1150,16 +1150,11 @@ bool H3Session::accept_session(int64_t stream_id) {
   // ヘッダー名と値は静的文字列リテラルを使用
   static const char* header_status = ":status";
   static const char* value_status = "200";
-  static const char* header_draft = "sec-webtransport-http3-draft";
-  static const char* value_draft = "draft02";
 
   std::vector<nghttp3_nv> nva = {
       {reinterpret_cast<uint8_t*>(const_cast<char*>(header_status)),
        reinterpret_cast<uint8_t*>(const_cast<char*>(value_status)),
        strlen(header_status), strlen(value_status), NGHTTP3_NV_FLAG_NONE},
-      {reinterpret_cast<uint8_t*>(const_cast<char*>(header_draft)),
-       reinterpret_cast<uint8_t*>(const_cast<char*>(value_draft)),
-       strlen(header_draft), strlen(value_draft), NGHTTP3_NV_FLAG_NONE},
   };
 
   // WebTransport セッション用のレスポンスを送信
@@ -2480,7 +2475,6 @@ void bind_webtransport_h3(nb::module_& m) {
   nb::enum_<H3EventType>(h3_mod, "EventType", "WebTransport イベント種別")
       .value("SESSION_READY", H3EventType::SessionReady)
       .value("SESSION_CLOSED", H3EventType::SessionClosed)
-      .value("STREAM_OPENED", H3EventType::StreamOpened)
       .value("STREAM_DATA", H3EventType::StreamData)
       .value("STREAM_CLOSED", H3EventType::StreamClosed)
       .value("RESET_STREAM", H3EventType::ResetStream)
@@ -2506,8 +2500,7 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_ro("error_message", &H3Event::error_message)
       .def_ro("status_code", &H3Event::status_code,
               "SessionRejected 発火時の HTTP status code。他イベントでは 0 "
-              "(パース失敗・範囲外は 0 に丸められる)")
-      .def_ro("is_unidirectional", &H3Event::is_unidirectional);
+              "(パース失敗・範囲外は 0 に丸められる)");
 
   // StreamInfo
   nb::class_<StreamInfo>(h3_mod, "StreamInfo", "WebTransport ストリーム情報")

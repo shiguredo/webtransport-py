@@ -61,7 +61,6 @@ enum class H3EventType {
   SessionClosed,
 
   // ストリーム関連
-  StreamOpened,
   StreamData,
   StreamClosed,
 
@@ -75,8 +74,7 @@ enum class H3EventType {
   // エラー
   Error,
 
-  // セッション拒否 (非 2xx 応答の受信。h2 側の SessionRejected と同じ
-  // 意味論。末尾に追加し既存バリアントの数値を変えない)
+  // セッション拒否 (非 2xx 応答の受信。h2 側の SessionRejected と同じ意味論)
   SessionRejected,
 };
 
@@ -92,7 +90,6 @@ struct H3Event {
   std::string error_message;
   // SessionRejected 発火時の HTTP status code。他イベントでは 0
   uint32_t status_code = 0;
-  bool is_unidirectional = false;
 };
 
 /**

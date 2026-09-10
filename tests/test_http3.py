@@ -41,11 +41,7 @@ def test_http3_event_type():
     assert http3.EventType.HEADERS is not None
     assert http3.EventType.DATA is not None
     assert http3.EventType.STREAM_END is not None
-    assert http3.EventType.PUSH_PROMISE is not None
     assert http3.EventType.GO_AWAY is not None
-    assert http3.EventType.WEBTRANSPORT_SESSION_READY is not None
-    assert http3.EventType.WEBTRANSPORT_STREAM_DATA is not None
-    assert http3.EventType.WEBTRANSPORT_DATAGRAM is not None
 
 
 def test_http3_connection_client():

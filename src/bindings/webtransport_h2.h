@@ -174,23 +174,16 @@ struct H2Event {
  * WebTransport ストリーム状態
  */
 enum class StreamState {
-  // 送信側状態 (Send は未使用。Ready → DataSent (FIN 送出) / ResetSent
-  // (リセット送出) の 2 終端のみ。受信側の追跡は recv_state が担当する)
+  // 送信側状態 (Ready → DataSent (FIN 送出) / ResetSent (リセット送出) の
+  // 2 終端のみ。受信側の追跡は recv_state が担当する)
   Ready,
-  Send,
   DataSent,
   ResetSent,
 
-  // 受信側状態 (本実装の recv_state は受信側の状態のみを表す。DataRead /
-  // ResetRead はアプリのイベント消費追跡を要するため使わない)
+  // 受信側状態
   Recv,
-  SizeKnown,
   DataRecvd,
   ResetRecvd,
-
-  // 終了状態
-  DataRead,
-  ResetRead,
 };
 
 /**
@@ -728,7 +721,6 @@ class H2Session {
 
   // 接続状態
   bool closed_ = false;
-  bool goaway_sent_ = false;
   // GOAWAY 受信済み (graceful shutdown)。新規 CONNECT のみ抑止し、
   // 既存セッションの送受信は継続する (draft-15 Section 6.13)
   bool goaway_received_ = false;

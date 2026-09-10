@@ -507,7 +507,7 @@ def next_event() -> Event | None
 
 `Config` のプロパティは `max_field_section_size` / `qpack_max_dtable_capacity` / `qpack_blocked_streams` / `is_server` / `allowed_origins`。`allowed_origins` は許可オリジンリストで、空リスト (未設定) なら全オリジンを受理する。
 
-`Event` のフィールドは `type` / `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `is_unidirectional`。`is_unidirectional` は値が設定される経路が無く常に False である (真偽の判定には使わないこと)。`StreamInfo` (セッションに属するストリーム情報) のフィールドは `stream_id` / `session_id` / `is_unidirectional` / `is_incoming` / `is_write_registered`。
+`Event` のフィールドは `type` / `session_id` / `stream_id` / `data` / `error_code` / `error_message`。`StreamInfo` (セッションに属するストリーム情報) のフィールドは `stream_id` / `session_id` / `is_unidirectional` / `is_incoming` / `is_write_registered`。
 
 結線パターン: `get_streams_to_send()` の結果を `quic.Connection.send_stream_data()` へ、`get_datagrams_to_send()` を `quic.Connection.send_datagram()` へ流す。逆方向は QUIC の `STREAM_DATA` / `DATAGRAM` イベントを `receive_stream_data()` / `receive_datagram()` へ渡す。
 
@@ -638,20 +638,20 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `max_datagram_frame_size=65536` / `enable_early_data=True` / `alpn_protocols=[]` / `server_name=""` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None`
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
 - `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `is_server=False` / `allowed_origins=[]`
-- `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `send_preface=True` / `no_rfc7540_priorities=True`
+- `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`
 - `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`
 
 ## イベント型 (EventType)
 
 `next_event()` が返す `Event` は `type` フィールドで分岐する。
 
-- `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `DATAGRAM` / `CONNECTION_ID_RETIRED` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
-- `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `PUSH_PROMISE` / `GO_AWAY` / `RESET` / `RESET_STREAM` / `STOP_SENDING` / `WEBTRANSPORT_SESSION_READY` / `WEBTRANSPORT_STREAM_DATA` / `WEBTRANSPORT_DATAGRAM`
-- `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `STREAM_OPENED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
+- `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
+- `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING`
+- `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `is_unidirectional` (`is_unidirectional` は値が設定される経路が無く常に False)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id`、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value`。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message`、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id`、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value`。
 
 ## 注意点
 

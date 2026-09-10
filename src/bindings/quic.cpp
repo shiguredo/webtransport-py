@@ -3150,7 +3150,6 @@ void bind_quic(nb::module_& m) {
       .value("STREAM_CLOSED", QuicEventType::StreamClosed)
       .value("STREAM_RESET", QuicEventType::StreamReset)
       .value("DATAGRAM", QuicEventType::DatagramReceived)
-      .value("CONNECTION_ID_RETIRED", QuicEventType::ConnectionIdRetired)
       .value("SESSION_TICKET", QuicEventType::SessionTicket)
       .value("EARLY_DATA_REJECTED", QuicEventType::EarlyDataRejected)
       .value("PATH_VALIDATED", QuicEventType::PathValidated)
