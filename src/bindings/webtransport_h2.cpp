@@ -32,6 +32,10 @@ constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
 // RFC 9000 Section 16: varint で表現できる最大値 (2^62 - 1)
 constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
 
+// HTTP/2 SETTINGS の値は uint32 (RFC 9113 Section 6.5.1)。WebTransport の
+// 初期フロー制御値の上限 (2^32 - 1) として使う
+constexpr uint64_t kMaxSettingsValue = (1ULL << 32) - 1;
+
 // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
 // プレースホルダ。draft で値が確定したら更新する
 constexpr uint32_t kWtFlowControlError = 0x50;
@@ -1581,26 +1585,28 @@ std::unique_ptr<H2Session> H2Session::create_server(
 }
 
 bool H2Session::initialize() {
-  // Config の初期値を生成時に検査する。上限を超える値は 2xx 応答受信時
-  // (nghttp2 の C コールバック内) や accept_session の初期フロー制御カプセル
-  // 送出で問題になるため、Python 境界であるここで ValueError にする
-  //
-  // RFC 9000 Section 16: varint の上限 (2^62 - 1) を超えると encode_varint が
-  // 例外になり C ABI 境界を越える
-  if (config_.wt_initial_max_data > kMaxVarint) {
-    throw std::invalid_argument("wt_initial_max_data must be less than 2^62: " +
+  // WebTransport の初期フロー制御値を生成時に検査する。SETTINGS の値は
+  // uint32 のため、2^32 以上は SETTINGS で切り詰められて WebTransport-Init や
+  // 初期カプセルと食い違う (RFC 9113 Section 6.5.1)。Python 境界であるここで
+  // ValueError にする。draft-15 Section 6.7 / 6.10 の Maximum Streams 2^60
+  // 制限もストリーム数 2 フィールドでは本検査 (2^32 - 1) により同時に満たす
+  if (config_.wt_initial_max_data > kMaxSettingsValue) {
+    throw std::invalid_argument("wt_initial_max_data must be less than 2^32: " +
                                 std::to_string(config_.wt_initial_max_data));
   }
-  // draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
-  // (受信側も超過を WT_FLOW_CONTROL_ERROR で拒否する)
-  if (config_.wt_initial_max_streams_bidi > kMaxStreamsLimit) {
+  if (config_.wt_initial_max_stream_data > kMaxSettingsValue) {
     throw std::invalid_argument(
-        "wt_initial_max_streams_bidi must not exceed 2^60: " +
+        "wt_initial_max_stream_data must be less than 2^32: " +
+        std::to_string(config_.wt_initial_max_stream_data));
+  }
+  if (config_.wt_initial_max_streams_bidi > kMaxSettingsValue) {
+    throw std::invalid_argument(
+        "wt_initial_max_streams_bidi must be less than 2^32: " +
         std::to_string(config_.wt_initial_max_streams_bidi));
   }
-  if (config_.wt_initial_max_streams_uni > kMaxStreamsLimit) {
+  if (config_.wt_initial_max_streams_uni > kMaxSettingsValue) {
     throw std::invalid_argument(
-        "wt_initial_max_streams_uni must not exceed 2^60: " +
+        "wt_initial_max_streams_uni must be less than 2^32: " +
         std::to_string(config_.wt_initial_max_streams_uni));
   }
 

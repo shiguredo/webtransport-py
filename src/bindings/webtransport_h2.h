@@ -95,19 +95,20 @@ struct H2SessionConfig {
   // サーバーモードかどうか
   bool is_server = false;
 
-  // WebTransport 初期フロー制御 (セッションレベル)。2^62 以上は
-  // create_client / create_server が ValueError にする (RFC 9000 Section 16)
+  // WebTransport 初期フロー制御 (セッションレベル)。2^32 以上は
+  // create_client / create_server が ValueError にする (SETTINGS は uint32)
   uint64_t wt_initial_max_data = 1048576;
 
-  // WebTransport 初期フロー制御 (ストリームレベル)
+  // WebTransport 初期フロー制御 (ストリームレベル)。2^32 以上は
+  // create_client / create_server が ValueError にする (SETTINGS は uint32)
   uint64_t wt_initial_max_stream_data = 262144;
 
-  // WebTransport 初期ストリーム数制限 (双方向)。2^60 超は
-  // create_client / create_server が ValueError にする (draft-15 Section 6.7)
+  // WebTransport 初期ストリーム数制限 (双方向)。2^32 以上は
+  // create_client / create_server が ValueError にする (SETTINGS は uint32)
   uint64_t wt_initial_max_streams_bidi = 100;
 
-  // WebTransport 初期ストリーム数制限 (単方向)。2^60 超は
-  // create_client / create_server が ValueError にする (draft-15 Section 6.10)
+  // WebTransport 初期ストリーム数制限 (単方向)。2^32 以上は
+  // create_client / create_server が ValueError にする (SETTINGS は uint32)
   uint64_t wt_initial_max_streams_uni = 100;
 
   // 受理前楽観的カプセルの蓄積上限 (バイト) 。サーバーが受理前に届いた

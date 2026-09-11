@@ -377,7 +377,7 @@ class Server:
         try:
             session = h2_low.Session.create_server(config)
         except ValueError:
-            # Config の varint 上限超えなど生成前の失敗で接続を開いたままに
+            # Config の上限値超えなど生成前の失敗で接続を開いたままに
             # しない (利用者入力の誤用)
             writer.close()
             raise

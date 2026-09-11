@@ -105,7 +105,7 @@
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の `reset_stream` / `stop_sending` に `stream_id` の varint 範囲検査と未知ストリームの送出抑止を追加する
   - @voluntas
-- [FIX] WebTransport over HTTP/2 の Config の `wt_initial_max_data` の varint 上限超えと `wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni` の 2^60 超えをセッション生成時の `ValueError` にする
+- [FIX] WebTransport over HTTP/2 の Config の初期フロー制御値が 2^32 以上だと SETTINGS で切り詰められて WebTransport-Init や初期フロー制御カプセルと食い違う問題を修正し、2^32 以上をセッション生成時の `ValueError` にする
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のサーバーが 405 応答に Allow: CONNECT を付与し、非 WebTransport リクエストへの無応答によるストリーム滞留を解消する
   - @voluntas

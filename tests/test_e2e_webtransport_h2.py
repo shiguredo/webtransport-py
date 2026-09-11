@@ -1752,7 +1752,7 @@ async def test_server_start_with_config_over_limit_raises_value_error(test_certi
     接続を待ち受ける前に設定ミスを検出する (fail-fast)。
     """
     config = h2_low.Config()
-    config.wt_initial_max_data = 2**62
+    config.wt_initial_max_data = 2**32
     server = Server(
         host="127.0.0.1",
         port=0,
@@ -1762,7 +1762,7 @@ async def test_server_start_with_config_over_limit_raises_value_error(test_certi
     )
 
     try:
-        with pytest.raises(ValueError, match=r"wt_initial_max_data must be less than 2\^62"):
+        with pytest.raises(ValueError, match=r"wt_initial_max_data must be less than 2\^32"):
             await server.start()
         # バインド前に拒否され、リスナーが残らない
         assert server.is_running is False
@@ -1789,14 +1789,16 @@ async def test_client_connect_with_config_over_limit_raises_value_error(test_cer
     )
     await server.start()
     config = h2_low.Config()
-    config.wt_initial_max_streams_bidi = 2**60 + 1
+    config.wt_initial_max_streams_bidi = 2**32
     client = Client(
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
         config=config,
     )
     try:
-        with pytest.raises(ValueError, match=r"wt_initial_max_streams_bidi must not exceed 2\^60"):
+        with pytest.raises(
+            ValueError, match=r"wt_initial_max_streams_bidi must be less than 2\^32"
+        ):
             await client.connect(timeout=5.0)
         assert client.is_connected is False
         # 後始末で接続が閉じられている (writer / reader が残らない)
