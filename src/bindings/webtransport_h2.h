@@ -387,6 +387,12 @@ class H2Session {
    * false のまま確立済みセッションとしては扱わない。エントリは両ハーフ
    * クローズ時の on_stream_close_callback による SessionClosed 発火のため
    * に残す。accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)。
+   *
+   * RFC 9110 Section 15.5.6 の MUST に従い、status_code が 405 の場合は
+   * Allow: CONNECT を応答ヘッダーに含める (WebTransport エンドポイントが
+   * 受け付ける唯一のメソッド)。非 WebTransport リクエストへの 405 応答にも
+   * 本 API を使う (wt_sessions_ に対象が無い場合は削除が no-op になり、
+   * イベントも発火しない)。
    * @param session_id セッション ID
    * @param status_code HTTP ステータスコード
    */

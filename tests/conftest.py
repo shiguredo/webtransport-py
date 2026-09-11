@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from webtransport import h2, h3
+from webtransport import h2, h3, http2
 from webtransport.quic import Config, Connection
 
 
@@ -438,12 +438,12 @@ def _establish_two_sessions() -> tuple[h3.Session, h3.Session, int, int]:
     return client, server, first_session_id, second_session_id
 
 
-def _h2_pump(src: h2.Session, dst: h2.Session) -> None:
-    """h2.Session の src の送信データを全て dst に渡す
+def _h2_pump(src: http2.Connection | h2.Session, dst: http2.Connection | h2.Session) -> None:
+    """h2.Session / http2.Connection の src の送信データを全て dst に渡す
 
     QUIC レイヤーを介さず、send() で取り出したデータを receive() で直接
-    渡す (モックなし)。send() は 1 回の呼び出しで送信バッファ全体を返し、
-    空なら None を返すため、None が返るまで繰り返す (防御的に最大 64 回)。
+    渡す (モックなし)。send() は 1 回で送信データを返し切るとは限らず、
+    無くなると None を返すため、None が返るまで繰り返す (防御的に最大 64 回)。
     """
     for _ in range(64):
         sent = False
@@ -455,6 +455,36 @@ def _h2_pump(src: h2.Session, dst: h2.Session) -> None:
             sent = True
         if not sent:
             break
+
+
+def _create_h2_http2_pair() -> tuple[http2.Connection, h2.Session]:
+    """http2.Connection クライアントと h2.Session サーバーを作成して初期化する
+
+    h2.Session サーバーの SETTINGS 交換まで完了させる。http2.Connection は
+    preface と SETTINGS を send() で返し、h2.Session は receive() で処理した
+    後に自身の SETTINGS を send() で返すため、双方の送信データが無くなるまで
+    往復させる。
+
+    @return (http2.Connection クライアント, h2.Session サーバー)
+    """
+    client = http2.Connection.create_client(http2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server = h2.Session.create_server(server_config)
+
+    for _ in range(10):
+        client_data = client.send()
+        if client_data:
+            server.receive(client_data)
+        server_data = server.send()
+        if server_data:
+            client.receive(server_data)
+        if not client_data and not server_data:
+            break
+    else:
+        raise AssertionError("SETTINGS 交換が収束しませんでした")
+
+    return client, server
 
 
 def _create_h2_session_pair() -> tuple[h2.Session, h2.Session]:

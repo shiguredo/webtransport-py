@@ -1880,14 +1880,22 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
 
   std::string status = std::to_string(status_code);
 
-  nghttp2_nv nva[] = {
+  // RFC 9110 Section 15.5.6 は 405 応答に Allow ヘッダーを含めることを
+  // MUST とする。WebTransport エンドポイントが受け付ける唯一のメソッドは
+  // CONNECT であるため、405 のときのみ Allow: CONNECT を載せる
+  // (非 WebTransport リクエストへの 405 応答にも同じ値が載る)。
+  // エントリ数は最大 2 で固定のため、固定長配列で組み立てる
+  nghttp2_nv nva[2] = {
       {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":status")),
        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(status.c_str())),
        7, status.size(), NGHTTP2_NV_FLAG_NONE},
+      {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>("allow")),
+       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>("CONNECT")), 5, 7,
+       NGHTTP2_NV_FLAG_NONE},
   };
+  size_t nva_count = (status_code == 405) ? 2 : 1;
 
-  nghttp2_submit_response(session_, session_id, nva,
-                          sizeof(nva) / sizeof(nva[0]), nullptr);
+  nghttp2_submit_response(session_, session_id, nva, nva_count, nullptr);
 
   // 非 2xx 応答で拒否されたセッションは一度も確立されていない
   // (draft-15 Section 3.2 の「A WebTransport session is established when
@@ -2538,6 +2546,14 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             event.session_id = stream_id;
             event.headers = it->second;
             h2_session->push_event(std::move(event));
+          } else {
+            // 非 WebTransport リクエスト (CONNECT +
+            // :protocol=webtransport 以外) は 405 で拒否してストリームを
+            // 終端する。draft-15 Section 3.2 の 405 SHOULD は extended
+            // CONNECT + :protocol=webtransport の対象リソースが
+            // WebTransport 非対応の場合を指し、本分岐はその対象外だが、
+            // WebTransport 専用エンドポイントとしての実装ポリシーで送出する
+            h2_session->reject_session(stream_id, 405);
           }
           h2_session->pending_headers_.erase(it);
         }
@@ -3016,7 +3032,7 @@ void bind_webtransport_h2(nb::module_& m) {
                    "int) -> None"),
            "WebTransport セッションを拒否 (サーバー用。status_code は "
            "200-599 (実質 300-599 用)。1xx と 3 桁未満・4 桁以上・600 以上は "
-           "ValueError)")
+           "ValueError。405 の場合は Allow: CONNECT を応答に含める)")
       .def("open_stream", &H2Session::open_stream, nb::lock_self(),
            nb::arg("session_id"), nb::arg("is_unidirectional"),
            nb::sig("def open_stream(self, session_id: int, is_unidirectional: "

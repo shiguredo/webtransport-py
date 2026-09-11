@@ -13,12 +13,16 @@ session is established when the server sends a 2xx response」により、非 2x
 こと (2xx 送出 = セッション確立) を検証する。2xx 保持エントリの残留は
 両ハーフクローズ時の on_stream_close_callback による SessionClosed 発火で
 間接検証する。
+
+さらに、サーバー側 reject_session の 405 応答が Allow: CONNECT を含み、
+405 以外の応答は Allow を含まないことも検証する。
 """
 
 from __future__ import annotations
 
 import pytest
 from conftest import (
+    _create_h2_http2_pair,
     _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
@@ -26,7 +30,7 @@ from conftest import (
     _h2_pump,
 )
 
-from webtransport import h2
+from webtransport import h2, http2
 
 
 def _encode_status_headers(session_id: int, status_code: int) -> bytes:
@@ -330,6 +334,62 @@ def test_server_reject_status_code_entry_retention(status_code: int, expected_cl
         assert closed_events[0].error_code == 0
     else:
         assert len(closed_events) == 0
+
+
+@pytest.mark.parametrize(
+    "status_code, expected_allow",
+    [(405, "CONNECT"), (403, None)],
+    ids=["method_not_allowed", "forbidden"],
+)
+def test_server_reject_session_allow_header_only_for_405(
+    status_code: int, expected_allow: str | None
+) -> None:
+    """reject_session の応答の allow: CONNECT が 405 のときのみ付くことを確認
+
+    RFC 9110 Section 15.5.6 は 405 応答に Allow ヘッダーを含めることを
+    MUST とする。h2.Session の SessionRejected イベントは headers が空の
+    ため allow を観測できない。応答ヘッダーを観測できる http2.Connection
+    をクライアントに使い、WT CONNECT を送って reject_session 後の HEADERS
+    イベントで allow の有無を表明する (405 以外には付けない)。
+    """
+    client, server = _create_h2_http2_pair()
+
+    # WebTransport CONNECT を送る (session_id は CONNECT のストリーム ID)
+    stream_id = client.submit_request(
+        [
+            (":method", "CONNECT"),
+            (":protocol", "webtransport"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+            (":path", "/webtransport"),
+        ]
+    )
+    assert stream_id > 0
+    client.send_data(stream_id, b"", eof=True)
+    _h2_pump(client, server)
+
+    # サーバー側でセッションが認識され、SESSION_READY が発火する
+    ready_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1
+    session_id = ready_events[0].session_id
+    assert session_id == stream_id
+
+    # 非 2xx (405 または 403) で拒否する
+    server.reject_session(session_id, status_code)
+    _h2_pump(server, client)
+
+    # HEADERS イベントで :status と allow の有無を確認する
+    events = _drain_events(client)
+    headers_events = [event for event in events if event.type == http2.EventType.HEADERS]
+    assert len(headers_events) == 1
+    assert headers_events[0].stream_id == session_id
+    response_headers = dict(headers_events[0].headers)
+    assert response_headers[":status"] == str(status_code)
+    if expected_allow is None:
+        # 405 以外では Allow ヘッダーを付けない
+        assert "allow" not in response_headers
+    else:
+        assert response_headers["allow"] == expected_allow
 
 
 @pytest.mark.parametrize(
