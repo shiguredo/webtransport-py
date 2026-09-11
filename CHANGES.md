@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] WebTransport over HTTP/2 の `h2.Client` は TLS 1.3 以上で接続し、`h2.Server` は TLS 1.2 以下の接続を拒否するようにする (draft-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) も拒否する)
+  - @voluntas
 - [CHANGE] Windows 対応を終了する
   - @voluntas
 - [CHANGE] HTTP/2 のリクエスト終端を `send_data(..., eof=True)` に変更し、`Client.request` に `body` を追加する

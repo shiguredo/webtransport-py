@@ -25,7 +25,8 @@ if TYPE_CHECKING:
 class Client:
     """WebTransport over HTTP/2 クライアント
 
-    asyncio を使用した非同期 WebTransport クライアント。
+    asyncio を使用した非同期 WebTransport クライアント。TLS 1.3 以上を必須とし
+    (draft-15 Section 7)、TLS 1.2 以下の対向へは接続できない。
 
     Usage:
         client = Client(url="https://localhost:8443/webtransport")
@@ -262,7 +263,10 @@ class Client:
         """WebTransport セッションを確立する
 
         deadline ベースで bounded に動作する。成功時は例外なしで復帰し、
-        失敗時は具体例外で理由を通知する。
+        失敗時は具体例外で理由を通知する。TLS 1.3 以上を必須とし
+        (draft-15 Section 7)、TLS 1.2 以下の対向へは接続できない。仕様上
+        許容される TLS 1.2 + extended master secret (EMS) も、Python の ssl
+        が EMS 交渉の有無を公開しないため拒否する。
 
         Args:
             timeout: 接続確立の打ち切り秒数。TCP 接続・SETTINGS 受信待ち・
@@ -272,9 +276,11 @@ class Client:
         Raises:
             ConnectTimeoutError: 待機中に成否を決めるイベントが届かず
                 deadline に達した場合
-            ConnectRefusedError: 待機中に TCP RST や TLS ハンドシェイク
-                前段の接続拒否が届いた場合
-            HandshakeFailedError: TLS 検証失敗や非 2xx 応答の場合
+            ConnectRefusedError: 待機中に接続リセット (TCP RST) が届いた
+                場合 (TLS バージョン不一致が接続リセットとして観測される
+                環境を含む)
+            HandshakeFailedError: TLS 検証失敗、TLS アラート (TLS バージョン
+                不一致や ALPN 不一致) の受信、非 2xx 応答の場合
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -285,6 +291,12 @@ class Client:
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
+        # draft-15 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
+        # (EMS) のいずれも満たさない接続では WebTransport over HTTP/2
+        # リクエストを送信してはならない (MUST NOT)。Python の ssl は EMS
+        # 交渉の有無を公開しないため、TLS 1.3 以上を許可し TLS 1.2 以下を
+        # 拒否する (draft の改版で要件が変わる可能性がある)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_3
         ssl_context.set_alpn_protocols(["h2"])
 
         try:

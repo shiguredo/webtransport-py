@@ -120,7 +120,10 @@ class SessionWriter:
 class Server:
     """WebTransport over HTTP/2 サーバー
 
-    asyncio を使用した非同期 WebTransport サーバー。
+    asyncio を使用した非同期 WebTransport サーバー。TLS 1.3 以上を必須とし
+    (draft-15 Section 7)、TLS 1.2 以下の接続は拒否する。仕様上許容される
+    TLS 1.2 + extended master secret (EMS) も、Python の ssl が EMS 交渉の
+    有無を公開しないため拒否する。
 
     Usage:
         async with Server(host="0.0.0.0", port=8443, certfile="cert.pem", keyfile="key.pem") as server:
@@ -304,6 +307,12 @@ class Server:
     async def start(self) -> None:
         """サーバーを開始する"""
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # draft-15 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
+        # (EMS) のいずれも満たさない接続で受信した WebTransport over HTTP/2
+        # リクエストは malformed として扱わなければならない (MUST)。Python の
+        # ssl は EMS 交渉の有無を公開しないため、TLS 1.3 以上を許可し TLS 1.2
+        # 以下を拒否する (draft の改版で要件が変わる可能性がある)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_3
         ssl_context.load_cert_chain(self._certfile, self._keyfile)
         ssl_context.set_alpn_protocols(["h2"])
 
