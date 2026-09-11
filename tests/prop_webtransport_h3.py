@@ -5,6 +5,10 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from webtransport import h3
+from webtransport.h3._error_codes import (
+    deliver_stream_reset_error_code,
+    webtransport_code_to_http_code,
+)
 
 # uint64 の範囲
 UINT64_MAX = 2**64 - 1
@@ -555,3 +559,22 @@ def test_receive_stream_data_bound_uni_no_abort() -> None:
         assert client.receive_stream_data(stream_id, b"data", False) == 0
     for stream_id in (3, 7, 11):
         assert server.receive_stream_data(stream_id, b"data", False) == 0
+
+
+# ========== エラーコードの復元 (draft-16 Section 4.4) ==========
+
+
+@given(st.integers(min_value=0, max_value=0xFFFFFFFF))
+@settings(max_examples=100)
+def prop_deliver_stream_reset_error_code_roundtrip(app_code: int):
+    """データストリームのリセットはワイヤ→アプリの復元で元の 32bit コードに戻る
+
+    webtransport_code_to_http_code でワイヤへ写したコードを
+    deliver_stream_reset_error_code で配信すると、元のアプリコードに戻る
+    (draft-16 Section 4.4 Figure 4 / draft-ietf-webtrans-overview-13 の
+    unsigned 32-bit 契約)。
+    """
+    wire = webtransport_code_to_http_code(app_code)
+    assert (
+        deliver_stream_reset_error_code(wire_error_code=wire, is_connect_stream=False) == app_code
+    )

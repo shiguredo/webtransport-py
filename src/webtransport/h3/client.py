@@ -171,11 +171,12 @@ class Client:
     ) -> None:
         """ストリームリセット受信時のコールバックを設定する
 
-        error_code はワイヤ上のコードを変更せずに渡す
-        (draft-ietf-webtrans-http3-16 Section 4.4)。データストリームで
-        WT_APPLICATION_ERROR レンジ外 (予約済み含む) の場合は None
-        (アプリエラーコードなし)。CONNECT ストリームのリセットは
-        HTTP/3 エラーコード空間のまま渡す。
+        error_code はデータストリームでは WT_APPLICATION_ERROR レンジの
+        ワイヤコードを unsigned 32-bit のアプリコードへ逆変換して渡す
+        (draft-ietf-webtrans-http3-16 Section 4.4 の unchanged はアプリコードの
+        end-to-end 保存を指すと解釈する)。レンジ外、またはレンジ内の予約済み
+        コードポイントの場合は None (アプリエラーコードなし)。CONNECT
+        ストリームのリセットは HTTP/3 エラーコード空間のまま渡す。
 
         Args:
             callback: async def callback(stream_id: int, error_code: int | None) -> None
