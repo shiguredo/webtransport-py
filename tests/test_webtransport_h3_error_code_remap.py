@@ -21,6 +21,18 @@ _WT_APPLICATION_ERROR_FIRST = 0x52E4A40FA8DB
 _WT_APPLICATION_ERROR_LAST = 0x52E5AC983162
 
 
+def _find_reserved_wire_code() -> int:
+    """WT_APPLICATION_ERROR レンジ内の予約済みコードポイントを 1 つ返す
+
+    予約済みは 0x1f * N + 0x21 で、レンジ先頭 + 0x1e が最初の予約済みに
+    なる (探索でこれを返す)。
+    """
+    for candidate in range(_WT_APPLICATION_ERROR_FIRST, _WT_APPLICATION_ERROR_FIRST + 0x40):
+        if (candidate - 0x21) % 0x1F == 0:
+            return candidate
+    raise AssertionError("予約済みコードポイントが見つかりませんでした")
+
+
 def test_webtransport_code_to_http_code_endpoints() -> None:
     """端点 0 と 0xffffffff が仕様の端点へ写ることを確認する"""
     assert webtransport_code_to_http_code(0) == _WT_APPLICATION_ERROR_FIRST
@@ -86,30 +98,47 @@ def test_http_code_to_webtransport_code_rejects_out_of_range() -> None:
     with pytest.raises(ValueError):
         http_code_to_webtransport_code(_WT_APPLICATION_ERROR_LAST + 1)
     # レンジ内の予約済み
-    reserved = _WT_APPLICATION_ERROR_FIRST + 1
-    # first+1 が予約済みとは限らないので、確実に予約済みを探す
-    for candidate in range(_WT_APPLICATION_ERROR_FIRST, _WT_APPLICATION_ERROR_FIRST + 0x40):
-        if (candidate - 0x21) % 0x1F == 0:
-            reserved = candidate
-            break
-    assert not is_wt_application_error_code(reserved)
+    reserved = _find_reserved_wire_code()
     with pytest.raises(ValueError):
         http_code_to_webtransport_code(reserved)
 
 
 def test_deliver_stream_reset_error_code_data_stream() -> None:
-    """データストリームはレンジ内をそのまま、レンジ外は None にする"""
+    """データストリームはレンジ内をアプリコードへ復元し、レンジ外または予約済みは None にする"""
     wire = webtransport_code_to_http_code(0x42)
     assert (
         deliver_stream_reset_error_code(
             wire_error_code=wire,
             is_connect_stream=False,
         )
-        == wire
+        == 0x42
+    )
+    # 上端のワイヤコードは 0xffffffff へ復元される
+    assert (
+        deliver_stream_reset_error_code(
+            wire_error_code=_WT_APPLICATION_ERROR_LAST,
+            is_connect_stream=False,
+        )
+        == 0xFFFFFFFF
+    )
+    # 下端のワイヤコードはアプリコード 0 へ復元される
+    assert (
+        deliver_stream_reset_error_code(
+            wire_error_code=_WT_APPLICATION_ERROR_FIRST,
+            is_connect_stream=False,
+        )
+        == 0
     )
     assert (
         deliver_stream_reset_error_code(
             wire_error_code=0x01,
+            is_connect_stream=False,
+        )
+        is None
+    )
+    assert (
+        deliver_stream_reset_error_code(
+            wire_error_code=_WT_APPLICATION_ERROR_LAST + 1,
             is_connect_stream=False,
         )
         is None
@@ -121,10 +150,19 @@ def test_deliver_stream_reset_error_code_data_stream() -> None:
         )
         is None
     )
+    # レンジ内の予約済みコードポイントも None (アプリエラーコードなし)
+    reserved = _find_reserved_wire_code()
+    assert (
+        deliver_stream_reset_error_code(
+            wire_error_code=reserved,
+            is_connect_stream=False,
+        )
+        is None
+    )
 
 
 def test_deliver_stream_reset_error_code_connect_stream() -> None:
-    """CONNECT ストリームはレンジ外でもワイヤコードをそのまま渡す"""
+    """CONNECT ストリームはレンジ内外を問わずワイヤコードをそのまま渡す"""
     assert (
         deliver_stream_reset_error_code(
             wire_error_code=0x42,
@@ -138,6 +176,15 @@ def test_deliver_stream_reset_error_code_connect_stream() -> None:
             is_connect_stream=True,
         )
         == 0x010E
+    )
+    # WT_APPLICATION_ERROR レンジ内でもリマップせずワイヤコードのまま渡す
+    in_range = webtransport_code_to_http_code(0x42)
+    assert (
+        deliver_stream_reset_error_code(
+            wire_error_code=in_range,
+            is_connect_stream=True,
+        )
+        == in_range
     )
 
 
@@ -254,7 +301,6 @@ async def test_connect_stream_reset_is_not_remapped(test_certificates) -> None:
     import asyncio
 
     from webtransport.h3 import Client, Server
-    from webtransport.h3._error_codes import webtransport_code_to_http_code
 
     session_ready_event = asyncio.Event()
     reset_received = asyncio.Event()
@@ -326,7 +372,6 @@ async def test_connect_stream_reset_is_not_remapped(test_certificates) -> None:
         assert reset_info["session_id"] == client_session_id
         # リマップされていないこと (ワイヤも配信も 0x03)
         assert reset_info["error_code"] == 0x03
-        assert reset_info["error_code"] != webtransport_code_to_http_code(0x03)
     finally:
         client_task.cancel()
         server_task.cancel()

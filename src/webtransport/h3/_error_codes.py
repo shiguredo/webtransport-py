@@ -41,8 +41,8 @@ def http_code_to_webtransport_code(h: int) -> int:
     """WT_APPLICATION_ERROR レンジのワイヤコードをアプリコードへ逆変換する
 
     draft-ietf-webtrans-http3-16 Figure 4 の
-    ``http_code_to_webtransport_code``。ライブラリの受信配信では使わず、
-    アプリやテストがワイヤコードを解釈する際の参照実装として提供する。
+    ``http_code_to_webtransport_code``。受信したストリームリセットをアプリへ
+    配信する際の逆変換 (``deliver_stream_reset_error_code``) でも使う。
 
     Args:
         h: ワイヤ上の HTTP/3 エラーコード
@@ -80,13 +80,15 @@ def deliver_stream_reset_error_code(
     """受信したストリームリセットのエラーコードをアプリへ配信する形へ整える
 
     draft-ietf-webtrans-http3-16 Section 4.4:
-    - データストリーム: ワイヤコードを変更せずに配信する。レンジ外
-      (予約済み含む) はアプリエラーコードなし (None)
+    - データストリーム: WT_APPLICATION_ERROR レンジのワイヤコードは
+      unsigned 32-bit のアプリコードへ逆変換して配信する。同節の unchanged は
+      アプリコードの end-to-end 保存を指すと解釈する。レンジ外、または
+      レンジ内の予約済みコードポイントの場合はアプリエラーコードなし (None)
     - CONNECT ストリーム: HTTP/3 エラーコード空間のまま配信する
       (リマップ対象外)
     """
     if is_connect_stream:
         return wire_error_code
     if is_wt_application_error_code(wire_error_code):
-        return wire_error_code
+        return http_code_to_webtransport_code(wire_error_code)
     return None

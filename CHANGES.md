@@ -105,6 +105,8 @@
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 のデータストリームリセットで受信したエラーコードを unsigned 32-bit のアプリコードに復元して `on_stream_reset` に配信する
+  - @voluntas
 - [FIX] WebTransport over HTTP/3 の `Client.connect` の SETTINGS 受信判定を制御ストリーム ID のヒューリスティックから SETTINGS の直接判定に修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の `reset_stream` / `stop_sending` に `stream_id` の varint 範囲検査と未知ストリームの送出抑止を追加する

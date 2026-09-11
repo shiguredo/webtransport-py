@@ -937,7 +937,7 @@ async def test_session_close_notifies_server(test_certificates):
 
 @pytest.mark.asyncio
 async def test_server_resets_client_stream(test_certificates):
-    """Server が reset_stream すると Client に STREAM_RESET が届くことを確認"""
+    """Server がアプリコードで reset_stream すると Client の on_stream_reset が受信側で復元した値を受け取ることを確認"""
     from webtransport.h3 import Client
 
     session_ready_event = asyncio.Event()
@@ -1004,11 +1004,9 @@ async def test_server_resets_client_stream(test_certificates):
     await asyncio.wait_for(client_reset_received.wait(), timeout=5.0)
 
     assert reset_info["stream_id"] == stream_id
-    # 受信側はワイヤコードを変更せず配信する (Section 4.4)。
-    # 送信側がアプリコード 0x01 を WT_APPLICATION_ERROR へリマップする
-    from webtransport.h3._error_codes import webtransport_code_to_http_code
-
-    assert reset_info["error_code"] == webtransport_code_to_http_code(0x01)
+    # 送信側がアプリコード 0x01 を WT_APPLICATION_ERROR へリマップし、
+    # 受信側はアプリコードへ復元して配信する (Section 4.4)
+    assert reset_info["error_code"] == 0x01
 
     client_task.cancel()
     server_task.cancel()
@@ -1020,7 +1018,7 @@ async def test_server_resets_client_stream(test_certificates):
 
 @pytest.mark.asyncio
 async def test_client_resets_server_stream(test_certificates):
-    """Client が reset_stream すると Server に STREAM_RESET が届くことを確認"""
+    """Client がアプリコードで reset_stream すると Server の on_stream_reset が受信側で復元した値を受け取ることを確認"""
     from webtransport.h3 import Client
 
     session_ready_event = asyncio.Event()
@@ -1102,11 +1100,9 @@ async def test_client_resets_server_stream(test_certificates):
     await asyncio.wait_for(server_reset_received.wait(), timeout=5.0)
 
     assert reset_info["stream_id"] == stream_id
-    # 受信側はワイヤコードを変更せず配信する (Section 4.4)。
-    # 送信側がアプリコード 0x02 を WT_APPLICATION_ERROR へリマップする
-    from webtransport.h3._error_codes import webtransport_code_to_http_code
-
-    assert reset_info["error_code"] == webtransport_code_to_http_code(0x02)
+    # 送信側がアプリコード 0x02 を WT_APPLICATION_ERROR へリマップし、
+    # 受信側はアプリコードへ復元して配信する (Section 4.4)
+    assert reset_info["error_code"] == 0x02
     # リセットされたストリームの属するセッション ID が渡される
     assert reset_info["session_id"] == expected_session_id["session_id"]
 
