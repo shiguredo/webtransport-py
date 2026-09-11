@@ -1,7 +1,7 @@
 # examples/http2/server.py が参照する http2.ResponseWriter が公開されておらず import 名として解決できない
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-http2-reexport-response-writer
 - Polished: 2026-09-09
 
@@ -33,3 +33,13 @@
 - SKILL.md から ResponseWriter 回避策注記が削除され、直後の `CapsuleType` bullet が `... は再エクスポートされていない。...` になっていること
 - `CHANGES.md` の `## develop` に `[ADD]` エントリが追加されていること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `src/webtransport/http2/__init__.py` の import を `from webtransport.http2.server import ResponseWriter, Server` に変更し、`__all__` に `ResponseWriter` をソート順で追加した
+- `examples/http2/server.py` の `http2.ResponseWriter` が `webtransport.http2` の属性として解決できるようにした (h2 の `SessionWriter` と対称)
+- `skills/webtransport-py/SKILL.md` の ResponseWriter 回避策注記を削除し、直後の CapsuleType 注記の助詞を「も」から「は」に修正した。モジュール表の http2 行にも `ResponseWriter` を追加した
+- `tests/test_webtransport.py` の `test_import_http2` に `ResponseWriter` の属性存在と `__all__` 収録の表明を追加し、`tests/test_e2e_http2.py` の `test_import_all` に `ResponseWriter` と `select_alpn` を追加した
+- 兄弟 `.pyi` を退避したレイアウトで `uvx ty check examples/http2/server.py` が 0 件になることを確認した (デフォルトレイアウトで `.pyi` が `__init__.py` を隠す根本原因は open/0167 の担当)
+- `CHANGES.md` の develop に [ADD] エントリを追加した
+- 全 1023 テストが通過することを確認した
