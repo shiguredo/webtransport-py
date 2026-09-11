@@ -281,8 +281,8 @@ class Client:
                 環境を含む)
             HandshakeFailedError: TLS 検証失敗、TLS アラート (TLS バージョン
                 不一致や ALPN 不一致) の受信、非 2xx 応答の場合
-            ValueError: Config の上限値 (varint の 2^62 - 1 や Maximum
-                Streams の 2^60) を超えるためセッション生成に失敗した場合
+            ValueError: Config の上限値 (2^32 - 1) を超えるためセッション
+                生成に失敗した場合
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout

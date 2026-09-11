@@ -643,7 +643,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
 - `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`
-- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`。`wt_initial_max_data` に 2^62 以上、`wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni` に 2^60 超を設定するとセッション生成時に `ValueError` になる (varint / Maximum Streams の上限)
+- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)
 
 ## イベント型 (EventType)
 

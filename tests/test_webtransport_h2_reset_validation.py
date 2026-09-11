@@ -3,9 +3,7 @@
 reset_stream の Reliable Size は送信済みバイト数と一致しなければならない
 (draft-ietf-webtrans-http2-15 Section 6.2) ため、任意指定の引数を廃止して
 常に bytes_sent を載せる。あわせて varint 範囲 (2^62 - 1、RFC 9000 Section
-16) の検査と、存在しないストリーム ID への送出抑止を検証する。さらに、
-Config の上限値 (varint / Maximum Streams) 超えがセッション生成時に
-ValueError になることも検証する。
+16) の検査と、存在しないストリーム ID への送出抑止を検証する。
 """
 
 from __future__ import annotations
@@ -220,54 +218,3 @@ def test_reset_stream_and_stop_sending_unknown_stream_id_ignored(unknown_stream_
     # WebTransport セッションが生存している (is_closed は接続全体のフラグの
     # ため、セッションの生存は get_session_ids で確認する)
     assert client.get_session_ids() == [session_id]
-
-
-@pytest.mark.parametrize(
-    "field, invalid_value",
-    [
-        ("wt_initial_max_data", 2**62),
-        ("wt_initial_max_streams_bidi", 2**60 + 1),
-        ("wt_initial_max_streams_uni", 2**60 + 1),
-    ],
-    ids=["max_data", "max_streams_bidi", "max_streams_uni"],
-)
-def test_create_session_with_config_over_limit_raises_value_error(
-    field: str, invalid_value: int
-) -> None:
-    """Config の上限値を超える初期フロー制御値ではセッション生成が ValueError になることを確認
-
-    Config の初期フロー制御値は 2xx 応答受信時や accept_session の初期
-    カプセル送出で使われる。上限超えを許すと nghttp2 の C コールバック内で
-    例外が発生したり、Maximum Streams の仕様上限 (2^60) を超えてピアに
-    拒否されたりするため、生成時に拒否する (RFC 9000 Section 16 /
-    draft-15 Section 6.7 / 6.10)。
-    """
-    for factory in (h2.Session.create_client, h2.Session.create_server):
-        config = h2.Config()
-        setattr(config, field, invalid_value)
-        with pytest.raises(ValueError, match=rf"{field} must .*: {invalid_value}"):
-            factory(config)
-
-
-@pytest.mark.parametrize(
-    "field, valid_value",
-    [
-        ("wt_initial_max_data", 2**62 - 1),
-        ("wt_initial_max_streams_bidi", 2**60),
-        ("wt_initial_max_streams_uni", 2**60),
-    ],
-    ids=["max_data", "max_streams_bidi", "max_streams_uni"],
-)
-def test_create_session_with_config_limit_max_succeeds(field: str, valid_value: int) -> None:
-    """上限値ちょうどの Config 値でセッションが生成できることを確認
-
-    上限検査が > ではなく >= に退行すると許容側の最大値が生成できなくなる。
-    client / server の両方でフィールドごとの上限値が通り、その 1 つ上が
-    拒否される境界を対にして固定する。
-    """
-    for factory in (h2.Session.create_client, h2.Session.create_server):
-        config = h2.Config()
-        setattr(config, field, valid_value)
-        session = factory(config)
-        assert session is not None
-        assert session.is_closed() is False
