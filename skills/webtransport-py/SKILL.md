@@ -212,6 +212,8 @@ async def reset_stream(stream_id: int, error_code: int = 0) -> None
 async def close_session(error_code: int = 0, error_message: str = "") -> None
 ```
 
+`send_stream_data` / `send_datagram` は `SessionWriter` と `h2.Client` のどちらも data が 1 MiB 超なら `ValueError` を送出する (未接続の `h2.Client` は送信しないため例外にならない)。
+
 `h2.Client.__init__(url, verify_peer=True, origin="", config=None)`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。
 
 ### QUIC (`webtransport.quic`)
@@ -634,7 +636,7 @@ def get_session_ids() -> list[int]
 def get_stream_ids(session_id: int) -> list[int]  # セッションに属するストリーム ID
 ```
 
-`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。
+`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。`receive` / `send_stream_data` / `send_datagram` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。
 
 ## Config の主要デフォルト値
 

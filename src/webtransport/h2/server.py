@@ -62,6 +62,9 @@ class SessionWriter:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: data が 1 MiB 超の場合
         """
         self._session.send_stream_data(self._session_id, stream_id, data, fin)
         send_data = self._session.send()
@@ -81,6 +84,9 @@ class SessionWriter:
 
         Args:
             data: 送信データ
+
+        Raises:
+            ValueError: data が 1 MiB 超の場合
         """
         self._session.send_datagram(self._session_id, data)
         send_data = self._session.send()

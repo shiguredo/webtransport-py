@@ -36,6 +36,23 @@ constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
 // 初期フロー制御値の上限 (2^32 - 1) として使う
 constexpr uint64_t kMaxSettingsValue = (1ULL << 32) - 1;
 
+// Python から渡される単回入力の上限 (バイト)。nb::bytes から std::vector へ
+// コピーする前に検査する。Config の wt_max_capsule_payload_size とは独立の
+// 固定値で、これを超える単回入力はアプリ側で分割する前提とする
+constexpr size_t kMaxPythonInputBytes = 1024 * 1024;
+
+// 1 MiB が既定のカプセルペイロード上限と同値であることを機械的に保証する
+static_assert(kMaxPythonInputBytes ==
+              H2SessionConfig{}.wt_max_capsule_payload_size);
+
+void check_python_input_size(const char* name, size_t size) {
+  if (size > kMaxPythonInputBytes) {
+    throw std::invalid_argument(std::string(name) + " must be at most " +
+                                std::to_string(kMaxPythonInputBytes) +
+                                " bytes: got " + std::to_string(size));
+  }
+}
+
 // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
 // プレースホルダ。draft で値が確定したら更新する
 constexpr uint32_t kWtFlowControlError = 0x50;
@@ -3060,12 +3077,13 @@ void bind_webtransport_h2(nb::module_& m) {
       .def(
           "receive",
           [](H2Session& s, nb::bytes data) {
+            check_python_input_size("receive data", data.size());
             return s.receive(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
           nb::lock_self(), nb::arg("data"),
           nb::sig("def receive(self, data: bytes) -> int"),
-          "受信したデータを処理")
+          "受信したデータを処理 (data が 1 MiB 超の場合は ValueError)")
       .def(
           "send",
           [](H2Session& s) -> std::optional<nb::bytes> {
@@ -3105,6 +3123,7 @@ void bind_webtransport_h2(nb::module_& m) {
           "send_stream_data",
           [](H2Session& s, int32_t session_id, uint64_t stream_id,
              nb::bytes data, bool fin) {
+            check_python_input_size("send_stream_data data", data.size());
             s.send_stream_data(
                 session_id, stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -3114,7 +3133,8 @@ void bind_webtransport_h2(nb::module_& m) {
           nb::arg("data"), nb::arg("fin") = false,
           nb::sig("def send_stream_data(self, session_id: int, stream_id: int, "
                   "data: bytes, fin: bool = False) -> None"),
-          "WebTransport ストリームにデータを送信")
+          "WebTransport ストリームにデータを送信 (data が 1 MiB 超の場合は "
+          "ValueError)")
       .def("reset_stream", &H2Session::reset_stream, nb::lock_self(),
            nb::arg("session_id"), nb::arg("stream_id"), nb::arg("error_code"),
            nb::sig("def reset_stream(self, session_id: int, stream_id: int, "
@@ -3129,6 +3149,7 @@ void bind_webtransport_h2(nb::module_& m) {
       .def(
           "send_datagram",
           [](H2Session& s, int32_t session_id, nb::bytes data) {
+            check_python_input_size("send_datagram data", data.size());
             s.send_datagram(
                 session_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
@@ -3136,7 +3157,7 @@ void bind_webtransport_h2(nb::module_& m) {
           nb::lock_self(), nb::arg("session_id"), nb::arg("data"),
           nb::sig(
               "def send_datagram(self, session_id: int, data: bytes) -> None"),
-          "データグラムを送信")
+          "データグラムを送信 (data が 1 MiB 超の場合は ValueError)")
       .def("close_session", &H2Session::close_session, nb::lock_self(),
            nb::arg("session_id"), nb::arg("error_code") = 0,
            nb::arg("error_message") = "",
