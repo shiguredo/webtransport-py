@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のサーバーが非 WT リクエストに一切応答せずストリームが滞留する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-h2-non-wt-request-no-response
 - Polished: 2026-09-09
 
@@ -36,3 +36,14 @@ draft-ietf-webtrans-http2-15 Section 3.2 の 405 SHOULD は「extended CONNECT �
 - `tests/test_webtransport_h2_end_stream.py` に、平文 GET をサーバーへ注入して自動 405 応答を検証する Sans-IO テストを追加すること。応答ヘッダーはクライアントに `webtransport.http2.Connection` (Sans-IO) を使い、`submit_request` + `send_data(..., eof=True)` で送ったリクエストの HEADERS イベントで `:status` / `allow` を、続く StreamEnd イベントで `END_STREAM` を表明する (応答を送っていない `h2_low.Session` クライアントへ 405 を渡すと nghttp2 が GOAWAY を返すため使わない)
 - `tests/test_webtransport_h2_reject_session.py` に `reject_session(session_id, 405)` の `allow: CONNECT` 表明を追加すること。`h2_low.Session` の `SessionRejected` イベントは `headers` が空のため `allow` を観測できない。クライアントに `webtransport.http2.Connection` を使い WT CONNECT を送り、`reject_session(405)` 後の HEADERS イベントで `allow` を表明する
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `H2Session::on_frame_recv_callback` の HEADERS 処理で、`is_connect && is_webtransport` 不成立の else 側に `reject_session(stream_id, 405)` を追加し、非 WebTransport リクエストへ 405 応答 (END_STREAM 付き) を返してストリームを終端するようにした
+- `H2Session::reject_session` で 405 のときのみ `Allow: CONNECT` を応答ヘッダーに載せるようにした (RFC 9110 Section 15.5.6 の MUST)。固定長配列で組み立て、405 以外の応答ヘッダー構成は変えない
+- `src/bindings/webtransport_h2.h` と nanobind の docstring に、405 時の Allow 付与と非 WebTransport リクエストへの応答に本 API を使うことを明記した
+- `tests/test_webtransport_h2_end_stream.py` に、`http2.Connection` クライアントから GET・CONNECT 単独・`:protocol=websocket` の CONNECT を送り、405 と `allow: CONNECT` と END_STREAM を表明する Sans-IO テスト、および終端前の POST でも 405 が返るテストを追加した
+- `tests/test_webtransport_h2_reject_session.py` に、`reject_session(405)` で `allow: CONNECT` が付き 403 では付かないことを表明するテストを追加した
+- `tests/conftest.py` に `http2.Connection` クライアントと `h2.Session` サーバーのペアを作る `_create_h2_http2_pair` を追加し、`_h2_pump` を両型で使えるようにした
+- `CHANGES.md` の `## develop` に FIX エントリを追加した
+- 全 989 テストが通過することを確認した
