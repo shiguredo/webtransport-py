@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の reset_stream に reliable_size を任意指定でき stream_id >= 2^62 で varint が壊れる
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h2-reset-stream-reliable-size-varint-validation
 - Polished: 2026-09-09
 
@@ -38,3 +38,17 @@
 - `skills/webtransport-py/SKILL.md` の `reset_stream` 説明が引数廃止に更新されていること
 - `CHANGES.md` の develop に FIX エントリが追加されていること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `H2Session::reset_stream` の `reliable_size` 引数を廃止し、常に送信済みバイト数 (`stream_it->second.bytes_sent`) を Reliable Size に載せるようにした (draft-15 Section 6.2)
+- `H2Session::reset_stream` / `H2Session::stop_sending` の冒頭で `stream_id` の varint 範囲 (2^62 - 1、RFC 9000 Section 16) を検査し、超過は `std::invalid_argument` (nanobind の既定翻訳で `ValueError`) にした。検査は未知ストリーム検査より先に行う
+- `H2Session::encode_varint` にも 2^62 - 1 上限の防御的検査を追加し、`kMaxVarint` を匿名 namespace の共通定数に集約した (ローカル定義 2 箇所も統合)
+- `H2Session::reset_stream` / `H2Session::stop_sending` に未知ストリーム ID の検査を追加し、存在しないストリームには黙って送出しないようにした (セッションは閉じない)
+- `H2Session::initialize` で Config の上限値を生成時に検査するようにした。`wt_initial_max_data` は 2^62 以上、`wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni` は 2^60 超 (draft-15 Section 6.7 / 6.10) で `ValueError` になる。2xx 応答受信時の nghttp2 コールバック内で `encode_varint` の例外が C ABI 境界を越える経路を塞ぐ
+- 高レベル `h2.Client.connect` は Config 上限超えの `ValueError` 時に接続 (writer / reader) を閉じて再送出し、`h2.Server.start` は使い捨てのセッション生成で起動時に Config を検証する
+- `tests/test_webtransport_h2_reset_validation.py` を新規作成し、Reliable Size のワイヤ値 (通常・複数チャンク・保留あり)、varint 境界の `ValueError`、終了済みセッションでの検査順序、未知ストリームの送出抑止、Config 上限の境界を検証した
+- `tests/prop_webtransport_h2.py` に Config 上限の property test、`tests/test_e2e_webtransport_h2.py` に高レベル `Server.start` / `Client.connect` の Config エラー e2e を追加した
+- `skills/webtransport-py/SKILL.md` から `reliable_size` を削除し、`ValueError` / 未知ストリーム抑止 / Config 上限の記載を追加した
+- `CHANGES.md` の develop に [CHANGE] (`reliable_size` 廃止) と [FIX] (入力検証・Config 上限) を追加した
+- 全 1013 テストが通過することを確認した
