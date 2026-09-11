@@ -99,6 +99,8 @@
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 のサーバーが 405 応答に Allow: CONNECT を付与し、非 WebTransport リクエストへの無応答によるストリーム滞留を解消する
+  - @voluntas
 - [FIX] WebTransport over HTTP/2 の受信マップがピアの未知ストリーム ID で無制限に増えるのを修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 と HTTP/2 の `Client.connect()` の無制限な待機ループを deadline 制御の bounded な待機に修正する

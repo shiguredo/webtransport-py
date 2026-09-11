@@ -9,12 +9,17 @@
 あわせて、WT_CLOSE_SESSION 受信後の挙動 (Section 6.12 の受信者 MUST である
 END_STREAM 応答の送出と、受信後の close_session / send_stream_data が
 塞がれて SessionClosed が二重発火しないこと) を検証する。
+
+さらに、非 WebTransport リクエストへの自動 405 応答 (Allow: CONNECT と
+END_STREAM 付き) も検証する。
 """
 
 from __future__ import annotations
 
+import pytest
 from conftest import (
     _connect_h2_session,
+    _create_h2_http2_pair,
     _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
@@ -22,7 +27,7 @@ from conftest import (
     _h2_pump,
 )
 
-from webtransport import h2
+from webtransport import h2, http2
 
 
 def _encode_headers_frame(session_id: int, header_block: bytes, end_stream: bool = False) -> bytes:
@@ -350,6 +355,109 @@ def test_end_stream_normal_http_stream_no_termination() -> None:
 
     # セッション終了として誤検知されない (SessionClosed は発火しない)
     assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(server))
+
+
+@pytest.mark.parametrize(
+    "request_headers",
+    [
+        [
+            (":method", "GET"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ],
+        [
+            (":method", "CONNECT"),
+            (":authority", "localhost"),
+        ],
+        [
+            (":method", "CONNECT"),
+            (":protocol", "websocket"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+            (":path", "/"),
+        ],
+    ],
+    ids=["get", "connect_without_protocol", "connect_other_protocol"],
+)
+def test_non_webtransport_request_returns_405_with_allow(
+    request_headers: list[tuple[str, str]],
+) -> None:
+    """非 WebTransport リクエストに 405 と Allow: CONNECT が END_STREAM 付きで返ることを確認
+
+    WebTransport 専用エンドポイントとして、CONNECT + :protocol=webtransport
+    以外のリクエストはストリームを滞留させず 405 で拒否する。WT 判定が
+    `CONNECT かつ webtransport` の論理積であることを固定するため、GET・
+    :protocol なしの CONNECT・:protocol が webtransport 以外の CONNECT を
+    ケースに含める。RFC 9110 Section 15.5.6 の MUST に従い Allow: CONNECT
+    を伴い、応答の END_STREAM でストリームを終端する。応答ヘッダーを観測
+    するクライアントには http2.Connection (Sans-IO) を使う (h2.Session
+    クライアントは平文リクエストを送出できない)。
+    """
+    client, server = _create_h2_http2_pair()
+
+    # 非 WT リクエストを送る (submit_request は END_STREAM を付けないため
+    # send_data(..., eof=True) でリクエストを終端する)
+    stream_id = client.submit_request(request_headers)
+    assert stream_id > 0
+    client.send_data(stream_id, b"", eof=True)
+    _h2_pump(client, server)
+
+    # サーバーが自動で 405 応答を返す
+    _h2_pump(server, client)
+
+    # HEADERS イベントで :status 405 と allow: CONNECT を確認する
+    events = _drain_events(client)
+    headers_events = [event for event in events if event.type == http2.EventType.HEADERS]
+    assert len(headers_events) == 1
+    assert headers_events[0].stream_id == stream_id
+    response_headers = dict(headers_events[0].headers)
+    assert response_headers[":status"] == "405"
+    assert response_headers["allow"] == "CONNECT"
+
+    # 405 応答の END_STREAM でストリームが終端される
+    assert any(
+        event.type == http2.EventType.STREAM_END and event.stream_id == stream_id
+        for event in events
+    )
+
+
+def test_non_webtransport_request_without_end_stream_returns_405() -> None:
+    """終端前の非 WebTransport リクエストにも 405 が END_STREAM 付きで返ることを確認
+
+    405 はリクエストの END_STREAM を待たず、HEADERS 受信時点で送出する。
+    ボディ送信途中 (eof なし) の POST でも応答が返り、ストリームが応答待ち
+    のまま滞留しないことを表明する。
+    """
+    client, server = _create_h2_http2_pair()
+
+    # POST のヘッダーとボディの一部だけを送る (END_STREAM は送らない)
+    stream_id = client.submit_request(
+        [
+            (":method", "POST"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    client.send_data(stream_id, b"partial-body", eof=False)
+    _h2_pump(client, server)
+
+    # リクエストの終端を待たずに 405 が返る
+    _h2_pump(server, client)
+
+    events = _drain_events(client)
+    headers_events = [event for event in events if event.type == http2.EventType.HEADERS]
+    assert len(headers_events) == 1
+    assert headers_events[0].stream_id == stream_id
+    response_headers = dict(headers_events[0].headers)
+    assert response_headers[":status"] == "405"
+    assert response_headers["allow"] == "CONNECT"
+    assert any(
+        event.type == http2.EventType.STREAM_END and event.stream_id == stream_id
+        for event in events
+    )
 
 
 def test_headers_200_end_stream_ready_and_closed() -> None:
