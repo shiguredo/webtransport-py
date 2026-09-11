@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の初期フロー制御 SETTINGS が uint64 値を uint32 に切り詰めて WebTransport-Init と広告値が食い違う
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h2-settings-uint64-truncation
 - Polished: 2026-09-09
 
@@ -30,3 +30,14 @@
 - 32 bit 範囲内の値は従来どおり動作すること
 - `tests/prop_webtransport_h2.py` の Config setter の property test 4 件は setter が uint64 全域を受け付ける現状のまま維持し、`create_client` / `create_server` で 2^32 - 1 は成功・2^32 は `ValueError` になる境界テストを `tests/test_webtransport_h2_settings_limit.py` (新規) に追加すること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `H2Session::initialize` の冒頭で `H2SessionConfig` の SETTINGS 送出対象 4 フィールド (`wt_initial_max_data` / `wt_initial_max_stream_data` / `wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni`) を `kMaxSettingsValue` (2^32 - 1、RFC 9113 Section 6.5.1) と比較し、超過は `std::invalid_argument` (nanobind の既定翻訳で `ValueError`) にした
+- これにより SETTINGS の `static_cast<uint32_t>` による黙った切り詰めが発生せず、SETTINGS と WebTransport-Init / 初期 `WT_MAX_DATA` / `WT_MAX_STREAMS` カプセルの値が一致する
+- `2^32 - 1` の上限は draft-15 Section 6.7 / 6.10 の Maximum Streams 2^60 制限と、0175 で追加した varint (2^62 - 1) の防御検査を同時に満たす (旧検査 2^62 / 2^60 は本検査に置き換えた)
+- `tests/test_webtransport_h2_settings_limit.py` を新規作成し、4 フィールド × client / server で 2^32 - 1 の生成成功と 2^32 (再現値の 2^32 + 5 を含む) の `ValueError` を検証した
+- `tests/prop_webtransport_h2.py` の Config 上限 property test の対象を 4 フィールド・2^32 以上に更新し、`tests/test_webtransport_h2_reset_validation.py` の Config 境界テストは本ファイルへ移動した
+- `src/bindings/webtransport_h2.h` の Config コメント、`skills/webtransport-py/SKILL.md`、`src/webtransport/h2/client.py` の docstring を 2^32 - 1 上限に更新した
+- `CHANGES.md` の develop の FIX エントリを最終的な挙動 (2^32 以上を生成時 `ValueError`) に更新した
+- 全 1016 テストが通過することを確認した
