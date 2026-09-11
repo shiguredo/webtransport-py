@@ -23,6 +23,8 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
   - @voluntas
+- [ADD] WebTransport over HTTP/3 の `h3.Session` に `is_webtransport_ready()` を追加する
+  - @voluntas
 - [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
   - @voluntas
 - [ADD] QUIC クライアントの証明書検証 (`ca_file` / カスタムコールバック) を実装する
@@ -102,6 +104,8 @@
 - [UPDATE] aws-lc を v5.8.0 に更新する
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 の `Client.connect` の SETTINGS 受信判定を制御ストリーム ID のヒューリスティックから SETTINGS の直接判定に修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の `reset_stream` / `stop_sending` に `stream_id` の varint 範囲検査と未知ストリームの送出抑止を追加する
   - @voluntas

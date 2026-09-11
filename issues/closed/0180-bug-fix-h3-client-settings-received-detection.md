@@ -1,7 +1,7 @@
 # h3.Client.connect の SETTINGS 受信判定を stream_id==3 のヒューリスティックから recv_settings2_cb ベースに置き換える
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h3-client-settings-received-detection
 - Polished: 2026-09-09
 
@@ -38,3 +38,15 @@
 - `H3Session.is_webtransport_ready()` が Python から観測できること
 - `tests/test_webtransport_h3_settings_ready.py` を新規作成し、Sans-IO でサーバー QPACK エンコーダーを制御より先に開設する順序で、エンコーダーのみ到着時は偽・制御到着後に真になる回帰テストを追加すること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.h` の `H3Session` に `settings_received_` / `peer_wt_enabled_` / `peer_enable_connect_protocol_` / `peer_h3_datagram_` を追加し、ムーブコンストラクタ・ムーブ代入にも含めた
+- `H3Session::recv_settings2_cb` で対向 SETTINGS の 3 設定を記録し、`H3Session::is_webtransport_ready()` を追加した (3 設定がすべて 1 の場合のみ真。クライアント用で、サーバーセッションでは常に偽になる旨を docstring に明記)
+- `src/webtransport/h3/client.py` の `Client.connect` から `settings_received` ローカル変数と `stream_id == 3` の判定を削除し、待機ループとループ後の判定を `is_webtransport_ready()` に置き換えた。タイムアウト文言も「WebTransport 対応 SETTINGS 未受信」に修正した
+- `tests/test_e2e_webtransport_h3_low_level.py` の低レベルクライアントの同じヒューリスティックを `is_webtransport_ready()` に置き換えた
+- `tests/test_webtransport_h3_settings_ready.py` を新規作成し、SETTINGS 未受信で偽、制御ストリームのタイプバイトのみで偽、SETTINGS を受信しても 3 設定が揃わなければ偽、サーバーの QPACK エンコーダーが stream_id 3 を占める順序でも制御ストリーム (11) の SETTINGS 受信で真、SETTINGS フレームの分割受信では完了まで偽、通常交換で真を検証した
+- `tests/conftest.py` に `_bind_session_streams` を切り出して `_create_session_pair` と新規テストで共用した
+- `skills/webtransport-py/SKILL.md` の `h3.Session` API 一覧に `is_webtransport_ready()` を追加し、`connect()` の説明を更新した
+- `CHANGES.md` の develop に [FIX] (SETTINGS 判定の修正) と [ADD] (`is_webtransport_ready()` の追加) を追加した
+- 全 1021 テストが通過することを確認した

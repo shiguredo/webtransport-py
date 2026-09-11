@@ -430,6 +430,16 @@ class H3Session {
   bool is_closed() const;
 
   /**
+   * 対向の SETTINGS で WebTransport over HTTP/3 が有効か
+   * (wt_enabled / enable_connect_protocol / h3_datagram が全て 1)
+   *
+   * クライアント用。サーバーセッションでは nghttp3 が対向の
+   * ENABLE_CONNECT_PROTOCOL を記録しないため常に偽になる
+   * (draft-ietf-webtrans-http3-16 Section 3.1)
+   */
+  bool is_webtransport_ready() const;
+
+  /**
    * 確立されたセッション ID のリストを取得
    */
   std::vector<int64_t> get_session_ids() const;
@@ -840,8 +850,12 @@ class H3Session {
   // 接続状態
   bool closed_ = false;
 
-  // reject_session が最後に送出した応答のステータスコード (テスト専用。
-  // 未送出時は std::nullopt を返すために 0 で初期化する)
+  // 対向 SETTINGS の受信状態 (draft-16 Section 3.1)。recv_settings2_cb が
+  // 設定し、is_webtransport_ready() が参照する
+  bool settings_received_ = false;
+  bool peer_wt_enabled_ = false;
+  bool peer_enable_connect_protocol_ = false;
+  bool peer_h3_datagram_ = false;
 };
 
 // Python バインディングを定義

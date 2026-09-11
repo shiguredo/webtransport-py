@@ -501,9 +501,15 @@ class Client:
             self._setup_streams()
             await self._send_pending()
 
-            # サーバーの SETTINGS を受信するまで待機
-            settings_received = False
-            while not settings_received and self._running and loop.time() < deadline:
+            # サーバーの SETTINGS を受信するまで待機する。制御ストリーム ID に
+            # 依存せず、is_webtransport_ready() が SETTINGS の 3 設定
+            # (wt_enabled / enable_connect_protocol / h3_datagram) を直接判定
+            # する (draft-16 Section 3.1 / RFC 9114 Section 6.2.1)
+            while (
+                not self._webtransport_session.is_webtransport_ready()
+                and self._running
+                and loop.time() < deadline
+            ):
                 await self._receive()
 
                 while True:
@@ -518,9 +524,6 @@ class Client:
                             quic_event.data,
                             quic_event.fin,
                         )
-                        # サーバーの制御ストリーム (stream_id=3) からデータを受信したら設定完了とみなす
-                        if quic_event.stream_id == 3:
-                            settings_received = True
                     elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                         self._running = False
                         raise ConnectRefusedError(
@@ -535,9 +538,11 @@ class Client:
                     self._quic_connection.handle_timeout()
                 await asyncio.sleep(0.01)
 
-            if not settings_received:
+            if not self._webtransport_session.is_webtransport_ready():
                 self._running = False
-                raise ConnectTimeoutError(f"HTTP/3 SETTINGS not received within {timeout} seconds")
+                raise ConnectTimeoutError(
+                    f"HTTP/3 SETTINGS with WebTransport support not received within {timeout} seconds"
+                )
 
             request_stream_id = self._quic_connection.open_stream(True)
             if self._webtransport_session.connect(request_stream_id, self._url, self._origin):
