@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の TLS 要件 (draft-15 Section 7) を強制し既定を TLS 1.3 のみにする
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-h2-enforce-tls-1-3
 - Polished: 2026-09-09
 
@@ -37,3 +37,13 @@ draft-ietf-webtrans-http2-15 Section 7 は、クライアントに「TLS 1.3 以
 - `tests/test_webtransport_h2_tls_version.py` を新規作成し、上記の TLS 1.2 拒否と TLS 1.3 成功を日本語コメント付きで検証すること
 - `CHANGES.md` の develop に `[CHANGE]` エントリが追加されていること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `src/webtransport/h2/client.py` の `Client.connect` で、`verify_peer` の真偽どちらの SSLContext にも `minimum_version = ssl.TLSVersion.TLSv1_3` を設定した
+- `src/webtransport/h2/server.py` の `Server.start` の SSLContext にも同じ設定を追加した
+- Python の `ssl` が EMS 交渉の有無を公開しないため、仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も拒否する (stricter-than-spec)。クラス docstring / `connect` の docstring / コードコメントに根拠と draft 改版の可能性を明記した
+- `tests/test_webtransport_h2_tls_version.py` を新規作成し、実 `h2.Server` + 実 `h2.Client` の TLS 1.3 接続成功 (交渉バージョンの表明付き)、生 TLS 1.2 サーバーへの接続拒否 (ハンドシェイクが成立した場合は SETTINGS を送らずタイムアウトにして偽陽性を防止)、生 TLS 1.2 クライアントの実 `h2.Server` への接続拒否を検証する
+- `README.md` と `skills/webtransport-py/SKILL.md` の WebTransport over HTTP/2 セクションに TLS 1.3 以上必須の注意書きを追加した
+- `CHANGES.md` の develop に [CHANGE] エントリを追加した
+- 全 992 テストが通過することを確認した
