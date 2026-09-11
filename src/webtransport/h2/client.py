@@ -281,6 +281,8 @@ class Client:
                 環境を含む)
             HandshakeFailedError: TLS 検証失敗、TLS アラート (TLS バージョン
                 不一致や ALPN 不一致) の受信、非 2xx 応答の場合
+            ValueError: Config の上限値 (varint の 2^62 - 1 や Maximum
+                Streams の 2^60) を超えるためセッション生成に失敗した場合
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -327,7 +329,18 @@ class Client:
             # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
             # 書き換えない。役割 (クライアント) は create_client が決める
             config = self._user_config if self._user_config is not None else h2_low.Config()
-            self._session = h2_low.Session.create_client(config)
+            try:
+                self._session = h2_low.Session.create_client(config)
+            except ValueError:
+                # Config の上限検査エラーなど生成時の入力検証失敗の後始末
+                # (利用者入力の誤用)。接続と状態を残さない
+                self._running = False
+                self._connected = False
+                if self._writer is not None:
+                    self._writer.close()
+                self._reader = None
+                self._writer = None
+                raise
             # 新規接続のため GOAWAY 通知済み印を戻す
             self._goaway_notified = False
 
@@ -490,6 +503,10 @@ class Client:
         Args:
             stream_id: ストリーム ID
             error_code: エラーコード
+
+        Raises:
+            ValueError: stream_id が 2^62 以上の場合 (varint の上限)。
+                存在しないストリーム ID へは送出せず無視する。
         """
         if self._session is None or self._session_id < 0:
             return

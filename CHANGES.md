@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] WebTransport over HTTP/2 の `h2.Session.reset_stream` から `reliable_size` 引数を廃止し、Reliable Size に送信済みバイト数を載せるようにする
+  - @voluntas
 - [CHANGE] WebTransport over HTTP/2 の `h2.Client` は TLS 1.3 以上で接続し、`h2.Server` は TLS 1.2 以下の接続を拒否するようにする (draft-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) も拒否する)
   - @voluntas
 - [CHANGE] Windows 対応を終了する
@@ -100,6 +102,10 @@
 - [UPDATE] aws-lc を v5.8.0 に更新する
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
+  - @voluntas
+- [FIX] WebTransport over HTTP/2 の `reset_stream` / `stop_sending` に `stream_id` の varint 範囲検査と未知ストリームの送出抑止を追加する
+  - @voluntas
+- [FIX] WebTransport over HTTP/2 の Config の `wt_initial_max_data` の varint 上限超えと `wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni` の 2^60 超えをセッション生成時の `ValueError` にする
   - @voluntas
 - [FIX] WebTransport over HTTP/2 のサーバーが 405 応答に Allow: CONNECT を付与し、非 WebTransport リクエストへの無応答によるストリーム滞留を解消する
   - @voluntas

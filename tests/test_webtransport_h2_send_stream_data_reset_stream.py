@@ -107,9 +107,9 @@ def test_reset_stream_after_local_close_session_not_sent() -> None:
 
     close_session は flush のタイミングに依存せず is_terminated を立てる。
     修正前は WT_RESET_STREAM capsule が WT_CLOSE_SESSION の後ろに積まれて
-    flush で送出され得た (終了済みセッション宛の誤送出)。reset_stream は
-    ストリームの有無に関わらずカプセルをキューするため、送出抑止の検証に
-    stream_id は無関係。
+    flush で送出され得た (終了済みセッション宛の誤送出)。実在ストリームを
+    使うことで、未知ストリーム抑止ではなくセッション終了ガード
+    (is_terminated) による抑止を検証する。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -221,9 +221,8 @@ def test_reset_stream_after_fin_not_sent() -> None:
     assert _encode_wt_stream_capsule(stream_id, b"hello", fin=True) in wire
 
     # FIN 後の reset_stream はワイヤへ送出されない (送出物は何も残らない。
-    # reliable_size は省略時 0 であり、仮に送出された場合の Reliable Size
-    # は FIN 送出時の bytes_sent (= b"hello" の長さ = 5) へフォールバック
-    # するが、ガードにより送出される前に返る)
+    # 仮に送出された場合の Reliable Size は FIN 送出時の bytes_sent
+    # (= b"hello" の長さ = 5) になるが、ガードにより送出される前に返る)
     client.reset_stream(session_id, stream_id, 1)
     wire = client.send()
     assert wire is None
