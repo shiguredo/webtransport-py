@@ -142,8 +142,10 @@ def test_stop_sending_after_client_non_2xx_reject_not_sent() -> None:
     応答受信時に削除される (draft-15 Section 3.2 では非 2xx はセッション非
     確立)。HTTP/2 ストリーム自体はサーバー側のみが閉じた半開きで生存する
     ため、修正前はエントリ不在でもカプセルをキューしてワイヤへ送出されて
-    いた。stream_id は送出抑止の検証に無関係のため 0 を使う (拒否前はセッション
-    未確立で open_stream できない)。
+    いた。拒否前はセッション未確立で open_stream できないため stream_id は
+    0 を使う。実行経路としてはセッションガードが先に評価されて抑止される
+    (ストリームを実在させたセッションガード単体の検証は
+    test_stop_sending_after_local_close_session_not_sent が担う)。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")

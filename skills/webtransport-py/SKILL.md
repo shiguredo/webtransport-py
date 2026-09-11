@@ -192,7 +192,7 @@ async def close() -> None
 
 `h2.Client` / `h2.Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
 
-`h2.Server.__init__(host, port, certfile, keyfile)` (証明書は必須)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
+`h2.Server.__init__(host, port, certfile, keyfile, config=None)` (証明書は必須)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
 
 ```python
 # on_session_ready(session_writer: SessionWriter)
@@ -212,7 +212,7 @@ async def reset_stream(stream_id: int, error_code: int = 0) -> None
 async def close_session(error_code: int = 0, error_message: str = "") -> None
 ```
 
-`h2.Client.__init__(url, verify_peer=True, origin="")`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。
+`h2.Client.__init__(url, verify_peer=True, origin="", config=None)`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。
 
 ### QUIC (`webtransport.quic`)
 
@@ -622,7 +622,7 @@ def accept_session(session_id: int) -> bool  # サーバー
 def reject_session(session_id: int, status_code: int) -> None
 def open_stream(session_id: int, is_unidirectional: bool) -> int
 def send_stream_data(session_id: int, stream_id: int, data: bytes, fin: bool = False) -> None
-def reset_stream(session_id: int, stream_id: int, error_code: int, reliable_size: int = 0) -> None
+def reset_stream(session_id: int, stream_id: int, error_code: int) -> None
 def stop_sending(session_id: int, stream_id: int, error_code: int) -> None
 def send_datagram(session_id: int, data: bytes) -> None
 def close_session(session_id: int, error_code: int = 0, error_message: str = "") -> None
@@ -633,6 +633,8 @@ def get_session_ids() -> list[int]
 def get_stream_ids(session_id: int) -> list[int]  # セッションに属するストリーム ID
 ```
 
+`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。
+
 ## Config の主要デフォルト値
 
 Sans I/O API はモジュールごとの `Config` で設定する。主要なもの:
@@ -641,7 +643,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
 - `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`
-- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`
+- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`。`wt_initial_max_data` に 2^62 以上、`wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni` に 2^60 超を設定するとセッション生成時に `ValueError` になる (varint / Maximum Streams の上限)
 
 ## イベント型 (EventType)
 
@@ -660,7 +662,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `verify_peer` のデフォルトが層で異なる。asyncio の `Client` は `verify_peer=True`、Sans I/O の `quic.Config` は `verify_peer=False`。Sans I/O API を直接使うときは明示的に有効にすること
 - `open_stream()` の引数名とデフォルトが層で異なる。`quic` は `bidirectional: bool = True`、asyncio の `h3.Client` / `h2.Client` / `h2.SessionWriter` は `unidirectional: bool = False` (デフォルトは双方向)、asyncio の `h3.Server` は `unidirectional: bool = True` (デフォルトは単方向。双方向指定は `NotImplementedError`)。Sans I/O の `h3.Session` / `h2.Session` の `open_stream` はデフォルト値を持たず `is_unidirectional` を必ず指定する
 - タイマー API (`get_timeout()` / `handle_timeout()`) があるのは `quic.Connection` のみ。`http3` / `h3` / `http2` / `h2` の Sans I/O クラスには無い
-- 独自の例外クラスは `connect()` 失敗通知に限定して定義する (`WebTransportConnectError` と `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の派生 3 クラス。asyncio の `h3` / `h2` の `Client.connect()` が送出する)。それ以外の生成系ファクトリの失敗は `RuntimeError`、asyncio ラッパーの未接続時操作も `RuntimeError` になる
+- 独自の例外クラスは `connect()` 失敗通知に限定して定義する (`WebTransportConnectError` と `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の派生 3 クラス。asyncio の `h3` / `h2` の `Client.connect()` が送出する。`h2.Client.connect()` は Config の上限値を超えた場合に素の `ValueError` も送出する)。`h2.Server.start()` も Config の上限値超えで `ValueError` になる。それ以外の生成系ファクトリの失敗は `RuntimeError` (ただし `h2.Session.create_client` / `create_server` は Config の上限値超えで `ValueError`)、asyncio ラッパーの未接続時操作も `RuntimeError` になる
 - `webtransport.http2.ResponseWriter` はコールバック引数として渡されるが `http2/__init__.py` から再エクスポートされていない。型注釈で import する場合は `from webtransport.http2.server import ResponseWriter` を使う
 - `h2.CapsuleType` (Capsule Protocol の型定数) も再エクスポートされていない。必要なら `from webtransport.webtransport_ext.h2 import CapsuleType` を使う
 

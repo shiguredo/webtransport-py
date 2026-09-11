@@ -29,6 +29,9 @@ void record_received_limit(std::optional<uint64_t>& received, uint64_t value) {
 // draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
 constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
 
+// RFC 9000 Section 16: varint で表現できる最大値 (2^62 - 1)
+constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
+
 // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
 // プレースホルダ。draft で値が確定したら更新する
 constexpr uint32_t kWtFlowControlError = 0x50;
@@ -156,6 +159,14 @@ bool is_valid_utf8(const uint8_t* data, size_t length) {
 // ========== Varint エンコード/デコード (QUIC 形式) ==========
 
 std::vector<uint8_t> H2Session::encode_varint(uint64_t value) {
+  // RFC 9000 Section 16: varint は 2^62 - 1 まで。超過は上位 2 ビットの長さ
+  // 表現が壊れ、デコード時に別の値になるため防御的に拒否する (呼び出し元は
+  // Python 境界の入力検証か、Config 生成時検査・カウンタのクランプ済み)
+  if (value > kMaxVarint) {
+    throw std::invalid_argument("varint value must be less than 2^62: " +
+                                std::to_string(value));
+  }
+
   std::vector<uint8_t> result;
 
   if (value < 64) {
@@ -1301,7 +1312,6 @@ void H2Session::maybe_send_max_data(int32_t session_id) {
     return;
   }
   uint64_t updated = wt_session->bytes_received + config_.wt_initial_max_data;
-  constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
   if (updated < wt_session->bytes_received || updated > kMaxVarint) {
     updated = kMaxVarint;
   }
@@ -1331,7 +1341,6 @@ void H2Session::maybe_send_max_stream_data(int32_t session_id,
   }
   uint64_t updated =
       stream_info.bytes_received + config_.wt_initial_max_stream_data;
-  constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
   if (updated < stream_info.bytes_received || updated > kMaxVarint) {
     updated = kMaxVarint;
   }
@@ -1572,6 +1581,29 @@ std::unique_ptr<H2Session> H2Session::create_server(
 }
 
 bool H2Session::initialize() {
+  // Config の初期値を生成時に検査する。上限を超える値は 2xx 応答受信時
+  // (nghttp2 の C コールバック内) や accept_session の初期フロー制御カプセル
+  // 送出で問題になるため、Python 境界であるここで ValueError にする
+  //
+  // RFC 9000 Section 16: varint の上限 (2^62 - 1) を超えると encode_varint が
+  // 例外になり C ABI 境界を越える
+  if (config_.wt_initial_max_data > kMaxVarint) {
+    throw std::invalid_argument("wt_initial_max_data must be less than 2^62: " +
+                                std::to_string(config_.wt_initial_max_data));
+  }
+  // draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
+  // (受信側も超過を WT_FLOW_CONTROL_ERROR で拒否する)
+  if (config_.wt_initial_max_streams_bidi > kMaxStreamsLimit) {
+    throw std::invalid_argument(
+        "wt_initial_max_streams_bidi must not exceed 2^60: " +
+        std::to_string(config_.wt_initial_max_streams_bidi));
+  }
+  if (config_.wt_initial_max_streams_uni > kMaxStreamsLimit) {
+    throw std::invalid_argument(
+        "wt_initial_max_streams_uni must not exceed 2^60: " +
+        std::to_string(config_.wt_initial_max_streams_uni));
+  }
+
   nghttp2_session_callbacks* callbacks;
   int rv = nghttp2_session_callbacks_new(&callbacks);
   if (rv != 0) {
@@ -2129,8 +2161,16 @@ void H2Session::send_stream_data(int32_t session_id,
 
 void H2Session::reset_stream(int32_t session_id,
                              uint64_t stream_id,
-                             uint32_t error_code,
-                             uint64_t reliable_size) {
+                             uint32_t error_code) {
+  // RFC 9000 Section 16: ワイヤに載る varint は 2^62 - 1 まで。超過は
+  // エンコード時に上位ビットが壊れ別のストリームをリセットするため、
+  // 未知ストリーム検査より先に入力検証する (超過値は必ず未知でもある)
+  if (stream_id > kMaxVarint) {
+    throw std::invalid_argument(
+        "reset_stream stream_id must be less than 2^62: " +
+        std::to_string(stream_id));
+  }
+
   // 終了したセッション ID への送信を黙って無視する (send_stream_data と同じ
   // ガード構成。チェックを send_capsule に置かない理由は send_datagram の
   // コメントを参照)。塞がないと WT_RESET_STREAM capsule が
@@ -2138,6 +2178,13 @@ void H2Session::reset_stream(int32_t session_id,
   // http2_stream_buffers_ に残留する (flush 後)
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+
+  // 存在しないストリーム ID への送出は黙って無視する (存在確認を送出可否の
+  // 条件にする。セッションは閉じない)
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it == wt_session->streams.end()) {
     return;
   }
 
@@ -2150,17 +2197,14 @@ void H2Session::reset_stream(int32_t session_id,
   // Data Sent → Reset Sent)、本実装は HTTP/2 の順序保証によりピアが必ず
   // 終端状態 (DataRecvd) で受信するため、draft-15 Section 6.2 の MUST NOT
   // に従い意図的に塞ぐ
-  auto stream_it = wt_session->streams.find(stream_id);
-  if (stream_it != wt_session->streams.end() &&
-      (stream_it->second.send_state == StreamState::ResetSent ||
-       stream_it->second.send_state == StreamState::DataSent)) {
+  if (stream_it->second.send_state == StreamState::ResetSent ||
+      stream_it->second.send_state == StreamState::DataSent) {
     return;
   }
 
-  // draft-15 Section 6.2: Reliable Size は送信済みバイト数以下
-  if (stream_it != wt_session->streams.end() && reliable_size == 0) {
-    reliable_size = stream_it->second.bytes_sent;
-  }
+  // draft-15 Section 6.2: Reliable Size は送信済みバイト数と一致させる
+  // (送信者は自カウンタで正値を知り得るため引数では受け取らない)
+  uint64_t reliable_size = stream_it->second.bytes_sent;
 
   // WT_RESET_STREAM capsule: Stream ID + Error Code + Reliable Size
   std::vector<uint8_t> payload;
@@ -2185,17 +2229,24 @@ void H2Session::reset_stream(int32_t session_id,
   // 以後の send_stream_data は send_state の確認で塞がれる
   // (draft-15 Section 6.4)。保留キューも破棄する (リセットは送信放棄の
   // 意思表示であり、残すと flush で終了後の送出になる)
-  if (stream_it != wt_session->streams.end()) {
-    stream_it->second.send_state = StreamState::ResetSent;
-    stream_it->second.pending_sends.clear();
-    // 両ハーフ終端ならエントリを解放する
-    maybe_release_stream(session_id, stream_id);
-  }
+  stream_it->second.send_state = StreamState::ResetSent;
+  stream_it->second.pending_sends.clear();
+  // 両ハーフ終端ならエントリを解放する
+  maybe_release_stream(session_id, stream_id);
 }
 
 void H2Session::stop_sending(int32_t session_id,
                              uint64_t stream_id,
                              uint32_t error_code) {
+  // RFC 9000 Section 16: ワイヤに載る varint は 2^62 - 1 まで。超過は
+  // エンコード時に上位ビットが壊れ別のストリームを指すため、
+  // 未知ストリーム検査より先に入力検証する
+  if (stream_id > kMaxVarint) {
+    throw std::invalid_argument(
+        "stop_sending stream_id must be less than 2^62: " +
+        std::to_string(stream_id));
+  }
+
   // 終了したセッション ID と、一度も connect されていないセッション ID への
   // 送信を黙って無視する (send_datagram と同じガード。チェックを
   // send_capsule に置かない理由は send_datagram のコメントを参照)。終了の
@@ -2208,6 +2259,12 @@ void H2Session::stop_sending(int32_t session_id,
   // 続けるため、ここで返す
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+
+  // 存在しないストリーム ID への送出は黙って無視する (存在確認を送出可否の
+  // 条件にする。セッションは閉じない)
+  if (wt_session->streams.find(stream_id) == wt_session->streams.end()) {
     return;
   }
 
@@ -2980,7 +3037,7 @@ void bind_webtransport_h2(nb::module_& m) {
           },
           nb::arg("config"), nb::rv_policy::take_ownership,
           nb::sig("def create_client(config: Config) -> Session"),
-          "クライアントセッションを作成")
+          "クライアントセッションを作成 (Config の上限値超えは ValueError)")
       .def_static(
           "create_server",
           [](const H2SessionConfig& config) {
@@ -2993,7 +3050,7 @@ void bind_webtransport_h2(nb::module_& m) {
           },
           nb::arg("config"), nb::rv_policy::take_ownership,
           nb::sig("def create_server(config: Config) -> Session"),
-          "サーバーセッションを作成")
+          "サーバーセッションを作成 (Config の上限値超えは ValueError)")
       .def(
           "receive",
           [](H2Session& s, nb::bytes data) {
@@ -3054,15 +3111,15 @@ void bind_webtransport_h2(nb::module_& m) {
           "WebTransport ストリームにデータを送信")
       .def("reset_stream", &H2Session::reset_stream, nb::lock_self(),
            nb::arg("session_id"), nb::arg("stream_id"), nb::arg("error_code"),
-           nb::arg("reliable_size") = 0,
            nb::sig("def reset_stream(self, session_id: int, stream_id: int, "
-                   "error_code: int, reliable_size: int = 0) -> None"),
-           "WebTransport ストリームをリセット")
+                   "error_code: int) -> None"),
+           "WebTransport ストリームをリセット (stream_id が 2^62 以上の場合は "
+           "ValueError)")
       .def("stop_sending", &H2Session::stop_sending, nb::lock_self(),
            nb::arg("session_id"), nb::arg("stream_id"), nb::arg("error_code"),
            nb::sig("def stop_sending(self, session_id: int, stream_id: int, "
                    "error_code: int) -> None"),
-           "送信停止を要求")
+           "送信停止を要求 (stream_id が 2^62 以上の場合は ValueError)")
       .def(
           "send_datagram",
           [](H2Session& s, int32_t session_id, nb::bytes data) {

@@ -116,6 +116,36 @@ def prop_session_create_server():
     assert session.is_closed() is False
 
 
+@given(st.integers(min_value=2**62, max_value=UINT64_MAX))
+@settings(max_examples=100)
+def prop_session_create_config_over_limit_raises(value: int):
+    """Config の上限値超えではセッション生成が ValueError になる
+
+    wt_initial_max_data の varint 上限 (2^62) 超えと、wt_initial_max_streams_bidi /
+    wt_initial_max_streams_uni の Maximum Streams 上限 (2^60) 超えは、いずれも
+    生成時に拒否される。2xx 応答受信時の encode_varint 例外 (RFC 9000 Section
+    16) と、ピアに拒否される仕様違反の広告 (draft-15 Section 6.7 / 6.10) を
+    防ぐことを固定する。
+    """
+    for field in (
+        "wt_initial_max_data",
+        "wt_initial_max_streams_bidi",
+        "wt_initial_max_streams_uni",
+    ):
+        for factory, is_server in (
+            (h2.Session.create_client, False),
+            (h2.Session.create_server, True),
+        ):
+            config = h2.Config()
+            config.is_server = is_server
+            setattr(config, field, value)
+            try:
+                factory(config)
+            except ValueError:
+                continue
+            raise AssertionError("varint 上限超えの Config 値で生成が成功しました")
+
+
 # ========== receive / send の堅牢性テスト ==========
 
 

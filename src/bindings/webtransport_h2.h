@@ -95,16 +95,19 @@ struct H2SessionConfig {
   // サーバーモードかどうか
   bool is_server = false;
 
-  // WebTransport 初期フロー制御 (セッションレベル)
+  // WebTransport 初期フロー制御 (セッションレベル)。2^62 以上は
+  // create_client / create_server が ValueError にする (RFC 9000 Section 16)
   uint64_t wt_initial_max_data = 1048576;
 
   // WebTransport 初期フロー制御 (ストリームレベル)
   uint64_t wt_initial_max_stream_data = 262144;
 
-  // WebTransport 初期ストリーム数制限 (双方向)
+  // WebTransport 初期ストリーム数制限 (双方向)。2^60 超は
+  // create_client / create_server が ValueError にする (draft-15 Section 6.7)
   uint64_t wt_initial_max_streams_bidi = 100;
 
-  // WebTransport 初期ストリーム数制限 (単方向)
+  // WebTransport 初期ストリーム数制限 (単方向)。2^60 超は
+  // create_client / create_server が ValueError にする (draft-15 Section 6.10)
   uint64_t wt_initial_max_streams_uni = 100;
 
   // 受理前楽観的カプセルの蓄積上限 (バイト) 。サーバーが受理前に届いた
@@ -430,29 +433,37 @@ class H2Session {
    * WT_RESET_STREAM capsule を送信
    *
    * 終了したセッション ID への送信は黙って無視する (send_datagram と同じ
-   * ガード構成)。リセット送出済み (ResetSent)・FIN 送出済み (DataSent)
-   * のストリームへの WT_RESET_STREAM 送出も無視する (draft-15
+   * ガード構成)。存在しないストリーム ID への送信も黙って無視する
+   * (セッションは閉じない)。リセット送出済み (ResetSent)・FIN 送出済み
+   * (DataSent) のストリームへの WT_RESET_STREAM 送出も無視する (draft-15
    * Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT be sent after a
    * stream is closed or reset」。再リセットと FIN 後のリセットの両方)。
+   * Reliable Size は常に送信済みバイト数 (bytes_sent) を載せる (draft-15
+   * Section 6.2)。
    * 送信リセットは送信側の終了のみであり受信側は継続するため
    * (draft-15 Section 5.2 の QUIC 状態ミラー)、エントリは保持され、以後の
    * send_stream_data は塞がれる (受信側の追跡は維持される)。
+   * 入力検証はセッション・未知ストリームの検査より先に行う。stream_id が
+   * 2^62 以上の場合は std::invalid_argument を投げる (nanobind の既定翻訳で
+   * ValueError。終了済みセッションでも例外になる)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
-   * @param reliable_size 信頼性のあるサイズ
    */
   void reset_stream(int32_t session_id,
                     uint64_t stream_id,
-                    uint32_t error_code,
-                    uint64_t reliable_size = 0);
+                    uint32_t error_code);
 
   /**
    * 送信停止を要求
    * WT_STOP_SENDING capsule を送信
    *
    * 終了したセッション ID と、一度も connect されていないセッション ID への
-   * 送信は黙って無視する (send_datagram と同じガード)。
+   * 送信は黙って無視する (send_datagram と同じガード)。存在しないストリーム
+   * ID への送信も黙って無視する (セッションは閉じない)。入力検証は
+   * セッション・未知ストリームの検査より先に行い、stream_id が 2^62 以上の
+   * 場合は std::invalid_argument を投げる (nanobind の既定翻訳で ValueError。
+   * 終了済みセッションでも例外になる)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param error_code エラーコード

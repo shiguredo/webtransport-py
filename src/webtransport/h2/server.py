@@ -94,6 +94,10 @@ class SessionWriter:
         Args:
             stream_id: ストリーム ID
             error_code: エラーコード
+
+        Raises:
+            ValueError: stream_id が 2^62 以上の場合 (varint の上限)。
+                存在しないストリーム ID へは送出せず無視する。
         """
         self._session.reset_stream(self._session_id, stream_id, error_code)
         send_data = self._session.send()
@@ -305,7 +309,19 @@ class Server:
         self._on_goaway = callback
 
     async def start(self) -> None:
-        """サーバーを開始する"""
+        """サーバーを開始する
+
+        Config の上限検査エラーは起動時に送出する (接続ごとの生成失敗を
+        避ける)。
+
+        Raises:
+            ValueError: config の上限値超えの場合
+        """
+        if self._user_config is not None:
+            # 使い捨てのセッション生成で Config を検証し、接続ごとの生成
+            # 失敗を起動時に表面化させる (生成したセッションは即座に破棄)
+            h2_low.Session.create_server(self._user_config)
+
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         # draft-15 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
         # (EMS) のいずれも満たさない接続で受信した WebTransport over HTTP/2
@@ -358,7 +374,13 @@ class Server:
         # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
         # 書き換えない。役割 (サーバー) は create_server が決める
         config = self._user_config if self._user_config is not None else h2_low.Config()
-        session = h2_low.Session.create_server(config)
+        try:
+            session = h2_low.Session.create_server(config)
+        except ValueError:
+            # Config の varint 上限超えなど生成前の失敗で接続を開いたままに
+            # しない (利用者入力の誤用)
+            writer.close()
+            raise
 
         session_writers: dict[int, SessionWriter] = {}
         goaway_notified = False
