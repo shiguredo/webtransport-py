@@ -164,7 +164,11 @@ H3Session::H3Session(H3Session&& other) noexcept
       qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
       qpack_decoder_stream_id_(other.qpack_decoder_stream_id_),
       max_client_streams_bidi_(other.max_client_streams_bidi_),
-      closed_(other.closed_) {
+      closed_(other.closed_),
+      settings_received_(other.settings_received_),
+      peer_wt_enabled_(other.peer_wt_enabled_),
+      peer_enable_connect_protocol_(other.peer_enable_connect_protocol_),
+      peer_h3_datagram_(other.peer_h3_datagram_) {
   other.conn_ = nullptr;
 }
 
@@ -201,6 +205,10 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     qpack_decoder_stream_id_ = other.qpack_decoder_stream_id_;
     max_client_streams_bidi_ = other.max_client_streams_bidi_;
     closed_ = other.closed_;
+    settings_received_ = other.settings_received_;
+    peer_wt_enabled_ = other.peer_wt_enabled_;
+    peer_enable_connect_protocol_ = other.peer_enable_connect_protocol_;
+    peer_h3_datagram_ = other.peer_h3_datagram_;
     other.conn_ = nullptr;
   }
   return *this;
@@ -1839,6 +1847,14 @@ bool H3Session::is_closed() const {
   return closed_;
 }
 
+bool H3Session::is_webtransport_ready() const {
+  // draft-16 Section 3.1: クライアントは SETTINGS を受信するまで CONNECT を
+  // 送ってはならない。3 設定 (wt_enabled / enable_connect_protocol /
+  // h3_datagram) が draft の規定値 1 の場合のみ有効とする
+  return settings_received_ && peer_wt_enabled_ &&
+         peer_enable_connect_protocol_ && peer_h3_datagram_;
+}
+
 std::vector<int64_t> H3Session::get_session_ids() const {
   return std::vector<int64_t>(session_ids_.begin(), session_ids_.end());
 }
@@ -2307,8 +2323,19 @@ int H3Session::recv_settings2_cb(nghttp3_conn* conn,
                                  const nghttp3_proto_settings* settings,
                                  void* conn_user_data) {
   (void)conn;
-  (void)settings;
-  (void)conn_user_data;
+
+  auto* session = static_cast<H3Session*>(conn_user_data);
+  if (settings == nullptr) {
+    return 0;
+  }
+
+  // draft-16 Section 3.1: 対向の SETTINGS を記録し、
+  // is_webtransport_ready() が WebTransport 対応を判定できるようにする
+  session->settings_received_ = true;
+  session->peer_wt_enabled_ = settings->wt_enabled == 1;
+  session->peer_enable_connect_protocol_ =
+      settings->enable_connect_protocol == 1;
+  session->peer_h3_datagram_ = settings->h3_datagram == 1;
   return 0;
 }
 
@@ -2688,6 +2715,10 @@ void bind_webtransport_h3(nb::module_& m) {
            "必要な QUIC ストリーム ID のリストを取得")
       .def("is_closed", &H3Session::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
+      .def(
+          "is_webtransport_ready", &H3Session::is_webtransport_ready,
+          nb::lock_self(), nb::sig("def is_webtransport_ready(self) -> bool"),
+          "対向 SETTINGS で WebTransport over HTTP/3 が有効か (クライアント用)")
       .def("get_session_ids", &H3Session::get_session_ids, nb::lock_self(),
            nb::sig("def get_session_ids(self) -> list[int]"),
            "確立されたセッション ID のリストを取得")

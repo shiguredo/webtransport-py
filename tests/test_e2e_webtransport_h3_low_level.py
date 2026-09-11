@@ -123,7 +123,7 @@ class _LowLevelClient:
         return True
 
     async def connect(self) -> bool:
-        """QUIC ハンドシェイクと制御ストリームのバインドを行う
+        """QUIC ハンドシェイク、制御ストリームのバインド、サーバーの SETTINGS 受信を行う
 
         Returns:
             接続に成功した場合は True
@@ -153,14 +153,13 @@ class _LowLevelClient:
         self._h3_session.bind_qpack_decoder_stream(decoder_stream_id)
         await self._pump()
 
-        # サーバーの SETTINGS を受信するまで待機
-        # サーバーの制御ストリームは server.py の _setup_streams が
-        # 最初に開く単方向ストリーム (stream_id=3) のため、その受信を
-        # SETTINGS 受信の完了とみなす (高レベル Client の connect と同じ)
-        settings_received = False
+        # サーバーの SETTINGS を受信するまで待機する。制御ストリーム ID に
+        # 依存せず、is_webtransport_ready() が SETTINGS の 3 設定
+        # (wt_enabled / enable_connect_protocol / h3_datagram) を直接判定する
+        # (高レベル Client の connect と同じ)
         max_attempts = 100
         attempt = 0
-        while not settings_received and attempt < max_attempts:
+        while not self._h3_session.is_webtransport_ready() and attempt < max_attempts:
             await self._receive()
             while True:
                 quic_event = self._quic_connection.next_event()
@@ -172,13 +171,11 @@ class _LowLevelClient:
                         quic_event.data,
                         quic_event.fin,
                     )
-                    if quic_event.stream_id == 3:
-                        settings_received = True
                 elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                     return False
             await self._pump()
             attempt += 1
-        return settings_received
+        return self._h3_session.is_webtransport_ready()
 
     async def establish_session(self) -> int:
         """WebTransport セッションを確立してセッション ID を返す

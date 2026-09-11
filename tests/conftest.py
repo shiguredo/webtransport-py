@@ -330,6 +330,20 @@ def _pump(src: h3.Session, dst: h3.Session) -> None:
             break
 
 
+def _bind_session_streams(client: h3.Session, server: h3.Session) -> None:
+    """h3.Session の制御 / QPACK ストリームをバインドする
+
+    クライアントの単方向ストリームは %4 == 2、サーバーは %4 == 3 を使う。
+    """
+    client.bind_control_stream(2)
+    client.bind_qpack_encoder_stream(6)
+    client.bind_qpack_decoder_stream(10)
+    server.bind_control_stream(3)
+    server.bind_qpack_encoder_stream(7)
+    server.bind_qpack_decoder_stream(11)
+    server.set_max_client_streams_bidi(100)
+
+
 def _create_session_pair() -> tuple[h3.Session, h3.Session]:
     """h3.Session のクライアント・サーバーペアを作成して初期化する
 
@@ -339,16 +353,7 @@ def _create_session_pair() -> tuple[h3.Session, h3.Session]:
     server_config = h3.Config()
     server_config.is_server = True
     server = h3.Session.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-    server.set_max_client_streams_bidi(100)
+    _bind_session_streams(client, server)
 
     # サーバーの SETTINGS をクライアントに送る
     _pump(server, client)
