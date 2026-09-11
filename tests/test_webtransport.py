@@ -16,10 +16,13 @@ def test_import_quic():
 
 
 def test_import_http2():
-    """HTTP/2 サブモジュールがインポートできることを確認"""
+    """HTTP/2 サブモジュールと再エクスポートされた ResponseWriter がインポートできることを確認"""
     import webtransport.http2
 
     assert webtransport.http2 is not None
+    # コールバック引数の型注釈で使う ResponseWriter が再エクスポートされている
+    assert webtransport.http2.ResponseWriter is not None
+    assert "ResponseWriter" in webtransport.http2.__all__
 
 
 def test_import_http3():

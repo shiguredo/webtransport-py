@@ -21,7 +21,7 @@ Usage:
 """
 
 from webtransport.http2.client import Client
-from webtransport.http2.server import Server
+from webtransport.http2.server import ResponseWriter, Server
 from webtransport.webtransport_ext.http2 import (
     Config,
     Connection,
@@ -37,6 +37,7 @@ __all__ = [
     "Connection",
     "Event",
     "EventType",
+    "ResponseWriter",
     "Server",
     "get_version",
     "select_alpn",

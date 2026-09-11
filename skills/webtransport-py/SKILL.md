@@ -38,7 +38,7 @@ uv add webtransport-py
 | `webtransport.h2` | WebTransport over HTTP/2 (RFC 9297 Capsule) | `Session` | `Server` / `Client` / `SessionWriter` | TCP + TLS |
 | `webtransport.quic` | QUIC 単体 | `Connection` | `Server` / `Client` | UDP |
 | `webtransport.http3` | HTTP/3 単体 | `Connection` | `Server` / `Client` | UDP + QUIC |
-| `webtransport.http2` | HTTP/2 単体 | `Connection` | `Server` / `Client` | TCP + TLS |
+| `webtransport.http2` | HTTP/2 単体 | `Connection` | `Server` / `Client` / `ResponseWriter` | TCP + TLS |
 
 `quic` / `http3` / `http2` には `get_version()` があり、それぞれ ngtcp2 / nghttp3 / nghttp2 のバージョン文字列を返す。
 
@@ -664,8 +664,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `open_stream()` の引数名とデフォルトが層で異なる。`quic` は `bidirectional: bool = True`、asyncio の `h3.Client` / `h2.Client` / `h2.SessionWriter` は `unidirectional: bool = False` (デフォルトは双方向)、asyncio の `h3.Server` は `unidirectional: bool = True` (デフォルトは単方向。双方向指定は `NotImplementedError`)。Sans I/O の `h3.Session` / `h2.Session` の `open_stream` はデフォルト値を持たず `is_unidirectional` を必ず指定する
 - タイマー API (`get_timeout()` / `handle_timeout()`) があるのは `quic.Connection` のみ。`http3` / `h3` / `http2` / `h2` の Sans I/O クラスには無い
 - 独自の例外クラスは `connect()` 失敗通知に限定して定義する (`WebTransportConnectError` と `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の派生 3 クラス。asyncio の `h3` / `h2` の `Client.connect()` が送出する。`h2.Client.connect()` は Config の上限値を超えた場合に素の `ValueError` も送出する)。`h2.Server.start()` も Config の上限値超えで `ValueError` になる。それ以外の生成系ファクトリの失敗は `RuntimeError` (ただし `h2.Session.create_client` / `create_server` は Config の上限値超えで `ValueError`)、asyncio ラッパーの未接続時操作も `RuntimeError` になる
-- `webtransport.http2.ResponseWriter` はコールバック引数として渡されるが `http2/__init__.py` から再エクスポートされていない。型注釈で import する場合は `from webtransport.http2.server import ResponseWriter` を使う
-- `h2.CapsuleType` (Capsule Protocol の型定数) も再エクスポートされていない。必要なら `from webtransport.webtransport_ext.h2 import CapsuleType` を使う
+- `h2.CapsuleType` (Capsule Protocol の型定数) は再エクスポートされていない。必要なら `from webtransport.webtransport_ext.h2 import CapsuleType` を使う
 
 ## サンプルコード
 
