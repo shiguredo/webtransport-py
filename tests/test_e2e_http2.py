@@ -22,8 +22,10 @@ def test_import_all():
         Connection,
         Event,
         EventType,
+        ResponseWriter,
         Server,
         get_version,
+        select_alpn,
     )
 
     assert Server is not None
@@ -32,7 +34,9 @@ def test_import_all():
     assert Connection is not None
     assert Event is not None
     assert EventType is not None
+    assert ResponseWriter is not None
     assert get_version is not None
+    assert select_alpn is not None
 
 
 def test_server_init():
