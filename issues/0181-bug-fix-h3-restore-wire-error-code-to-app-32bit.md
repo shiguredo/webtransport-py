@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の受信側でワイヤ上のエラーコードを 32 bit アプリコードに復元して on_stream_reset に配信する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h3-restore-wire-error-code-to-app-32bit
 - Polished: 2026-09-09
 
@@ -45,3 +45,14 @@
 - CONNECT ストリームは wire コードのまま配信されること
 - `tests/prop_webtransport_h3.py` に error code のワイヤ→アプリ復元 roundtrip PBT を追加し、既存 e2e 2 件と単体 1 件の期待値を更新すること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `src/webtransport/h3/_error_codes.py` の `deliver_stream_reset_error_code` を、データストリームでは `is_wt_application_error_code` が真の場合に `http_code_to_webtransport_code` で unsigned 32-bit のアプリコードへ逆変換して返す形に変更した (draft-16 Section 4.4 の unchanged はアプリコードの end-to-end 保存を指すと解釈する)
+- レンジ外、またはレンジ内の予約済みコードポイントは従来どおり `None` を配信し、CONNECT ストリームは非リマップのままとした
+- `http_code_to_webtransport_code` の docstring を受信配信でも使う旨に更新し、`client.py` / `server.py` の `on_stream_reset` docstring もデータストリームは復元値、CONNECT は HTTP/3 コード空间のまま渡す旨に更新した
+- `tests/test_webtransport_h3_error_code_remap.py` の配信テストをアプリコードへの復元・予約済み `None`・上端 / 下端 / 上側レンジ外の境界・CONNECT のレンジ内非リマップまで拡張した
+- `tests/test_e2e_webtransport_h3.py` の受信期待値をワイヤコードからアプリコード (0x01 / 0x02) に更新した
+- `tests/prop_webtransport_h3.py` にワイヤ→アプリ復元の roundtrip PBT を追加した
+- `CHANGES.md` の develop にデータストリームリセットの受信復元の FIX エントリを追加した
+- 全 1023 テストが通過することを確認した
