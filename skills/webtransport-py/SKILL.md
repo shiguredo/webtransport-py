@@ -190,6 +190,8 @@ async def close() -> None
 
 ### WebTransport over HTTP/2 (`webtransport.h2`)
 
+`h2.Client` / `h2.Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
+
 `h2.Server.__init__(host, port, certfile, keyfile)` (証明書は必須)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
 
 ```python
