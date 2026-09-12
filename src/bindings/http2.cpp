@@ -302,12 +302,19 @@ void Http2Connection::goaway(uint32_t error_code) {
   goaway_sent_ = true;
 }
 
-void Http2Connection::ping() {
+void Http2Connection::ping(const std::vector<uint8_t>& opaque_data) {
   if (!session_ || closed_) {
     return;
   }
 
-  nghttp2_submit_ping(session_, NGHTTP2_FLAG_NONE, nullptr);
+  // RFC 9113 Section 6.7 の PING は 8 バイト固定。空 (未指定) はゼロ 8 バイト
+  // を送る nghttp2 の既定挙動に任せる
+  if (!opaque_data.empty() && opaque_data.size() != 8) {
+    throw std::runtime_error("ping opaque_data must be exactly 8 bytes");
+  }
+
+  nghttp2_submit_ping(session_, NGHTTP2_FLAG_NONE,
+                      opaque_data.empty() ? nullptr : opaque_data.data());
 }
 
 bool Http2Connection::terminate_session(uint32_t error_code,
@@ -756,13 +763,16 @@ int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
       }
       break;
 
-    case NGHTTP2_PING:
-      if (!(frame->hd.flags & NGHTTP2_FLAG_ACK)) {
-        Http2Event event;
-        event.type = Http2EventType::Ping;
-        self->push_event(std::move(event));
-      }
-      break;
+    case NGHTTP2_PING: {
+      // ACK も含めてイベント化する (RFC 9113 Section 6.7)。RTT 測定や疎通確認
+      // では ACK の受信を観測する必要がある
+      Http2Event event;
+      event.type = Http2EventType::Ping;
+      event.opaque_data.assign(frame->ping.opaque_data,
+                               frame->ping.opaque_data + 8);
+      event.ack = (frame->hd.flags & NGHTTP2_FLAG_ACK) != 0;
+      self->push_event(std::move(event));
+    } break;
 
     case NGHTTP2_GOAWAY: {
       Http2Event event;
@@ -790,6 +800,9 @@ int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
       Http2Event event;
       event.type = Http2EventType::WindowUpdate;
       event.stream_id = frame->hd.stream_id;
+      // RFC 9113 Section 6.9 の Window Size Increment (1〜2^31-1)
+      event.window_size_increment =
+          static_cast<uint32_t>(frame->window_update.window_size_increment);
       self->push_event(std::move(event));
     } break;
 
@@ -1018,7 +1031,17 @@ void bind_http2(nb::module_& m) {
       .def_ro("promised_stream_id", &Http2Event::promised_stream_id,
               "PUSH_PROMISE の promised stream ID")
       .def_ro("priority_field_value", &Http2Event::priority_field_value,
-              "PRIORITY_UPDATE の priority field value");
+              "PRIORITY_UPDATE の priority field value")
+      .def_prop_ro(
+          "opaque_data",
+          [](const Http2Event& e) {
+            return nb::bytes(reinterpret_cast<const char*>(e.opaque_data.data()),
+                             e.opaque_data.size());
+          },
+          "PING の opaque data (RFC 9113 Section 6.7)")
+      .def_ro("ack", &Http2Event::ack, "PING ACK かどうか")
+      .def_ro("window_size_increment", &Http2Event::window_size_increment,
+              "WINDOW_UPDATE の増分値 (RFC 9113 Section 6.9)");
 
   // Http2Connection
   nb::class_<Http2Connection>(http2_m, "Connection",
@@ -1103,8 +1126,18 @@ void bind_http2(nb::module_& m) {
            nb::arg("error_code") = 0,
            nb::sig("def goaway(self, error_code: int = 0) -> None"),
            "GOAWAY を送信")
-      .def("ping", &Http2Connection::ping, nb::lock_self(),
-           nb::sig("def ping(self) -> None"), "PING を送信")
+      .def(
+          "ping",
+          [](Http2Connection& self, nb::bytes opaque_data) {
+            // bytes は std::vector<uint8_t> の型キャスト対象外 (nanobind は
+            // bytes / str をシーケンスとして受け付けない) ため明示変換する
+            self.ping(std::vector<uint8_t>(opaque_data.c_str(),
+                                           opaque_data.c_str() +
+                                               opaque_data.size()));
+          },
+          nb::lock_self(), nb::arg("opaque_data") = nb::bytes("", 0),
+          nb::sig("def ping(self, opaque_data: bytes = b'') -> None"),
+          "PING を送信 (opaque_data は 8 バイト固定)")
       .def("terminate_session", &Http2Connection::terminate_session,
            nb::lock_self(), nb::arg("error_code") = 0,
            nb::arg("last_stream_id") = 0,

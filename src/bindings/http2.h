@@ -85,6 +85,12 @@ struct Http2Event {
   int32_t promised_stream_id = 0;
   // PRIORITY_UPDATE の priority field value (例: "u=5, i")
   std::string priority_field_value;
+  // PING の 8 バイトの opaque data (RFC 9113 Section 6.7)。PING 以外では空
+  std::vector<uint8_t> opaque_data;
+  // PING が ACK の場合のみ true (RFC 9113 Section 6.7)。PING 以外では false
+  bool ack = false;
+  // WINDOW_UPDATE の増分値 (RFC 9113 Section 6.9)。WINDOW_UPDATE 以外では 0
+  uint32_t window_size_increment = 0;
 };
 
 /**
@@ -187,8 +193,10 @@ class Http2Connection {
 
   /**
    * PING を送信
+   * @param opaque_data 8 バイトの opaque data (RFC 9113 Section 6.7)。
+   *   空ならゼロ 8 バイトを送る。8 バイト以外は std::runtime_error
    */
-  void ping();
+  void ping(const std::vector<uint8_t>& opaque_data = {});
 
   /**
    * トレーラを送信 (サーバー用)

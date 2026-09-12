@@ -1,7 +1,7 @@
 # HTTP/2 の PING・WINDOW_UPDATE イベントに不足フィールドを追加する
 
 - Created: 2026-09-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-http2-event-fields
 - Polished: {YYYY-MM-DD}
 
@@ -35,3 +35,17 @@ HTTP/2 低レベル API (`http2.Connection`) の受信イベントから PING �
 
 - `issues/closed/0123-refactor-http-event-details.md` — 分離元 (PING・WINDOW_UPDATE 項目を移管)
 - `issues/0129-add-http2-bindings-test-force-close.md` — 同一ファイルを変更するため順序調整
+
+## 解決方法
+
+`Http2Event` に 3 フィールドを追加し、`ping()` で opaque data を指定できるようにした。
+
+- `src/bindings/http2.h` の `Http2Event` に `opaque_data` (PING の 8 バイト) / `ack` (PING ACK か) / `window_size_increment` (WINDOW_UPDATE の増分値) を追加した
+- `src/bindings/http2.cpp` の `on_frame_recv_callback` を変更した。PING は ACK も含めてイベント化し、`frame->ping.opaque_data` の 8 バイトと ACK フラグを載せる (RFC 9113 Section 6.7)。WINDOW_UPDATE は `frame->window_update.window_size_increment` を載せる (RFC 9113 Section 6.9)
+- `Http2Connection::ping` に 8 バイトの `opaque_data` 引数を追加した。未指定なら nghttp2 の既定どおりゼロ 8 バイトを送り、8 バイト以外は `std::runtime_error` を送出する
+- nanobind の型キャストでは `bytes` を `std::vector<uint8_t>` に渡せない (nanobind の `seq_get` が `bytes` / `str` をシーケンスとして拒否する) ため、`ping` の binding は lambda で `nb::bytes` を受けて明示変換する形にした
+- 型スタブは `make develop` で再生成し、`src/webtransport/http2/__init__.pyi` に `opaque_data` / `ack` / `window_size_increment` と `ping(opaque_data: bytes = b'')` が反映された
+- テストを 5 本追加した。`test_http2_ping_opaque_data_roundtrip` (送信 opaque data のピア観測と ACK の同一データ観測) / `test_http2_ping_without_opaque_data_sends_zero_bytes` / `test_http2_ping_invalid_opaque_data_length_raises` / `test_http2_window_update_increment_observed` (受信ウィンドウ超過のボディ送出で再開放を観測) / `test_http2_window_update_event_fields_default_for_other_events`
+- `skills/webtransport-py/SKILL.md` の `http2.Event` フィールド一覧と `ping` のシグネチャを更新した
+
+`window_size_increment` の代入を外すと `test_http2_window_update_increment_observed` が失敗することを確認し、テストが実際に増分値を検証していることを確かめた。`uv run pytest tests/ --timeout=30` の 1069 件が全て通る。
