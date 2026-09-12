@@ -24,16 +24,37 @@ RFC 9114 Section 8.1 (H3_REQUEST_CANCELLED):
 RFC 9114 Section 4.1.1 により、部分的に処理したリクエストを破棄する場合は
 H3_REQUEST_CANCELLED を使う。テストで `close_stream` の明示値を与えるために
 公開する。
+
+RFC 9114 Section 8.1 の残りの主要なエラーコードは、低レベル
+`http3.Connection` の `Error` イベント (`error_code`) として観測される値と
+比較するために公開する。QPACK の 3 値は RFC 9204 Section 8.3 の定義による。
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "H3_FRAME_ERROR",
+    "H3_FRAME_UNEXPECTED",
     "H3_GENERAL_PROTOCOL_ERROR",
+    "H3_ID_ERROR",
+    "H3_INTERNAL_ERROR",
+    "H3_MISSING_SETTINGS",
     "H3_NO_ERROR",
     "H3_REQUEST_CANCELLED",
+    "H3_SETTINGS_ERROR",
+    "H3_STREAM_CREATION_ERROR",
+    "QPACK_DECOMPRESSION_FAILED",
 ]
 
 H3_GENERAL_PROTOCOL_ERROR: int = 0x0101
 H3_NO_ERROR: int = 0x0100
 H3_REQUEST_CANCELLED: int = 0x010C
+H3_INTERNAL_ERROR: int = 0x0102
+H3_STREAM_CREATION_ERROR: int = 0x0103
+H3_FRAME_UNEXPECTED: int = 0x0105
+H3_FRAME_ERROR: int = 0x0106
+H3_ID_ERROR: int = 0x0108
+H3_SETTINGS_ERROR: int = 0x0109
+H3_MISSING_SETTINGS: int = 0x010A
+# RFC 9204 Section 8.3 (QPACK)
+QPACK_DECOMPRESSION_FAILED: int = 0x0200

@@ -55,6 +55,10 @@ class ClientConnection:
         self.qpack_encoder_stream_id: int = -1
         self.qpack_decoder_stream_id: int = -1
         self.http3_streams_setup: bool = False
+        # 直前の Error イベントで得た H3 ワイヤーエラーコードとメッセージ。
+        # _close_client_connection_on_h3_error が CONNECTION_CLOSE に載せる
+        self.h3_error_code: int = H3_GENERAL_PROTOCOL_ERROR
+        self.h3_error_message: str = "http3 protocol error"
         # 受信 FIN が立った双方向ストリーム (on_stream_end 通知用)。
         # 受信経路とタイマー経路のどちらで QUIC イベントを取り出しても
         # 同じ通知経路になるよう接続単位で保持し、HTTP/3 層のイベントを
@@ -144,6 +148,9 @@ class Server:
         self._on_data: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
         self._on_stream_end: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_connection_error: Callable[[int, str, tuple[str, int]], Awaitable[None]] | None = (
+            None
+        )
 
     @property
     def host(self) -> str:
@@ -200,6 +207,25 @@ class Server:
             callback: async def callback(stream_id: int, addr: tuple[str, int]) -> None
         """
         self._on_stream_end = callback
+
+    def on_connection_error(
+        self,
+        callback: Callable[[int, str, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """HTTP/3 プロトコルエラー検知時のコールバックを設定する
+
+        低レベルが nghttp3 の負値 return で自主クローズしたときに、RFC 9114
+        Section 8.1 の H3 ワイヤーエラーコードとメッセージが渡される。接続は
+        この後 QUIC CONNECTION_CLOSE で回収される。
+
+        Args:
+            callback: async def callback(
+                error_code: int,
+                error_message: str,
+                addr: tuple[str, int],
+            ) -> None
+        """
+        self._on_connection_error = callback
 
     def on_stream_reset(
         self,
@@ -397,7 +423,9 @@ class Server:
         両方で対称)。
         """
         if client.quic_connection is not None and not client.quic_connection.is_closed():
-            client.quic_connection.close(H3_GENERAL_PROTOCOL_ERROR, "http3 protocol error")
+            # Error イベントを経ていればその H3 ワイヤーコード、経ていなければ
+            # H3_GENERAL_PROTOCOL_ERROR を載せる
+            client.quic_connection.close(client.h3_error_code, client.h3_error_message)
             await self._drain_all_to(addr, client)
         self._remove_client(addr)
 
@@ -621,6 +649,18 @@ class Server:
                     # 届くのは正当なワイヤパターン。実ブラウザ等が送り得る)。
                     # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
                     # 低レベル API の契約としてそのまま維持される
+
+                    elif http3_event.type == http3_low.EventType.ERROR:
+                        # HTTP/3 プロトコルエラー。CONNECTION_CLOSE に載せる
+                        # error_code を後段の回収経路で使うため記録する
+                        client.h3_error_code = http3_event.error_code
+                        client.h3_error_message = http3_event.error_message
+                        if self._on_connection_error is not None:
+                            await self._on_connection_error(
+                                http3_event.error_code,
+                                http3_event.error_message,
+                                addr,
+                            )
 
                     elif http3_event.type == http3_low.EventType.RESET_STREAM:
                         client.quic_connection.reset_stream(

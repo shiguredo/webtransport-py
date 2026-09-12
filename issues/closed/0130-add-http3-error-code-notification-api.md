@@ -1,7 +1,7 @@
 # HTTP/3 プロトコルエラーのエラーコード通知 API を追加する
 
 - Created: 2026-08-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-http3-error-code-notification-api
 - Polished: {YYYY-MM-DD}
 
@@ -56,14 +56,23 @@ HTTP/3 プロトコルエラー発生時に、`nghttp3_conn_read_stream2` / `ngh
 
 ## 解決方法
 
-- `src/bindings/http3.h` に `Http3EventType::Error` と `Http3Event.error_message` を追加
-- `src/bindings/http3.cpp` の `Http3Connection::receive_stream_data` / `get_streams_to_send` の負値分岐で、`closed_ = true` に加えて Error イベントを push
-- `src/bindings/http3.cpp` に nghttp3 内部エラー → H3 ワイヤーコードのマッピング関数を実装 (`static uint64_t nghttp3_error_to_h3_wire_code(int nghttp3_err)` 等)
-- `src/webtransport/http3.pyi` を bindings と同期
-- `src/webtransport/http3/constants.py` に RFC 9114 Section 8.1 定数を追加
-- `src/webtransport/http3/client.py` / `server.py` に `on_connection_error` コールバックと Error イベント処理を追加、QUIC `close()` の error_code を Error イベント由来に変更
-- `tests/test_http3.py` にマッピング関数の単体テストを追加
-- `tests/test_e2e_http3.py` に `on_connection_error` 発火の e2e テストを追加
+HTTP/3 プロトコルエラーの詳細をアプリへ通知する API を実装した。
+
+- `src/bindings/http3.h` の `Http3EventType` に `Error` を追加し、`Http3Event` に `error_message` を追加した
+- `src/bindings/http3.cpp` に `nghttp3_error_to_h3_wire_code` を追加した。nghttp3 の `NGHTTP3_ERR_H3_*` は対応する H3 ワイヤーコードへそのまま写像し、QPACK の 3 エラーは RFC 9204 Section 8.3 の 0x0200-0x0202 へ、`NGHTTP3_ERR_H3_MESSAGE_ERROR` (H3 に対応コードが無い) とその他は `H3_GENERAL_PROTOCOL_ERROR` へ写像する
+- `receive_stream_data` の `nghttp3_conn_read_stream2` 負値分岐と `get_streams_to_send` の `nghttp3_conn_writev_stream` 負値分岐で、`closed_ = true` に加えて Error イベントを push するようにした。`error_message` は `nghttp3_strerror` の文字列
+- `Error` イベントと `error_message` を nanobind で公開し、型スタブを再生成した
+- `src/webtransport/http3/constants.py` に RFC 9114 Section 8.1 の主要コード (H3_INTERNAL_ERROR / H3_STREAM_CREATION_ERROR / H3_FRAME_UNEXPECTED / H3_FRAME_ERROR / H3_ID_ERROR / H3_SETTINGS_ERROR / H3_MISSING_SETTINGS) と RFC 9204 Section 8.3 の `QPACK_DECOMPRESSION_FAILED` を追加した
+- `src/webtransport/http3/client.py` に `on_connection_error(error_code, error_message)`、`server.py` に `on_connection_error(error_code, error_message, addr)` を追加し、Error イベントを配信するようにした
+- `_close_on_h3_error` (`client.py`) と `_close_client_connection_on_h3_error` (`server.py`) が QUIC CONNECTION_CLOSE に載せる error_code を、直前の Error イベント由来の H3 ワイヤーコードに置き換えた (0107 の `H3_GENERAL_PROTOCOL_ERROR` 固定をやめた)。Error イベントを経ずに閉じた場合 (テスト専用の強制クローズ等) は従来の `H3_GENERAL_PROTOCOL_ERROR` を使う
+- テストを 4 本追加した
+  - `test_http3_protocol_error_event_reports_wire_code` (低レベル): HEADERS より前の DATA フレームで `ERROR` イベントが `H3_FRAME_UNEXPECTED` (0x0105) とメッセージを載せる
+  - `test_http3_non_error_events_have_no_error_message` (低レベル)
+  - `test_server_on_connection_error_fires_on_protocol_error` (e2e): 実 Server-Client 接続でサーバー側の HTTP/3 層に不正フレームを注入し、`on_connection_error` が 0x0105 で発火して client が回収される
+  - `test_client_on_connection_error_fires_on_protocol_error` (e2e): クライアント側に注入すると `H3_STREAM_CREATION_ERROR` (0x0103) で発火し `run()` が終了する (クライアント起動ストリームへのサーバー応答になるため nghttp3 の判定が変わる)
+- `skills/webtransport-py/SKILL.md` の http3 コールバック一覧と `EventType` 一覧を更新した
+
+e2e テストは `_on_connection_error` の配線 (Error イベント → コールバック) と `is_closed()` 経路の両方を実接続で検証する。`uv run pytest tests/ --timeout=30` の 1110 件が全て通る。
 
 ## 依存関係
 

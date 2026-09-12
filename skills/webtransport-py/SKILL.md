@@ -305,6 +305,7 @@ def was_early_data_attempted() -> bool
 # on_data(stream_id: int, data: bytes, addr: tuple[str, int])
 # on_stream_end(stream_id: int, addr: tuple[str, int])
 # on_stream_reset(stream_id: int, error_code: int, addr: tuple[str, int])
+# on_connection_error(error_code: int, error_message: str, addr: tuple[str, int])
 
 async def submit_response(addr: tuple[str, int], stream_id: int, headers: list[tuple[str, str]]) -> None
 async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
@@ -320,6 +321,7 @@ async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: boo
 # on_data(stream_id: int, data: bytes)
 # on_stream_end(stream_id: int)
 # on_stream_reset(stream_id: int, error_code: int)
+# on_connection_error(error_code: int, error_message: str)
 
 async def request(method: str, path: str, headers: list[tuple[str, str]] | None = None) -> int
 async def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
@@ -672,7 +674,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 `next_event()` が返す `Event` は `type` フィールドで分岐する。
 
 - `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
-- `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING` / `INFORMATIONAL` / `TRAILERS`
+- `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING` / `INFORMATIONAL` / `TRAILERS` / `ERROR`
 - `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE` / `INFORMATIONAL` / `TRAILERS`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
