@@ -214,7 +214,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 
 `send_stream_data` / `send_datagram` は `SessionWriter` と `h2.Client` のどちらも data が 1 MiB 超なら `ValueError` を送出する (未接続の `h2.Client` は送信しないため例外にならない)。
 
-`h2.Client.__init__(url, verify_peer=True, origin="", config=None)`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。
+`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
 
 ### QUIC (`webtransport.quic`)
 

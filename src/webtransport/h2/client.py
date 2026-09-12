@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from webtransport.exceptions import (
     ConnectRefusedError,
@@ -50,6 +50,7 @@ class Client:
         verify_peer: bool = True,
         origin: str = "",
         config: h2_low.Config | None = None,
+        close_wait_timeout: float = 3.0,
     ) -> None:
         """クライアントを初期化する
 
@@ -59,12 +60,15 @@ class Client:
             origin: Origin ヘッダー値 (空なら付与しない)
             config: HTTP/2 / WebTransport セッション設定。省略時は既定値。
                 呼び出し元のオブジェクトは書き換えない
+            close_wait_timeout: close() でピアの CONNECT ストリームクローズを
+                待つ上限秒数。0 以下なら待機しない
         """
         self._url = url
         self._host, self._port, self._path = self._parse_url(url)
         self._verify_peer = verify_peer
         self._origin = origin
         self._user_config = config
+        self._close_wait_timeout = close_wait_timeout
 
         self._session: h2_low.Session | None = None
         self._reader: asyncio.StreamReader | None = None
@@ -72,6 +76,19 @@ class Client:
         self._running = False
         self._connected = False
         self._session_id = -1
+        # close() の待機で観測するピアの CONNECT ストリームクローズ記録。
+        # run() と close() のどちらが観測しても記録する
+        self._peer_closed_session_ids: set[int] = set()
+        # 直近の close() の待機結果
+        self._close_wait_result: Literal["peer-closed", "timeout", "skipped", "none"] = "none"
+        # run() が実際に実行中かどうか。_running は connect() 成功時に立って
+        # run() の起動有無に関わらず True のため、受信の同時呼び出し回避には
+        # 実行中フラグを使う
+        self._run_active = False
+        # run() がコールバックを実行中かどうか。実行中は run() が受信して
+        # いないため、コールバックから (子タスク経由を含めて) close() が
+        # 呼ばれても close() が自身で受信できる
+        self._in_callback = False
         # connect() が SESSION_READY を消費したときの引き継ぎバッファ。
         # run() のイベントループ開始時に先に処理し、コールバック登録の
         # 順序に依存せず on_session_ready を発火させる (イベントは
@@ -227,13 +244,13 @@ class Client:
             self._writer.write(data)
             await self._writer.drain()
 
-    async def _receive(self) -> None:
+    async def _receive(self, timeout: float = 0.1) -> None:
         """データを受信する"""
         if self._session is None or self._reader is None:
             return
 
         try:
-            data = await asyncio.wait_for(self._reader.read(65535), timeout=0.1)
+            data = await asyncio.wait_for(self._reader.read(65535), timeout=timeout)
             if data:
                 self._session.receive(data)
             else:
@@ -286,6 +303,11 @@ class Client:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+
+        # 再接続で前回のピアクローズ観測を引き継がない (CONNECT ストリーム ID は
+        # 接続ごとに再利用され得るため)
+        self._peer_closed_session_ids.clear()
+        self._close_wait_result = "none"
 
         if self._verify_peer:
             ssl_context = ssl.create_default_context()
@@ -520,6 +542,21 @@ class Client:
         self._session.reset_stream(self._session_id, stream_id, error_code)
         await self._send_pending()
 
+    async def _invoke_callback(
+        self, callback: Callable[..., Awaitable[None]], *args: object
+    ) -> None:
+        """run() のイベントコールバックを実行する
+
+        実行中は run() が受信していないことを _in_callback で示し、コールバック
+        から (子タスク経由を含めて) close() が呼ばれた場合に close() 側が自身で
+        受信できるようにする。
+        """
+        self._in_callback = True
+        try:
+            await callback(*args)
+        finally:
+            self._in_callback = False
+
     async def run(self) -> None:
         """メインループを実行する
 
@@ -528,95 +565,167 @@ class Client:
         if self._session is None:
             raise RuntimeError("client is not connected")
 
-        # connect() が消費した SESSION_READY を引き継ぐ (コールバック登録の
-        # 順序に依存せず、run() のイベントループで発火させる)
-        if self._pending_session_ready is not None:
-            pending_session_id = self._pending_session_ready
-            self._pending_session_ready = None
-            if self._on_session_ready is not None:
-                await self._on_session_ready(pending_session_id)
+        self._run_active = True
+        try:
+            # connect() が消費した SESSION_READY を引き継ぐ (コールバック登録の
+            # 順序に依存せず、run() のイベントループで発火させる)
+            if self._pending_session_ready is not None:
+                pending_session_id = self._pending_session_ready
+                self._pending_session_ready = None
+                if self._on_session_ready is not None:
+                    await self._invoke_callback(self._on_session_ready, pending_session_id)
 
-        while self._running:
-            await self._receive()
-            await self._send_pending()
+            while self._running:
+                await self._receive()
+                await self._send_pending()
 
-            while True:
-                event = self._session.next_event()
-                if event is None:
-                    break
+                while True:
+                    event = self._session.next_event()
+                    if event is None:
+                        break
 
-                if (
-                    event.type == h2_low.EventType.SESSION_READY
-                    and self._on_session_ready is not None
-                ):
-                    await self._on_session_ready(event.session_id)
+                    if (
+                        event.type == h2_low.EventType.SESSION_READY
+                        and self._on_session_ready is not None
+                    ):
+                        await self._invoke_callback(self._on_session_ready, event.session_id)
 
-                elif event.type == h2_low.EventType.SESSION_CLOSED:
-                    self._connected = False
-                    if self._on_session_closed is not None:
-                        await self._on_session_closed(event.session_id)
+                    elif event.type == h2_low.EventType.SESSION_CLOSED:
+                        # close() の待機でも参照するため、コールバックとは別に記録する
+                        self._peer_closed_session_ids.add(event.session_id)
+                        self._connected = False
+                        if self._on_session_closed is not None:
+                            await self._invoke_callback(self._on_session_closed, event.session_id)
 
-                elif (
-                    event.type == h2_low.EventType.STREAM_DATA and self._on_stream_data is not None
-                ):
-                    await self._on_stream_data(event.stream_id, event.data)
+                    elif (
+                        event.type == h2_low.EventType.STREAM_DATA
+                        and self._on_stream_data is not None
+                    ):
+                        await self._invoke_callback(
+                            self._on_stream_data, event.stream_id, event.data
+                        )
 
-                elif (
-                    event.type == h2_low.EventType.STREAM_RESET
-                    and self._on_stream_reset is not None
-                ):
-                    await self._on_stream_reset(event.stream_id, event.error_code)
+                    elif (
+                        event.type == h2_low.EventType.STREAM_RESET
+                        and self._on_stream_reset is not None
+                    ):
+                        await self._invoke_callback(
+                            self._on_stream_reset, event.stream_id, event.error_code
+                        )
 
-                elif event.type == h2_low.EventType.DATAGRAM and self._on_datagram is not None:
-                    await self._on_datagram(event.data)
+                    elif event.type == h2_low.EventType.DATAGRAM and self._on_datagram is not None:
+                        await self._invoke_callback(self._on_datagram, event.data)
 
-                elif event.type == h2_low.EventType.GOAWAY and not self._goaway_notified:
-                    self._goaway_notified = True
-                    if self._on_goaway is not None:
-                        await self._on_goaway(event.last_stream_id, event.error_code)
+                    elif event.type == h2_low.EventType.GOAWAY and not self._goaway_notified:
+                        self._goaway_notified = True
+                        if self._on_goaway is not None:
+                            await self._invoke_callback(
+                                self._on_goaway, event.last_stream_id, event.error_code
+                            )
 
-                # 0x50 (WT_FLOW_CONTROL_ERROR) のみ on_error へ渡す
-                elif (
-                    event.type == h2_low.EventType.ERROR
-                    and event.error_code == 0x50
-                    and self._on_error is not None
-                ):
-                    await self._on_error(event.error_code, event.error_message)
+                    # 0x50 (WT_FLOW_CONTROL_ERROR) のみ on_error へ渡す
+                    elif (
+                        event.type == h2_low.EventType.ERROR
+                        and event.error_code == 0x50
+                        and self._on_error is not None
+                    ):
+                        await self._invoke_callback(
+                            self._on_error, event.error_code, event.error_message
+                        )
 
-            if self._session.is_closed():
-                self._running = False
+                if self._session.is_closed():
+                    self._running = False
 
-            await asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)
+        finally:
+            self._run_active = False
 
     async def close(self) -> None:
         """接続を閉じる
 
         draft-15 Section 6.12: WT_CLOSE_SESSION 後に CONNECT ストリームを
-        half-close する。
+        half-close し、ピアの CONNECT ストリームクローズ (END_STREAM /
+        RST_STREAM) を close_wait_timeout の上限まで待ってから TCP/TLS を
+        閉じる。上限で打ち切った場合も閉じる処理へ進む。
         """
-        was_running = self._running
         self._running = False
         self._connected = False
         # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
         # セッション ID で発火させないため)
         self._pending_session_ready = None
 
-        if self._session is not None and self._session_id >= 0:
-            self._session.close_session(self._session_id)
-            await self._send_pending()
-            # run() が並行していないときだけ half-close 完了を待つ
-            if not was_running:
-                for _ in range(10):
-                    await self._receive()
+        try:
+            if self._session is not None and self._session_id >= 0:
+                session_id = self._session_id
+                self._session.close_session(session_id)
+                try:
                     await self._send_pending()
-                    await asyncio.sleep(0.01)
+                except OSError:
+                    # 接続断 (RST 等) では送出できなくても閉じる処理へ進む
+                    pass
+                # 二重 close() で待機を繰り返さないようセッション ID を破棄する
+                self._session_id = -1
+                if self._close_wait_timeout <= 0:
+                    self._close_wait_result = "skipped"
+                elif await self._wait_for_peer_close(session_id):
+                    self._close_wait_result = "peer-closed"
+                else:
+                    self._close_wait_result = "timeout"
+        finally:
+            if self._writer is not None:
+                self._writer.close()
+                try:
+                    await self._writer.wait_closed()
+                except ssl.SSLError, ConnectionError, OSError:
+                    pass
 
-        if self._writer is not None:
-            self._writer.close()
+    async def _wait_for_peer_close(self, session_id: int) -> bool:
+        """ピアの CONNECT ストリームクローズを待つ。観測したら True を返す
+
+        draft-15 Section 6.12 の MUST (WT_CLOSE_SESSION の受信側は END_STREAM
+        で応答してストリームを閉じる) への応答を best-effort で観測する
+        (draft の改版で要件が変わる可能性がある)。終了条件はピアクローズの
+        観測・接続断 (EOF / RST 等)・close_wait_timeout の満了で、いずれも
+        呼び出し側は閉じる処理へ進む。
+        """
+        if self._session is None:
+            return False
+        if session_id in self._peer_closed_session_ids:
+            return True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._close_wait_timeout
+        # run() が実行中でも、コールバック実行中は run() が受信していないため
+        # 自身で受信する (子タスク経由の close() もここで拾う)
+        from_run_callback = self._in_callback
+        while self._run_active and not from_run_callback and loop.time() < deadline:
+            if session_id in self._peer_closed_session_ids:
+                return True
+            await asyncio.sleep(0.001)
+        while loop.time() < deadline:
+            if session_id in self._peer_closed_session_ids:
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
             try:
-                await self._writer.wait_closed()
-            except ssl.SSLError, ConnectionError, OSError:
-                pass
+                await self._receive(timeout=min(0.1, remaining))
+                await self._send_pending()
+            except OSError:
+                # 接続断 (RST 等) では待機を打ち切って閉じる処理へ進む
+                break
+            # 待機中はイベントコールバックを発火せず、SESSION_CLOSED の記録
+            # だけを行う (close() 前の従来動作を保ち、run() との再入を避ける)
+            while True:
+                event = self._session.next_event()
+                if event is None:
+                    break
+                if event.type == h2_low.EventType.SESSION_CLOSED:
+                    self._peer_closed_session_ids.add(event.session_id)
+            if self._reader is None or self._reader.at_eof():
+                # ピアが接続自体を閉じた (EOF)
+                break
+            await asyncio.sleep(0.001)
+        return session_id in self._peer_closed_session_ids
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""

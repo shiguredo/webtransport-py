@@ -1806,3 +1806,329 @@ async def test_client_connect_with_config_over_limit_raises_value_error(test_cer
         assert client._reader is None
     finally:
         await server.stop()
+
+
+async def _serve_silent_h2(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """SETTINGS 交換と 2xx 応答のみ行い、以後は応答も切断もせず沈黙する手続きサーバー
+
+    close() の待機タイムアウト検証で使う。クライアントの WT_CLOSE_SESSION
+    を含む DATA フレームを受け取っても応答せず、接続も維持する。
+    """
+    # クライアントの preface + SETTINGS を読む
+    try:
+        await asyncio.wait_for(reader.read(65535), timeout=5.0)
+    except TimeoutError:
+        writer.close()
+        return
+    # SETTINGS (WebTransport 有効化) を返す
+    settings = (
+        (0x0008).to_bytes(2, "big")
+        + (1).to_bytes(4, "big")
+        + (0x2B60).to_bytes(2, "big")
+        + (1).to_bytes(4, "big")
+    )
+    writer.write(
+        len(settings).to_bytes(3, "big") + bytes([0x04, 0x00]) + (0).to_bytes(4, "big") + settings
+    )
+    await writer.drain()
+    # CONNECT を読む
+    try:
+        await asyncio.wait_for(reader.read(65535), timeout=5.0)
+    except TimeoutError:
+        writer.close()
+        return
+    # 2xx (:status 200) を返す
+    writer.write(
+        (1).to_bytes(3, "big") + bytes([0x01, 0x04]) + (1).to_bytes(4, "big") + bytes([0x88])
+    )
+    await writer.drain()
+    # 以後は届いたデータを読み捨てて応答しない (接続も閉じない)
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(65535), timeout=5.0)
+            except TimeoutError:
+                continue
+            if not chunk:
+                break
+    except ConnectionError, OSError:
+        pass
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_client_close_waits_for_peer_fin(test_certificates):
+    """close() がピアの CONNECT ストリームクローズを待ってから閉じることを確認
+
+    通常経路ではサーバーが WT_CLOSE_SESSION 応答の END_STREAM を返すため、
+    待機結果が peer-closed になる。既定の待機上限が 3 秒であることも確認する。
+    """
+    from webtransport.h2 import Client, Server
+
+    assert Client(url="https://127.0.0.1:4433/webtransport")._close_wait_timeout == 3.0
+
+    session_closed_event = asyncio.Event()
+
+    async def on_session_closed(session_writer):
+        session_closed_event.set()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    server.on_session_closed(on_session_closed)
+    await server.start()
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    try:
+        await client.connect()
+        await client.close()
+        assert client._close_wait_result == "peer-closed"
+        # WT_CLOSE_SESSION がサーバーに届き、セッション終了が通知される
+        await asyncio.wait_for(session_closed_event.wait(), timeout=5.0)
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_waits_while_run_active(test_certificates):
+    """run() 実行中に close() してもピアクローズを観測して閉じることを確認
+
+    run() の記録を close() が参照する経路と、run() 終了後に close() 自身が
+    受信して観測する経路のどちらでも、待機結果が peer-closed になる。
+    """
+    from webtransport.h2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    try:
+        # run() が実行中になるまで待ってから close() する (_run_active 待機の検証)
+        for _ in range(100):
+            if client._run_active:
+                break
+            await asyncio.sleep(0.01)
+        assert client._run_active is True
+        await client.close()
+        assert client._close_wait_result == "peer-closed"
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_from_run_callback(test_certificates):
+    """run() のコールバックから close() を呼んでもタイムアウトせずに閉じることを確認
+
+    run() がコールバックを await している間は _run_active が True のままだが、
+    同一タスクからの close() は自身で受信してピアクローズを観測する。
+    """
+    from webtransport.h2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        close_wait_timeout=1.0,
+    )
+    closed = asyncio.Event()
+
+    async def on_session_ready(session_id):
+        await client.close()
+        closed.set()
+
+    client.on_session_ready(on_session_ready)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    try:
+        await asyncio.wait_for(closed.wait(), timeout=5.0)
+        assert client._close_wait_result == "peer-closed"
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_from_run_callback_child_task(test_certificates):
+    """run() のコールバックが子タスクで close() を呼んでも観測できることを確認
+
+    コールバックが子タスク化して close() を待つ場合も、run() は受信して
+    いないため close() が自身で受信してピアクローズを観測する。
+    """
+    from webtransport.h2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        close_wait_timeout=1.0,
+    )
+    closed = asyncio.Event()
+
+    async def on_session_ready(session_id):
+        await asyncio.gather(client.close())
+        closed.set()
+
+    client.on_session_ready(on_session_ready)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+    try:
+        await asyncio.wait_for(closed.wait(), timeout=5.0)
+        assert client._close_wait_result == "peer-closed"
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_idempotent_and_unconnected(test_certificates):
+    """二重 close() と未接続 close() が安全で待機結果を保つことを確認"""
+    from webtransport.h2 import Client, Server
+
+    # 未接続の close() は待機せずに結果 none のまま完了する
+    unconnected = Client(url="https://127.0.0.1:4433/webtransport", verify_peer=False)
+    await unconnected.close()
+    assert unconnected._close_wait_result == "none"
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    try:
+        await client.connect()
+        await client.close()
+        assert client._close_wait_result == "peer-closed"
+        # 二重 close() は待機を繰り返さず結果を保つ
+        await client.close()
+        assert client._close_wait_result == "peer-closed"
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_times_out_without_peer_fin(test_certificates):
+    """ピアが応答しなくても close() が上限で完了することを確認
+
+    2xx 応答後に沈黙する手続きサーバーに対し、短い上限で待機が打ち切られ、
+    待機結果が timeout になる。実時間で上限いっぱい待つことを確認する。
+    """
+    from webtransport.h2 import Client
+
+    async def handle_silent_server(reader, writer):
+        await _serve_silent_h2(reader, writer)
+
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(test_certificates["certfile"], test_certificates["keyfile"])
+    ssl_context.set_alpn_protocols(["h2"])
+    fake_server = await asyncio.start_server(handle_silent_server, "127.0.0.1", 0, ssl=ssl_context)
+    port = fake_server.sockets[0].getsockname()[1]
+    client = Client(
+        url=f"https://127.0.0.1:{port}/webtransport",
+        verify_peer=False,
+        close_wait_timeout=0.5,
+    )
+    try:
+        await client.connect()
+        # 上限いっぱい待って打ち切られる。上限超過の検出力のため下限を
+        # 主眼とし、上限側は CI 変動の余裕を持たせる
+        start = time.monotonic()
+        await client.close()
+        elapsed = time.monotonic() - start
+        assert client._close_wait_result == "timeout"
+        assert 0.4 <= elapsed < 2.0
+    finally:
+        fake_server.close()
+        await fake_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_client_close_skipped_without_wait(test_certificates):
+    """close_wait_timeout=0 では待たずに閉じ、待機結果が skipped になることを確認
+
+    WT_CLOSE_SESSION は送出されるためサーバー側にもセッション終了が届く。
+    """
+    from webtransport.h2 import Client, Server
+
+    session_closed_event = asyncio.Event()
+
+    async def on_session_closed(session_writer):
+        session_closed_event.set()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    server.on_session_closed(on_session_closed)
+    await server.start()
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        close_wait_timeout=0,
+    )
+    try:
+        await client.connect()
+        await client.close()
+        assert client._close_wait_result == "skipped"
+        await asyncio.wait_for(session_closed_event.wait(), timeout=5.0)
+    finally:
+        await server.stop()
