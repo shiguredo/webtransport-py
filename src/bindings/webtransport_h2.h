@@ -553,6 +553,18 @@ class H2Session {
   bool is_closed() const;
 
   /**
+   * セッションレベルの送信可能残量を返す (観測専用)
+   *
+   * `max_data_local` と `bytes_sent` の差 (負値は 0) を返す。フロー制御の
+   * 動作確認や e2e テストで、ワイヤの WT_MAX_DATA カプセル列を読まずに
+   * 残量を観測するために使う。存在しないセッション ID では 0 を返す
+   *
+   * @param session_id セッション ID
+   * @return 送信可能残量 (バイト)
+   */
+  uint64_t get_send_credit(int32_t session_id) const;
+
+  /**
    * 確立されたセッション ID のリストを取得
    */
   std::vector<int32_t> get_session_ids() const;
