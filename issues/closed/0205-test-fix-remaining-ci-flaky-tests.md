@@ -1,7 +1,7 @@
 # CI で flaky に失敗する残りのテストを修正する
 
 - Created: 2026-09-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-remaining-ci-flaky-tests
 - Polished: 2026-09-12
 
@@ -38,3 +38,12 @@ closed/0200 で CI の flaky 対策 (pacing 対応のポーリング化・閾値
 - 全テストが通過すること
 - CI (wheel ワークフロー) が通過すること
 - `CHANGES.md` の `### misc` に FIX エントリが追加されていること
+
+## 解決方法
+
+- `tests/test_quic_stream_control.py` の `exchange_packets` を pacing 対応にした。期限到来済みのタイマーは `handle_timeout()` で処理し、pacing などの未来の期限は `wait_pacing_timeout` で待って再試行する。両側の最小期限が `QUIET_TIMEOUT_NS` (1 秒) を超えたら静穏とみなして打ち切り、`PUMP_ATTEMPTS` 回で収束しない場合は異常として失敗させた
+- `test_extend_max_stream_offset` は、拡張の前提としてサーバーがストリームデータを受信したこと (STREAM_DATA イベント) を表明してから `extend_max_stream_offset` を呼ぶようにした (ngtcp2 は未知ストリームへの拡張を成功として黙って破棄するため)
+- `test_connection_close_retransmission_on_receive` と `test_connection_close_retransmission_stops_after_closing_period` は、受信に使うクライアントパケットを `close()` の前に生成する方式に変更し、closing 期間中の実時間待機を排除した。stops テストは、満了前の再アーム肯定確認 2 回・満了まで保持する再アーム 1 回・満了後の受信 1 回の 4 パケット構成とした
+- `test_duplicate_packet_discarded` と `test_receive_after_close` の `send()` も、pacing で空振りする間は待つ `_send_with_pacing_wait` に置き換えた
+- `CHANGES.md` の `### misc` に FIX エントリを追加した
+- 対象テストは 20 回連続して通過することを確認した (改善反映後も 10 回連続で確認)
