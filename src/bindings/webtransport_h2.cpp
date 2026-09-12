@@ -1640,6 +1640,8 @@ bool H2Session::initialize() {
       callbacks, on_data_chunk_recv_callback);
   nghttp2_session_callbacks_set_on_stream_close_callback(
       callbacks, on_stream_close_callback);
+  nghttp2_session_callbacks_set_on_frame_not_send_callback(
+      callbacks, on_frame_not_send_callback);
   nghttp2_session_callbacks_set_on_header_callback(callbacks,
                                                    on_header_callback);
   nghttp2_session_callbacks_set_on_begin_headers_callback(
@@ -1918,6 +1920,16 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
     return;
   }
 
+  // RFC 9113 Section 5.1.1: HTTP/2 のストリーム ID は 1 以上。0 以下は
+  // nghttp2_submit_response が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用で
+  // あり、黙って no-op にしない (クライアントセッションは接続ガードで
+  // 従来どおり no-op)。例外は nanobind の既定翻訳で ValueError になる
+  if (session_id <= 0) {
+    throw std::invalid_argument(
+        "reject_session session_id must be a positive stream ID: " +
+        std::to_string(session_id));
+  }
+
   // status_code を検証する: HTTP status code (RFC 9110 Section 15) として
   // 意味を持つ 200-599 のみを許容する。1xx と 3 桁未満・4 桁以上・600 以上
   // は誤用であり、クライアント側の挙動を壊す: 2 桁以下は nghttp2 が
@@ -1950,7 +1962,19 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   };
   size_t nva_count = (status_code == 405) ? 2 : 1;
 
-  nghttp2_submit_response(session_, session_id, nva, nva_count, nullptr);
+  int rv =
+      nghttp2_submit_response(session_, session_id, nva, nva_count, nullptr);
+  if (rv != 0) {
+    // submit 失敗 (NOMEM 等) を観測可能にする。送出時の非 fatal な失敗は
+    // on_frame_not_send_callback が観測する
+    H2Event error_event;
+    error_event.type = H2EventType::Error;
+    error_event.session_id = session_id;
+    error_event.stream_id = static_cast<uint64_t>(session_id);
+    error_event.error_code = static_cast<uint32_t>(-rv);
+    error_event.error_message = nghttp2_strerror(rv);
+    push_event(std::move(error_event));
+  }
 
   // 非 2xx 応答で拒否されたセッションは一度も確立されていない
   // (draft-15 Section 3.2 の「A WebTransport session is established when
@@ -2879,6 +2903,36 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
   return 0;
 }
 
+int H2Session::on_frame_not_send_callback(nghttp2_session* session,
+                                          const nghttp2_frame* frame,
+                                          int lib_error_code,
+                                          void* user_data) {
+  (void)session;
+
+  // HEADERS フレームの送出失敗を観測対象にする (H2Session が送出するのは
+  // reject_session / accept_session の応答 HEADERS が主)。nghttp2 は送出直前の
+  // 判定でカテゴリーを書き換えるため、カテゴリーではなく type のみで判定する
+  if (frame->hd.type != NGHTTP2_HEADERS) {
+    return 0;
+  }
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+
+  // 送出失敗を Error イベントで観測可能にする。receive() の失敗時と同じ
+  // 形式 (error_code は nghttp2 エラーコードの絶対値)。nghttp2 のセッション
+  // 操作 API は呼ばず push_event のみを行う (nghttp2_strerror は状態に
+  // 触れない。再入防止)。戻り値は 0 固定 (非 0 は
+  // NGHTTP2_ERR_CALLBACK_FAILURE として致命扱いになる)
+  H2Event event;
+  event.type = H2EventType::Error;
+  event.session_id = frame->hd.stream_id;
+  event.stream_id = static_cast<uint64_t>(frame->hd.stream_id);
+  event.error_code = static_cast<uint32_t>(-lib_error_code);
+  event.error_message = nghttp2_strerror(lib_error_code);
+  h2_session->push_event(std::move(event));
+  return 0;
+}
+
 int H2Session::on_header_callback(nghttp2_session* session,
                                   const nghttp2_frame* frame,
                                   const uint8_t* name,
@@ -3111,9 +3165,12 @@ void bind_webtransport_h2(nb::module_& m) {
            nb::arg("session_id"), nb::arg("status_code"),
            nb::sig("def reject_session(self, session_id: int, status_code: "
                    "int) -> None"),
-           "WebTransport セッションを拒否 (サーバー用。status_code は "
-           "200-599 (実質 300-599 用)。1xx と 3 桁未満・4 桁以上・600 以上は "
-           "ValueError。405 の場合は Allow: CONNECT を応答に含める)")
+           "WebTransport セッションを拒否 (サーバー用。session_id は正の"
+           "ストリーム ID のみ (0 以下は ValueError。クライアントセッション"
+           "では no-op)。status_code は 200-599 (実質 300-599 用)。1xx と "
+           "3 桁未満・4 桁以上・600 以上は ValueError。405 の場合は "
+           "Allow: CONNECT を応答に含める。応答の submit / 送出失敗は "
+           "ERROR イベントを発火する)")
       .def("open_stream", &H2Session::open_stream, nb::lock_self(),
            nb::arg("session_id"), nb::arg("is_unidirectional"),
            nb::sig("def open_stream(self, session_id: int, is_unidirectional: "

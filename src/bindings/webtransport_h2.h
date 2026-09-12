@@ -396,7 +396,15 @@ class H2Session {
    * Allow: CONNECT を応答ヘッダーに含める (WebTransport エンドポイントが
    * 受け付ける唯一のメソッド)。非 WebTransport リクエストへの 405 応答にも
    * 本 API を使う (wt_sessions_ に対象が無い場合は削除が no-op になり、
-   * イベントも発火しない)。
+   * 通常送出時はイベントも発火しない)。
+   *
+   * session_id は HTTP/2 の正のストリーム ID のみを許容する (0 以下は
+   * ValueError。クライアントセッションでは従来どおり no-op)。応答の submit
+   * 失敗 (NOMEM 等) と非 fatal な送出失敗 (submit は成功したが HEADERS が
+   * 送出時に破棄された場合) は H2EventType::Error イベントで観測可能にする
+   * (観測点は h2.Session.next_event()。高レベル h2.Server / h2.Client は
+   * 0x50 以外の Error を on_error に渡さない)。失敗時もセッション状態の更新
+   * (非 2xx の削除 / 2xx の is_terminated) は成功時と同じに行う。
    * @param session_id セッション ID
    * @param status_code HTTP ステータスコード
    */
@@ -633,6 +641,14 @@ class H2Session {
                                       int32_t stream_id,
                                       uint32_t error_code,
                                       void* user_data);
+  // HEADERS フレームが送出されなかった場合の通知。応答 (reject_session /
+  // accept_session) の submit は成功したが、送出時に非 fatal なエラー
+  // (STREAM_SHUT_WR / STREAM_CLOSED 等) で破棄されたことを Error イベントで
+  // 観測可能にする。nghttp2 のセッション操作 API は呼ばない (再入防止)
+  static int on_frame_not_send_callback(nghttp2_session* session,
+                                        const nghttp2_frame* frame,
+                                        int lib_error_code,
+                                        void* user_data);
   static int on_header_callback(nghttp2_session* session,
                                 const nghttp2_frame* frame,
                                 const uint8_t* name,

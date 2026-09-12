@@ -198,16 +198,17 @@ def prop_accept_session_arbitrary(session_id: int):
 
 
 @given(
-    st.integers(min_value=0, max_value=2**31 - 1),
+    st.integers(min_value=-(2**31), max_value=2**31 - 1),
     st.integers(min_value=0, max_value=2**31 - 1),
 )
 @settings(max_examples=100)
 def prop_reject_session_arbitrary(session_id: int, status_code: int):
     """任意のパラメータで reject_session してもクラッシュしない
 
-    サーバー API は 200-599 以外の status_code を ValueError にする
-    (誤用パスで「SessionClosed 非発火」の設計ピンを破らせない)。
-    それ以外のパラメータ (セッション未確立等) は無視される。
+    サーバー API は 200-599 以外の status_code と 0 以下の session_id を
+    ValueError にする (誤用パスで「SessionClosed 非発火」の設計ピンを
+    破らせない)。確立していない正の session_id は呼び出し自体では例外にせず、
+    応答の送出時に ERROR イベントになる。
     """
     config = h2.Config()
     config.is_server = True

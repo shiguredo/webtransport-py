@@ -1,7 +1,7 @@
 # H2Session::reject_session が応答の submit / 送出失敗を握り潰す
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h2-reject-session-submit-failure
 - Polished: 2026-09-12
 
@@ -27,14 +27,24 @@
 - 観測点は低レベル `h2.Session.next_event()` とする。高レベル `h2.Server` / `h2.Client` は 0x50 以外の Error を `on_error` へ渡さないため、本 Error は高レベルには届かない (高レベルへの通知追加は対象外)
 - submit / 送出失敗時のセッション状態は成功時と同じにする。非 2xx は `wt_sessions_` を削除する (エントリを残すと `send_datagram` / `send_stream_data` が開いたままカプセルが滞留し、非確立セッションでは `SessionClosed` を発火しない設計ピンも壊れる)。2xx は `is_terminated` と `capsule_buffer` の破棄を行う
 - 失敗後も応答は送出されないためストリームは滞留したまま (nghttp2 への RST_STREAM 送出は行わない) を既知の制約とする
-- 変更対象: `src/bindings/webtransport_h2.cpp` / `src/bindings/webtransport_h2.h` (`reject_session` の docstring に session_id 検証と Error 観測を追記) / `tests/test_webtransport_h2_reject_session.py` (回帰テスト) / `tests/prop_webtransport_h2.py` (reject_session PBT の docstring が「セッション未確立等は無視される」前提のため更新) / `CHANGES.md` の develop への FIX エントリ
+- 変更対象: `src/bindings/webtransport_h2.cpp` / `src/bindings/webtransport_h2.h` (`reject_session` の docstring に session_id 検証と Error 観測を追記) / `skills/webtransport-py/SKILL.md` (入力検証と ERROR 観測の追記) / `tests/test_webtransport_h2_reject_session.py` (回帰テスト) / `tests/prop_webtransport_h2.py` (reject_session PBT の docstring が「セッション未確立等は無視される」前提のため更新) / `CHANGES.md` の develop への FIX エントリ
 
 ## 完了条件
 
 - サーバーセッションに対する `reject_session(0, status)` と `reject_session(-1, status)` が `ValueError` になること (クライアントセッションでは従来どおり no-op であること)
 - submit 失敗 (`rv != 0`) のときに `H2EventType::Error` を push する実装であること (`NGHTTP2_ERR_NOMEM` は公開 API から再現不能のため自動テストの対象外とし、コードで担保する)
 - 送出失敗の回帰テスト: 同一ストリームへ `reject_session` を 2 回呼んだとき 2 回目、またはリセット済みストリームへ呼んだときに `H2EventType::Error` が発火すること
-- 失敗時も非 2xx の `wt_sessions_` 削除が行われ、`send_stream_data` / `send_datagram` がエントリ不在で塞がれることをテストでピン留めすること
+- 失敗時も状態更新 (非 2xx の `wt_sessions_` 削除 / 2xx の `is_terminated`) が成功時と同じく行われること。失敗経路の削除は公開 API から再現できないため `rv` 非依存の無条件更新は実装で担保し、テストでは失敗した 2 回目の呼び出しがエントリを再作成しないことと、両ハーフクローズ時に SessionClosed が発火しないことを表明する
 - `tests/prop_webtransport_h2.py` の reject_session PBT の docstring を更新すること
 - `CHANGES.md` の `## develop` に FIX エントリが追加されていること
 - 既存のテストが引き続き通過すること
+
+## 解決方法
+
+- `H2Session::reject_session` に `session_id <= 0` の入力検証を追加し、`std::invalid_argument` (nanobind の既定翻訳で `ValueError`) にした。接続ガードの直後に置くため、クライアントセッションでは従来どおり no-op
+- `nghttp2_submit_response` の戻り値が非 0 のときは `H2EventType::Error` を push するようにした (`session_id` / `error_code = -rv` / `error_message = nghttp2_strerror(rv)`)
+- `nghttp2_session_callbacks_set_on_frame_not_send_callback` を登録し、応答 HEADERS が送出時に非 fatal エラー (同一ストリームへの再応答の STREAM_SHUT_WR、リセット済みストリームの STREAM_CLOSED 等) で破棄された場合も同じ形式の `H2EventType::Error` を push するようにした。コールバック内では nghttp2 のセッション操作 API を呼ばない (再入防止)
+- 失敗時もセッション状態の更新 (非 2xx の削除 / 2xx の `is_terminated` と `capsule_buffer` 破棄) は成功時と同じく無条件に行う (既存挙動の維持)
+- `tests/test_webtransport_h2_reject_session.py` に、0 以下の session_id で `ValueError`、同一ストリームへの 2 回目の応答で ERROR 512、RST_STREAM 後の応答で ERROR 510、失敗後も両ハーフクローズで SessionClosed が発火しないことのテストを追加した。`tests/prop_webtransport_h2.py` の docstring と負値戦略も更新した
+- `skills/webtransport-py/SKILL.md` に入力検証と ERROR 観測 (低レベルのみ) を追記し、`CHANGES.md` の develop に [FIX] エントリを追加した
+- 単体 26 件・h2 低レベル / prop 266 件・h2 e2e 61 件の通過を確認し、全テストは実装コミット時のフックで通過した
