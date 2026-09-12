@@ -1,4 +1,4 @@
-"""QUIC 証明書検証 / 0-RTT / Connection Migration の e2e テスト"""
+"""QUIC 証明書検証 / 0-RTT / Connection Migration / パケットロス の e2e テスト"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 import pytest
+from lossy_relay import LossyRelay, LossyRelayPacket
 
 from webtransport.quic import Client, Server
 
@@ -810,4 +811,94 @@ async def test_connection_migration(test_certificates):
     server_task.cancel()
     await asyncio.gather(client_task, server_task, return_exceptions=True)
     await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_handshake_completes_with_initial_packet_loss(test_certificates):
+    """最初のクライアント Initial をロスしてもハンドシェイクが完了することを確認する
+
+    クライアントとサーバーの間に UDP リレーを挟み、c2s の 0 番目
+    (最初の Initial) をドロップする。ngtcp2 の Initial 再送により
+    ハンドシェイクは回復し、その後の 1 ストリーム往復も成立する
+    (RFC 9002 Section 6.2 の PTO による再送)。
+    """
+
+    server_received: list[bytes] = []
+    client_received: list[bytes] = []
+    server_got_data = asyncio.Event()
+    client_got_reply = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_server_stream(stream_id: int, data: bytes, fin: bool, addr: object) -> None:
+        server_received.append(data)
+        logger.info("サーバー受信: %s", data)
+        server_got_data.set()
+        await server.send_stream_data(addr, stream_id, b"pong", fin=True)
+
+    server.on_stream_data(on_server_stream)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    # c2s の最初のパケットだけをドロップし、以降は全通しにする
+    def drop_first_client_packet(packet: LossyRelayPacket) -> bool:
+        if packet.direction == "c2s" and packet.index == 0:
+            logger.info("最初のクライアントパケットをドロップする (%d バイト)", len(packet.data))
+            return True
+        return False
+
+    relay = LossyRelay(
+        server_addr=("127.0.0.1", server.actual_port),
+        drop_rule=drop_first_client_packet,
+    )
+
+    async with relay:
+        client = Client(
+            host="127.0.0.1",
+            port=relay.actual_port,
+            verify_peer=False,
+        )
+
+        async def on_client_stream(stream_id: int, data: bytes, fin: bool) -> None:
+            client_received.append(data)
+            logger.info("クライアント受信: %s", data)
+            client_got_reply.set()
+
+        client.on_stream_data(on_client_stream)
+
+        # Initial の再送タイマー (PTO 相当) は秒オーダーのため余裕を持たせる
+        connected = await asyncio.wait_for(client.connect(timeout=15.0), timeout=20.0)
+        assert connected is True, "Initial を 1 つロスしてもハンドシェイクは完了するべき"
+        assert relay.dropped["c2s"] == 1, "最初のクライアントパケットが 1 つドロップされるべき"
+
+        client_task = asyncio.create_task(client.run())
+
+        stream_id = await client.open_stream(bidirectional=True)
+        await client.send_stream_data(stream_id, b"ping", fin=True)
+
+        await asyncio.wait_for(server_got_data.wait(), timeout=10.0)
+        await asyncio.wait_for(client_got_reply.wait(), timeout=10.0)
+
+        assert b"ping" in server_received
+        assert b"pong" in client_received
+
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        await client.close()
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
     await server.stop()
