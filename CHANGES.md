@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] `http3.Connection.close_stream` の既定 `error_code` を H3_NO_ERROR (0x0100) に変更する
+  - @voluntas
 - [CHANGE] `http2.EventType` と `http3.EventType` に `INFORMATIONAL` (1xx) と `TRAILERS` を追加し、受信トレーラと 1xx を `HEADERS` から区別できるようにする
   - @voluntas
 - [CHANGE] WebTransport over HTTP/2 の `h2.Session.reset_stream` から `reliable_size` 引数を廃止し、Reliable Size に送信済みバイト数を載せるようにする
