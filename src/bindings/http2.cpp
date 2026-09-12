@@ -719,6 +719,43 @@ ssize_t Http2Connection::send_callback(nghttp2_session* session,
   return NGHTTP2_ERR_WOULDBLOCK;
 }
 
+namespace {
+
+// HEADERS フレームを Headers / Informational / Trailers に分類する
+//
+// nghttp2 の nghttp2_headers_category は「最初のレスポンスか、それ以外か」
+// しか表さず、1xx とトレーラを区別しない。実際 nghttp2 は 1xx を先に送ると
+// 最初の HEADERS を HCAT_RESPONSE、後続の最終レスポンスを HCAT_HEADERS と
+// する (nghttp2_session.c の session_predicate_response_headers_send) ため、
+// cat では分類できない。疑似ヘッダーで判定する:
+//   - `:method` を持つものはリクエスト (RFC 9113 Section 8.3)
+//   - `:status` を持つものはレスポンス。1xx なら interim response
+//     (RFC 9113 Section 8.1 / RFC 9110 Section 15)
+//   - どちらも持たない終端 HEADERS はトレーラ (RFC 9110 Section 6.5)
+Http2EventType classify_headers_event(
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  bool has_status = false;
+  bool informational = false;
+  for (const auto& [name, value] : headers) {
+    if (name == ":method") {
+      return Http2EventType::Headers;
+    }
+    if (name != ":status") {
+      continue;
+    }
+    has_status = true;
+    // ":status" は 3 桁の数字。1 桁目が '1' なら 1xx
+    informational = !value.empty() && value[0] == '1';
+  }
+  if (!has_status) {
+    return Http2EventType::Trailers;
+  }
+  return informational ? Http2EventType::Informational
+                       : Http2EventType::Headers;
+}
+
+}  // namespace
+
 int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
                                             const nghttp2_frame* frame,
                                             void* user_data) {
@@ -727,13 +764,17 @@ int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
   switch (frame->hd.type) {
     case NGHTTP2_HEADERS:
       if (frame->hd.flags & NGHTTP2_FLAG_END_HEADERS) {
-        // ヘッダー受信完了
+        // ヘッダー受信完了。nghttp2 の cat は 1xx とトレーラを区別しない
+        // (NGHTTP2_HCAT_HEADERS に同居する) ため、:status の有無で判定する
+        // (RFC 9113 Section 8.1 の interim response と RFC 9110 Section 6.5
+        // の trailer section)。cat が REQUEST / RESPONSE 以外で :status が
+        // 無いものだけをトレーラとする
         auto it = self->pending_headers_.find(frame->hd.stream_id);
         if (it != self->pending_headers_.end()) {
           Http2Event event;
-          event.type = Http2EventType::Headers;
           event.stream_id = frame->hd.stream_id;
           event.headers = std::move(it->second);
+          event.type = classify_headers_event(event.headers);
           self->push_event(std::move(event));
           self->pending_headers_.erase(it);
         }
@@ -1010,7 +1051,9 @@ void bind_http2(nb::module_& m) {
       .value("SETTINGS", Http2EventType::Settings)
       .value("PING", Http2EventType::Ping)
       .value("PUSH_PROMISE", Http2EventType::PushPromise)
-      .value("PRIORITY_UPDATE", Http2EventType::PriorityUpdate);
+      .value("PRIORITY_UPDATE", Http2EventType::PriorityUpdate)
+      .value("INFORMATIONAL", Http2EventType::Informational)
+      .value("TRAILERS", Http2EventType::Trailers);
 
   // Http2Event
   nb::class_<Http2Event>(http2_m, "Event", "HTTP/2 イベント")

@@ -82,10 +82,11 @@ def test_http3_submit_trailers() -> None:
     assert event.type == http3.EventType.DATA
     assert event.data == b"request-body"
 
-    # トレーラも本体ヘッダーと同じ HEADERS イベントとして積まれる
+    # トレーラは TRAILERS イベントとして本体ヘッダーと区別して積まれる
+    # (RFC 9114 Section 4.1 のメッセージ構成、RFC 9110 Section 6.5)
     event = server.next_event()
     assert event is not None
-    assert event.type == http3.EventType.HEADERS
+    assert event.type == http3.EventType.TRAILERS
     assert dict(event.headers)["x-trailer"] == "trailer-value"
 
     event = server.next_event()
@@ -129,9 +130,10 @@ def test_http3_submit_info() -> None:
     _pump(server, client)
 
     # 1xx → 最終レスポンス → 本体 → ストリーム終端の順に届く
+    # (1xx は INFORMATIONAL として最終レスポンスの HEADERS と区別する)
     event = client.next_event()
     assert event is not None
-    assert event.type == http3.EventType.HEADERS
+    assert event.type == http3.EventType.INFORMATIONAL
     assert dict(event.headers)[":status"] == "103"
 
     event = client.next_event()
@@ -381,3 +383,50 @@ def test_http3_headers_fin_same_chunk_stream_end_once() -> None:
     assert any(event.type == http3.EventType.HEADERS for event in events)
     end_events = [event for event in events if event.type == http3.EventType.STREAM_END]
     assert len(end_events) == 1
+
+
+def test_http3_response_trailers_distinguished() -> None:
+    """レスポンスのトレーラが TRAILERS として最終レスポンスの HEADERS と区別されることを確認
+
+    RFC 9114 Section 4.1 のメッセージ構成 (header section → content →
+    trailer section) と RFC 9110 Section 6.5 の trailer section により、
+    終端 HEADERS は `:status` を持たない。サーバーの最終レスポンスは
+    HEADERS のまま、トレーラは TRAILERS として届く。
+    """
+    client, server = _create_connection_pair()
+
+    # リクエストを送ってサーバーに届ける
+    assert client.submit_request(0, _request_headers()) is True
+    _pump(client, server)
+    request_event = server.next_event()
+    assert request_event is not None
+    assert request_event.type == http3.EventType.HEADERS
+
+    # サーバーが最終レスポンス + 本体 + トレーラを送る
+    assert server.submit_response(0, [(":status", "200")]) is True
+    _pump(server, client)
+    server.send_data(0, b"response-body", fin=True)
+    assert server.submit_trailers(0, [("x-checksum", "abc")]) is True
+    _pump(server, client)
+
+    events = []
+    while True:
+        event = client.next_event()
+        if event is None:
+            break
+        events.append(event)
+
+    response_events = [
+        e for e in events if e.type == http3.EventType.HEADERS and ":status" in dict(e.headers)
+    ]
+    assert len(response_events) == 1
+    assert dict(response_events[0].headers)[":status"] == "200"
+
+    trailer_events = [e for e in events if e.type == http3.EventType.TRAILERS]
+    assert len(trailer_events) == 1
+    assert dict(trailer_events[0].headers) == {"x-checksum": "abc"}
+
+    # トレーラが HEADERS として届かない
+    assert not any(
+        e.type == http3.EventType.HEADERS and ":status" not in dict(e.headers) for e in events
+    )

@@ -963,6 +963,27 @@ int Http3Connection::recv_header_cb(nghttp3_conn* conn,
   return 0;
 }
 
+namespace {
+
+// `:status` が 1xx かどうかを判定する
+//
+// RFC 9114 Section 4.1 は「サーバーは 0 個以上の interim HTTP レスポンスを
+// 同じストリームへ送り、その後ろに単一の最終 HTTP レスポンスを送る」と定め、
+// interim response は 1xx の `:status` で表現される (RFC 9110 Section 15)。
+bool is_informational_status(
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  for (const auto& [name, value] : headers) {
+    if (name != ":status") {
+      continue;
+    }
+    // ":status" は 3 桁の数字。1 桁目が '1' なら 1xx
+    return !value.empty() && value[0] == '1';
+  }
+  return false;
+}
+
+}  // namespace
+
 int Http3Connection::end_headers_cb(nghttp3_conn* conn,
                                     int64_t stream_id,
                                     int fin,
@@ -973,9 +994,12 @@ int Http3Connection::end_headers_cb(nghttp3_conn* conn,
   auto it = self->pending_headers_.find(stream_id);
   if (it != self->pending_headers_.end()) {
     Http3Event event;
-    event.type = Http3EventType::Headers;
     event.stream_id = stream_id;
     event.headers = std::move(it->second);
+    // `:status` が 1xx のヘッダーは interim response (RFC 9114 Section 4.1)
+    event.type = is_informational_status(event.headers)
+                     ? Http3EventType::Informational
+                     : Http3EventType::Headers;
     self->push_event(std::move(event));
     self->pending_headers_.erase(it);
   }
@@ -1016,7 +1040,28 @@ int Http3Connection::end_trailers_cb(nghttp3_conn* conn,
                                      int fin,
                                      void* conn_user_data,
                                      void* stream_user_data) {
-  return end_headers_cb(conn, stream_id, fin, conn_user_data, stream_user_data);
+  auto* self = static_cast<Http3Connection*>(conn_user_data);
+
+  auto it = self->pending_headers_.find(stream_id);
+  if (it != self->pending_headers_.end()) {
+    Http3Event event;
+    // トレーラは終端 HEADERS であり `:status` を持たない
+    // (RFC 9114 Section 4.1 のメッセージ構成、RFC 9110 Section 6.5)
+    event.type = Http3EventType::Trailers;
+    event.stream_id = stream_id;
+    event.headers = std::move(it->second);
+    self->push_event(std::move(event));
+    self->pending_headers_.erase(it);
+  }
+
+  if (fin) {
+    Http3Event event;
+    event.type = Http3EventType::StreamEnd;
+    event.stream_id = stream_id;
+    self->push_event(std::move(event));
+  }
+
+  return 0;
 }
 
 int Http3Connection::stop_sending_cb(nghttp3_conn* conn,
@@ -1173,7 +1218,9 @@ void bind_http3(nb::module_& m) {
       .value("STREAM_END", Http3EventType::StreamEnd)
       .value("GO_AWAY", Http3EventType::GoAway)
       .value("RESET_STREAM", Http3EventType::ResetStream)
-      .value("STOP_SENDING", Http3EventType::StopSending);
+      .value("STOP_SENDING", Http3EventType::StopSending)
+      .value("INFORMATIONAL", Http3EventType::Informational)
+      .value("TRAILERS", Http3EventType::Trailers);
 
   // Http3Event
   nb::class_<Http3Event>(http3_m, "Event", "HTTP/3 イベント")

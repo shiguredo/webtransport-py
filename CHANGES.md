@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] `http2.EventType` と `http3.EventType` に `INFORMATIONAL` (1xx) と `TRAILERS` を追加し、受信トレーラと 1xx を `HEADERS` から区別できるようにする
+  - @voluntas
 - [CHANGE] WebTransport over HTTP/2 の `h2.Session.reset_stream` から `reliable_size` 引数を廃止し、Reliable Size に送信済みバイト数を載せるようにする
   - @voluntas
 - [CHANGE] WebTransport over HTTP/2 の `h2.Client` は TLS 1.3 以上で接続し、`h2.Server` は TLS 1.2 以下の接続を拒否するようにする (draft-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) も拒否する)

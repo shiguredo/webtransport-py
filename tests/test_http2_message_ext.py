@@ -57,7 +57,7 @@ def test_http2_submit_trailer() -> None:
     trailer_index = next(
         i
         for i, e in enumerate(events)
-        if e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers
+        if e.type == http2.EventType.TRAILERS and ("x-trailer", "value") in e.headers
     )
     assert response_index < data_indices[0] < trailer_index
     # トレーラ HEADERS が END_STREAM を担うため、STREAM_END はトレーラの
@@ -88,7 +88,7 @@ def test_http2_submit_trailer_after_flush() -> None:
 
     events = _drain_events(client)
     assert any(
-        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
+        e.type == http2.EventType.TRAILERS and ("x-trailer", "value") in e.headers for e in events
     )
     assert any(e.type == http2.EventType.STREAM_END and e.stream_id == stream_id for e in events)
 
@@ -111,7 +111,7 @@ def test_http2_submit_trailer_eof_data() -> None:
     _h2_pump(server, client)
     events = _drain_events(client)
     assert not any(
-        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
+        e.type == http2.EventType.TRAILERS and ("x-trailer", "value") in e.headers for e in events
     )
     assert any(e.type == http2.EventType.STREAM_END and e.stream_id == stream_id for e in events)
 
@@ -137,7 +137,7 @@ def test_http2_submit_trailer_reset_stream() -> None:
 
     events = _drain_events(client)
     assert not any(
-        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
+        e.type == http2.EventType.TRAILERS and ("x-trailer", "value") in e.headers for e in events
     )
     assert any(e.type == http2.EventType.STREAM_RESET for e in events)
 
@@ -162,7 +162,7 @@ def test_http2_submit_trailer_after_eof_data() -> None:
 
     events = _drain_events(client)
     assert any(
-        e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
+        e.type == http2.EventType.TRAILERS and ("x-trailer", "value") in e.headers for e in events
     )
     assert any(e.type == http2.EventType.STREAM_END and e.stream_id == stream_id for e in events)
 
@@ -342,7 +342,7 @@ def test_http2_message_ext_guards() -> None:
     assert server.submit_trailer(stream_id, [("x-trailer", "second")]) is False
     _h2_pump(server, client)
     assert any(
-        e.type == http2.EventType.HEADERS and ("x-trailer", "first") in e.headers
+        e.type == http2.EventType.TRAILERS and ("x-trailer", "first") in e.headers
         for e in _drain_events(client)
     )
 
@@ -425,4 +425,47 @@ def test_http2_goaway_after_response_delivered() -> None:
     assert any(event.type == http2.EventType.HEADERS for event in events)
     assert any(
         event.type == http2.EventType.DATA and event.data == b"response-body" for event in events
+    )
+
+
+def test_http2_informational_response_distinguished() -> None:
+    """1xx レスポンスが INFORMATIONAL、最終レスポンスが HEADERS になることを確認
+
+    RFC 9113 Section 8.1 の interim response (1xx) と最終レスポンスを区別して
+    観測できる。nghttp2 の nghttp2_headers_category は 1xx を先に送ると
+    最初の HEADERS を HCAT_RESPONSE、最終レスポンスを HCAT_HEADERS とするため
+    cat では分類できない。`:status` の値で判定する。
+    """
+    client, server = _create_http2_pair()
+
+    stream_id = client.submit_request(_request_headers())
+    assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(client)
+
+    # 1xx (103 Early Hints) を送ってから最終レスポンスを送る
+    server.submit_response(stream_id, [(":status", "103"), ("link", "</style.css>")])
+    _h2_pump(server, client)
+
+    events = _drain_events(client)
+    assert len(events) == 1
+    assert events[0].type == http2.EventType.INFORMATIONAL
+    assert events[0].stream_id == stream_id
+    assert dict(events[0].headers)[":status"] == "103"
+
+    server.submit_response(stream_id, [(":status", "200")])
+    server.send_data(stream_id, b"body", False)
+    assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is True
+    _h2_pump(server, client)
+
+    events = _drain_events(client)
+    assert events[0].type == http2.EventType.HEADERS
+    assert dict(events[0].headers)[":status"] == "200"
+    assert any(
+        e.type == http2.EventType.TRAILERS and dict(e.headers) == {"x-trailer": "value"}
+        for e in events
+    )
+    # トレーラは HEADERS としては届かない
+    assert not any(
+        e.type == http2.EventType.HEADERS and ":status" not in dict(e.headers) for e in events
     )
