@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の Client.close がピアの CONNECT ストリームクローズを待たずに接続を閉じる
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h2-client-close-waits-peer-fin
 - Polished: 2026-09-12
 
@@ -39,3 +39,14 @@ h2 draft には h3 の当該 SHOULD に対応する規定はなく、h2 には C
 - e2e テストで、ピアの close 待機 ("peer-closed" 相当)・タイムアウト ("timeout" 相当)・`close_wait_timeout=0` のスキップ ("skipped" 相当) を検証すること (h3 の `_close_wait_result` と対称の観測点を使う)
 - `CHANGES.md` の `## develop` に [FIX] エントリが追加されていること
 - 既存のテストがすべて通ること
+
+## 解決方法
+
+- `src/webtransport/h2/client.py` の `Client` に `close_wait_timeout: float = 3.0` を追加した (h3 と対称)
+- `Client.close` から 10 回 × 10ms の固定スリープループを撤去し、WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズ (`SESSION_CLOSED`) を `close_wait_timeout` の上限まで観測してから TCP/TLS を閉じる `_wait_for_peer_close` に置き換えた。終了条件はピアクローズの観測・接続断 (EOF / RST 等)・タイムアウトで、接続断時は例外を伝播せず閉じる処理へ進む
+- 待機結果を `_close_wait_result` ("peer-closed" / "timeout" / "skipped" / "none") で観測できるようにし、ピアクローズの観測は `_peer_closed_session_ids` に記録する。`connect()` で両者をリセットし、再接続で前回の観測を引き継がない
+- run() の実行中判定は `_run_active` で行い、run() のコールバック実行中は `_in_callback` を立てて、コールバックから (子タスク経由を含めて) close() が呼ばれても close() が自身で受信できるようにした。run() 実行中でコールバック外の場合は run() の終了を待ってから受信する
+- `close()` 後は `session_id` が -1 になり、二重 close() は待機を繰り返さない
+- `tests/test_e2e_webtransport_h2.py` に待機結果 (peer-closed / timeout / skipped)、run() 実行中、コールバック内 close (直接・子タスク経由)、冪等性・未接続 close の e2e テストを追加した
+- `skills/webtransport-py/SKILL.md` に `close_wait_timeout` と close() 後の `session_id` を追記し、`CHANGES.md` の develop に [FIX] エントリを追加した
+- 全テストが通過することを確認した
