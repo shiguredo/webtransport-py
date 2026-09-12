@@ -677,6 +677,7 @@ bool QuicConnection::initialize_client(const std::string& local_host,
   callbacks.stream_open = stream_open_cb;
   callbacks.stream_close = stream_close_cb;
   callbacks.stream_reset = stream_reset_cb;
+  callbacks.recv_stop_sending = recv_stop_sending_cb;
   callbacks.recv_datagram = recv_datagram_cb;
   callbacks.handshake_completed = handshake_completed_cb;
   callbacks.rand = rand_cb;
@@ -806,6 +807,7 @@ bool QuicConnection::initialize_server() {
   callbacks.stream_open = stream_open_cb;
   callbacks.stream_close = stream_close_cb;
   callbacks.stream_reset = stream_reset_cb;
+  callbacks.recv_stop_sending = recv_stop_sending_cb;
   callbacks.recv_datagram = recv_datagram_cb;
   callbacks.handshake_completed = handshake_completed_cb;
   callbacks.rand = rand_cb;
@@ -954,6 +956,7 @@ bool QuicConnection::initialize_server_from_packet(
   callbacks.stream_open = stream_open_cb;
   callbacks.stream_close = stream_close_cb;
   callbacks.stream_reset = stream_reset_cb;
+  callbacks.recv_stop_sending = recv_stop_sending_cb;
   callbacks.recv_datagram = recv_datagram_cb;
   callbacks.handshake_completed = handshake_completed_cb;
   callbacks.rand = rand_cb;
@@ -2910,6 +2913,26 @@ int QuicConnection::stream_reset_cb(ngtcp2_conn* conn,
   return 0;
 }
 
+int QuicConnection::recv_stop_sending_cb(ngtcp2_conn* conn,
+                                          int64_t stream_id,
+                                          uint64_t app_error_code,
+                                          void* user_data,
+                                          void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
+  auto* self = static_cast<QuicConnection*>(user_data);
+
+  // ピアが送信側の停止を要求した (RFC 9000 Section 19.5)。RESET_STREAM と
+  // 同様にアプリへ伝播する (draft-ietf-webtrans-http3-16 Section 4.4)
+  QuicEvent event;
+  event.type = QuicEventType::StopSending;
+  event.stream_id = stream_id;
+  event.error_code = app_error_code;
+  self->push_event(std::move(event));
+
+  return 0;
+}
+
 int QuicConnection::recv_datagram_cb(ngtcp2_conn* conn,
                                      uint32_t flags,
                                      const uint8_t* data,
@@ -3153,7 +3176,8 @@ void bind_quic(nb::module_& m) {
       .value("SESSION_TICKET", QuicEventType::SessionTicket)
       .value("EARLY_DATA_REJECTED", QuicEventType::EarlyDataRejected)
       .value("PATH_VALIDATED", QuicEventType::PathValidated)
-      .value("PATH_VALIDATION_FAILED", QuicEventType::PathValidationFailed);
+      .value("PATH_VALIDATION_FAILED", QuicEventType::PathValidationFailed)
+      .value("STOP_SENDING", QuicEventType::StopSending);
 
   nb::enum_<ReceiveResult>(quic_m, "ReceiveResult", "QUIC パケットの受信結果")
       .value("ACCEPTED", ReceiveResult::Accepted)

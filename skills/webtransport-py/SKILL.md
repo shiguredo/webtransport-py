@@ -225,6 +225,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 # on_handshake_completed(addr: tuple[str, int])
 # on_stream_data(stream_id: int, data: bytes, fin: bool, addr: tuple[str, int])
 # on_datagram(data: bytes, addr: tuple[str, int])
+# on_stop_sending(stream_id: int, error_code: int, addr: tuple[str, int])
 # on_connection_closed(addr: tuple[str, int])
 
 async def open_stream(addr: tuple[str, int], bidirectional: bool = True) -> int
@@ -256,6 +257,7 @@ def __init__(
 # on_handshake_completed() / on_connection_closed()
 # on_stream_data(stream_id: int, data: bytes, fin: bool)
 # on_datagram(data: bytes)
+# on_stop_sending(stream_id: int, error_code: int)
 # on_session_ticket(ticket: bytes)
 # on_early_data_rejected()  (0-RTT early data が受け入れられなかったときに発火)
 
@@ -658,13 +660,13 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 
 `next_event()` が返す `Event` は `type` フィールドで分岐する。
 
-- `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
+- `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
 - `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING`
 - `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message`、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id`、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message`、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id`、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。
 
 ## 注意点
 

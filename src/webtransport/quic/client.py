@@ -142,6 +142,7 @@ class Client:
         self._on_handshake_completed: Callable[[], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, bool], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
+        self._on_stop_sending: Callable[[int, int], Awaitable[None]] | None = None
         self._on_connection_closed: Callable[[], Awaitable[None]] | None = None
         self._on_session_ticket: Callable[[bytes], Awaitable[None]] | None = None
         self._on_early_data_rejected: Callable[[], Awaitable[None]] | None = None
@@ -196,6 +197,21 @@ class Client:
             callback: async def callback(data: bytes) -> None
         """
         self._on_datagram = callback
+
+    def on_stop_sending(
+        self,
+        callback: Callable[[int, int], Awaitable[None]],
+    ) -> None:
+        """ピアからの STOP_SENDING 受信時のコールバックを設定する
+
+        ピアが送信側の停止を要求したときに、そのアプリケーションエラー
+        コードとともに呼ばれる (RFC 9000 Section 19.5)。STREAM_RESET の
+        `wait_for_stream_reset` とは異なり、待機せずに通知する。
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int) -> None
+        """
+        self._on_stop_sending = callback
 
     def on_connection_closed(
         self,
@@ -506,6 +522,14 @@ class Client:
 
             elif event.type == quic_low.EventType.STREAM_RESET:
                 self._handle_stream_reset(event.stream_id, event.error_code)
+
+            elif event.type == quic_low.EventType.STOP_SENDING:
+                if self._on_stop_sending is not None:
+                    await self._run_callback(
+                        self._on_stop_sending,
+                        event.stream_id,
+                        event.error_code,
+                    )
 
             elif event.type == quic_low.EventType.DATAGRAM:
                 if self._on_datagram is not None:
