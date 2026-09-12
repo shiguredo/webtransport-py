@@ -1,7 +1,7 @@
 # HTTP/2 の data_source_read_callback の O(n²) コピーを解消する
 
 - Created: 2026-09-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-data-source-offset
 - Polished: {YYYY-MM-DD}
 
@@ -23,6 +23,14 @@
 
 - オフセット方式であること・データ完全性・部分送出時の先頭残量保持を検証する単体テストがある (タイミング測定ではなく white-box 観測とする)
 - 既存の全テストが通る
+
+## 解決方法
+
+- `src/bindings/http2.h` の `StreamData` に `offset` (送信済みバイト数) を追加し、`http3.h` の `StreamData` と同型にした
+- `Http2Connection::data_source_read_callback` から `front.data.erase` を削除し、部分送出では `offset` を進める方式に変更した。nghttp2 が要求する長さは 1 フレーム分 (`max_frame_size` 以下) に収まるため、`memcpy` のコピー量は常にフレームサイズ相当になり O(n²) が解消される
+- 実装中に `Http2Connection::send_data` の `push_back({data, eof})` が集約初期化の宣言順で `offset` に `eof` の値を格納し、送出データの先頭 1 バイトが欠落するバグを発見した。指定初期化子 `{.data = data, .eof = eof}` に修正した (旧実装の `erase` 方式でも同じ欠落が起きており、`offset` 追加前から潜在していた)
+- 白箱観測用に `_test_stream_buffer_count` / `_test_stream_buffer_remaining` / `_test_stream_buffer_offset` を追加した
+- 追加した単体テスト: オフセット方式 (バッファ総バイト数が変わらず `offset` だけ進む)、100 KiB のデータ完全性、複数エントリのエントリ単位オフセット、空データ + `eof=True` の END_STREAM 送出、空データ + `eof=False` が送信待ちデータを破棄しないこと
 
 ## 関連 issue
 
