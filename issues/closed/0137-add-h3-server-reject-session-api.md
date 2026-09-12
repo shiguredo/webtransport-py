@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 高レベル Server にセッション拒否 API を追加する
 
 - Created: 2026-08-27
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-h3-server-reject-session-api
 - Polished: {YYYY-MM-DD}
 
@@ -46,3 +46,16 @@ draft-ietf-webtrans-http3-16 Section 3.2 準拠のセッション拒否手段を
 ## 関連 issue
 
 - `issues/closed/0134-add-h2-server-reject-session-api.md` — h2 側の対称実装 (シグネチャ・検証・完了条件の参考)
+
+## 解決方法
+
+`h3.Server` に `on_session_request` を追加した。
+
+- `src/bindings/webtransport_h3.h` の `H3Event` に `headers` フィールドを追加し、`src/bindings/webtransport_h3.cpp` の SESSION_READY push 時に受信 CONNECT ヘッダーを載せて `.def_ro("headers", ...)` で公開した。型スタブは `make develop` で再生成した
+- `src/webtransport/h3/server.py` の `Server` に `on_session_request(session_id, headers, addr) -> int | None` を追加した。シグネチャと戻り値検証は `h2.Server` と実装レベルで揃えた (`None` または 200-299 で accept、300-599 で reject、`bool` / 非 int / 範囲外は `ValueError`)
+- `_process_webtransport_events` の SESSION_READY 分岐でコールバックを呼び、`should_accept` で分岐するようにした。reject 時は `reject_session(session_id, status)` を呼び、`on_session_ready` は発火しない
+- Origin 検証は既存の `h3.Config.allowed_origins` のまま (本 issue では手を加えない)
+- `skills/webtransport-py/SKILL.md` の h3 サーバーコールバック一覧と `h3.Event` フィールド一覧を更新した
+- e2e テストを 9 本追加した。accept 経路 (`test_on_session_request_accepts`) でヘッダーと `(host, port)` に正規化された addr が渡ること、reject 経路 (`test_on_session_request_rejects_with_non_2xx`) で `HandshakeFailedError` になり `on_session_ready` が発火しないこと、不正な戻り値 7 ケース (`True` / `False` / `1.5` / `"403"` / `199` / `600` / `-1`) で `ValueError` が送出されることを検証する
+
+`uv run pytest tests/ --timeout=30` の 1084 件が全て通る。

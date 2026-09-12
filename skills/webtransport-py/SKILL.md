@@ -70,6 +70,9 @@ async def main() -> None:
         allowed_origins=["https://example.com"],
     )
     # コールバックのシグネチャ (すべて async)
+    # on_session_request(session_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]) -> int | None
+    #   None または 200-299 で accept、300-599 で reject (指定 status で応答)。
+    #   bool / 非 int / 範囲外は ValueError になり run() が停止する
     # on_session_ready(session_id: int, addr: tuple[str, int])
     # on_session_closed(session_id: int, addr: tuple[str, int])
     # on_stream_data(session_id: int, stream_id: int, data: bytes, addr: tuple[str, int])
@@ -666,7 +669,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE` / `INFORMATIONAL` / `TRAILERS`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message`、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
 
 ## 注意点
 

@@ -99,6 +99,9 @@ struct H3Event {
   std::string error_message;
   // SessionRejected 発火時の HTTP status code。他イベントでは 0
   uint32_t status_code = 0;
+  // SESSION_READY 発火時の受信 CONNECT ヘッダー (疑似ヘッダーを含む)。
+  // 他イベントでは空
+  std::vector<std::pair<std::string, std::string>> headers;
 };
 
 /**

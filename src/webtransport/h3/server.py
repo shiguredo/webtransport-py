@@ -112,6 +112,9 @@ class Server:
         self._running = False
         self._actual_port = 0
 
+        self._on_session_request: (
+            Callable[[int, list[tuple[str, str]], tuple[str, int]], Awaitable[int | None]] | None
+        ) = None
         self._on_session_ready: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_session_closed: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_stream_data: (
@@ -141,6 +144,36 @@ class Server:
     def is_running(self) -> bool:
         """サーバーが実行中かどうか"""
         return self._running
+
+    def on_session_request(
+        self,
+        callback: Callable[[int, list[tuple[str, str]], tuple[str, int]], Awaitable[int | None]],
+    ) -> None:
+        """CONNECT 要求を受けたときのコールバックを設定する
+
+        `h2.Server.on_session_request` と対称の API。draft-ietf-webtrans-http3-16
+        Section 3.2 は 403 (Origin 検証失敗、SHOULD) / 405 (対象リソース未対応、
+        SHOULD) / 3xx (redirect) の応答を挙げており、2xx で accept される。
+
+        コールバックの戻り値:
+            None または int (200-299): accept する (低レベルは 200 を送出する)
+            int (300-599): reject する。指定した status_code で応答する
+            範囲外の int (0-199 / 600 以上 / 負値)、bool (int のサブクラス)、
+            非 int (float 等) は ValueError が投げられ、接続が閉じる
+            (コールバック本体が例外を投げた場合も接続が閉じる)
+
+        引数の headers は SESSION_READY イベントに載る受信 CONNECT ヘッダー
+        (疑似ヘッダーを含む)。addr は `_normalize_addr` で正規化した
+        (host, port) の 2 要素。
+
+        Args:
+            callback: async def callback(
+                session_id: int,
+                headers: list[tuple[str, str]],
+                addr: tuple[str, int],
+            ) -> int | None
+        """
+        self._on_session_request = callback
 
     def on_session_ready(
         self,
@@ -454,9 +487,37 @@ class Server:
                         if addr in self._clients:
                             del self._clients[addr]
                     break
-                client.webtransport_session.accept_session(webtransport_event.session_id)
-                if self._on_session_ready is not None:
-                    await self._on_session_ready(webtransport_event.session_id, addr)
+                should_accept = True
+                if self._on_session_request is not None:
+                    status = await self._on_session_request(
+                        webtransport_event.session_id,
+                        webtransport_event.headers,
+                        addr,
+                    )
+                    if status is not None:
+                        # bool は int のサブクラスなので明示的に弾く。
+                        # float 等の非 int も受け入れない (h2.Server と同一の検証)
+                        if isinstance(status, bool) or not isinstance(status, int):
+                            raise ValueError(
+                                f"on_session_request must return None or int, got {type(status).__name__}: {status!r}"
+                            )
+                        # HTTP status code の妥当範囲は 200-599 のみ受け入れる
+                        if not (200 <= status < 600):
+                            raise ValueError(
+                                f"on_session_request status_code out of range (200-599): {status}"
+                            )
+                        if status >= 300:
+                            # reject。低レベルの reject_session が非 2xx 応答を
+                            # 送出し、セッション ID を session_ids_ から外す
+                            client.webtransport_session.reject_session(
+                                webtransport_event.session_id,
+                                status,
+                            )
+                            should_accept = False
+                if should_accept:
+                    client.webtransport_session.accept_session(webtransport_event.session_id)
+                    if self._on_session_ready is not None:
+                        await self._on_session_ready(webtransport_event.session_id, addr)
 
             elif webtransport_event.type == h3_low.EventType.SESSION_CLOSED:
                 if self._on_session_closed is not None:
