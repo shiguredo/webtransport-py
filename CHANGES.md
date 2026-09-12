@@ -29,6 +29,8 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
   - @voluntas
+- [ADD] HTTP/3 のプロトコルエラーを `http3.EventType.ERROR` として通知し、`http3.Client` / `http3.Server` に `on_connection_error` を追加する
+  - @voluntas
 - [ADD] WebTransport over HTTP/2 の `h2.Session` に送信可能残量を返す `get_send_credit` を追加する
   - @voluntas
 - [ADD] WebTransport over HTTP/2 の `h2.Server` に `allowed_origins` を追加し、Origin 検証 (draft-15 Section 3.2) を実装する

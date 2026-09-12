@@ -81,6 +81,11 @@ class Client:
         self._on_headers: Callable[[int, list[tuple[str, str]]], Awaitable[None]] | None = None
         self._on_data: Callable[[int, bytes], Awaitable[None]] | None = None
         self._on_stream_end: Callable[[int], Awaitable[None]] | None = None
+        self._on_connection_error: Callable[[int, str], Awaitable[None]] | None = None
+        # 直前の Error イベントで得た H3 ワイヤーエラーコードとメッセージ。
+        # _close_on_h3_error が QUIC CONNECTION_CLOSE に載せる
+        self._h3_error_code: int = H3_GENERAL_PROTOCOL_ERROR
+        self._h3_error_message: str = "http3 protocol error"
         self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
 
     @property
@@ -119,6 +124,21 @@ class Client:
             callback: async def callback(stream_id: int, data: bytes) -> None
         """
         self._on_data = callback
+
+    def on_connection_error(
+        self,
+        callback: Callable[[int, str], Awaitable[None]],
+    ) -> None:
+        """HTTP/3 プロトコルエラー検知時のコールバックを設定する
+
+        低レベルが nghttp3 の負値 return で自主クローズしたときに、RFC 9114
+        Section 8.1 の H3 ワイヤーエラーコードとメッセージが渡される。接続は
+        この後 QUIC CONNECTION_CLOSE で閉じられる。
+
+        Args:
+            callback: async def callback(error_code: int, error_message: str) -> None
+        """
+        self._on_connection_error = callback
 
     def on_stream_end(
         self,
@@ -218,10 +238,12 @@ class Client:
 
         RFC 9114 Section 5.3 (Immediate Application Closure) に沿って
         QUIC CONNECTION_CLOSE を送出したうえで _running を落とす。
-        error_code は H3_GENERAL_PROTOCOL_ERROR (RFC 9114 Section 8.1) を使用する。
+        error_code は直前の Error イベントで得た RFC 9114 Section 8.1 の
+        H3 ワイヤーコードを使う。Error イベントを経ずに閉じた場合
+        (テスト専用の強制クローズ等) は H3_GENERAL_PROTOCOL_ERROR を使う。
         """
         if self._quic_connection is not None and not self._quic_connection.is_closed():
-            self._quic_connection.close(H3_GENERAL_PROTOCOL_ERROR, "http3 protocol error")
+            self._quic_connection.close(self._h3_error_code, self._h3_error_message)
             await self._drain_all()
         self._running = False
         self._connected = False
@@ -584,6 +606,17 @@ class Client:
                 # 届くのは正当なワイヤパターン。実ブラウザ等が送り得る)。
                 # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
                 # 低レベル API の契約としてそのまま維持される
+
+                elif http3_event.type == http3_low.EventType.ERROR:
+                    # HTTP/3 プロトコルエラー。QUIC CONNECTION_CLOSE に載せる
+                    # error_code を後段の _close_on_h3_error で使うため記録する
+                    self._h3_error_code = http3_event.error_code
+                    self._h3_error_message = http3_event.error_message
+                    if self._on_connection_error is not None:
+                        await self._on_connection_error(
+                            http3_event.error_code,
+                            http3_event.error_message,
+                        )
 
                 elif http3_event.type == http3_low.EventType.RESET_STREAM:
                     self._quic_connection.reset_stream(

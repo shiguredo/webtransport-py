@@ -1776,3 +1776,151 @@ async def test_connection_migration_continues_request(test_certificates):
         await asyncio.gather(client_task, server_task, return_exceptions=True)
         await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_on_connection_error_fires_on_protocol_error(test_certificates):
+    """サーバー側の HTTP/3 プロトコルエラーで on_connection_error が発火することを確認
+
+    サーバー側の HTTP/3 層に HEADERS より前の DATA フレームを注入すると、
+    RFC 9114 Section 4.1 により H3_FRAME_UNEXPECTED (0x0105) の接続エラーに
+    なる。高レベル層は Error イベントを受けてコールバックに H3 ワイヤーコードと
+    メッセージを渡し、QUIC CONNECTION_CLOSE にも同じコードを載せて client を
+    回収する。実 Server と実 Client の接続を使い、サーバー側の低レベル層へ
+    直接注入する (負値経路はワイヤからは誘発困難なため)。
+    """
+    from webtransport.http3 import Client, Server
+    from webtransport.http3.constants import H3_FRAME_UNEXPECTED
+
+    received: list[tuple[int, str]] = []
+    error_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_connection_error(error_code, error_message, addr):
+        received.append((error_code, error_message))
+        error_received.set()
+
+    server.on_connection_error(on_connection_error)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    try:
+        await client.connect()
+
+        # サーバーが client を登録するまで待つ
+        for _ in range(100):
+            if server._clients:
+                break
+            await asyncio.sleep(0.02)
+        assert server._clients, "サーバーが client を登録しませんでした"
+
+        addr, server_client = next(iter(server._clients.items()))
+        assert server_client.http3_connection is not None
+
+        # HEADERS より前の DATA フレームを注入する
+        frame = bytes([0x00, 0x02]) + b"hi"
+        server_client.http3_connection.receive_stream_data(0, frame, False)
+
+        await asyncio.wait_for(error_received.wait(), timeout=5.0)
+        assert received[0][0] == H3_FRAME_UNEXPECTED
+        assert received[0][1] != ""
+        assert "FRAME_UNEXPECTED" in received[0][1]
+
+        # サーバーは該当 client を回収する
+        for _ in range(100):
+            if addr not in server._clients:
+                break
+            await asyncio.sleep(0.02)
+        assert addr not in server._clients
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_on_connection_error_fires_on_protocol_error(test_certificates):
+    """クライアント側の HTTP/3 プロトコルエラーで on_connection_error が発火することを確認
+
+    クライアント側の HTTP/3 層に不正フレームを注入し、Error イベント経由で
+    コールバックが H3 ワイヤーコードとメッセージを受け取ること、run() が
+    QUIC CONNECTION_CLOSE を送出して終了することを検証する。
+
+    クライアント起動の双方向ストリーム 0 へサーバーが応答する形になるため、
+    nghttp3 は H3_STREAM_CREATION_ERROR (0x0103) を返す
+    (RFC 9114 Section 8.1: ピアが受け入れないストリームを作成した)。
+    """
+    from webtransport.http3 import Client, Server
+    from webtransport.http3.constants import H3_STREAM_CREATION_ERROR
+
+    received: list[tuple[int, str]] = []
+    error_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_connection_error(error_code, error_message):
+        received.append((error_code, error_message))
+        error_received.set()
+
+    client.on_connection_error(on_connection_error)
+    await client.connect()
+
+    run_task = asyncio.create_task(client.run())
+    await asyncio.sleep(0.05)
+    assert not run_task.done()
+
+    # クライアント側の HTTP/3 層へ不正フレームを注入する
+    frame = bytes([0x00, 0x02]) + b"hi"
+    client._http3_connection.receive_stream_data(0, frame, False)
+
+    await asyncio.wait_for(error_received.wait(), timeout=5.0)
+    assert received[0][0] == H3_STREAM_CREATION_ERROR
+    assert received[0][1] != ""
+
+    # run() は CONNECTION_CLOSE を送出して終了する
+    await asyncio.wait_for(run_task, timeout=5.0)
+    assert run_task.done() is True
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await client.close()
+    await server.stop()

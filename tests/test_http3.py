@@ -144,3 +144,65 @@ def test_http3_test_force_close_does_not_affect_peer():
 
     assert client.is_closed() is True
     assert server.is_closed() is False
+
+
+def test_http3_protocol_error_event_reports_wire_code():
+    """不正フレームで Error イベントが H3 ワイヤーコードとメッセージを載せることを確認
+
+    RFC 9114 Section 4.1 は HEADERS より前の DATA フレームを
+    H3_FRAME_UNEXPECTED とする。nghttp3 の負値 return から
+    nghttp3_error_to_h3_wire_code が 0x0105 を導出し、Error イベントとして
+    アプリに通知される。
+    """
+    from webtransport.http3.constants import H3_FRAME_UNEXPECTED
+
+    client = http3.Connection.create_client(http3.Config())
+    server_config = http3.Config()
+    server_config.is_server = True
+    server = http3.Connection.create_server(server_config)
+    client.bind_control_stream(2)
+    client.bind_qpack_encoder_stream(6)
+    client.bind_qpack_decoder_stream(10)
+    server.bind_control_stream(3)
+    server.bind_qpack_encoder_stream(7)
+    server.bind_qpack_decoder_stream(11)
+    _pump(server, client)
+    _pump(client, server)
+    while server.next_event() is not None:
+        pass
+
+    # HEADERS より前に DATA フレーム (type 0x00) を送る
+    frame = bytes([0x00, 0x02]) + b"hi"
+    assert server.receive_stream_data(0, frame, False) == 0
+
+    events = []
+    while True:
+        event = server.next_event()
+        if event is None:
+            break
+        events.append(event)
+
+    error_events = [e for e in events if e.type == http3.EventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == H3_FRAME_UNEXPECTED
+    assert error_events[0].error_code == 0x0105
+    assert "FRAME_UNEXPECTED" in error_events[0].error_message
+    # 低レベルは自主クローズする
+    assert server.is_closed() is True
+
+
+def test_http3_non_error_events_have_no_error_message():
+    """Error 以外のイベントでは error_message が空であることを確認"""
+    client = http3.Connection.create_client(http3.Config())
+    server_config = http3.Config()
+    server_config.is_server = True
+    server = http3.Connection.create_server(server_config)
+    _pump(server, client)
+    _pump(client, server)
+
+    while True:
+        event = server.next_event()
+        if event is None:
+            break
+        assert event.type != http3.EventType.ERROR
+        assert event.error_message == ""

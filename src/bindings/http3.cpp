@@ -144,6 +144,55 @@ bool Http3Connection::initialize() {
   return rv == 0;
 }
 
+namespace {
+
+// nghttp3 の内部エラーコードを RFC 9114 Section 8.1 の H3 ワイヤーエラー
+// コードへ写像する
+//
+// nghttp3 は H3 のエラー条件に対応する内部コード (NGHTTP3_ERR_H3_*) を
+// 持つため、まずそれをそのまま写像する。QPACK のエラーは RFC 9204
+// Section 8.3 のアプリケーションエラーコードへ写像する。どれにも該当
+// しないものは H3_GENERAL_PROTOCOL_ERROR とする
+// (RFC 9114 Section 8.1: より specific なコードに一致しないプロトコル違反)
+uint64_t nghttp3_error_to_h3_wire_code(int nghttp3_err) {
+  switch (nghttp3_err) {
+    case NGHTTP3_ERR_H3_FRAME_UNEXPECTED:
+      return 0x0105;  // H3_FRAME_UNEXPECTED
+    case NGHTTP3_ERR_H3_FRAME_ERROR:
+      return 0x0106;  // H3_FRAME_ERROR
+    case NGHTTP3_ERR_H3_MISSING_SETTINGS:
+      return 0x010a;  // H3_MISSING_SETTINGS
+    case NGHTTP3_ERR_H3_INTERNAL_ERROR:
+      return 0x0102;  // H3_INTERNAL_ERROR
+    case NGHTTP3_ERR_H3_CLOSED_CRITICAL_STREAM:
+      return 0x0104;  // H3_CLOSED_CRITICAL_STREAM
+    case NGHTTP3_ERR_H3_GENERAL_PROTOCOL_ERROR:
+      return 0x0101;  // H3_GENERAL_PROTOCOL_ERROR
+    case NGHTTP3_ERR_H3_ID_ERROR:
+      return 0x0108;  // H3_ID_ERROR
+    case NGHTTP3_ERR_H3_SETTINGS_ERROR:
+      return 0x0109;  // H3_SETTINGS_ERROR
+    case NGHTTP3_ERR_H3_STREAM_CREATION_ERROR:
+      return 0x0103;  // H3_STREAM_CREATION_ERROR
+    case NGHTTP3_ERR_H3_EXCESSIVE_LOAD:
+      return 0x0107;  // H3_EXCESSIVE_LOAD
+    case NGHTTP3_ERR_H3_MESSAGE_ERROR:
+      // H3 に対応するワイヤーコードが無い (HTTP メッセージの意味論違反)。
+      // RFC 9114 Section 8.1 の一般則に従い general protocol error とする
+      return 0x0101;
+    case NGHTTP3_ERR_QPACK_DECOMPRESSION_FAILED:
+      return 0x0200;  // QPACK_DECOMPRESSION_FAILED (RFC 9204 Section 8.3)
+    case NGHTTP3_ERR_QPACK_ENCODER_STREAM_ERROR:
+      return 0x0201;  // QPACK_ENCODER_STREAM_ERROR
+    case NGHTTP3_ERR_QPACK_DECODER_STREAM_ERROR:
+      return 0x0202;  // QPACK_DECODER_STREAM_ERROR
+    default:
+      return 0x0101;  // H3_GENERAL_PROTOCOL_ERROR
+  }
+}
+
+}  // namespace
+
 size_t Http3Connection::receive_stream_data(int64_t stream_id,
                                             const std::vector<uint8_t>& data,
                                             bool fin) {
@@ -173,6 +222,14 @@ size_t Http3Connection::receive_stream_data(int64_t stream_id,
     // Http2Connection::receive の同種経路と対称にし、高レベル層の
     // is_closed() チェックで run() を終了させる。
     closed_ = true;
+    // 詳細な H3 ワイヤーエラーコードとメッセージをアプリへ通知する
+    // (高レベル層は QUIC CONNECTION_CLOSE の error_code にも使う)
+    Http3Event event;
+    event.type = Http3EventType::Error;
+    event.stream_id = stream_id;
+    event.error_code = nghttp3_error_to_h3_wire_code(static_cast<int>(rv));
+    event.error_message = nghttp3_strerror(static_cast<int>(rv));
+    push_event(std::move(event));
     return 0;
   }
 
@@ -199,6 +256,13 @@ Http3Connection::get_streams_to_send() {
       // nghttp3 の送信側プロトコルエラー時に closed_ を立てる。
       // Http2Connection::send の同種経路と対称にする。
       closed_ = true;
+      Http3Event event;
+      event.type = Http3EventType::Error;
+      event.stream_id = stream_id;
+      event.error_code =
+          nghttp3_error_to_h3_wire_code(static_cast<int>(sveccnt));
+      event.error_message = nghttp3_strerror(static_cast<int>(sveccnt));
+      push_event(std::move(event));
       break;
     }
 
@@ -1226,7 +1290,8 @@ void bind_http3(nb::module_& m) {
       .value("RESET_STREAM", Http3EventType::ResetStream)
       .value("STOP_SENDING", Http3EventType::StopSending)
       .value("INFORMATIONAL", Http3EventType::Informational)
-      .value("TRAILERS", Http3EventType::Trailers);
+      .value("TRAILERS", Http3EventType::Trailers)
+      .value("ERROR", Http3EventType::Error);
 
   // Http3Event
   nb::class_<Http3Event>(http3_m, "Event", "HTTP/3 イベント")
@@ -1242,6 +1307,8 @@ void bind_http3(nb::module_& m) {
           },
           "データ")
       .def_ro("error_code", &Http3Event::error_code, "エラーコード")
+      .def_ro("error_message", &Http3Event::error_message,
+              "Error イベントのエラーメッセージ (他イベントでは空)")
       .def_ro("push_id", &Http3Event::push_id, "Push ID");
 
   // Http3Connection

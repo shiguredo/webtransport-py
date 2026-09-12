@@ -70,6 +70,9 @@ enum class Http3EventType {
   Informational,
   // トレーラ (終端 HEADERS で :status を持たないもの)
   Trailers,
+  // HTTP/3 プロトコルエラー (nghttp3 の負値 return)。
+  // error_code は RFC 9114 Section 8.1 の H3 ワイヤーエラーコード
+  Error,
 };
 
 /**
@@ -82,6 +85,9 @@ struct Http3Event {
   std::vector<uint8_t> data;
   uint64_t error_code = 0;
   int64_t push_id = -1;
+  // Error イベントのエラーメッセージ (nghttp3_strerror の文字列)。
+  // 他イベントでは空
+  std::string error_message;
 };
 
 /**
