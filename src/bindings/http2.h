@@ -455,11 +455,6 @@ class Http2Connection {
   bool initialize();
 
   // nghttp2 コールバック
-  static ssize_t send_callback(nghttp2_session* session,
-                               const uint8_t* data,
-                               size_t length,
-                               int flags,
-                               void* user_data);
   static int on_frame_recv_callback(nghttp2_session* session,
                                     const nghttp2_frame* frame,
                                     void* user_data);
@@ -484,13 +479,13 @@ class Http2Connection {
   static int on_begin_headers_callback(nghttp2_session* session,
                                        const nghttp2_frame* frame,
                                        void* user_data);
-  static ssize_t data_source_read_callback(nghttp2_session* session,
-                                           int32_t stream_id,
-                                           uint8_t* buf,
-                                           size_t length,
-                                           uint32_t* data_flags,
-                                           nghttp2_data_source* source,
-                                           void* user_data);
+  static nghttp2_ssize data_source_read_callback(nghttp2_session* session,
+                                                 int32_t stream_id,
+                                                 uint8_t* buf,
+                                                 size_t length,
+                                                 uint32_t* data_flags,
+                                                 nghttp2_data_source* source,
+                                                 void* user_data);
 
   // ヘルパー
   void push_event(Http2Event event);
@@ -501,9 +496,6 @@ class Http2Connection {
 
   // イベントキュー
   std::deque<Http2Event> events_;
-
-  // 送信バッファ
-  std::vector<uint8_t> send_buffer_;
 
   // ストリームデータ (送信待ち)
   std::map<int32_t, std::deque<StreamData>> stream_buffers_;

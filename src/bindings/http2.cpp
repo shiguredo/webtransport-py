@@ -28,7 +28,6 @@ Http2Connection::Http2Connection(Http2Connection&& other) noexcept
       config_(std::move(other.config_)),
       session_(other.session_),
       events_(std::move(other.events_)),
-      send_buffer_(std::move(other.send_buffer_)),
       stream_buffers_(std::move(other.stream_buffers_)),
       pending_headers_(std::move(other.pending_headers_)),
       pending_trailers_(std::move(other.pending_trailers_)),
@@ -47,7 +46,6 @@ Http2Connection& Http2Connection::operator=(Http2Connection&& other) noexcept {
     config_ = std::move(other.config_);
     session_ = other.session_;
     events_ = std::move(other.events_);
-    send_buffer_ = std::move(other.send_buffer_);
     stream_buffers_ = std::move(other.stream_buffers_);
     pending_headers_ = std::move(other.pending_headers_);
     pending_trailers_ = std::move(other.pending_trailers_);
@@ -92,8 +90,8 @@ bool Http2Connection::initialize() {
     return false;
   }
 
-  // コールバックを設定
-  nghttp2_session_callbacks_set_send_callback(callbacks, send_callback);
+  // コールバックを設定 (送信は nghttp2_session_mem_send2 で行うため
+  // send_callback は登録しない。nghttp2.h の mem_send2 の説明に従う)
   nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
                                                        on_frame_recv_callback);
   nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
@@ -159,7 +157,8 @@ size_t Http2Connection::receive(const std::vector<uint8_t>& data) {
     return 0;
   }
 
-  ssize_t rv = nghttp2_session_mem_recv(session_, data.data(), data.size());
+  nghttp2_ssize rv =
+      nghttp2_session_mem_recv2(session_, data.data(), data.size());
   if (rv < 0) {
     closed_ = true;
     return 0;
@@ -175,7 +174,7 @@ std::optional<std::vector<uint8_t>> Http2Connection::send() {
 
   // セッションから送信データを取得
   const uint8_t* data = nullptr;
-  ssize_t len = nghttp2_session_mem_send(session_, &data);
+  nghttp2_ssize len = nghttp2_session_mem_send2(session_, &data);
 
   if (len < 0) {
     closed_ = true;
@@ -214,12 +213,12 @@ int32_t Http2Connection::submit_request(
   // データプロバイダを常に渡す。未設定だと nghttp2 が HEADERS に
   // END_STREAM を付け、後続の send_data が DATA を送出できなくなる。
   // リクエストの終端は send_data(..., eof=True) で行う
-  nghttp2_data_provider data_prd;
+  nghttp2_data_provider2 data_prd;
   data_prd.source.ptr = this;
   data_prd.read_callback = data_source_read_callback;
 
-  int32_t stream_id = nghttp2_submit_request(session_, nullptr, nva.data(),
-                                             nva.size(), &data_prd, nullptr);
+  int32_t stream_id = nghttp2_submit_request2(session_, nullptr, nva.data(),
+                                              nva.size(), &data_prd, nullptr);
 
   if (stream_id < 0) {
     return -1;
@@ -253,14 +252,14 @@ void Http2Connection::submit_response(
   }
 
   // データプロバイダの設定
-  nghttp2_data_provider data_prd;
+  nghttp2_data_provider2 data_prd;
   data_prd.source.ptr = this;
   data_prd.read_callback = data_source_read_callback;
 
   stream_buffers_[stream_id].clear();
 
-  nghttp2_submit_response(session_, stream_id, nva.data(), nva.size(),
-                          &data_prd);
+  nghttp2_submit_response2(session_, stream_id, nva.data(), nva.size(),
+                           &data_prd);
 }
 
 void Http2Connection::send_data(int32_t stream_id,
@@ -741,15 +740,6 @@ void Http2Connection::push_event(Http2Event event) {
 
 // ========== nghttp2 コールバック ==========
 
-ssize_t Http2Connection::send_callback(nghttp2_session* session,
-                                       const uint8_t* data,
-                                       size_t length,
-                                       int flags,
-                                       void* user_data) {
-  // nghttp2_session_mem_send を使用するため、このコールバックは使われない
-  return NGHTTP2_ERR_WOULDBLOCK;
-}
-
 namespace {
 
 // HEADERS フレームを Headers / Informational / Trailers に分類する
@@ -987,13 +977,14 @@ int Http2Connection::on_begin_headers_callback(nghttp2_session* session,
   return 0;
 }
 
-ssize_t Http2Connection::data_source_read_callback(nghttp2_session* session,
-                                                   int32_t stream_id,
-                                                   uint8_t* buf,
-                                                   size_t length,
-                                                   uint32_t* data_flags,
-                                                   nghttp2_data_source* source,
-                                                   void* user_data) {
+nghttp2_ssize Http2Connection::data_source_read_callback(
+    nghttp2_session* session,
+    int32_t stream_id,
+    uint8_t* buf,
+    size_t length,
+    uint32_t* data_flags,
+    nghttp2_data_source* source,
+    void* user_data) {
   auto* self = static_cast<Http2Connection*>(user_data);
 
   auto it = self->stream_buffers_.find(stream_id);
@@ -1054,7 +1045,7 @@ ssize_t Http2Connection::data_source_read_callback(nghttp2_session* session,
     }
   }
 
-  return static_cast<ssize_t>(copy_len);
+  return static_cast<nghttp2_ssize>(copy_len);
 }
 
 // ========== Python バインディング ==========

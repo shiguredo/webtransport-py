@@ -130,3 +130,43 @@ jobs:
           uv run pytest tests/ --timeout=30 --tb=short -v -o pythonpath=
         env:
           UV_NO_SYNC: 1
+
+  # deprecated な ssize_t 版 nghttp2 API に戻るとビルドが壊れることを検出する。
+  # 拡張モジュールのコンパイルでのみ NGHTTP2_NO_SSIZE_T を定義し、
+  # 依存ライブラリのビルドには影響させない
+  build_no_ssize_t:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: ubuntu-24.04_x86_64
+            runs_on: ubuntu-24.04
+        python_version:
+          - "3.14"
+    runs-on: ${{ matrix.platform.runs_on }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python_version }}
+
+      - name: Cache dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _deps
+          key: ${{ runner.os }}-deps-${{ matrix.platform.name }}-${{ hashFiles('deps.json', 'CMakeLists.txt', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ matrix.platform.name }}-
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential nasm golang-go
+
+      - name: Build wheel without deprecated ssize_t APIs
+        env:
+          CMAKE_ARGS: "-DCMAKE_CXX_FLAGS=-DNGHTTP2_NO_SSIZE_T"
+        run: uv build --wheel

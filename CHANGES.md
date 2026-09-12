@@ -327,6 +327,8 @@
   - @voluntas
 - [FIX] HTTP/2 の送信バッファで先頭 1 バイトが欠落する問題と、空のボディで END_STREAM が送出されない問題を修正する
   - @voluntas
+- [UPDATE] nghttp2 の deprecated な ssize_t 版 API (`nghttp2_session_mem_send` / `mem_recv` / `submit_request` / `submit_response` / `data_provider` / `data_source_read_callback` / `send_callback`) を `*2` 版へ移行し、`NGHTTP2_NO_SSIZE_T` を定義したビルドを CI で検証する
+  - @voluntas
 
 ### misc
 
