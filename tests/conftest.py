@@ -355,6 +355,36 @@ def _pump(src: h3.Session, dst: h3.Session) -> None:
             break
 
 
+def _send_pre_accept_wt_close_session(client: h3.Session) -> bytes:
+    """クライアントが受理前に WT_CLOSE_SESSION を送出する
+
+    クライアントの close_session で WT_CLOSE_SESSION カプセルを送信キューに
+    積み、get_streams_to_send で取り出して返す (サーバーへの注入は呼び出し
+    側が行う)。受理前のカプセルはサーバー側で nghttp3 の inq にバッファされ、
+    accept_session の confirm 処理中に同期処理される (draft-ietf-webtrans
+    -http3-16 Section 3.2 の「A server MUST NOT process these bytes as
+    capsules until it sends a 2xx response accepting the session」)。
+
+    get_streams_to_send が WT_CLOSE_SESSION カプセル 1 件だけを返すことは、
+    _setup_connect が CONNECT ヘッダーを書き出し済みであることに依存する
+    (クライアントの送信キューに残っているのはカプセルのみ)。
+
+    @param client クライアントセッション (connect 済み)
+    @return WT_CLOSE_SESSION カプセルのデータ
+    """
+    client.close_session(0, 0)
+    streams = client.get_streams_to_send()
+    assert len(streams) == 1, "WT_CLOSE_SESSION カプセル以外の送信データがあります"
+    wt_close_stream_id, wt_close_data, wt_close_fin = streams[0]
+    assert wt_close_stream_id == 0, "CONNECT ストリーム以外の送信データがあります"
+    # nghttp3 は WT_CLOSE_SESSION 送出時に FIN も付ける
+    # (draft-ietf-webtrans-http3-16 Section 6 の MUST「WT_CLOSE_SESSION を
+    # 送出するエンドポイントは直後に FIN を送る」を満たす)。サーバーへの
+    # 注入時に fin を False にすれば「FIN が別パケットで届く」変種を構成できる
+    assert wt_close_fin is True, "WT_CLOSE_SESSION カプセルには FIN が付きます"
+    return wt_close_data
+
+
 def _bind_h3_server_streams(server: h3.Session) -> None:
     """h3.Session サーバーの制御 / QPACK ストリームをバインドする
 
