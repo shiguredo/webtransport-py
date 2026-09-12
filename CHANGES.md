@@ -107,6 +107,8 @@
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の reject_session にセッション ID の入力検証を追加し、応答の submit / 送出失敗を ERROR イベントで観測可能にする
+  - @voluntas
 - [FIX] WebTransport over HTTP/3 のサーバーが非 WebTransport リクエストに 405 応答 (Allow: CONNECT) を返し、無応答によるストリーム滞留を解消する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 の受理前データストリームが無制限にバッファリングされる問題を修正する

@@ -27,14 +27,14 @@
 - 観測点は低レベル `h2.Session.next_event()` とする。高レベル `h2.Server` / `h2.Client` は 0x50 以外の Error を `on_error` へ渡さないため、本 Error は高レベルには届かない (高レベルへの通知追加は対象外)
 - submit / 送出失敗時のセッション状態は成功時と同じにする。非 2xx は `wt_sessions_` を削除する (エントリを残すと `send_datagram` / `send_stream_data` が開いたままカプセルが滞留し、非確立セッションでは `SessionClosed` を発火しない設計ピンも壊れる)。2xx は `is_terminated` と `capsule_buffer` の破棄を行う
 - 失敗後も応答は送出されないためストリームは滞留したまま (nghttp2 への RST_STREAM 送出は行わない) を既知の制約とする
-- 変更対象: `src/bindings/webtransport_h2.cpp` / `src/bindings/webtransport_h2.h` (`reject_session` の docstring に session_id 検証と Error 観測を追記) / `tests/test_webtransport_h2_reject_session.py` (回帰テスト) / `tests/prop_webtransport_h2.py` (reject_session PBT の docstring が「セッション未確立等は無視される」前提のため更新) / `CHANGES.md` の develop への FIX エントリ
+- 変更対象: `src/bindings/webtransport_h2.cpp` / `src/bindings/webtransport_h2.h` (`reject_session` の docstring に session_id 検証と Error 観測を追記) / `skills/webtransport-py/SKILL.md` (入力検証と ERROR 観測の追記) / `tests/test_webtransport_h2_reject_session.py` (回帰テスト) / `tests/prop_webtransport_h2.py` (reject_session PBT の docstring が「セッション未確立等は無視される」前提のため更新) / `CHANGES.md` の develop への FIX エントリ
 
 ## 完了条件
 
 - サーバーセッションに対する `reject_session(0, status)` と `reject_session(-1, status)` が `ValueError` になること (クライアントセッションでは従来どおり no-op であること)
 - submit 失敗 (`rv != 0`) のときに `H2EventType::Error` を push する実装であること (`NGHTTP2_ERR_NOMEM` は公開 API から再現不能のため自動テストの対象外とし、コードで担保する)
 - 送出失敗の回帰テスト: 同一ストリームへ `reject_session` を 2 回呼んだとき 2 回目、またはリセット済みストリームへ呼んだときに `H2EventType::Error` が発火すること
-- 失敗時も非 2xx の `wt_sessions_` 削除が行われ、`send_stream_data` / `send_datagram` がエントリ不在で塞がれることをテストでピン留めすること
+- 失敗時も状態更新 (非 2xx の `wt_sessions_` 削除 / 2xx の `is_terminated`) が成功時と同じく行われること。失敗経路の削除は公開 API から再現できないため `rv` 非依存の無条件更新は実装で担保し、テストでは失敗した 2 回目の呼び出しがエントリを再作成しないことと、両ハーフクローズ時に SessionClosed が発火しないことを表明する
 - `tests/prop_webtransport_h2.py` の reject_session PBT の docstring を更新すること
 - `CHANGES.md` の `## develop` に FIX エントリが追加されていること
 - 既存のテストが引き続き通過すること
