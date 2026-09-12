@@ -458,33 +458,41 @@ class Server:
                 if current is asyncio.current_task():
                     del self._connection_tasks[connection]
 
-    async def _send_to(self, addr: tuple[str, int], connection: quic_low.Connection) -> None:
-        """接続の送信待ちパケットを 1 つ送出する
+    async def _send_to(self, addr: tuple[str, int], connection: quic_low.Connection) -> int:
+        """接続の送信待ちパケットを送出できるだけ送出する
 
         パケットにリモートアドレスが埋まっていればそれを使い、
         未設定ならマップ上のクライアントアドレスにフォールバックする。
-        send() の連続 drain は ACK 待ちが必要なケースでハングするため行わない。
+        send() は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで
+        必ず None を返すため、None まで drain しても戻ってこなくならない。
         削除済み接続への送信は何もしない (終了済み接続の残存送信物は送らない)
+
+        Returns:
+            送信したパケット数
         """
         if self._socket is None:
-            return
+            return 0
         if connection not in self._conn_addr:
-            return
-
-        packet = connection.send()
-        if packet is None:
-            return
-
-        if packet.remote_host and packet.remote_port:
-            dest: tuple[str, int] = (packet.remote_host, packet.remote_port)
-        else:
-            dest = addr
+            return 0
 
         loop = asyncio.get_running_loop()
-        await loop.sock_sendto(self._socket, packet.data, dest)
+        sent = 0
+        while True:
+            packet = connection.send()
+            if packet is None:
+                break
+
+            if packet.remote_host and packet.remote_port:
+                dest: tuple[str, int] = (packet.remote_host, packet.remote_port)
+            else:
+                dest = addr
+
+            await loop.sock_sendto(self._socket, packet.data, dest)
+            sent += 1
 
         # 送信経路の CID 発行に追従するため、送出後に索引を最新化する
         self._refresh_dcid_index(connection)
+        return sent
 
     async def open_stream(
         self,

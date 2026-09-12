@@ -240,14 +240,21 @@ class Client:
             return self._remote_addr
         return (self._host, self._port)
 
-    async def _send_pending(self) -> None:
-        """送信待ちデータを送信する"""
+    async def _send_pending(self) -> int:
+        """送信待ちデータを送出できるだけ送出する
+
+        send() は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで
+        必ず None を返すため、None まで drain しても戻ってこなくならない。
+
+        Returns:
+            送信したパケット数
+        """
         if self._quic_connection is None:
-            return
+            return 0
         if self._webtransport_session is None:
-            return
+            return 0
         if self._socket is None:
-            return
+            return 0
 
         for stream_id, stream_data, fin in self._webtransport_session.get_streams_to_send():
             self._quic_connection.send_stream_data(stream_id, stream_data, fin)
@@ -255,17 +262,18 @@ class Client:
         for datagram in self._webtransport_session.get_datagrams_to_send():
             self._quic_connection.send_datagram(datagram)
 
-        # send() の連続 drain は ACK 待ちが必要なケースでハングするため 1 パケットに留める
-        packet = self._quic_connection.send()
-        if packet is None:
-            return
-
         loop = asyncio.get_running_loop()
-        await loop.sock_sendto(
-            self._socket,
-            packet.data,
-            self._destination_for_packet(packet),
-        )
+        sent = 0
+        while True:
+            packet = self._quic_connection.send()
+            if packet is None:
+                return sent
+            await loop.sock_sendto(
+                self._socket,
+                packet.data,
+                self._destination_for_packet(packet),
+            )
+            sent += 1
 
     async def _receive(self) -> None:
         """データを受信する"""

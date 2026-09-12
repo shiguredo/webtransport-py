@@ -187,27 +187,35 @@ class Client:
             return self._remote_addr
         return (self._host, self._port)
 
-    async def _send_pending(self) -> None:
-        """送信待ちデータを送信する"""
+    async def _send_pending(self) -> int:
+        """送信待ちデータを送出できるだけ送出する
+
+        send() は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで
+        必ず None を返すため、None まで drain しても戻ってこなくならない。
+
+        Returns:
+            送信したパケット数
+        """
         if self._quic_connection is None or self._http3_connection is None:
-            return
+            return 0
         if self._socket is None:
-            return
+            return 0
 
         for stream_id, stream_data, fin in self._http3_connection.get_streams_to_send():
             self._quic_connection.send_stream_data(stream_id, stream_data, fin)
 
-        # send() の連続 drain は ACK 待ちが必要なケースでハングするため 1 パケットに留める
-        packet = self._quic_connection.send()
-        if packet is None:
-            return
-
         loop = asyncio.get_running_loop()
-        await loop.sock_sendto(
-            self._socket,
-            packet.data,
-            self._destination_for_packet(packet),
-        )
+        sent = 0
+        while True:
+            packet = self._quic_connection.send()
+            if packet is None:
+                return sent
+            await loop.sock_sendto(
+                self._socket,
+                packet.data,
+                self._destination_for_packet(packet),
+            )
+            sent += 1
 
     async def _drain_all(self) -> None:
         """QUIC の送信キューにあるパケットをすべて送出する
@@ -261,10 +269,11 @@ class Client:
                 loop.sock_recvfrom(self._socket, 65535),
                 timeout=0.1,
             )
-            remote = self._normalize_addr(raw_remote)
-            self._quic_connection.receive(data, self._local_addr, remote)
         except TimeoutError:
-            pass
+            return
+
+        remote = self._normalize_addr(raw_remote)
+        self._quic_connection.receive(data, self._local_addr, remote)
 
     def _setup_http3_streams(self) -> None:
         """HTTP/3 制御ストリームを設定する"""
