@@ -17,6 +17,31 @@ from webtransport import h2, h3, http2, http3
 from webtransport.quic import Config, Connection
 
 
+class _EventSource[E](Protocol):
+    """next_event() でイベントを 1 件ずつ取り出せるオブジェクト
+
+    h3.Session / h2.Session / http2.Connection など、next_event() を
+    持つオブジェクトが対象
+    """
+
+    def next_event(self) -> E | None: ...
+
+
+def _drain_events[E](source: _EventSource[E]) -> list[E]:
+    """イベントを全て取り出す (next_event() が None を返すまで)
+
+    イベントの取り出し仕様 (None が返るまで取り出す) を 1 箇所に閉じ込め、
+    各テストヘルパーは取り出したイベントの解釈だけを担う。
+    """
+    events = []
+    while True:
+        event = source.next_event()
+        if event is None:
+            break
+        events.append(event)
+    return events
+
+
 @pytest.fixture(scope="session")
 def test_certificates():
     """テスト用の自己署名証明書を生成する
@@ -378,18 +403,13 @@ def _accept_session(server: h3.Session) -> int:
 
     @return 受理したセッション ID
     """
-    session_id = -1
-    count = 0
-    while True:
-        event = server.next_event()
-        if event is None:
-            break
-        if event.type == h3.EventType.SESSION_READY:
-            assert server.accept_session(event.session_id) is True, "セッションの受理に失敗しました"
-            session_id = event.session_id
-            count += 1
-    assert count <= 1, "SESSION_READY が複数回発火しました"
-    assert session_id >= 0, "セッションが確立されませんでした"
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) <= 1, "SESSION_READY が複数回発火しました"
+    assert len(ready_events) == 1, "セッションが確立されませんでした"
+    session_id = ready_events[0].session_id
+    assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
     return session_id
 
 
@@ -398,17 +418,13 @@ def _drain_session_ready(client: h3.Session) -> int:
     セッション ID を返す (無ければ -1)。複数の SESSION_READY が積まれて
     いた場合は累積バグとしてテストを失敗させる
     """
-    session_id = -1
-    count = 0
-    while True:
-        event = client.next_event()
-        if event is None:
-            break
-        if event.type == h3.EventType.SESSION_READY:
-            session_id = event.session_id
-            count += 1
-    assert count <= 1, "SESSION_READY が複数回発火しました"
-    return session_id
+    ready_events = [
+        event for event in _drain_events(client) if event.type == h3.EventType.SESSION_READY
+    ]
+    assert len(ready_events) <= 1, "SESSION_READY が複数回発火しました"
+    if not ready_events:
+        return -1
+    return ready_events[0].session_id
 
 
 def _connect_session(
@@ -582,48 +598,19 @@ def _connect_h2_session(
     _h2_pump(client, server)
 
     # サーバー側で SESSION_READY が発火して受理できる
-    ready_events = []
-    while True:
-        event = server.next_event()
-        if event is None:
-            break
-        if event.type == h2.EventType.SESSION_READY:
-            ready_events.append(event)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.SESSION_READY
+    ]
     assert len(ready_events) == 1, "SESSION_READY が 0 回または複数回発火しました"
     assert ready_events[0].session_id == session_id
     assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
     _h2_pump(server, client)
 
     # クライアント側で SESSION_READY が発火する
-    ready_events = []
-    while True:
-        event = client.next_event()
-        if event is None:
-            break
-        if event.type == h2.EventType.SESSION_READY:
-            ready_events.append(event)
+    ready_events = [
+        event for event in _drain_events(client) if event.type == h2.EventType.SESSION_READY
+    ]
     assert len(ready_events) == 1, "SESSION_READY が複数回発火しました"
     assert ready_events[0].session_id == session_id
 
     return session_id
-
-
-class _EventSource[E](Protocol):
-    """next_event() でイベントを 1 件ずつ取り出せるオブジェクト
-
-    h3.Session / h2.Session / http2.Connection など、next_event() を
-    持つオブジェクトが対象
-    """
-
-    def next_event(self) -> E | None: ...
-
-
-def _drain_events[E](source: _EventSource[E]) -> list[E]:
-    """イベントを全て取り出す (next_event() が None を返すまで)"""
-    events = []
-    while True:
-        event = source.next_event()
-        if event is None:
-            break
-        events.append(event)
-    return events
