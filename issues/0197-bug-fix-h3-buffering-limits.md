@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の受理前データストリームのバッファリング上限がない
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h3-buffering-limits
 - Polished: 2026-09-12
 
@@ -46,3 +46,15 @@ h3 バインディングは受理前データグラムを保持しない (サー
 - 上限超過・境界 (`累計 == 上限` と上限 + 1)・上限 0・上限以下 (分割到着)・拒否後の後続データ破棄・受理確定後の対象外を検証する単体テストを追加すること
 - `CHANGES.md` の `## develop` に [FIX] エントリが追加されていること
 - 既存のテストがすべて通ること
+
+## 解決方法
+
+- `H3SessionConfig` に `wt_pre_accept_buffer_limit` (バイト、既定 65536、受理前 WebTransport データストリーム 1 本あたりの累計受信バイト上限) を追加し、`h3.Config` として公開した (nanobind の def_rw と生成 stub)
+- `read_from_nghttp3` で `nghttp3_conn_read_stream2` の戻り後に `nghttp3_conn_get_stream_wt_session_id` で session ID を取得し、受理確定前のストリームの `length - consumed` (nghttp3 が今回内部バッファへ取り込んだバイト数) を計数するようにした。WebTransport データストリーム以外 (session ID が -1) は対象外
+- 累計が上限を超えたら STOP_SENDING イベントを WT_BUFFERED_STREAM_REJECTED (0x3994BD84) で push し、`nghttp3_conn_close_stream` で内部バッファを解放する。拒否済み stream_id は集合で保持し、以後のデータは nghttp3 へ再投入せず破棄する (ピアの FIN で解放。アプリ起点のリセットでは解放しない)
+- 受理確定は専用の集合 (`accepted_session_ids_`) で管理し (サーバー: `accept_session` の confirm 成功時、クライアント: 2xx 応答での SESSION_READY push 時)、受理確定・終了・拒否時に受理前計数を破棄するようにした
+- クライアントの `connect()` のイベントドレインでも `RESET_STREAM` / `STOP_SENDING` を `run()` と同様に変換するようにした
+- `tests/test_webtransport_h3_pre_accept_buffer_limit.py` に、上限超過 (双方向・単方向)・境界 (累計 == 上限 / 上限 + 1)・上限 0・上限以下の分割到着・受理確定後の対象外・アプリ起点リセット後の再投入防止・クライアント側の拒否と破棄のテストを追加した
+- `skills/webtransport-py/SKILL.md` に `wt_pre_accept_buffer_limit` を追記し、`CHANGES.md` の develop に [FIX] エントリを追加した
+- クライアントの `connect()` 待機中の変換は、QUIC 層に自側が送出する STOP_SENDING をテストから観測する API がなく、受理前状態を再現する生サーバーの構築が必要なため単体テストの対象外とし、コードレビューで確認した
+- 単体 9 件・h3 低レベル 173 件・h3 e2e 69 件の通過を確認し、全テストは実装コミット時のフックで通過した
