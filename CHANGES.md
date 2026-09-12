@@ -25,6 +25,8 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
   - @voluntas
+- [ADD] `h3.Client` / `http3.Client` に `migrate()` を追加し、`h3.Server` / `http3.Server` が Connection Migration を受け付けるようにする
+  - @voluntas
 - [ADD] `h3.Server` に `on_session_request` コールバックを追加し、`h3.Event` に受信 CONNECT ヘッダー (`headers`) を追加する
   - @voluntas
 - [ADD] QUIC のピアからの STOP_SENDING を `quic.EventType.STOP_SENDING` として伝播し、`quic.Client` / `quic.Server` に `on_stop_sending` を追加する

@@ -3178,3 +3178,104 @@ async def test_on_session_request_invalid_return_raises(test_certificates, statu
         await asyncio.gather(server_task, return_exceptions=True)
         await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_connection_migration_continues_session(test_certificates):
+    """h3.Client.migrate() 後も WebTransport セッションの通信が継続することを確認
+
+    RFC 9000 Section 9 の Connection Migration を高レベル h3.Server が受け付ける。
+    移行後は送信元アドレスが変わるため、サーバーは DCID で接続を照合して
+    `_clients` のアドレスキーを張り替える。移行前後で双方向通信が継続し、
+    サーバーが観測する addr も新アドレスに切り替わることを検証する。
+    """
+    from webtransport.h3 import Client, Server
+
+    server_received: list[bytes] = []
+    server_addrs: list[tuple[str, int]] = []
+    before_migrate = asyncio.Event()
+    after_migrate = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(session_id, stream_id, data, addr):
+        server_received.append(data)
+        server_addrs.append(addr)
+        if data == b"before-migrate":
+            await server.send_stream_data(addr, stream_id, b"ack-before", fin=False)
+            before_migrate.set()
+        elif data == b"after-migrate":
+            await server.send_stream_data(addr, stream_id, b"ack-after", fin=True)
+            after_migrate.set()
+
+    server.on_stream_data(on_stream_data)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    client_received: list[bytes] = []
+    client_got_reply = asyncio.Event()
+
+    async def on_client_stream_data(stream_id, data):
+        client_received.append(data)
+        client_got_reply.set()
+
+    client.on_stream_data(on_client_stream_data)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        stream_id = await client.open_stream()
+        assert stream_id >= 0
+        await client.send_stream_data(stream_id, b"before-migrate", fin=False)
+        await asyncio.wait_for(before_migrate.wait(), timeout=5.0)
+        await asyncio.wait_for(client_got_reply.wait(), timeout=5.0)
+
+        old_addr = server_addrs[-1]
+
+        # ローカルアドレスを差し替えてマイグレーションする
+        assert await client.migrate() is True
+
+        client_got_reply.clear()
+        await client.send_stream_data(stream_id, b"after-migrate", fin=True)
+        await asyncio.wait_for(after_migrate.wait(), timeout=5.0)
+        await asyncio.wait_for(client_got_reply.wait(), timeout=5.0)
+
+        assert b"before-migrate" in server_received
+        assert b"after-migrate" in server_received
+        assert b"ack-before" in client_received
+        assert b"ack-after" in client_received
+        # 移行後はサーバーが観測する addr が変わる
+        assert server_addrs[-1] != old_addr
+        # サーバーの接続表も新アドレスへ張り替わっている (旧アドレスが残らない)
+        assert old_addr not in server._clients
+        assert server_addrs[-1] in server._clients
+    finally:
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()

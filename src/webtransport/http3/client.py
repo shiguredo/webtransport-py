@@ -618,6 +618,48 @@ class Client:
 
             await asyncio.sleep(0.01)
 
+    async def migrate(self) -> bool:
+        """ローカル UDP ソケットを差し替えてコネクションマイグレーションを開始する
+
+        `quic.Client.migrate` と同じ手順。接続と上位層 (HTTP/3 / WebTransport)
+        の状態は維持したまま、送受信に使うソケットとアドレスだけを差し替える。
+        サーバー側は DCID で接続を照合してアドレスキーを張り替える
+        (RFC 9000 Section 9)。
+
+        Returns:
+            マイグレーション開始に成功した場合は True
+        """
+        if self._quic_connection is None:
+            return False
+
+        # 現接続と同一 family で新ソケットを作る。リモートは接続時の数値
+        # IP を使い回し、再解決しない
+        if self._socket is not None:
+            family = self._socket.family
+        elif self._remote_addr is not None and ":" in self._remote_addr[0]:
+            family = socket.AF_INET6
+        else:
+            family = socket.AF_INET
+        new_socket = socket.socket(family, socket.SOCK_DGRAM)
+        new_socket.setblocking(False)
+        new_socket.bind(("::", 0) if family == socket.AF_INET6 else ("0.0.0.0", 0))
+        new_local = self._normalize_addr(new_socket.getsockname())
+        remote = self._remote_addr if self._remote_addr is not None else (self._host, self._port)
+
+        if not self._quic_connection.initiate_migration(new_local, remote):
+            new_socket.close()
+            return False
+
+        old_socket = self._socket
+        self._socket = new_socket
+        self._local_addr = new_local
+
+        if old_socket is not None:
+            old_socket.close()
+
+        await self._send_pending()
+        return True
+
     async def close(self) -> None:
         """接続を閉じる"""
         self._running = False

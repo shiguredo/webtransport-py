@@ -1561,3 +1561,104 @@ async def test_idle_timeout_reaps_client(test_certificates):
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_connection_migration_continues_request(test_certificates):
+    """http3.Client.migrate() 後も HTTP/3 リクエストが継続することを確認
+
+    RFC 9000 Section 9 の Connection Migration を高レベル http3.Server が
+    受け付ける。移行後は送信元アドレスが変わるため、サーバーは DCID で接続を
+    照合して `_clients` のアドレスキーを張り替える。移行前後でリクエスト /
+    レスポンスが継続することを検証する。
+    """
+    from webtransport.http3 import Client, Server
+
+    server_addrs: list[tuple[str, int]] = []
+    request_received = asyncio.Event()
+    second_request_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        server_addrs.append(addr)
+        path = dict(headers).get(":path", "/")
+        if path == "/before":
+            request_received.set()
+        elif path == "/after":
+            second_request_received.set()
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        await server.send_data(addr, stream_id, f"body:{path}".encode(), fin=True)
+
+    server.on_request(on_request)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    client_received: list[bytes] = []
+    client_got_body = asyncio.Event()
+
+    async def on_client_data(stream_id, data):
+        client_received.append(data)
+        client_got_body.set()
+
+    client.on_data(on_client_data)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        stream_id = await client.request("GET", "/before")
+        assert stream_id >= 0
+        await client.send_data(stream_id, b"", fin=True)
+        await asyncio.wait_for(request_received.wait(), timeout=5.0)
+        await asyncio.wait_for(client_got_body.wait(), timeout=5.0)
+        assert b"body:/before" in client_received
+
+        old_addr = server_addrs[-1]
+
+        # ローカルアドレスを差し替えてマイグレーションする
+        assert await client.migrate() is True
+
+        client_got_body.clear()
+        stream_id = await client.request("GET", "/after")
+        assert stream_id >= 0
+        await client.send_data(stream_id, b"", fin=True)
+        await asyncio.wait_for(second_request_received.wait(), timeout=5.0)
+        await asyncio.wait_for(client_got_body.wait(), timeout=5.0)
+        assert b"body:/after" in client_received
+
+        # 移行後はサーバーが観測する addr が変わる
+        assert server_addrs[-1] != old_addr
+        # サーバーの接続表も新アドレスへ張り替わっている (旧アドレスが残らない)
+        assert old_addr not in server._clients
+        assert server_addrs[-1] in server._clients
+    finally:
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
