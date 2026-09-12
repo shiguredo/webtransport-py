@@ -275,6 +275,13 @@ class H3Session {
    * 非 2xx 拒否後に accept_session を呼んだ場合 (もう一つの誤用経路) は
    * false を返す (受理不可能の明示。詳細は accept_session の docstring を
    * 参照)。
+   *
+   * RFC 9110 Section 15.5.6 は 405 応答に Allow ヘッダーを含めることを MUST
+   * とする。status_code が 405 のときは Allow: CONNECT を応答ヘッダーに
+   * 含める。非 WebTransport リクエスト (通常の HTTP リクエスト、:authority
+   * のみの古典 CONNECT、未知の :protocol の extended CONNECT 等) への 405
+   * 応答も end_headers_cb から本 API で送出する。非 WebTransport リクエスト
+   * では session_ids_ 等に対象がなく、非 2xx 時の削除は no-op になる。
    * @param stream_id セッションストリーム ID
    * @param status_code HTTP ステータスコード
    */

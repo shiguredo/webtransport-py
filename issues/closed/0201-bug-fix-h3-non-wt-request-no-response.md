@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 のサーバーが非 WebTransport リクエストに応答せず 405 にも Allow が付かない
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h3-non-wt-request-no-response
 - Polished: 2026-09-12
 
@@ -35,3 +35,12 @@ draft-ietf-webtrans-http3-16 Section 3.2 は、extended CONNECT で `:protocol=w
 - 非 WT リクエストの 405 と `reject_session(405)` の allow を表明する Sans-IO テストを追加すること
 - `CHANGES.md` の develop に FIX エントリが追加されていること
 - 既存のテストが引き続き通過すること
+
+## 解決方法
+
+- `H3Session::end_headers_cb` の非 WebTransport サーバー側リクエスト分岐で `reject_session(stream_id, 405)` を呼び、405 応答でストリームを終端するようにした (修正前は無応答で破棄)
+- `H3Session::reject_session` で status_code が 405 のときのみ `Allow: CONNECT` を応答ヘッダーに含めるようにした (RFC 9110 Section 15.5.6 の MUST)。ヘッダー名 `allow` と値 `CONNECT` は h2 の実装と揃えた
+- `reject_session` の docstring (ヘッダーと nanobind の def) に、405 時の Allow 付与と非 WebTransport リクエストへの応答使用を明記した
+- `tests/conftest.py` に `http3.Connection` クライアント + `h3.Session` サーバーの Sans-IO ペア (`_create_h3_http3_pair` / `_h3_http3_pump`) を追加し、`tests/test_webtransport_h3_non_wt_request.py` に、GET・:authority のみの古典 CONNECT・他プロトコル CONNECT の 405 + `allow: CONNECT` + ストリーム終端、`reject_session` の 405 のみ allow が付くこと (403 / 302 / 500 では付かない)、受理済みセッションが 405 で壊れないことのテストを追加した
+- `CHANGES.md` の develop に [FIX] エントリを追加した
+- 単体 8 件・h3 低レベル 181 件・h3 e2e 69 件・prop 76 件の通過を確認し、全テストは実装コミット時のフックで通過した

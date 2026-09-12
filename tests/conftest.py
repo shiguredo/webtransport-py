@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from webtransport import h2, h3, http2
+from webtransport import h2, h3, http2, http3
 from webtransport.quic import Config, Connection
 
 
@@ -330,6 +330,17 @@ def _pump(src: h3.Session, dst: h3.Session) -> None:
             break
 
 
+def _bind_h3_server_streams(server: h3.Session) -> None:
+    """h3.Session サーバーの制御 / QPACK ストリームをバインドする
+
+    サーバーの単方向ストリームは %4 == 3 を使う。
+    """
+    server.bind_control_stream(3)
+    server.bind_qpack_encoder_stream(7)
+    server.bind_qpack_decoder_stream(11)
+    server.set_max_client_streams_bidi(100)
+
+
 def _bind_session_streams(client: h3.Session, server: h3.Session) -> None:
     """h3.Session の制御 / QPACK ストリームをバインドする
 
@@ -338,10 +349,7 @@ def _bind_session_streams(client: h3.Session, server: h3.Session) -> None:
     client.bind_control_stream(2)
     client.bind_qpack_encoder_stream(6)
     client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-    server.set_max_client_streams_bidi(100)
+    _bind_h3_server_streams(server)
 
 
 def _create_session_pair() -> tuple[h3.Session, h3.Session]:
@@ -441,6 +449,54 @@ def _establish_two_sessions() -> tuple[h3.Session, h3.Session, int, int]:
     first_session_id = _connect_session(client, server, 0)
     second_session_id = _connect_session(client, server, 4)
     return client, server, first_session_id, second_session_id
+
+
+def _h3_http3_pump(client: http3.Connection, server: h3.Session) -> None:
+    """http3.Connection クライアントと h3.Session サーバーの送信データを相互に渡す
+
+    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
+    receive_stream_data で直接渡す (モックなし)。双方の送信データが
+    無くなるまで繰り返す (無限ループ防止のため最大 64 回)。
+    """
+    for _ in range(64):
+        sent = False
+        for stream_id, data, fin in client.get_streams_to_send():
+            server.receive_stream_data(stream_id, data, fin)
+            sent = True
+        for stream_id, data, fin in server.get_streams_to_send():
+            client.receive_stream_data(stream_id, data, fin)
+            sent = True
+        if not sent:
+            break
+    else:
+        raise AssertionError("送信データが収束しませんでした")
+
+
+def _create_h3_http3_pair() -> tuple[http3.Connection, h3.Session]:
+    """http3.Connection クライアントと h3.Session サーバーを作成して初期化する
+
+    h3.Session サーバーの制御 / QPACK ストリームをバインドし、SETTINGS 交換
+    まで完了させる。h3.Session の Event には応答ヘッダーがないため、405 の
+    allow などの応答ヘッダーの観測には http3.Connection の Event を使う。
+    クライアントは SETTINGS で WebTransport 対応を広告する。
+
+    @return (http3.Connection クライアント, h3.Session サーバー)
+    """
+    client_config = http3.Config()
+    client_config.enable_webtransport = True
+    client_config.enable_h3_datagram = True
+    client = http3.Connection.create_client(client_config)
+    # クライアントの制御 / QPACK ストリーム (クライアント起動単方向)
+    # をバインドする (未バインドでは submit_request が false になる)
+    client.bind_control_stream(2)
+    client.bind_qpack_encoder_stream(6)
+    client.bind_qpack_decoder_stream(10)
+    server_config = h3.Config()
+    server_config.is_server = True
+    server = h3.Session.create_server(server_config)
+    _bind_h3_server_streams(server)
+    _h3_http3_pump(client, server)
+    return client, server
 
 
 def _h2_pump(src: http2.Connection | h2.Session, dst: http2.Connection | h2.Session) -> None:
