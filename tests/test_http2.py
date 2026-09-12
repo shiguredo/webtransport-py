@@ -333,3 +333,216 @@ def test_http2_test_force_close_does_not_affect_peer():
 
     assert client.is_closed() is True
     assert server.is_closed() is False
+
+
+def test_http2_send_buffer_uses_offset_not_shift():
+    """部分送出が残データのシフトではなくオフセットで進むことを確認
+
+    大バッファを max_frame_size 刻みで送出すると、旧実装は部分コピーごとに
+    残データを erase でシフトしていた (O(n²))。オフセット方式ではバッファの
+    総バイト数が変わらず、先頭のオフセットだけが進む。テスト専用の
+    `_test_stream_buffer_count` / `_test_stream_buffer_remaining` /
+    `_test_stream_buffer_offset` で白箱観測する。
+    """
+    client, server = _create_http2_pair()
+    stream_id = client.submit_request(
+        [
+            (":method", "POST"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    server.submit_response(stream_id, [(":status", "200")])
+    # max_frame_size (16384) を超えるボディを積む
+    body = b"x" * (64 * 1024)
+    server.send_data(stream_id, body, True)
+
+    # 送出前にバッファへ積まれている
+    assert server._test_stream_buffer_count(stream_id) == 1
+    assert server._test_stream_buffer_remaining(stream_id) == len(body)
+    assert server._test_stream_buffer_offset(stream_id) == 0
+
+    # DATA フレームが送出されるまで send() を繰り返す。send() は 1 回に
+    # つき mem_send が返した 1 チャンクだけを返すため、SETTINGS などの
+    # 制御フレームだけが返る回がある
+    for _ in range(10):
+        packet = server.send()
+        assert packet is not None
+        if server._test_stream_buffer_offset(stream_id) > 0:
+            break
+
+    count = server._test_stream_buffer_count(stream_id)
+    remaining = server._test_stream_buffer_remaining(stream_id)
+    offset = server._test_stream_buffer_offset(stream_id)
+
+    # バッファの総バイト数は減っていない (シフトしていない)
+    assert len(body) == remaining + offset
+    # オフセットは送出できた範囲だけ進み、未送出の残りが残る
+    assert 0 < offset < len(body)
+    assert remaining == len(body) - offset
+    # 先頭エントリは送出し切るまで残る (エントリ数は増減しない)
+    assert count == 1
+
+
+def test_http2_large_send_data_integrity():
+    """オフセット方式でも大バッファの内容が欠落しないことを確認
+
+    フロー制御のウィンドウ更新を返しながら 100 KiB を送出し、受信側で
+    バイト列が完全一致することを確認する。
+    """
+    client, server = _create_http2_pair()
+    stream_id = client.submit_request(
+        [
+            (":method", "POST"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    server.submit_response(stream_id, [(":status", "200")])
+    body = bytes(range(256)) * 400
+    server.send_data(stream_id, body, True)
+
+    received = bytearray()
+    for _ in range(200):
+        _h2_pump(server, client)
+        for event in _drain_events(client):
+            if event.type == http2.EventType.DATA:
+                received.extend(event.data)
+        _h2_pump(client, server)
+        if len(received) == len(body):
+            break
+
+    assert bytes(received) == body
+
+
+def test_http2_send_buffer_offset_with_multiple_entries():
+    """複数エントリを積んだ場合もエントリ単位でオフセットが進むことを確認"""
+    client, server = _create_http2_pair()
+    stream_id = client.submit_request(
+        [
+            (":method", "POST"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    server.submit_response(stream_id, [(":status", "200")])
+    server.send_data(stream_id, b"a" * (32 * 1024), False)
+    server.send_data(stream_id, b"b" * (32 * 1024), True)
+
+    assert server._test_stream_buffer_count(stream_id) == 2
+    assert server._test_stream_buffer_remaining(stream_id) == 32768
+    assert server._test_stream_buffer_offset(stream_id) == 0
+
+    # 全量を送出する
+    received = bytearray()
+    for _ in range(200):
+        _h2_pump(server, client)
+        for event in _drain_events(client):
+            if event.type == http2.EventType.DATA:
+                received.extend(event.data)
+        _h2_pump(client, server)
+        if len(received) == 64 * 1024:
+            break
+
+    assert bytes(received) == b"a" * (32 * 1024) + b"b" * (32 * 1024)
+    # 送出完了後はバッファが空になる
+    assert server._test_stream_buffer_count(stream_id) == 0
+
+
+def test_http2_empty_send_data_with_eof_closes_stream():
+    """空データ + eof=True で END_STREAM が送出されることを確認
+
+    送出するバイトが残っていない場合に read_callback を呼ぶと、nghttp2 は
+    空のバッファを defer して EOF を立てる機会を失い、ボディ無しの
+    レスポンスで END_STREAM が送出されなくなる。空データの時点で応答を
+    終端できることを白箱 (バッファが空になる) と受信側イベントで確認する。
+    """
+    client, server = _create_http2_pair()
+    stream_id = client.submit_request(
+        [
+            (":method", "GET"),
+            (":path", "/empty"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    server.submit_response(stream_id, [(":status", "204")])
+    _h2_pump(server, client)
+    _drain_events(client)
+
+    server.send_data(stream_id, b"", True)
+    assert server._test_stream_buffer_count(stream_id) == 1
+
+    for _ in range(10):
+        _h2_pump(server, client)
+        if server._test_stream_buffer_count(stream_id) == 0:
+            break
+
+    # 送出し切ったのでバッファは空になる
+    assert server._test_stream_buffer_count(stream_id) == 0
+
+    # 受信側は END_STREAM を観測し、ストリームが両側で閉じる
+    types = [event.type for event in _drain_events(client)]
+    assert http2.EventType.STREAM_END in types
+    assert server.stream_local_close(stream_id) is True
+
+
+def test_http2_empty_send_data_without_eof_keeps_pending_data():
+    """空データ + eof=False が送信待ちデータを破棄しないことを確認
+
+    空の送信をユーザーが明示的に呼んだ場合でも、既に積まれた送信待ちデータは
+    そのまま残り、後続の送出で欠落しないことを確認する。
+    """
+    client, server = _create_http2_pair()
+    stream_id = client.submit_request(
+        [
+            (":method", "POST"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    server.submit_response(stream_id, [(":status", "200")])
+    body = b"payload"
+    server.send_data(stream_id, body, False)
+    # 空データ (eof なし) を挟んでも既存のエントリは残る
+    server.send_data(stream_id, b"", False)
+
+    assert server._test_stream_buffer_count(stream_id) == 2
+    assert server._test_stream_buffer_remaining(stream_id) == len(body)
+    assert server._test_stream_buffer_offset(stream_id) == 0
+
+    received = bytearray()
+    for _ in range(50):
+        _h2_pump(server, client)
+        for event in _drain_events(client):
+            if event.type == http2.EventType.DATA:
+                received.extend(event.data)
+        _h2_pump(client, server)
+        if len(received) == len(body):
+            break
+
+    assert bytes(received) == body

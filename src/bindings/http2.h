@@ -102,6 +102,9 @@ struct Http2Event {
  */
 struct StreamData {
   std::vector<uint8_t> data;
+  // 送信済みバイト数。部分送出では残データをシフトせず本値を進める
+  // (O(n²) コピーを避ける。http3.h の StreamData と同型)
+  size_t offset = 0;
   bool eof = false;
 };
 
@@ -203,6 +206,26 @@ class Http2Connection {
    * 低レベルが自主クローズした状態と同じ観測になる
    */
   void test_force_close();
+
+  /**
+   * テスト専用: 送信バッファのエントリ数を返す (production からは呼ばない)
+   */
+  size_t test_stream_buffer_count(int32_t stream_id) const;
+
+  /**
+   * テスト専用: 送信バッファ先頭エントリの残バイト数を返す
+   * (production からは呼ばない)
+   */
+  size_t test_stream_buffer_remaining(int32_t stream_id) const;
+
+  /**
+   * テスト専用: 送信バッファ先頭エントリの送信済みオフセットを返す
+   * (production からは呼ばない)
+   *
+   * 部分送出が残データのシフトではなくオフセットで進んでいることを白箱で
+   * 観測するために使う (O(n²) コピー解消の回帰ピン)
+   */
+  size_t test_stream_buffer_offset(int32_t stream_id) const;
 
   /**
    * PING を送信
