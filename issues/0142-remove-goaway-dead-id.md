@@ -1,7 +1,7 @@
 # HTTP/3 の goaway の死んだ id 引数を削除する
 
 - Created: 2026-09-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/remove-goaway-dead-id
 - Polished: {YYYY-MM-DD}
 
@@ -30,3 +30,15 @@
 - `issues/closed/0123-refactor-http-event-details.md` — 分離元 (goaway 項目を移管)
 - `issues/0124-remove-dead-code-cpp.md` — 当該引数は対象外であり重複しない
 - `issues/0132-add-http3-bindings-test-force-close.md` — 同一ファイルを変更するため順序調整
+
+## 解決方法
+
+`Http3Connection::goaway` から無視されていた `id` 引数を削除した。
+
+- `src/bindings/http3.h` の宣言を `void goaway()` に変更し、GOAWAY ID は nghttp3 が内部算出する (nghttp3 に ID を指定する API が無い) ことを docstring に明記した
+- `src/bindings/http3.cpp` の実装シグネチャとバインディング (`nb::arg("id")` を削除し `nb::sig("def goaway(self) -> None")` に変更) を更新した。型スタブは `make develop` で再生成した
+- 呼び出し側を更新した。`tests/test_http3_message_ext.py` の 2 箇所と `tests/test_http3_stream_state.py` の 1 箇所を `goaway()` に変更した
+- `tests/prop_http3.py` の `prop_goaway_arbitrary_id` は任意 ID の堅牢性テストであり引数削除で存在意義が無くなるため、`prop_goaway_without_control_stream_is_noop` に置き換えた (コントロールストリーム未バインドの `goaway()` が何もせず、接続状態と必要ストリーム一覧が変わらないことを確認する)
+- `skills/webtransport-py/SKILL.md` の `http3.Connection` のメソッド一覧を `goaway()` に、`close_stream` の既定値を 0x0100 に更新した (0141 の追従)
+
+`uv run pytest tests/ --timeout=30` の 1089 件が全て通る。
