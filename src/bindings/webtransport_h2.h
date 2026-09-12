@@ -639,11 +639,11 @@ class H2Session {
   uint64_t allocate_stream_id(int32_t session_id, bool is_unidirectional);
 
   // nghttp2 コールバック
-  static ssize_t send_callback(nghttp2_session* session,
-                               const uint8_t* data,
-                               size_t length,
-                               int flags,
-                               void* user_data);
+  static nghttp2_ssize send_callback(nghttp2_session* session,
+                                     const uint8_t* data,
+                                     size_t length,
+                                     int flags,
+                                     void* user_data);
   static int on_frame_recv_callback(nghttp2_session* session,
                                     const nghttp2_frame* frame,
                                     void* user_data);
@@ -676,13 +676,13 @@ class H2Session {
   static int on_begin_headers_callback(nghttp2_session* session,
                                        const nghttp2_frame* frame,
                                        void* user_data);
-  static ssize_t data_source_read_callback(nghttp2_session* session,
-                                           int32_t stream_id,
-                                           uint8_t* buf,
-                                           size_t length,
-                                           uint32_t* data_flags,
-                                           nghttp2_data_source* source,
-                                           void* user_data);
+  static nghttp2_ssize data_source_read_callback(nghttp2_session* session,
+                                                 int32_t stream_id,
+                                                 uint8_t* buf,
+                                                 size_t length,
+                                                 uint32_t* data_flags,
+                                                 nghttp2_data_source* source,
+                                                 void* user_data);
 
   // ヘルパー
   void push_event(H2Event event);

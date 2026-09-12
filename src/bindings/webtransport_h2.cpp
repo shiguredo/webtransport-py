@@ -657,7 +657,7 @@ void H2Session::report_stream_state_error(int32_t session_id,
   constexpr uint32_t kWtStreamStateError = 0x51;
   // 検知した WT_STREAM_STATE_ERROR をアプリに通知してからセッションを閉じる。
   // close_session は送信をキューするのみで nghttp2_session_send を呼ばないため
-  // mem_recv コールバック中でも安全であり、即座に is_terminated を立てて同一
+  // mem_recv2 コールバック中でも安全であり、即座に is_terminated を立てて同一
   // receive() 内の後続カプセルを遮断する
   H2Event event;
   event.type = H2EventType::Error;
@@ -1359,7 +1359,7 @@ void H2Session::report_wt_error(int32_t session_id,
                                 const std::string& error_message) {
   // 検知した WT_ERROR をアプリへ通知してからセッションを閉じる。
   // close_session は送信をキューするのみで nghttp2_session_send を呼ばない
-  // ため mem_recv コールバック中でも安全であり、即座に is_terminated を
+  // ため mem_recv2 コールバック中でも安全であり、即座に is_terminated を
   // 立てて同一 receive() 内の後続カプセルを遮断する
   H2Event event;
   event.type = H2EventType::Error;
@@ -1685,7 +1685,7 @@ bool H2Session::initialize() {
     return false;
   }
 
-  nghttp2_session_callbacks_set_send_callback(callbacks, send_callback);
+  nghttp2_session_callbacks_set_send_callback2(callbacks, send_callback);
   nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
                                                        on_frame_recv_callback);
   nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
@@ -1753,8 +1753,8 @@ size_t H2Session::receive(const std::vector<uint8_t>& data) {
     return 0;
   }
 
-  ssize_t processed =
-      nghttp2_session_mem_recv(session_, data.data(), data.size());
+  nghttp2_ssize processed =
+      nghttp2_session_mem_recv2(session_, data.data(), data.size());
 
   if (processed < 0) {
     H2Event event;
@@ -1867,12 +1867,12 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
        17, wt_init.size(), NGHTTP2_NV_FLAG_NONE});
 
   // Capsule データ送信用のデータプロバイダー
-  nghttp2_data_provider data_prd;
+  nghttp2_data_provider2 data_prd;
   data_prd.source.ptr = this;
   data_prd.read_callback = data_source_read_callback;
 
-  int32_t stream_id = nghttp2_submit_request(session_, nullptr, nva.data(),
-                                             nva.size(), &data_prd, this);
+  int32_t stream_id = nghttp2_submit_request2(session_, nullptr, nva.data(),
+                                              nva.size(), &data_prd, this);
 
   if (stream_id < 0) {
     return -1;
@@ -1910,12 +1910,12 @@ bool H2Session::accept_session(int32_t session_id) {
   };
 
   // Capsule データ送信用のデータプロバイダー
-  nghttp2_data_provider data_prd;
+  nghttp2_data_provider2 data_prd;
   data_prd.source.ptr = this;
   data_prd.read_callback = data_source_read_callback;
 
-  int rv = nghttp2_submit_response(session_, session_id, nva,
-                                   sizeof(nva) / sizeof(nva[0]), &data_prd);
+  int rv = nghttp2_submit_response2(session_, session_id, nva,
+                                    sizeof(nva) / sizeof(nva[0]), &data_prd);
   if (rv != 0) {
     // 応答送出に失敗したら蓄積を破棄する
     if (auto* failed_session = get_wt_session(session_id)) {
@@ -1973,7 +1973,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   }
 
   // RFC 9113 Section 5.1.1: HTTP/2 のストリーム ID は 1 以上。0 以下は
-  // nghttp2_submit_response が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用で
+  // nghttp2_submit_response2 が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用で
   // あり、黙って no-op にしない (クライアントセッションは接続ガードで
   // 従来どおり no-op)。例外は nanobind の既定翻訳で ValueError になる
   if (session_id <= 0) {
@@ -2015,7 +2015,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   size_t nva_count = (status_code == 405) ? 2 : 1;
 
   int rv =
-      nghttp2_submit_response(session_, session_id, nva, nva_count, nullptr);
+      nghttp2_submit_response2(session_, session_id, nva, nva_count, nullptr);
   if (rv != 0) {
     // submit 失敗 (NOMEM 等) を観測可能にする。送出時の非 fatal な失敗は
     // on_frame_not_send_callback が観測する
@@ -2057,7 +2057,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
       wt_session->capsule_buffer.clear();
     }
   }
-  // mem_recv コールバック中でも安全なよう、ここでは session_send しない
+  // mem_recv2 コールバック中でも安全なよう、ここでは session_send しない
 }
 
 int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
@@ -2482,7 +2482,7 @@ void H2Session::close_session(int32_t session_id,
   // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
   // RST_STREAM ではアプリケーション終了を正しく伝えられない
   //
-  // nghttp2_session_send は mem_recv コールバック中に呼んではならない。
+  // nghttp2_session_send は mem_recv2 コールバック中に呼んではならない。
   // 送信は呼び出し側の send() / receive() 後段に任せる。
   end_stream_pending_.insert(session_id);
   nghttp2_session_resume_data(session_, session_id);
@@ -2564,18 +2564,18 @@ std::vector<uint64_t> H2Session::get_stream_ids(int32_t session_id) const {
 
 // ========== nghttp2 コールバック実装 ==========
 
-ssize_t H2Session::send_callback(nghttp2_session* session,
-                                 const uint8_t* data,
-                                 size_t length,
-                                 int flags,
-                                 void* user_data) {
+nghttp2_ssize H2Session::send_callback(nghttp2_session* session,
+                                       const uint8_t* data,
+                                       size_t length,
+                                       int flags,
+                                       void* user_data) {
   (void)session;
   (void)flags;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
   h2_session->send_buffer_.insert(h2_session->send_buffer_.end(), data,
                                   data + length);
-  return static_cast<ssize_t>(length);
+  return static_cast<nghttp2_ssize>(length);
 }
 
 int H2Session::on_frame_recv_callback(nghttp2_session* session,
@@ -3039,13 +3039,13 @@ int H2Session::on_begin_headers_callback(nghttp2_session* session,
   return 0;
 }
 
-ssize_t H2Session::data_source_read_callback(nghttp2_session* session,
-                                             int32_t stream_id,
-                                             uint8_t* buf,
-                                             size_t length,
-                                             uint32_t* data_flags,
-                                             nghttp2_data_source* source,
-                                             void* user_data) {
+nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
+                                                   int32_t stream_id,
+                                                   uint8_t* buf,
+                                                   size_t length,
+                                                   uint32_t* data_flags,
+                                                   nghttp2_data_source* source,
+                                                   void* user_data) {
   (void)session;
   (void)source;
 
@@ -3083,7 +3083,7 @@ ssize_t H2Session::data_source_read_callback(nghttp2_session* session,
     h2_session->end_stream_pending_.erase(stream_id);
   }
 
-  return static_cast<ssize_t>(to_read);
+  return static_cast<nghttp2_ssize>(to_read);
 }
 
 // ========== Python バインディング ==========

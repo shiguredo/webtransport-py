@@ -1,7 +1,7 @@
 # nghttp2 v1.70.0 で deprecated と明記されている API 群 (ssize_t 版) を *2 版に移行する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-migrate-to-nghttp2-non-deprecated-apis
 - Polished: {YYYY-MM-DD}
 
@@ -31,3 +31,10 @@
 - `#define NGHTTP2_NO_SSIZE_T` を明示的に設定してもビルドが通ること (CI に検証ジョブを追加)
 - `Http2Connection::send_callback` と `send_buffer_` の死にコードが削除されていること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `src/bindings/http2.cpp` と `src/bindings/webtransport_h2.cpp` の nghttp2 API を `*2` 版へ置き換えた。置き換え対象は `nghttp2_session_mem_send2` / `nghttp2_session_mem_recv2` / `nghttp2_submit_request2` / `nghttp2_submit_response2` / `nghttp2_data_provider2` / `nghttp2_data_source_read_callback2` / `nghttp2_session_callbacks_set_send_callback2` で、戻り値型はすべて `nghttp2_ssize` にした
+- `Http2Connection::send_callback` は `nghttp2_session_mem_send2` しか使わないため一度も呼ばれない死にコードだった。コールバック登録・宣言・定義と、送信に使われていなかった `send_buffer_` メンバー (ムーブコンストラクタとムーブ代入の転送を含む) を削除した
+- `H2Session::send_callback` は `nghttp2_session_send` を使う蓄積型の実装で実際に呼ばれるため、`send_callback2` として維持した
+- `NGHTTP2_NO_SSIZE_T` を定義した wheel ビルドを行う `build_no_ssize_t` ジョブを `.github/workflows/test.yml` に追加した。deprecated API に戻すとこのジョブがコンパイルエラーで落ちることをローカルで確認済み
