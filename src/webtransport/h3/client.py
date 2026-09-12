@@ -573,6 +573,16 @@ class Client:
                             # を抜ける (残ったイベントはキューに残り、run() で
                             # 処理される)
                             break
+                        if event.type == h3_low.EventType.RESET_STREAM:
+                            # 受理前ストリームの拒否などで nghttp3 が QUIC
+                            # RESET_STREAM の送出を要求している (run() と同じ変換)
+                            self._quic_connection.reset_stream(event.stream_id, event.error_code)
+                            continue
+                        if event.type == h3_low.EventType.STOP_SENDING:
+                            # 受理前ストリームの上限超過などで nghttp3 が QUIC
+                            # STOP_SENDING の送出を要求している (run() と同じ変換)
+                            self._quic_connection.stop_sending(event.stream_id, event.error_code)
+                            continue
                         if event.type == h3_low.EventType.SESSION_REJECTED:
                             self._connected = False
                             self._running = False

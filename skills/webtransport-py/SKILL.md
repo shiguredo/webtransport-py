@@ -510,7 +510,7 @@ def next_event() -> Event | None
 
 `close_stream` は nghttp3 へのストリーム終了通知で、戻り値はリセットされたストリームが属するセッション ID (復元できない場合は -1)。`reset_stream` は `close_stream` を呼ぶだけであり、QUIC RESET_STREAM の送出は asyncio ラッパーの `reset_stream` が QUIC 層への通知と合わせて行う (Sans I/O で直接使う場合は `quic.Connection.reset_stream()` を自分で呼ぶ)。`connect` の `origin` は Origin ヘッダー値で、空文字なら付与しない。
 
-`Config` のプロパティは `max_field_section_size` / `qpack_max_dtable_capacity` / `qpack_blocked_streams` / `is_server` / `allowed_origins`。`allowed_origins` は許可オリジンリストで、空リスト (未設定) なら全オリジンを受理する。
+`Config` のプロパティは `max_field_section_size` / `qpack_max_dtable_capacity` / `qpack_blocked_streams` / `wt_pre_accept_buffer_limit` / `is_server` / `allowed_origins`。`allowed_origins` は許可オリジンリストで、空リスト (未設定) なら全オリジンを受理する。`wt_pre_accept_buffer_limit` は受理前 WebTransport データストリーム 1 本あたりの累計受信バイト上限 (既定 65536) で、超過したストリームは WT_BUFFERED_STREAM_REJECTED で拒否される。
 
 `Event` のフィールドは `type` / `session_id` / `stream_id` / `data` / `error_code` / `error_message`。`StreamInfo` (セッションに属するストリーム情報) のフィールドは `stream_id` / `session_id` / `is_unidirectional` / `is_incoming` / `is_write_registered`。
 
@@ -644,9 +644,9 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 
 - `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `max_datagram_frame_size=65536` / `enable_early_data=True` / `alpn_protocols=[]` / `server_name=""` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None`
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
-- `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `is_server=False` / `allowed_origins=[]`
+- `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `wt_pre_accept_buffer_limit=65536` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`
-- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)
+- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100` / `wt_pre_accept_buffer_limit=65536` / `wt_max_capsule_payload_size=1048576`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)
 
 ## イベント型 (EventType)
 

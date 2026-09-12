@@ -50,6 +50,15 @@ struct H3SessionConfig {
 
   // 許可オリジン (サーバー用。空なら全オリジンを受理する)
   std::vector<std::string> allowed_origins;
+
+  // 受理前 (セッション確定前) の WebTransport データストリーム 1 本あたりの
+  // 累計受信バイト上限。超過時は WT_BUFFERED_STREAM_REJECTED で拒否する
+  // (draft-ietf-webtrans-http3-16 Section 4.6 の MUST: 受理前バッファの上限)。
+  // h2 の同名設定はセッション単位のカプセルバッファ上限であり、本設定は
+  // ストリーム単位で意味が異なる。総量は QUIC の同時ストリーム数上限
+  // (quic.Config の max_streams_bidi / max_streams_uni) で有界になる。
+  // 0 を設定した場合は受理前データを 1 バイトでも受信した時点で拒否する
+  uint64_t wt_pre_accept_buffer_limit = 65536;
 };
 
 /**
@@ -692,6 +701,23 @@ class H3Session {
   // しない。順序保証は同一ストリーム内のバイト順のみである
   void flush_unblocked_held_data();
 
+  // 受理前ストリームの受信バイトを計数し、上限 (config_ の
+  // wt_pre_accept_buffer_limit) を超えたら WT_BUFFERED_STREAM_REJECTED で
+  // 拒否する。read_from_nghttp3 が nghttp3_conn_read_stream2 から戻った後
+  // (コールバック外) に呼ぶ。length は nghttp3 へ渡したバイト数、consumed は
+  // read_stream2 の戻り値 (非負) であり、length - consumed が nghttp3 内部に
+  // 取り込まれた受理前バッファ量になる
+  void enforce_pre_accept_buffer_limit(int64_t stream_id,
+                                       size_t length,
+                                       size_t consumed,
+                                       bool fin);
+
+  // ストリーム単位の受理前計数状態を破棄する (ストリームのクローズ時)
+  void forget_pre_accept_stream(int64_t stream_id);
+
+  // セッション単位の受理前計数状態を破棄する (セッションの受理確定・終了時)
+  void forget_pre_accept_session(int64_t session_id);
+
   // WT_CLOSE_SESSION の Application Error Message が不正 (1024 バイト超・
   // 4 バイト未満の不正な長さ・不正 UTF-8) の検知を保留したセッション ID。recv_wt_close_session_cb が
   // コールバック内で nghttp3 を呼べない (再入防止) ため検知のみを行い、
@@ -729,6 +755,23 @@ class H3Session {
 
   // WebTransport セッション管理
   std::set<int64_t> session_ids_;
+
+  // 受理が確定した (nghttp3 の confirm / 2xx 応答処理が完了した) セッション
+  // ID。session_ids_ は CONNECT リクエスト受信時 / connect() 時に挿入される
+  // ため、受理前バッファの計数対象の判定にはこちらを使う
+  std::set<int64_t> accepted_session_ids_;
+
+  // 受理前ストリームの累計受信バイト (stream_id → 累計) とそのセッション ID。
+  // セッションの受理確定時にセッション単位でまとめて破棄するために両方保持する
+  std::map<int64_t, uint64_t> pre_accept_buffered_bytes_;
+  std::map<int64_t, int64_t> pre_accept_stream_session_ids_;
+
+  // 上限超過で拒否した受理前ストリーム。nghttp3_conn_close_stream 後のデータ
+  // 再投入で nghttp3 がストリームを再生成し、ストリームタイプの誤解釈や
+  // glitch レート制限の消費を招くため、以後のデータは nghttp3 へ渡さない。
+  // ピアの FIN で解放する。RESET_STREAM では解放しない (close_stream は
+  // アプリ起点のリセットからも呼ばれ、その場合はピアが送信を続け得る)
+  std::set<int64_t> rejected_pre_accept_stream_ids_;
 
   // end_stream コールバックで FIN を検知した CONNECT ストリームのセッション
   // ID (セッション終了の後始末の保留集合)。コールバック内では nghttp3 を

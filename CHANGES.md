@@ -107,6 +107,8 @@
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
   - @voluntas
+- [FIX] WebTransport over HTTP/3 の受理前データストリームが無制限にバッファリングされる問題を修正する
+  - @voluntas
 - [FIX] WebTransport over HTTP/2 のクライアント close() がピア終了を待たずに切断する問題を修正する
   - @voluntas
 - [FIX] WebTransport over HTTP/2 の `h2.Session.receive` / `send_stream_data` / `send_datagram` に 1 MiB の入力サイズ上限を追加し、超過は `ValueError` にする

@@ -9,7 +9,7 @@
 
 draft-ietf-webtrans-http3-16 Section 4.6 は、セッション確立前に届いたストリームとデータグラムについて、確立済みセッションに関連付けられるまでバッファしてよい (SHOULD) としたうえで、「To avoid resource exhaustion, endpoints MUST limit the number of buffered streams and datagrams」と定める。上限を超えたストリームは RESET_STREAM または STOP_SENDING を WT_BUFFERED_STREAM_REJECTED で送って閉じ、上限を超えたデータグラムは破棄しなければならない。
 
-h3 バインディングの受理前データグラムは既に破棄しており (`receive_datagram` が `session_ids_` にない宛先を捨てる)、バッファ数は常に 0 のためデータグラム側の MUST は満たしている。一方、受理前の WebTransport データストリームは nghttp3 内部で無制限にバッファリングされ、上限がない。ストリーム数は QUIC の同時ストリーム数上限 (`quic.Config` の `max_streams_bidi` / `max_streams_uni`、既定 100) で有界だが、1 ストリームあたりの蓄積量が無制限であるため、ピアが大量データを送るだけでメモリを枯渇させられる。nghttp3 1.18.90 の公開 API には受理前バッファの上限設定・量の観測がなく (設定構造体 `nghttp3_settings` に該当項目がない)、`NGHTTP3_ERR_WT_BUFFERED_STREAM_REJECTED` は非公開の `nghttp3_conn_on_wt_stream` が構造的な不整合時のみ返す。このためバインディング層で受理前ストリームの累計を計数し、上限超過時に WT_BUFFERED_STREAM_REJECTED で拒否する。
+h3 バインディングは受理前データグラムを保持しない (サーバーは `end_headers_cb` 前の未知セッション宛を破棄し、クライアントは 2xx 前も `Datagram` イベント化するだけで高レベル層が破棄する)。バッファ数は常に 0 のため、データグラム側の MUST は満たしている。一方、受理前の WebTransport データストリームは nghttp3 内部で無制限にバッファリングされ、上限がない。ストリーム数は QUIC の同時ストリーム数上限 (`quic.Config` の `max_streams_bidi` / `max_streams_uni`、既定 100) で有界だが、1 ストリームあたりの蓄積量が無制限であるため、ピアが大量データを送るだけでメモリを枯渇させられる。nghttp3 1.18.90 の公開 API には受理前バッファの上限設定・量の観測がなく (設定構造体 `nghttp3_settings` に該当項目がない)、`NGHTTP3_ERR_WT_BUFFERED_STREAM_REJECTED` は非公開の `nghttp3_conn_on_wt_stream` が構造的な不整合時のみ返す。このためバインディング層で受理前ストリームの累計を計数し、上限超過時に WT_BUFFERED_STREAM_REJECTED で拒否する。
 
 ## 現状
 
@@ -39,9 +39,10 @@ h3 バインディングの受理前データグラムは既に破棄してお�
 
 ## 完了条件
 
-- 受理前ストリームの累計が `h3.Config` の `wt_pre_accept_buffer_limit` を超えた場合に、そのストリームが WT_BUFFERED_STREAM_REJECTED で拒否されること (高レベル層から STOP_SENDING が送出される。クライアントの `connect()` 待機中に届いたストリームでも送出されること)。拒否後の同一 stream_id のデータが nghttp3 へ再投入されないこと
-- 上限以下の受理前ストリームは従来どおり確定後にアプリへ配信されること
+- 受理前ストリームの累計が `h3.Config` の `wt_pre_accept_buffer_limit` を超えた場合に、そのストリームが WT_BUFFERED_STREAM_REJECTED で拒否されること (バインディングが STOP_SENDING イベントを push し、高レベル層が QUIC の STOP_SENDING へ変換して送出すること)。拒否後の同一 stream_id のデータが nghttp3 へ再投入されないこと
+- クライアントの `connect()` 待機中に届いた受理前ストリームでも拒否イベントが処理されること。ただし低レベル e2e での検証は、QUIC 層に自側が送出する STOP_SENDING をテストから観測する API がなく、受理前状態を再現する生サーバーの構築が必要なため対象外とし、コードレビューで確認する
+- 上限以下 (境界の `累計 == 上限` を含む) の受理前ストリームは従来どおり確定後にアプリへ配信されること。受理確定後のストリームは上限の対象外であること
 - 上限値が `h3.Config` から設定できること (`src/webtransport/h3.pyi` に反映されていること)
-- 上限超過・上限以下・拒否後の後続データ破棄を検証する単体テストを追加すること
+- 上限超過・境界 (`累計 == 上限` と上限 + 1)・上限 0・上限以下 (分割到着)・拒否後の後続データ破棄・受理確定後の対象外を検証する単体テストを追加すること
 - `CHANGES.md` の `## develop` に [FIX] エントリが追加されていること
 - 既存のテストがすべて通ること
