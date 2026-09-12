@@ -304,6 +304,8 @@
 
 ### misc
 
+- [UPDATE] 受理前 WT_CLOSE_SESSION 送出テストヘルパーを conftest.py に集約する
+  - @voluntas
 - [UPDATE] テスト用の UDP パケットロス注入リレー LossyRelay とハンドシェイクロスからの回復テストを追加する
   - @voluntas
 - [UPDATE] conftest.py の手書きイベント取り出しループを _drain_events に寄せ替える

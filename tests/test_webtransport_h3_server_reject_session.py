@@ -18,6 +18,7 @@ from conftest import (
     _drain_events,
     _encode_wt_datagram,
     _pump,
+    _send_pre_accept_wt_close_session,
     _setup_connect,
 )
 
@@ -34,36 +35,6 @@ def _deliver_connect_request(client: h3.Session, server: h3.Session) -> None:
     assert client.connect(0, "https://localhost/webtransport") is True
     headers = _setup_connect(client, server, 0)
     server.receive_stream_data(0, headers, False)
-
-
-def _send_pre_accept_wt_close_session(client: h3.Session) -> bytes:
-    """クライアントが受理前に WT_CLOSE_SESSION を送出する
-
-    close_session で送信キューに積まれた WT_CLOSE_SESSION カプセルを
-    get_streams_to_send で取り出して返す (サーバーへの注入は呼び出し側が
-    行う)。受理前のカプセルはサーバー側で nghttp3 の inq にバッファされ、
-    accept_session の confirm 処理中に同期処理される
-    (draft-ietf-webtrans-http3-16 Section 3.2 の「A server MUST NOT process
-    these bytes as capsules until it sends a 2xx response accepting the
-    session」)。
-
-    get_streams_to_send が WT_CLOSE_SESSION カプセル 1 件だけを返すことは、
-    _setup_connect が CONNECT ヘッダーを書き出し済みであることに依存する
-    (クライアントの送信キューに残っているのはカプセルのみ)。
-
-    @param client クライアントセッション (connect 済み)
-    @return WT_CLOSE_SESSION カプセルのデータ
-    """
-    client.close_session(0, 0)
-    streams = client.get_streams_to_send()
-    assert len(streams) == 1, "WT_CLOSE_SESSION カプセル以外の送信データがあります"
-    wt_close_stream_id, wt_close_data, wt_close_fin = streams[0]
-    assert wt_close_stream_id == 0, "CONNECT ストリーム以外の送信データがあります"
-    # nghttp3 は WT_CLOSE_SESSION 送出時に FIN も付ける
-    # (draft-ietf-webtrans-http3-16 Section 6 の MUST「WT_CLOSE_SESSION を
-    # 送出するエンドポイントは直後に FIN を送る」を満たす)
-    assert wt_close_fin is True, "WT_CLOSE_SESSION カプセルには FIN が付きます"
-    return wt_close_data
 
 
 @pytest.mark.parametrize(
