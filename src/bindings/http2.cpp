@@ -225,7 +225,7 @@ int32_t Http2Connection::submit_request(
     return -1;
   }
 
-  stream_buffers_[stream_id] = {};
+  stream_buffers_[stream_id].clear();
   return stream_id;
 }
 
@@ -257,7 +257,7 @@ void Http2Connection::submit_response(
   data_prd.source.ptr = this;
   data_prd.read_callback = data_source_read_callback;
 
-  stream_buffers_[stream_id] = {};
+  stream_buffers_[stream_id].clear();
 
   nghttp2_submit_response(session_, stream_id, nva.data(), nva.size(),
                           &data_prd);
@@ -278,7 +278,10 @@ void Http2Connection::send_data(int32_t stream_id,
     eof = false;
   }
 
-  stream_buffers_[stream_id].push_back({data, eof});
+  // 集約初期化は宣言順に値を割り当てるため、offset を飛ばして eof を渡す
+  // つもりで {data, eof} と書くと offset に eof の値が入る (先頭 1 バイトが
+  // 欠落する)。指定初期化子で明示的にフィールドを指定する
+  stream_buffers_[stream_id].push_back({.data = data, .eof = eof});
   nghttp2_session_resume_data(session_, stream_id);
 }
 
@@ -306,6 +309,28 @@ void Http2Connection::test_force_close() {
   // テスト専用。nghttp2 の mem_recv / mem_send が負値を返した経路と同じ
   // 状態 (closed_ のみを立て、イベントは push しない)
   closed_ = true;
+}
+
+size_t Http2Connection::test_stream_buffer_count(int32_t stream_id) const {
+  auto it = stream_buffers_.find(stream_id);
+  return it == stream_buffers_.end() ? 0 : it->second.size();
+}
+
+size_t Http2Connection::test_stream_buffer_remaining(int32_t stream_id) const {
+  auto it = stream_buffers_.find(stream_id);
+  if (it == stream_buffers_.end() || it->second.empty()) {
+    return 0;
+  }
+  const auto& front = it->second.front();
+  return front.data.size() - front.offset;
+}
+
+size_t Http2Connection::test_stream_buffer_offset(int32_t stream_id) const {
+  auto it = stream_buffers_.find(stream_id);
+  if (it == stream_buffers_.end() || it->second.empty()) {
+    return 0;
+  }
+  return it->second.front().offset;
 }
 
 void Http2Connection::ping(const std::vector<uint8_t>& opaque_data) {
@@ -1009,12 +1034,18 @@ ssize_t Http2Connection::data_source_read_callback(nghttp2_session* session,
   auto& buffers = it->second;
   auto& front = buffers.front();
 
-  size_t copy_len = std::min(length, front.data.size());
-  std::memcpy(buf, front.data.data(), copy_len);
+  // 送信済みバイト数を offset で持ち、部分送出では残データをシフトしない。
+  // 旧実装は部分コピーごとに front.data.erase で全残データをシフトしていた
+  // ため、大バッファをフレーム単位で送出するとコピーコストが二乗で増えて
+  // いた。nghttp2 が要求する長さは 1 フレーム分に収まるため、ここでの
+  // コピーは常にフレームサイズ相当になる
+  size_t remaining = front.data.size() - front.offset;
+  size_t copy_len = std::min(length, remaining);
+  std::memcpy(buf, front.data.data() + front.offset, copy_len);
 
-  if (copy_len < front.data.size()) {
-    front.data.erase(front.data.begin(), front.data.begin() + copy_len);
-  } else {
+  front.offset += copy_len;
+
+  if (front.offset >= front.data.size()) {
     bool is_eof = front.eof;
     buffers.pop_front();
 
@@ -1179,6 +1210,25 @@ void bind_http2(nb::module_& m) {
       .def("_test_force_close", &Http2Connection::test_force_close,
            nb::lock_self(),
            "テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)")
+      .def(
+          "_test_stream_buffer_count",
+          &Http2Connection::test_stream_buffer_count, nb::lock_self(),
+          nb::arg("stream_id"),
+          nb::sig("def _test_stream_buffer_count(self, stream_id: int) -> int"),
+          "テスト専用: 送信バッファのエントリ数を返す")
+      .def(
+          "_test_stream_buffer_remaining",
+          &Http2Connection::test_stream_buffer_remaining, nb::lock_self(),
+          nb::arg("stream_id"),
+          nb::sig(
+              "def _test_stream_buffer_remaining(self, stream_id: int) -> int"),
+          "テスト専用: 送信バッファ先頭の残バイト数を返す")
+      .def("_test_stream_buffer_offset",
+           &Http2Connection::test_stream_buffer_offset, nb::lock_self(),
+           nb::arg("stream_id"),
+           nb::sig(
+               "def _test_stream_buffer_offset(self, stream_id: int) -> int"),
+           "テスト専用: 送信バッファ先頭の送信済みオフセットを返す")
       .def(
           "ping",
           [](Http2Connection& self, nb::bytes opaque_data) {

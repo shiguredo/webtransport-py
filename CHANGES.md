@@ -325,6 +325,8 @@
   - @voluntas
 - [FIX] QUIC サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
   - @voluntas
+- [FIX] HTTP/2 の送信バッファで先頭 1 バイトが欠落する問題と、空のボディで END_STREAM が送出されない問題を修正する
+  - @voluntas
 
 ### misc
 
@@ -334,6 +336,8 @@
 - [UPDATE] `http3.Connection` にテスト専用の `_test_force_close()` を追加する
   - @voluntas
 - [UPDATE] `http2.Connection` にテスト専用の `_test_force_close()` を追加する
+  - @voluntas
+- [UPDATE] `http2.Connection` にテスト専用の送信バッファ観測 (`_test_stream_buffer_count` / `_test_stream_buffer_remaining` / `_test_stream_buffer_offset`) を追加する
   - @voluntas
 
 - [UPDATE] 高レベル h2 Server の 405 拒否 (Allow: CONNECT) を e2e で検証する
