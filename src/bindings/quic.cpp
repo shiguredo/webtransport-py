@@ -2914,10 +2914,10 @@ int QuicConnection::stream_reset_cb(ngtcp2_conn* conn,
 }
 
 int QuicConnection::recv_stop_sending_cb(ngtcp2_conn* conn,
-                                          int64_t stream_id,
-                                          uint64_t app_error_code,
-                                          void* user_data,
-                                          void* stream_user_data) {
+                                         int64_t stream_id,
+                                         uint64_t app_error_code,
+                                         void* user_data,
+                                         void* stream_user_data) {
   (void)conn;
   (void)stream_user_data;
   auto* self = static_cast<QuicConnection*>(user_data);

@@ -1035,8 +1035,9 @@ void bind_http2(nb::module_& m) {
       .def_prop_ro(
           "opaque_data",
           [](const Http2Event& e) {
-            return nb::bytes(reinterpret_cast<const char*>(e.opaque_data.data()),
-                             e.opaque_data.size());
+            return nb::bytes(
+                reinterpret_cast<const char*>(e.opaque_data.data()),
+                e.opaque_data.size());
           },
           "PING の opaque data (RFC 9113 Section 6.7)")
       .def_ro("ack", &Http2Event::ack, "PING ACK かどうか")
@@ -1131,9 +1132,8 @@ void bind_http2(nb::module_& m) {
           [](Http2Connection& self, nb::bytes opaque_data) {
             // bytes は std::vector<uint8_t> の型キャスト対象外 (nanobind は
             // bytes / str をシーケンスとして受け付けない) ため明示変換する
-            self.ping(std::vector<uint8_t>(opaque_data.c_str(),
-                                           opaque_data.c_str() +
-                                               opaque_data.size()));
+            self.ping(std::vector<uint8_t>(
+                opaque_data.c_str(), opaque_data.c_str() + opaque_data.size()));
           },
           nb::lock_self(), nb::arg("opaque_data") = nb::bytes("", 0),
           nb::sig("def ping(self, opaque_data: bytes = b'') -> None"),
