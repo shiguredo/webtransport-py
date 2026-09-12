@@ -121,6 +121,9 @@ class Client:
         # 接続中のリモートアドレス (数値 IP。migrate で再解決せず使い回す)
         self._remote_addr: tuple[str, int] | None = None
         self._running = False
+        # 次に QUIC のタイマーを処理すべき期限までの秒数。受信待ちの
+        # タイムアウトに使い、期限までに受信が無ければタイマーを処理する
+        self._wait = 0.1
         self._connected = False
         # SESSION_TICKET イベントで受け取った最新チケット
         self._latest_session_ticket: bytes | None = None
@@ -324,31 +327,40 @@ class Client:
         return (self._host, self._port)
 
     async def _send_pending(self) -> int:
-        """送信待ちパケットを 1 つ送出する
+        """送信待ちパケットを送出できるだけ送出する
 
-        send() を ACK なしで連続 drain すると、ストリームデータ滞留時に
-        戻ってこなくなるため、1 呼び出しあたり 1 パケットに留める。
+        send() は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで
+        必ず None を返すため、None まで drain しても戻ってこなくならない。
+        1 パケットに留めると run() の待機間隔がそのままスループット上限に
+        なるため、送出できるだけまとめて送出する。
 
         Returns:
-            送信したパケット数 (0 または 1。送信しない場合は 0)
+            送信したパケット数
         """
         if self._connection is None or self._socket is None:
             return 0
 
-        packet = self._connection.send()
-        if packet is None:
-            return 0
-
         loop = asyncio.get_running_loop()
-        await loop.sock_sendto(
-            self._socket,
-            packet.data,
-            self._destination_for_packet(packet),
-        )
-        return 1
+        sent = 0
+        while True:
+            packet = self._connection.send()
+            if packet is None:
+                return sent
+            await loop.sock_sendto(
+                self._socket,
+                packet.data,
+                self._destination_for_packet(packet),
+            )
+            sent += 1
 
-    async def _receive(self) -> None:
-        """データを受信する"""
+    async def _receive(self, timeout: float = 0.1) -> None:
+        """データを受信する
+
+        timeout はソケット読み取りの待ち時間。呼び出し側は QUIC の次の
+        タイムアウト期限に合わせて渡す。待っている間にタイマー処理
+        (再送・ACK・pacing) ができないとスループットが大きく落ちるため、
+        期限までに受信が無ければ戻って呼び出し側にタイマーを処理させる。
+        """
         if self._connection is None or self._socket is None:
             return
         if self._local_addr is None:
@@ -358,12 +370,32 @@ class Client:
         try:
             data, raw_remote = await asyncio.wait_for(
                 loop.sock_recvfrom(self._socket, 65535),
-                timeout=0.1,
+                timeout=timeout,
             )
-            remote = self._normalize_addr(raw_remote)
-            self._connection.receive(data, self._local_addr, remote)
         except TimeoutError:
-            pass
+            return
+
+        remote = self._normalize_addr(raw_remote)
+        self._connection.receive(data, self._local_addr, remote)
+
+    def _timeout_seconds(self) -> float:
+        """QUIC の次のタイムアウトまでの秒数を返す
+
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。0 以下の場合は
+        即座にタイマー処理すべき状態のため 0 を返す。
+        """
+        if self._connection is None:
+            return 0.1
+        timeout_ns = self._connection.get_timeout()
+        if timeout_ns is None:
+            return 0.1
+        if timeout_ns <= 0:
+            return 0.0
+        # 1 回の受信待ちは 0.001〜0.1 秒に収める。下限を設けないと
+        # pacing 期限がマイクロ秒単位で来たときに受信待ちがほぼ常に
+        # タイムアウトし、pacing で送れるようになった直後に送り出せない
+        # (下限を設けても sleep 側は 0 に近い値で回るため応答性は落ちない)
+        return min(max(timeout_ns / 1e9, 0.001), 0.1)
 
     def _resolve_connect(self, result: bool) -> None:
         """connect() の待機者へ結果を通知する
@@ -570,7 +602,7 @@ class Client:
         try:
             while self._running:
                 try:
-                    await self._receive()
+                    await self._receive(self._wait)
                 except OSError:
                     if not self._running:
                         break
@@ -585,14 +617,26 @@ class Client:
                 if not self._running:
                     break
 
-                await self._send_pending()
+                sent = await self._send_pending()
 
                 if self._connection is not None:
                     timeout = self._connection.get_timeout()
                     if timeout is not None and timeout <= 0:
                         self._connection.handle_timeout()
+                        # タイマー処理で再送や ACK が積まれた可能性があるため
+                        # もう一度送信待ちを掃く
+                        sent += await self._send_pending()
+                    # 受信待ちは次のタイマー期限に合わせる。期限までに受信が
+                    # 無ければ戻ってタイマーを処理する
+                    self._wait = self._timeout_seconds()
 
-                await asyncio.sleep(0.01)
+                # 送信を続けられている間は sleep しない。sock_sendto は毎回
+                # イベントループへ制御を返すため、他タスクを止めない。
+                # 送信が無かったときは次の送信機会 (pacing 期限 / PTO /
+                # ACK タイマー) まで待つ。固定 0.01 秒で待つと pacing 律速時に
+                # スループットが 1 桁落ちる
+                if sent == 0:
+                    await asyncio.sleep(self._wait)
         except asyncio.CancelledError:
             # 外部からのキャンセルでも connect() の待機者と受信待機者を
             # 永久待機させない
