@@ -1082,6 +1082,36 @@ async def _h2_server_with_sans_io_client(
     return server, reader, writer, client, session_id
 
 
+async def _h2_server_with_origin_allowed(
+    test_certificates: dict[str, str],
+    allowed_origins: list[str],
+) -> tuple[Server, asyncio.StreamReader, asyncio.StreamWriter, h2_low.Session]:
+    """allowed_origins 付きの高レベル Server を起動し Sans-IO クライアントを SETTINGS まで進める
+
+    @return (server, reader, writer, client)
+    """
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        allowed_origins=allowed_origins,
+    )
+    await server.start()
+
+    reader, writer = await _open_sans_io_h2_connection(server.actual_port)
+    client = h2_low.Session.create_client(h2_low.Config())
+
+    _send_all_h2_data(client, writer)
+    await writer.drain()
+    received = await asyncio.wait_for(reader.read(65535), timeout=2.0)
+    assert received
+    client.receive(received)
+    assert client.is_webtransport_ready() is True
+
+    return server, reader, writer, client
+
+
 @pytest.mark.asyncio
 async def test_h2_server_rejects_session_with_non_2xx(test_certificates):
     """on_session_request が 403 を返すとクライアントに SESSION_REJECTED が届くことを確認
@@ -2420,4 +2450,118 @@ async def test_client_on_stop_sending_fires(test_certificates):
         client_task.cancel()
         await asyncio.gather(client_task, return_exceptions=True)
         await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_h2_server_rejects_disallowed_origin(test_certificates):
+    """allowed_origins に無い Origin の CONNECT が 403 で拒否されることを確認
+
+    draft-ietf-webtrans-http2-15 Section 3.2 の「When the request contains the
+    Origin header, the WebTransport server MUST verify the Origin header」と
+    「If the verification fails, the WebTransport server SHOULD reply with
+    status code 403」を、高レベル h2.Server の allowed_origins で満たす。
+    """
+    server, reader, writer, client = await _h2_server_with_origin_allowed(
+        test_certificates, ["https://allowed.example.com"]
+    )
+    try:
+        session_id = client.connect(
+            "https://localhost/webtransport",
+            origin="https://disallowed.example.com",
+        )
+        assert session_id >= 0
+
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={h2_low.EventType.SESSION_REJECTED},
+        )
+        rejected_events = [e for e in events if e.type == h2_low.EventType.SESSION_REJECTED]
+        assert len(rejected_events) == 1
+        assert rejected_events[0].session_id == session_id
+        assert rejected_events[0].status_code == 403
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_h2_server_accepts_allowed_origin(test_certificates):
+    """allowed_origins に一致する Origin の CONNECT が受理されることを確認"""
+    server, reader, writer, client = await _h2_server_with_origin_allowed(
+        test_certificates, ["https://allowed.example.com"]
+    )
+    try:
+        session_id = client.connect(
+            "https://localhost/webtransport",
+            origin="https://allowed.example.com",
+        )
+        assert session_id >= 0
+
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={h2_low.EventType.SESSION_READY},
+        )
+        ready_events = [e for e in events if e.type == h2_low.EventType.SESSION_READY]
+        assert len(ready_events) == 1
+        assert ready_events[0].session_id == session_id
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_h2_server_accepts_request_without_origin(test_certificates):
+    """allowed_origins 設定時でも Origin ヘッダー無しの CONNECT が受理されることを確認
+
+    仕様上 Origin は非ブラウザクライアントでは OPTIONAL である。
+    """
+    server, reader, writer, client = await _h2_server_with_origin_allowed(
+        test_certificates, ["https://allowed.example.com"]
+    )
+    try:
+        # origin を指定せず connect する
+        session_id = client.connect("https://localhost/webtransport")
+        assert session_id >= 0
+
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={h2_low.EventType.SESSION_READY},
+        )
+        assert any(e.type == h2_low.EventType.SESSION_READY for e in events)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_h2_server_without_allowed_origins_accepts_any_origin(test_certificates):
+    """allowed_origins 未設定なら任意の Origin が受理されることを確認 (既定の後方互換)"""
+    server, reader, writer, client = await _h2_server_with_origin_allowed(test_certificates, [])
+    try:
+        session_id = client.connect(
+            "https://localhost/webtransport",
+            origin="https://any.example.com",
+        )
+        assert session_id >= 0
+
+        events = await _pump_sans_io_h2(
+            reader,
+            writer,
+            client,
+            want_types={h2_low.EventType.SESSION_READY},
+        )
+        assert any(e.type == h2_low.EventType.SESSION_READY for e in events)
+    finally:
+        writer.close()
+        await writer.wait_closed()
         await server.stop()
