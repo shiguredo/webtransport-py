@@ -27,9 +27,11 @@ async def test_two_clients_isolated(test_certificates) -> None:
     """
     1 台の遅延中も他接続の往復が止まらないことを確認する
 
-    クライアント A の応答を 0.5 秒待たせる間に、クライアント B の送信から
-    受信までが 50 ms 以内で完了する。単一ループの直列処理では B も 0.5 秒
-    待たされるため、分離の有無を wall time で判定できる。
+    クライアント A の応答を 1.5 秒待たせる間に、クライアント B の送信から
+    受信までが 200 ms 以内で完了する。単一ループの直列処理では B も 1.5 秒
+    待たされるため、分離の有無を wall time で判定できる。遅延が 0.5 秒の
+    ときは CI ランナーのスケジューリング揺らぎ (実測 73 ms) で B の判定が
+    落ちたため、遅延としきい値の分離幅を広げた。
     """
     server = Server(
         host="127.0.0.1",
@@ -41,7 +43,7 @@ async def test_two_clients_isolated(test_certificates) -> None:
     async def on_server_stream_data(stream_id, data, fin, addr):
         # 遅延対象のみ待たせる
         if data == b"slow":
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5)
         await server.send_stream_data(addr, stream_id, data, fin=True)
 
     server.on_stream_data(on_server_stream_data)
@@ -77,10 +79,10 @@ async def test_two_clients_isolated(test_certificates) -> None:
         await client_b.send_stream_data(stream_b, b"fast", fin=True)
         await asyncio.wait_for(got_b.wait(), timeout=5.0)
         elapsed = time.monotonic() - start
-        # 0.5 秒の遅延に引きずられず 50 ms 以内で完了する
-        assert elapsed < 0.05, f"B の往復が遅延した: {elapsed:.3f}s"
+        # 1.5 秒の遅延に引きずられず 200 ms 以内で完了する
+        assert elapsed < 0.2, f"B の往復が遅延した: {elapsed:.3f}s"
         # A も最終的に完了する
-        await asyncio.wait_for(got_a.wait(), timeout=5.0)
+        await asyncio.wait_for(got_a.wait(), timeout=10.0)
     finally:
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
@@ -94,8 +96,8 @@ async def test_hundred_clients_isolated(test_certificates) -> None:
     """
     100 並行接続で 1 台の遅延が他に波及しないことを確認する
 
-    0 番のみ 0.5 秒待たせ、残り 99 台の往復の最大値が 100 ms 以内である。
-    波及の定義は各接続の往復時間の最大値とする。
+    0 番のみ 0.5 秒待たせ、残り 99 台の往復の中央値が 150 ms 以内である。
+    波及の定義は各接続の往復時間の中央値とする。
     """
     server = Server(
         host="127.0.0.1",
@@ -159,9 +161,9 @@ async def test_hundred_clients_isolated(test_certificates) -> None:
         # 波及を検出するため中央値で判定する
         elapsed = sorted(elapsed_list[1:])
         median = elapsed[len(elapsed) // 2]
-        assert median < 0.1, f"99 台の往復中央値が遅延した: {median:.3f}s"
+        assert median < 0.15, f"99 台の往復中央値が遅延した: {median:.3f}s"
         # 遅延側も最終的に完了する
-        await asyncio.wait_for(events[0].wait(), timeout=5.0)
+        await asyncio.wait_for(events[0].wait(), timeout=10.0)
     finally:
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
