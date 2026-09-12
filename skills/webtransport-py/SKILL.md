@@ -292,11 +292,14 @@ def was_early_data_attempted() -> bool
 # サーバーコールバック
 # on_request(stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int])
 # on_data(stream_id: int, data: bytes, addr: tuple[str, int])
+# on_stream_end(stream_id: int, addr: tuple[str, int])
 # on_stream_reset(stream_id: int, error_code: int, addr: tuple[str, int])
 
 async def submit_response(addr: tuple[str, int], stream_id: int, headers: list[tuple[str, str]]) -> None
 async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
 ```
+
+`on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。
 
 `http3.Client.__init__(host, port=443, idle_timeout_ns=30_000_000_000, verify_peer=True, ca_file=None, verify_callback=None)`。
 
@@ -320,11 +323,14 @@ async def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
 ```python
 # on_request(stream_id: int, headers: list[tuple[str, str]], response_writer: ResponseWriter)
 # on_data(stream_id: int, data: bytes, response_writer: ResponseWriter)
+# on_stream_end(stream_id: int, response_writer: ResponseWriter)
 
 # ResponseWriter のメソッド
 async def send_headers(stream_id: int, headers: list[tuple[str, str]]) -> None
 async def send_data(stream_id: int, data: bytes, end_stream: bool = False) -> None
 ```
+
+`on_stream_end` はリクエストボディ終端 (END_STREAM) の受信で通知する。ボディなしのリクエスト (HEADERS に END_STREAM) でも呼ばれる。RESET_STREAM で終了した場合は呼ばれない。
 
 `http2.Client.__init__(host, port=443, verify_peer=True)`。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` の形は http3 と同じで、`send_data(stream_id, data, eof=False)` のみ引数名が異なる。
 

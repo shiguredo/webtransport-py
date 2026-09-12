@@ -55,6 +55,11 @@ class ClientConnection:
         self.qpack_encoder_stream_id: int = -1
         self.qpack_decoder_stream_id: int = -1
         self.http3_streams_setup: bool = False
+        # 受信 FIN が立った双方向ストリーム (on_stream_end 通知用)。
+        # 受信経路とタイマー経路のどちらで QUIC イベントを取り出しても
+        # 同じ通知経路になるよう接続単位で保持し、HTTP/3 層のイベントを
+        # 処理したあとに通知する
+        self.finished_streams: list[int] = []
 
     def setup_http3_streams(self) -> None:
         """HTTP/3 制御ストリームとQPACKストリームを設定する"""
@@ -133,6 +138,7 @@ class Server:
             Callable[[int, list[tuple[str, str]], tuple[str, int]], Awaitable[None]] | None
         ) = None
         self._on_data: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_stream_end: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int, tuple[str, int]], Awaitable[None]] | None = None
 
     @property
@@ -176,6 +182,20 @@ class Server:
             callback: async def callback(stream_id: int, data: bytes, addr: tuple[str, int]) -> None
         """
         self._on_data = callback
+
+    def on_stream_end(
+        self,
+        callback: Callable[[int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """リクエストボディ終端 (FIN) 受信時のコールバックを設定する
+
+        POST などのリクエストボディの受信完了を検知してから応答を送るために
+        使う。RESET_STREAM / STOP_SENDING などで終了した場合は呼ばれない。
+
+        Args:
+            callback: async def callback(stream_id: int, addr: tuple[str, int]) -> None
+        """
+        self._on_stream_end = callback
 
     def on_stream_reset(
         self,
@@ -365,6 +385,11 @@ class Server:
                     quic_event.data,
                     quic_event.fin,
                 )
+                # nghttp3_conn_close_stream は残りの DATA イベントを落とす
+                # ことがあるため使わない。QUIC の FIN をストリーム終端の
+                # 合図として使う (高レベル Client と同じ判定)
+                if quic_event.fin and quic_event.stream_id % 4 in (0, 1):
+                    client.finished_streams.append(quic_event.stream_id)
             elif quic_event.type == quic_low.EventType.STREAM_RESET:
                 if self._on_stream_reset is not None:
                     await self._on_stream_reset(
@@ -516,6 +541,17 @@ class Server:
                                 addr,
                             )
 
+                    # STREAM_END イベント (ヘッダー終端などで低レベルが発火する
+                    # 終端検知) はここでは消費しない: on_stream_end は受信した
+                    # QUIC FIN (finished_streams) の単一経路で通知する。ヘッダー
+                    # と FIN が同一の QUIC STREAM_DATA として届くと両経路で
+                    # 通知され 2 回呼ばれるため (RFC 9114 Section 4.1 の
+                    # メッセージフレーミングと Section 6 のフレーム境界と
+                    # QUIC STREAM_DATA 境界の独立性により、1 チャンクで
+                    # 届くのは正当なワイヤパターン。実ブラウザ等が送り得る)。
+                    # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
+                    # 低レベル API の契約としてそのまま維持される
+
                     elif http3_event.type == http3_low.EventType.RESET_STREAM:
                         client.quic_connection.reset_stream(
                             http3_event.stream_id,
@@ -527,6 +563,14 @@ class Server:
                             http3_event.stream_id,
                             http3_event.error_code,
                         )
+
+                # HTTP/3 の DATA を処理したあとに STREAM_END を通知する。
+                # コールバック未設定でも滞留させないよう必ず取り出す
+                finished_streams = client.finished_streams
+                client.finished_streams = []
+                if self._on_stream_end is not None:
+                    for stream_id in finished_streams:
+                        await self._on_stream_end(stream_id, addr)
 
                 await self._send_to(addr, client)
 

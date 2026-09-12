@@ -352,6 +352,191 @@ async def test_server_client_post_with_body(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_server_on_stream_end_fires_after_body(test_certificates):
+    """Server.on_stream_end がリクエストボディ終端で発火することを確認
+
+    分割して送ったボディの受信完了を検知してから応答する。on_data が先に
+    呼ばれ、on_stream_end は 1 回だけ同じ stream_id で呼ばれる。
+    """
+    from webtransport.http3 import Client, Server
+
+    calls: list[tuple[str, int]] = []
+    received_bodies: list[bytes] = []
+    stream_ended = asyncio.Event()
+    client_data_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        calls.append(("request", stream_id))
+
+    async def on_data(stream_id, data, addr):
+        calls.append(("data", stream_id))
+        received_bodies.append(data)
+
+    async def on_stream_end(stream_id, addr):
+        calls.append(("stream_end", stream_id))
+        stream_ended.set()
+        # ボディ受信が完了してから応答する
+        response_headers = [(":status", "200"), ("content-type", "text/plain")]
+        await server.submit_response(addr, stream_id, response_headers)
+        await server.send_data(addr, stream_id, b"done", fin=True)
+
+    server.on_request(on_request)
+    server.on_data(on_data)
+    server.on_stream_end(on_stream_end)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    received: list[bytes] = []
+
+    async def on_client_data(stream_id, data):
+        received.append(data)
+        client_data_received.set()
+
+    client.on_data(on_client_data)
+
+    await client.connect()
+
+    stream_id = await client.request("POST", "/echo")
+    assert stream_id >= 0
+    # ボディを 2 回に分けて送り、最後に FIN を付ける
+    await client.send_data(stream_id, b"pay")
+    await client.send_data(stream_id, b"load", fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(stream_ended.wait(), timeout=5.0)
+    await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+
+    # on_request の後に on_data (分割数ぶん) と on_stream_end が 1 回ずつ
+    assert calls[0] == ("request", stream_id)
+    assert calls[-1] == ("stream_end", stream_id)
+    assert calls.count(("stream_end", stream_id)) == 1
+    assert all(call == ("data", stream_id) for call in calls[1:-1])
+    assert b"".join(received_bodies) == b"payload"
+    assert received == [b"done"]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_on_stream_end_fires_for_bodyless_request(test_certificates):
+    """ボディなしリクエストでも Server.on_stream_end が 1 回だけ発火することを確認
+
+    GET では on_data は呼ばれず、on_stream_end だけが 1 回呼ばれる。
+    ヘッダーと FIN が別フレームでも同一の QUIC STREAM_DATA でも、通知は
+    QUIC FIN の単一経路であるため二重発火しない。
+    """
+    from webtransport.http3 import Client, Server
+
+    calls: list[tuple[str, int]] = []
+    stream_ended = asyncio.Event()
+    client_headers_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        calls.append(("request", stream_id))
+
+    async def on_data(stream_id, data, addr):
+        calls.append(("data", stream_id))
+
+    async def on_stream_end(stream_id, addr):
+        calls.append(("stream_end", stream_id))
+        stream_ended.set()
+        await server.submit_response(addr, stream_id, [(":status", "204")])
+        await server.send_data(addr, stream_id, b"", fin=True)
+
+    server.on_request(on_request)
+    server.on_data(on_data)
+    server.on_stream_end(on_stream_end)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_headers(stream_id, headers):
+        client_headers_received.set()
+
+    client.on_headers(on_client_headers)
+
+    await client.connect()
+
+    stream_id = await client.request("GET", "/empty")
+    assert stream_id >= 0
+    await client.send_data(stream_id, b"", fin=True)
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(stream_ended.wait(), timeout=5.0)
+    await asyncio.wait_for(client_headers_received.wait(), timeout=5.0)
+
+    # on_data は呼ばれず、on_stream_end は 1 回だけ呼ばれる
+    assert calls == [("request", stream_id), ("stream_end", stream_id)]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_multiple_http3_requests(test_certificates):
     """同一接続で複数の GET リクエストが独立して処理されることを確認"""
     from webtransport.http3 import Client, Server

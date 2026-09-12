@@ -23,6 +23,8 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
   - @voluntas
+- [ADD] `http2.Server` と `http3.Server` にリクエストボディ終端 (`on_stream_end`) コールバックを追加する
+  - @voluntas
 - [ADD] `webtransport.http2` から `ResponseWriter` を再エクスポートする
   - @voluntas
 - [ADD] WebTransport over HTTP/3 の `h3.Session` に `is_webtransport_ready()` を追加する
