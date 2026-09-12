@@ -196,6 +196,15 @@ class Http2Connection {
   void goaway(uint32_t error_code = NGHTTP2_NO_ERROR);
 
   /**
+   * テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)
+   *
+   * nghttp2 の mem_recv / mem_send が負値を返した経路 (`closed_ = true`) を
+   * Python から人工的に作る。イベントは push しないため、フレームエラーで
+   * 低レベルが自主クローズした状態と同じ観測になる
+   */
+  void test_force_close();
+
+  /**
    * PING を送信
    * @param opaque_data 8 バイトの opaque data (RFC 9113 Section 6.7)。
    *   空ならゼロ 8 バイトを送る。8 バイト以外は std::runtime_error

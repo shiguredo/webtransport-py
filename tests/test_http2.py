@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    _create_http2_pair,
     _drain_events,
     _exchange_http2_settings,
     _h2_pump,
@@ -288,3 +289,47 @@ def test_http2_window_update_event_fields_default_for_other_events():
         assert event.opaque_data == b""
         assert event.ack is False
         assert event.window_size_increment == 0
+
+
+def test_http2_test_force_close_helper():
+    """テスト専用 _test_force_close が is_closed を立てイベントを積まないことを確認
+
+    nghttp2 の mem_recv / mem_send が負値を返した経路 (closed_ = true) を
+    Python から人工的に作る。イベントは push しないため next_event() は
+    None を返す。
+    """
+    client, server = _create_http2_pair()
+    stream_id = client.submit_request(
+        [
+            (":method", "GET"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+        ]
+    )
+    assert stream_id > 0
+    _h2_pump(client, server)
+
+    # 送信前は閉じていない。既存イベントを空にしてから検証する
+    assert client.is_closed() is False
+    _drain_events(client)
+    assert client.next_event() is None
+
+    client._test_force_close()
+
+    assert client.is_closed() is True
+    # 強制クローズはイベントを積まない
+    assert client.next_event() is None
+    # 通常の送信も行わない
+    assert client.send() is None
+
+
+def test_http2_test_force_close_does_not_affect_peer():
+    """_test_force_close がピア側の接続に影響しないことを確認"""
+    client, server = _create_http2_pair()
+    _h2_pump(client, server)
+
+    client._test_force_close()
+
+    assert client.is_closed() is True
+    assert server.is_closed() is False

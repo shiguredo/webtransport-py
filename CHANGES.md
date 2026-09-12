@@ -324,6 +324,9 @@
 
 ### misc
 
+- [UPDATE] `http2.Connection` にテスト専用の `_test_force_close()` を追加する
+  - @voluntas
+
 - [UPDATE] 高レベル h2 Server の 405 拒否 (Allow: CONNECT) を e2e で検証する
   - @voluntas
 - [UPDATE] PBT にセッション終了後の送信無視の property を追加し、e2e テストの固定 sleep と過大なタイムアウトを解消する
