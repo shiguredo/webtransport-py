@@ -739,6 +739,17 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   event.stream_id = stream_id;
   event.error_code = static_cast<uint32_t>(error_code);
   push_event(std::move(event));
+
+  // draft-15 Section 6.3 / RFC 9000 Section 3.5: 送信側が Ready / Send 状態
+  // のストリームへの WT_STOP_SENDING 受信には WT_RESET_STREAM で応答する。
+  // エラーコードは受信した WT_STOP_SENDING のものを複製する (draft-15
+  // Section 6.3 の「The error code from the WT_STOP_SENDING capsule can be
+  // copied into the WT_RESET_STREAM capsule if the endpoint does not have a
+  // more appropriate code to use」)。送信側が既に終端 (DataSent /
+  // ResetSent) の場合は reset_stream 側のガードで送出されない
+  if (known_stream) {
+    reset_stream(session_id, stream_id, static_cast<uint32_t>(error_code));
+  }
 }
 
 void H2Session::handle_wt_max_data(int32_t session_id,

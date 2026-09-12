@@ -307,3 +307,86 @@ def test_drain_session_unestablished_session_id_ignored() -> None:
     client.drain_session(unestablished_session_id)
     wire = client.send()
     assert wire is None or _encode_wt_drain_session_capsule() not in wire
+
+
+def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
+    """WT_STOP_SENDING capsule のワイヤバイト列を組み立てる"""
+    payload = _encode_varint(stream_id) + _encode_varint(error_code)
+    return bytes([0x99, 0x0B, 0x4D, 0x3A, len(payload)]) + payload
+
+
+def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
+    """WT_RESET_STREAM capsule のワイヤバイト列を組み立てる"""
+    payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
+    return bytes([0x99, 0x0B, 0x4D, 0x39, len(payload)]) + payload
+
+
+def test_stop_sending_on_ready_stream_auto_resets() -> None:
+    """Ready 状態のストリームへの WT_STOP_SENDING に WT_RESET_STREAM で自動応答することを確認
+
+    draft-15 Section 6.3 は「the recipient of a WT_STOP_SENDING capsule sends
+    a WT_RESET_STREAM capsule in response if the stream is in the "Ready" or
+    "Send" state」(RFC 9000 Section 3.5 由来の MUST) を求める。エラーコードは
+    受信した WT_STOP_SENDING から複製する (同 Section の can)。ストリーム
+    情報を持つ側でしか判定できないため、サーバー自身が開いたストリームを
+    使う。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # サーバーが双方向ストリームを開き、データを送ってクライアントに
+    # ストリームを認知させる (FIN は付けないため送信側は Ready のまま)
+    stream_id = server.open_stream(session_id, False)
+    assert stream_id >= 0
+    server.send_stream_data(session_id, stream_id, b"hello")
+    _h2_pump(server, client)
+    _drain_events(server)
+
+    # クライアントの WT_STOP_SENDING がサーバーに届く
+    error_code = 42
+    client.stop_sending(session_id, stream_id, error_code)
+    _h2_pump(client, server)
+
+    events = _drain_events(server)
+    stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
+    assert len(stop_events) == 1
+    assert stop_events[0].stream_id == stream_id
+    assert stop_events[0].error_code == error_code
+
+    # 自動応答の WT_RESET_STREAM がワイヤに載る (エラーコードは複製され、
+    # Reliable Size は送信済みバイト数 5 になる。draft-15 Section 6.2)
+    wire = server.send()
+    assert wire is not None, "WT_RESET_STREAM が送出されていません"
+    assert _encode_wt_reset_stream_capsule(stream_id, error_code, len(b"hello")) in wire
+
+
+def test_stop_sending_on_terminal_stream_does_not_auto_reset() -> None:
+    """送信側が終端済みのストリームには自動応答しないことを確認
+
+    draft-15 Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT be sent after
+    a stream is closed or reset」により、送信側が FIN 送出済み (DataSent) の
+    ストリームには WT_RESET_STREAM を送出しない。STOP_SENDING イベント自体は
+    届く。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # サーバーが双方向ストリームを開き、FIN まで送る (送信側は DataSent)
+    stream_id = server.open_stream(session_id, False)
+    assert stream_id >= 0
+    server.send_stream_data(session_id, stream_id, b"body", fin=True)
+    _h2_pump(server, client)
+    _drain_events(server)
+
+    error_code = 7
+    client.stop_sending(session_id, stream_id, error_code)
+    _h2_pump(client, server)
+
+    events = _drain_events(server)
+    stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
+    assert len(stop_events) == 1
+    assert stop_events[0].stream_id == stream_id
+
+    # 自動応答の WT_RESET_STREAM は送出されない
+    wire = server.send()
+    assert wire is None or _encode_wt_reset_stream_capsule(stream_id, error_code, 0) not in wire

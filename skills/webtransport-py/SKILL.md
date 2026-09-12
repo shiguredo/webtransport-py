@@ -147,6 +147,7 @@ async def main() -> None:
     # on_session_ready(session_id: int) / on_session_closed(session_id: int)
     # on_stream_data(stream_id: int, data: bytes)
     # on_stream_reset(stream_id: int, error_code: int)
+    # on_stop_sending(stream_id: int, error_code: int)
     # on_datagram(data: bytes)
 
     async def on_stream_data(stream_id: int, data: bytes) -> None:
@@ -205,6 +206,7 @@ async def close() -> None
 # on_session_closed(session_writer: SessionWriter)
 # on_stream_data(stream_id: int, data: bytes, session_writer: SessionWriter)
 # on_stream_reset(stream_id: int, error_code: int, session_writer: SessionWriter)
+# on_stop_sending(stream_id: int, error_code: int, session_writer: SessionWriter)
 # on_datagram(data: bytes, session_writer: SessionWriter)
 ```
 
@@ -215,6 +217,7 @@ async def open_stream(unidirectional: bool = False) -> int
 async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(data: bytes) -> None
 async def reset_stream(stream_id: int, error_code: int = 0) -> None
+async def stop_sending(stream_id: int, error_code: int = 0) -> None
 async def close_session(error_code: int = 0, error_message: str = "") -> None
 ```
 

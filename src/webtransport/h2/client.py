@@ -99,6 +99,7 @@ class Client:
         self._on_session_closed: Callable[[int], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
+        self._on_stop_sending: Callable[[int, int], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes], Awaitable[None]] | None = None
         self._on_error: Callable[[int, str], Awaitable[None]] | None = None
         self._on_goaway: Callable[[int, int], Awaitable[None]] | None = None
@@ -183,6 +184,22 @@ class Client:
             callback: async def callback(data: bytes) -> None
         """
         self._on_datagram = callback
+
+    def on_stop_sending(
+        self,
+        callback: Callable[[int, int], Awaitable[None]],
+    ) -> None:
+        """ピアからの WT_STOP_SENDING 受信時のコールバックを設定する
+
+        ピアが送信側の停止を要求したときに、そのアプリケーションエラーコードと
+        ともに呼ばれる (draft-ietf-webtrans-http2-15 Section 6.3)。受信側の
+        低レベル層は送信側が Ready / Send 状態なら WT_RESET_STREAM を自動で
+        返すため、このコールバックは通知のみを担う。
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int) -> None
+        """
+        self._on_stop_sending = callback
 
     def on_error(
         self,
@@ -542,6 +559,27 @@ class Client:
         self._session.reset_stream(self._session_id, stream_id, error_code)
         await self._send_pending()
 
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ピアに送信停止を要求する (WT_STOP_SENDING)
+
+        受信側の停止を要求し、送信側が Ready / Send 状態ならピアが
+        WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-15 Section 6.3 /
+        RFC 9000 Section 3.5)。
+
+        Args:
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード
+
+        Raises:
+            ValueError: stream_id が 2^62 以上の場合 (varint の上限)。
+                存在しないストリーム ID へは送出せず無視する。
+        """
+        if self._session is None or self._session_id < 0:
+            return
+
+        self._session.stop_sending(self._session_id, stream_id, error_code)
+        await self._send_pending()
+
     async def _invoke_callback(
         self, callback: Callable[..., Awaitable[None]], *args: object
     ) -> None:
@@ -611,6 +649,14 @@ class Client:
                     ):
                         await self._invoke_callback(
                             self._on_stream_reset, event.stream_id, event.error_code
+                        )
+
+                    elif (
+                        event.type == h2_low.EventType.STOP_SENDING
+                        and self._on_stop_sending is not None
+                    ):
+                        await self._invoke_callback(
+                            self._on_stop_sending, event.stream_id, event.error_code
                         )
 
                     elif event.type == h2_low.EventType.DATAGRAM and self._on_datagram is not None:
