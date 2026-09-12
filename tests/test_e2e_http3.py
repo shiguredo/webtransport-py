@@ -1174,6 +1174,120 @@ async def test_large_post_body(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_http3_client_run_exits_on_low_level_force_close(test_certificates):
+    """HTTP/3 層の自主クローズで Client.run() が終了することを単独検証する
+
+    nghttp3 の read_stream2 / writev_stream が負値を返した経路では QUIC の
+    CONNECTION_CLOSED イベントも発火しないため、`run()` は HTTP/3 層の
+    `is_closed()` を見て QUIC に CONNECTION_CLOSE を送りつつ終了する。この
+    負値経路は Python から誘発困難なため、テスト専用 `_test_force_close()`
+    で同じ状態を作る。
+    """
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+
+    run_task = asyncio.create_task(client.run())
+    await asyncio.sleep(0.05)
+    assert not run_task.done()
+
+    # QUIC の CONNECTION_CLOSED も close() も使わずに HTTP/3 層を閉じる
+    client._http3_connection._test_force_close()
+
+    # is_closed() チェックが効いていれば数秒以内に run() が終了する
+    await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done() is True
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_http3_server_removes_client_on_low_level_force_close(test_certificates):
+    """HTTP/3 層の自主クローズで Server.run() が client を回収することを単独検証する
+
+    サーバー側の HTTP/3 層が負値 return で自主クローズしたとき、GRACE な
+    QUIC の CONNECTION_CLOSED は発火しない。`run()` は `http3_connection.is_closed()`
+    を見て CONNECTION_CLOSE を送出し `_clients` から取り除く。テスト専用
+    `_test_force_close()` でその状態を作る。
+    """
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+
+    # run() が accept して client を登録するまで待つ
+    for _ in range(100):
+        if server._clients:
+            break
+        await asyncio.sleep(0.02)
+    assert server._clients, "サーバーが client を登録しませんでした"
+
+    # サーバー側の HTTP/3 層を閉じる (QUIC の CONNECTION_CLOSED は使わない)
+    addr, server_client = next(iter(server._clients.items()))
+    assert server_client.http3_connection is not None
+    server_client.http3_connection._test_force_close()
+
+    # run() の回収経路が動いて登録が外れる
+    for _ in range(100):
+        if addr not in server._clients:
+            break
+        await asyncio.sleep(0.02)
+    assert addr not in server._clients
+
+    # サーバーの run() は停止していない (回収のみ)
+    assert not server_task.done()
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_http3_client_run_exits_on_client_close(test_certificates):
     """Client.run() 実行中に close() が呼ばれると run() が終了することを回帰確認する
 

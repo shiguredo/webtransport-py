@@ -1,5 +1,24 @@
 """HTTP/3 テスト"""
 
+from __future__ import annotations
+
+from webtransport import http3
+
+
+def _pump(src: http3.Connection, dst: http3.Connection) -> None:
+    """src の送信データを全て dst に渡す
+
+    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
+    receive_stream_data で直接渡す (モックなし)
+    """
+    for _ in range(64):
+        sent = False
+        for stream_id, data, fin in src.get_streams_to_send():
+            dst.receive_stream_data(stream_id, data, fin)
+            sent = True
+        if not sent:
+            break
+
 
 def test_http3_import():
     """HTTP/3 モジュールがインポートできることを確認"""
@@ -84,3 +103,44 @@ def test_http3_connection_with_webtransport():
     conn = http3.Connection.create_client(config)
     assert conn is not None
     assert conn.is_closed() is False
+
+
+def test_http3_test_force_close_helper():
+    """テスト専用 _test_force_close が is_closed を立てイベントを積まないことを確認
+
+    nghttp3 の read_stream2 / writev_stream が負値を返した経路 (closed_) を
+    Python から人工的に作る。イベントは push しないため next_event() は
+    None を返す。
+    """
+    client = http3.Connection.create_client(http3.Config())
+    server_config = http3.Config()
+    server_config.is_server = True
+    server = http3.Connection.create_server(server_config)
+    _pump(server, client)
+    _pump(client, server)
+
+    # 既存イベントを空にしてから検証する
+    assert client.is_closed() is False
+    while client.next_event() is not None:
+        pass
+
+    client._test_force_close()
+
+    assert client.is_closed() is True
+    # 強制クローズはイベントを積まない
+    assert client.next_event() is None
+
+
+def test_http3_test_force_close_does_not_affect_peer():
+    """_test_force_close がピア側の接続に影響しないことを確認"""
+    client = http3.Connection.create_client(http3.Config())
+    server_config = http3.Config()
+    server_config.is_server = True
+    server = http3.Connection.create_server(server_config)
+    _pump(server, client)
+    _pump(client, server)
+
+    client._test_force_close()
+
+    assert client.is_closed() is True
+    assert server.is_closed() is False

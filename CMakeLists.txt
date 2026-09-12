@@ -339,12 +339,15 @@ nanobind_add_stub(
   INCLUDE_PRIVATE
 )
 
+# INCLUDE_PRIVATE: `_test_force_close` のようなテスト専用ヘルパは先頭
+# アンダースコアを持つため、既定では stubgen が出力しない
 nanobind_add_stub(
   http3_stub
   MODULE webtransport_ext.http3
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/http3.pyi
   PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
   DEPENDS webtransport_ext
+  INCLUDE_PRIVATE
 )
 
 nanobind_add_stub(

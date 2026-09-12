@@ -473,6 +473,12 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
   push_event(std::move(event));
 }
 
+void Http3Connection::test_force_close() {
+  // テスト専用。nghttp3 の read_stream2 / writev_stream が負値を返した経路と
+  // 同じ状態 (closed_ のみを立て、イベントは push しない)
+  closed_ = true;
+}
+
 void Http3Connection::close_stream(int64_t stream_id, uint64_t error_code) {
   if (!conn_ || closed_) {
     return;
@@ -1344,6 +1350,9 @@ void bind_http3(nb::module_& m) {
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> None"),
            "ストリームをリセット")
+      .def("_test_force_close", &Http3Connection::test_force_close,
+           nb::lock_self(),
+           "テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)")
       .def("close_stream", &Http3Connection::close_stream, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("error_code") = NGHTTP3_H3_NO_ERROR,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
