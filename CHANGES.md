@@ -296,6 +296,8 @@
 
 ### misc
 
+- [FIX] CI でフレークする QUIC テストの pacing 依存を修正する
+  - @voluntas
 - [UPDATE] C++ バインディングの死にコードを削除する
   - @voluntas
 - [UPDATE] WebTransport over HTTP/3 の低レベル API テストを別ファイルへ分割する

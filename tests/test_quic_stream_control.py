@@ -9,12 +9,15 @@ import time
 
 from conftest import (
     CLIENT_ADDR,
+    PUMP_ATTEMPTS,
     SERVER_ADDR,
+    _drain_events,
     create_client_server_pair,
     perform_handshake,
+    wait_pacing_timeout,
 )
 
-from webtransport.quic import Config, Connection
+from webtransport.quic import Config, Connection, EventType
 
 # ngtcp2 が keep-alive の無効化に使う値
 UINT64_MAX = (1 << 64) - 1
@@ -26,6 +29,10 @@ MAX_DATA_DEFAULT = 1048576
 MAX_STREAM_DATA_DEFAULT = 262144
 # 既定の最大ストリーム数 (Config のデフォルト値)
 MAX_STREAMS_DEFAULT = 100
+
+# 静穏判定の閾値 (ns)。PTO / ACK 遅延などの期限は通常これより近いため、
+# 両側の最小期限がこれより遠ければ即時送信は無いとみなす
+QUIET_TIMEOUT_NS = 1_000_000_000
 
 
 def drain_timers(client: Connection, server: Connection):
@@ -60,25 +67,56 @@ def drain_timers(client: Connection, server: Connection):
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
-        # 両側のタイマーがアイドルタイムアウト相当 (1 秒超) になったら静穏とみなす
-        if (client_timeout is None or client_timeout > 1_000_000_000) and (
-            server_timeout is None or server_timeout > 1_000_000_000
+        # 両側のタイマーがアイドルタイムアウト相当になったら静穏とみなす
+        if (client_timeout is None or client_timeout > QUIET_TIMEOUT_NS) and (
+            server_timeout is None or server_timeout > QUIET_TIMEOUT_NS
         ):
             return
         time.sleep(0.05)
 
 
-def exchange_packets(client: Connection, server: Connection, rounds: int = 10):
-    """双方向のパケット送受信を指定ラウンド分交換する"""
-    for _ in range(rounds):
+def exchange_packets(client: Connection, server: Connection):
+    """双方向のパケットを送信可能なぶん交換する
+
+    期限到来済みのタイマー (PTO / ACK 遅延) は handle_timeout() で処理し、
+    pacing などの未来の期限は待って再試行する。両側の期限が静穏判定
+    (QUIET_TIMEOUT_NS) まで遠ざかったら、送信すべきものが無くなったと
+    みなして打ち切る。PUMP_ATTEMPTS 回で収束しなかった場合は異常として
+    失敗させる (上限は安全弁であり、通常は数回で収束する)。
+
+    1 秒超の期限は静穏とみなすため、pacing の期限が 1 秒を超える極端な
+    環境では未送信データを残して戻り得る。その場合は呼び出し元の事後条件
+    (前提表明や値の検証) が検出する。
+
+    keep-alive が有効な接続では期限が返り続けて静穏判定に達しないため、
+    呼び出す前に keep_alive_timeout(UINT64_MAX) で無効化すること
+    (drain_timers と同じ前提)。
+    """
+    for _ in range(PUMP_ATTEMPTS):
+        # 期限到来済みのタイマーを処理する。send() だけでは期限切れの
+        # タイマーが解消せず、空回りするため
+        for connection in (client, server):
+            timeout = connection.get_timeout()
+            if timeout is not None and timeout <= 0:
+                connection.handle_timeout()
+
         client_packet = client.send()
         if client_packet:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
         server_packet = server.send()
         if server_packet:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
-        if client_packet is None and server_packet is None:
+
+        timeouts = [
+            timeout
+            for connection in (client, server)
+            if (timeout := connection.get_timeout()) is not None
+        ]
+        if not timeouts or min(timeouts) > QUIET_TIMEOUT_NS:
             return
+        if client_packet is None and server_packet is None:
+            wait_pacing_timeout(client, server)
+    raise AssertionError("パケット交換が PUMP_ATTEMPTS 回で収束しませんでした")
 
 
 def test_streams_left_before_handshake():
@@ -226,6 +264,17 @@ def test_extend_max_stream_offset():
     stream_id = client.open_stream(True)
     client.send_stream_data(stream_id, b"x")
     exchange_packets(client, server)
+
+    # サーバーがストリームを認識して受信データを処理したことを確認する。
+    # 未認識のまま extend_max_stream_offset を呼ぶと、ngtcp2 は不明
+    # ストリームとして拡張を黙って破棄する (戻り値は成功のため検知できない)
+    stream_data_events = [
+        event
+        for event in _drain_events(server)
+        if event.type == EventType.STREAM_DATA and event.stream_id == stream_id
+    ]
+    assert len(stream_data_events) == 1, "サーバーがストリームデータを受信していません"
+    assert stream_data_events[0].data == b"x"
 
     # 閾値未満 (window/4 = 64 KiB 以下) の拡張は送出されない
     # (自動再開放の 1 バイトを含めても閾値未満)

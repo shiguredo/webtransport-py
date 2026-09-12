@@ -16,7 +16,7 @@ from conftest import (
     wait_pacing_timeout,
 )
 
-from webtransport.quic import Config, Connection, EventType, ReceiveResult
+from webtransport.quic import Config, Connection, EventType, Packet, ReceiveResult
 
 
 def test_close_nonexistent_stream():
@@ -77,8 +77,8 @@ def test_receive_after_close():
     assert perform_handshake(client, server, initial_packet)
 
     # サーバーがパケットを生成
-    server_packet = server.send()
-    assert server_packet is not None
+    server_packet = _send_with_pacing_wait(server)
+    assert server_packet is not None, "pacing 待ち後もサーバーのパケットを生成できません"
 
     # クライアントが接続をクローズ
     client.close(0, "client close")
@@ -121,6 +121,22 @@ def test_send_after_close():
     assert result is None
 
 
+def _send_with_pacing_wait(connection: Connection) -> Packet | None:
+    """send() が pacing で空振りする間、期限まで待って再試行して 1 パケット返す
+
+    直前に送信データを積んでいる前提で使う。pacing の期限は静穏判定 (1 秒)
+    より長くなることがあるため打ち切りはせず、上限回数まで待つ。返るパケットは
+    直前に積んだデータを含むとは限らない。
+    """
+    for _ in range(PUMP_ATTEMPTS):
+        packet = connection.send()
+        if packet is not None:
+            return packet
+        if not wait_pacing_timeout(connection):
+            return None
+    return None
+
+
 def test_connection_close_retransmission_on_receive():
     """close() 後の受信パケットに応答して CONNECTION_CLOSE を再送する"""
     client, server, initial_packet = create_client_server_pair()
@@ -133,6 +149,19 @@ def test_connection_close_retransmission_on_receive():
     while server.next_event() is not None:
         pass
 
+    # closing 期間は close() 時に 3×PTO で固定されるため、closing 中に
+    # pacing の期限待ちを挟むと満了して再送されないことがある。受信に使う
+    # クライアントのパケットは close() の前に生成しておく (接続が closing で
+    # ない間は pacing の期限待ちを安全に挟める)
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+    client.send_stream_data(stream_id, b"first", False)
+    first_packet = _send_with_pacing_wait(client)
+    assert first_packet is not None, "pacing 待ち後もクライアントのパケットを生成できません"
+    client.send_stream_data(stream_id, b"second", False)
+    second_packet = _send_with_pacing_wait(client)
+    assert second_packet is not None, "pacing 待ち後もクライアントのパケットを生成できません"
+
     # サーバーが close() して CONNECTION_CLOSE を生成・保持する
     server.close(0x100, "server error")
     assert server.is_closed()
@@ -144,19 +173,9 @@ def test_connection_close_retransmission_on_receive():
     # 受信を挟まない 2 回目の send() は None (初回配送の契約維持)
     assert server.send() is None
 
-    # ピア (クライアント) は接続が生きていると思い、ストリームにデータを積む
-    stream_id = client.open_stream(True)
-    assert stream_id >= 0
-    client.send_stream_data(stream_id, b"hello", False)
-    client_packet = client.send()
-    assert client_packet is not None
-
-    # サーバーがそのパケットを受信すると CONNECTION_CLOSE が再アームされる
-    result = server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
-    assert result == ReceiveResult.DISCARDED
-
-    # 受信パケットへの応答として、初回と同じ CONNECTION_CLOSE が再送される
+    # 1 つ目の受信で再アームされ、初回と同じ CONNECTION_CLOSE が再送される
     # (RFC 9000 Section 10.2.1 の同一パケット再送)
+    assert server.receive(first_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
     retransmitted = server.send()
     assert retransmitted is not None
     assert retransmitted.data == close_packet.data
@@ -164,18 +183,8 @@ def test_connection_close_retransmission_on_receive():
     # 再送後は再び受信を挟まない限り None に戻る (受信データグラムごとに 1 回)
     assert server.send() is None
 
-    # 2 回目の受信でも同じパケットが再送される (再アームの繰り返し)。
-    # 直前の送出の pacing 期限待ちの可能性があるため待って再試行する
-    client.send_stream_data(stream_id, b"world", False)
-    client_packet = None
-    for _ in range(PUMP_ATTEMPTS):
-        client_packet = client.send()
-        if client_packet is not None:
-            break
-        if not wait_pacing_timeout(client, server):
-            break
-    assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    # 2 つ目の受信でも同じパケットが再送される (再アームの繰り返し)
+    assert server.receive(second_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
     retransmitted_again = server.send()
     assert retransmitted_again is not None
     assert retransmitted_again.data == close_packet.data
@@ -196,6 +205,19 @@ def test_connection_close_retransmission_stops_after_closing_period():
     while server.next_event() is not None:
         pass
 
+    # closing 期間は close() 時に 3×PTO で固定されるため、closing 中に
+    # pacing の期限待ちを挟むと満了して期待と食い違う。受信に使う
+    # クライアントのパケットは close() の前に 4 つ生成しておく
+    # (満了前の再送 2 回・満了まで保持する再アーム 1 回・満了後の受信 1 回)
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+    client_packets = []
+    for payload in (b"hello", b"world", b"again", b"last"):
+        client.send_stream_data(stream_id, payload, False)
+        packet = _send_with_pacing_wait(client)
+        assert packet is not None, "pacing 待ち後もクライアントのパケットを生成できません"
+        client_packets.append(packet)
+
     # サーバーが close() して CONNECTION_CLOSE を生成・保持する
     server.close(0x100, "server error")
     assert server.is_closed()
@@ -205,29 +227,27 @@ def test_connection_close_retransmission_stops_after_closing_period():
     assert close_packet is not None
 
     # CLOSING 期間の満了前は、受信パケットごとに従来どおり 1 回再送される
-    stream_id = client.open_stream(True)
-    assert stream_id >= 0
-    client.send_stream_data(stream_id, b"hello", False)
-    client_packet = client.send()
-    assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    assert (
+        server.receive(client_packets[0].data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    ), "満了前の受信が破棄になりません"
     retransmitted = server.send()
     assert retransmitted is not None
     assert retransmitted.data == close_packet.data
 
-    # 満了前に再アームしておく (満了後も再アーム済みのパケットを返さない
-    # ことを破棄に依存せず確認するため)。直前の送出の pacing 期限待ちの
-    # 可能性があるため待って再試行する
-    client.send_stream_data(stream_id, b"world", False)
-    client_packet = None
-    for _ in range(PUMP_ATTEMPTS):
-        client_packet = client.send()
-        if client_packet is not None:
-            break
-        if not wait_pacing_timeout(client, server):
-            break
-    assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    # 再アームの繰り返しでも満了前は同じパケットが再送される (肯定確認)
+    assert (
+        server.receive(client_packets[1].data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    ), "満了前の 2 回目の受信が破棄になりません"
+    retransmitted_again = server.send()
+    assert retransmitted_again is not None
+    assert retransmitted_again.data == close_packet.data
+
+    # 3 回目の受信では再アームだけして send() を呼ばず、armed のまま満了を
+    # 迎えさせる (満了後も再アーム済みのパケットを返さないことを破棄に
+    # 依存せず確認するため)
+    assert (
+        server.receive(client_packets[2].data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.DISCARDED
+    ), "満了前の 3 回目の受信が破棄になりません"
 
     # CLOSING 期間の満了まで実時間待ちする (get_timeout() が残り時間を返す)
     timeout = server.get_timeout()
@@ -244,10 +264,9 @@ def test_connection_close_retransmission_stops_after_closing_period():
 
     # 満了後は受信パケットにも応答しない。receive() は終了を返し、再アームも
     # ConnectionClosed イベントの push も行わない
-    client.send_stream_data(stream_id, b"again", False)
-    client_packet = client.send()
-    assert client_packet is not None
-    assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.CLOSED
+    assert (
+        server.receive(client_packets[3].data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.CLOSED
+    ), "満了後の受信が終了になりません"
     assert server.send() is None
     assert server.next_event() is None
 
@@ -727,12 +746,12 @@ def test_duplicate_packet_discarded():
     client, server, initial_packet = create_client_server_pair()
     assert perform_handshake(client, server, initial_packet)
 
-    # ストリームデータを積んだ正規パケットを用意する
+    # 正規の 1RTT パケットを用意する (中身は重複判定に無関係)
     stream_id = client.open_stream(True)
     assert stream_id >= 0
     client.send_stream_data(stream_id, b"hello", False)
-    client_packet = client.send()
-    assert client_packet is not None
+    client_packet = _send_with_pacing_wait(client)
+    assert client_packet is not None, "pacing 待ち後もクライアントのパケットを生成できません"
 
     # 初回は受理される
     assert server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR) == ReceiveResult.ACCEPTED
