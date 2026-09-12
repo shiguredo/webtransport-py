@@ -1,7 +1,7 @@
 # HTTP/2 テストの _exchange_settings / _pump を conftest.py に集約する
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/refactor-consolidate-http2-test-helpers
 - Polished: {YYYY-MM-DD}
 
@@ -28,3 +28,15 @@
 - `tests/conftest.py` に SETTINGS 交換ヘルパーが 1 箇所だけ存在すること
 - 4 テストファイルのローカル `_exchange_settings` / `_pump` が削除され、conftest のヘルパーと `_h2_pump` の import に切り替わっていること
 - 全テストが通ること
+
+## 解決方法
+
+`tests/conftest.py` に `_exchange_http2_settings` と `_create_http2_pair` を追加し、4 テストファイルのローカルヘルパーを削除した。
+
+- `_exchange_http2_settings`: `http2.Connection` 同士の SETTINGS 交換。既存の `_create_h2_http2_pair` と同じループに収束判定の `AssertionError` を加えたもの
+- `_create_http2_pair`: `http2.Connection` のクライアント・サーバーペア作成と SETTINGS 交換 (`_create_h2_http2_pair` の http2 同士版)
+- `_h2_pump` は既存のものを再利用し、`_create_h2_http2_pair` も `_exchange_http2_settings` を使う形に寄せた
+- `tests/test_http2.py` / `test_http2_message_ext.py` / `test_http2_session_control.py` / `test_http2_session_state.py` からローカルの `_exchange_settings` / `_pump` / `_create_connection_pair` を削除し、呼び出しを `_exchange_http2_settings` / `_h2_pump` / `_create_http2_pair` に置き換えた
+- 各ファイルの `conftest` からの import を実際に使う名前だけに揃えた
+
+テストの検証内容は変更していない。`uv run pytest tests/ --timeout=30` の 1058 件が全て通ることを確認した。
