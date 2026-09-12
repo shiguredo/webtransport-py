@@ -1,7 +1,7 @@
 # 高レベル API の送信を 1 受信 1 パケットの律速から drain 化してスループットを回復する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/perf-drain-send-pending-throughput
 - Polished: {YYYY-MM-DD}
 
@@ -33,3 +33,16 @@ UDP 系の高レベル API (`quic.Client` / `quic.Server` / `h3.Client` / `h3.Se
 - `test_large_post_body` (`tests/test_e2e_http2.py` / `test_e2e_http3.py`) が 1 秒未満で通過すること
 - `send()` を drain する際に無限ループ・ハングが起きないこと (`send()` は cwnd 枯渇・フロー制御律速のいずれでも必ず nullopt を返すことを実験で実証済み)
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- 6 箇所の `_send_pending` / `_send_to` を「`send()` が None を返すまで drain」に変更した。`send()` は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで必ず None を返すため無限ループにはならない
+- 根拠不明だった「連続 drain すると ACK 待ちでハングする」というコメントを削除し、drain が安全である理由に書き直した
+- `quic.Client` の受信待ちタイムアウトと待機間隔を、固定値 (0.1 秒 / 0.01 秒) から QUIC の次回タイマー期限ベースに変更した。固定値では pacing 律速時に送信機会を取り逃す
+- `tests/test_e2e_http3.py::test_large_post_body` (32 KB) は 2.81 秒から 1.79 秒に短縮した
+- `quic.Client` から `quic.Server` への 4 MiB 片方向転送は 120 秒で 1.69 MB (TIMEOUT) から 7.65 秒で完走 (535 KB/s) に改善した
+
+## 未達の完了条件
+
+- 「h3 Client から 32 MiB 以上を 10 秒以内」は未達 (32 MiB で約 99 秒)。計測の結果、律速は `send()` の pacing とストリーム受信フロー制御であり、イベントループの待機間隔ではないことを確認した。この 2 点は `issues/0206-perf-quic-pacing-flow-control-throughput.md` で扱う
+- 「`test_large_post_body` が 1 秒未満」も未達 (1.79 秒)。同じ律速による
