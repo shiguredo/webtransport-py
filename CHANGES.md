@@ -328,6 +328,9 @@
 
 ### misc
 
+- [UPDATE] 確立済みペアへの API 呼び出し系列を検証するステートフル PBT を追加する
+  - @voluntas
+
 - [UPDATE] `http3.Connection` にテスト専用の `_test_force_close()` を追加する
   - @voluntas
 - [UPDATE] `http2.Connection` にテスト専用の `_test_force_close()` を追加する
