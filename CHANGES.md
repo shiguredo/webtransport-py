@@ -304,6 +304,10 @@
 
 ### misc
 
+- [UPDATE] テスト用の UDP パケットロス注入リレー LossyRelay とハンドシェイクロスからの回復テストを追加する
+  - @voluntas
+- [UPDATE] conftest.py の手書きイベント取り出しループを _drain_events に寄せ替える
+  - @voluntas
 - [FIX] CI でフレークする QUIC テストの pacing 依存を修正する
   - @voluntas
 - [UPDATE] C++ バインディングの死にコードを削除する

@@ -33,3 +33,8 @@ test-results/
 
 # Agents
 .claude/
+
+# ローカル作業用の一時ディレクトリ (uv のキャッシュ・ツール設置先など)
+.tmp/
+.uv-cache/
+.uv-tools/

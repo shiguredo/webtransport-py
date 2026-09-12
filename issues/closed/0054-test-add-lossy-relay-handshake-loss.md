@@ -1,7 +1,7 @@
 # ハンドシェイク損失下でも接続が完了することを LossyRelay で検証する
 
 - Created: 2026-08-09
-- Completed: YYYY-MM-DD
+- Completed: 2026-09-12
 - Branch: feature/add-lossy-relay-handshake-loss
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -39,4 +39,13 @@ QUIC ハンドシェイクのパケット (Initial / Handshake) が UDP ロス�
 
 ## 解決方法
 
-(実装時に追記する)
+`tests/lossy_relay.py` を新設し、`tests/test_e2e_quic_advanced.py` にハンドシェイクロスの回復テストを 1 本追加した。
+
+- `LossyRelayPacket`: `direction` ("c2s" / "s2c")・方向別の 0 始まり `index`・`data` を持つ frozen dataclass
+- `LossyRelay`: 1 つの UDP ソケットで両方向を扱う 1 対 1 のリレー。`async with` で起動・停止し、`listen_port=0` で空きポートを自動割り当てして `actual_port` で取得できる。クライアントのアドレスは最初のパケットで確定する (単一クライアント前提)。サーバーから見たピアはリレーのアドレスになる
+- `drop_rule` コールバックが True を返したパケットは転送しない。転送・ドロップの方向別件数を `forwarded` / `dropped` で観測できる
+- パケットの改変・遅延・重複は行わない (ドロップのみ)。既存テストのフィクスチャには組み込んでいない
+- `tests/test_e2e_quic_advanced.py` に `test_handshake_completes_with_initial_packet_loss` を追加した。c2s の 0 番目のみをドロップし、`client.connect(timeout=15.0)` が True を返すこと、ドロップが実際に 1 件起きたこと、その後に 1 ストリームの `ping` / `pong` 往復が成立することを検証する
+- `connect()` の戻り値は現行実装どおり `bool` (期限までに確立できない場合は False) のため、issue の記述をそのまま利用した
+
+`uv run pytest tests/ --timeout=30` の 1058 件が全て通ることを確認した。ドロップ規則を無効化すると `relay.dropped["c2s"] == 1` の assert で失敗することも確認し、テストが実際にロスを注入していることを検証した。
