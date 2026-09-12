@@ -29,3 +29,18 @@ PBT (Property-Based Testing) で検証できるプロトコル不変条件のう
 - `tests/test_e2e_webtransport_h2.py` の `test_session_close_notifies_server` の sleep が確定したイベント待ちに置換され、settle 用 2 箇所の sleep が残存し settle 目的のコメントが付与される
 - `test_large_echo_over_initial_recv_window` の `wait_for` が確定値 (5.0 秒第一候補) になり、全テストが通る
 - `tests/test_e2e_webtransport_h2.py::test_session_close_notifies_server` と `tests/test_e2e_webtransport_h3.py::test_large_echo_over_initial_recv_window` が `uv run pytest tests/ -v --timeout=30` の 10 回連続および `uv run pytest tests/test_e2e_webtransport_h2.py::test_session_close_notifies_server tests/test_e2e_webtransport_h3.py::test_large_echo_over_initial_recv_window -v --timeout=30` の 50 回連続で安定する
+
+## 対応状況 (2026-09-12)
+
+完了した項目:
+
+- `tests/prop_webtransport_h2.py` と `tests/prop_webtransport_h3.py` に `prop_send_datagram_to_closed_session_ignored` を追加した。`close_session` で明示的に終了させたセッション ID 宛の送信が送出されないことを検証し、参照仕様 (`refs/webtrans/draft-ietf-webtrans-http2-15.txt` Section 3.4 / `refs/webtrans/draft-ietf-webtrans-http3-16.txt` Section 6) を docstring に明記した
+- `tests/test_e2e_webtransport_h2.py::test_session_close_notifies_server` の `asyncio.sleep(0.1)` を、サーバーが送ったデータグラムをクライアントの `run()` が受信したことを示すイベント待ち (`client_ready`) に置き換えた。`close()` 前に成立し `run()` 未起動では成立しない観測である
+- `test_client_on_session_ready_fires` / `test_client_on_session_ready_after_connect` の settle 用 sleep 2 箇所は意図をコメントで明示して残した
+- `test_large_echo_over_initial_recv_window` の `wait_for` を 10.0 秒に確定した。実測は 5 回計測で 7.99〜8.17 秒であり、issue の「5.0 秒第一候補」は実測に対して余裕が無いため、10 秒以内という上限条件の中で 10.0 秒を採用した
+- `uv run pytest tests/ --timeout=30` を 10 回連続で実行して全 1060 件が毎回通ること、対象 2 テストの単独実行を 50 回連続で実行して 50 回とも通ることを確認した
+
+未対応の項目:
+
+- 「フロー制御超過のエラー送出」の property。H3 のセッションフロー制御自体が未実装 (`src/bindings/webtransport_h3.cpp` にフロー制御カプセルの処理が無く、`H3Session::open_stream` にセッション内ストリーム数制限が無い) であり、`issues/pending/0092-add-h3-session-flow-control.md` が nghttp3 ライブラリ側の追加実装を前提に保留されている。0092 の完了後に着手する
+- この項目が残るため本 issue は open のままとする
