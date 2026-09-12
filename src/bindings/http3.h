@@ -217,6 +217,16 @@ class Http3Connection {
   void reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
+   * テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)
+   *
+   * nghttp3 の read_stream2 / writev_stream が負値を返した経路
+   * (`closed_ = true`) を Python から人工的に作る。イベントは push しない
+   * ため、HTTP/3 プロトコルエラーで低レベルが自主クローズした状態と同じ
+   * 観測になる
+   */
+  void test_force_close();
+
+  /**
    * QUIC ストリーム終了を nghttp3 に通知する
    *
    * QUIC の STREAM_CLOSED を受けたときに呼ぶ。

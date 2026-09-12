@@ -1,7 +1,7 @@
 # HTTP/3 bindings にテスト専用の `closed_` 強制セットヘルパを追加する
 
 - Created: 2026-08-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-http3-bindings-test-force-close
 - Polished: {YYYY-MM-DD}
 
@@ -53,3 +53,19 @@
 
 - 本 issue は 0107 (closed 予定) と 0129 (open、HTTP/2 版) の完了後に着手するのが自然
 - 0129 と本 issue はテストヘルパ設計 (`_test_force_close`) の名前と方針を揃えるべき (対称性の維持)
+
+## 解決方法
+
+`http3.Connection` にテスト専用の `_test_force_close()` を追加した (0129 の HTTP/2 版と同型)。
+
+- `src/bindings/http3.h` に `test_force_close()` の宣言と「テスト専用。production からは呼ばない」旨の docstring を追加した
+- `src/bindings/http3.cpp` で `closed_ = true` のみを立てる実装を追加し、`_test_force_close` としてバインドした (イベントは push しない = HTTP/3 プロトコルエラーの負値経路と同じ観測)
+- `CMakeLists.txt` の `nanobind_add_stub(http3_stub ...)` に `INCLUDE_PRIVATE` を追加した。生成される `src/webtransport/http3/__init__.pyi` に `def _test_force_close(self) -> None` が載り、`ty check` と `ruff check` を通る
+- テストを 4 本追加した
+  - `test_http3_test_force_close_helper` (低レベル): 呼び出し後に `is_closed()` が True、`next_event()` が None
+  - `test_http3_test_force_close_does_not_affect_peer` (低レベル): ピア側は閉じない
+  - `test_http3_client_run_exits_on_low_level_force_close` (e2e): QUIC の `CONNECTION_CLOSED` も `close()` も使わずに `Client.run()` が終了する
+  - `test_http3_server_removes_client_on_low_level_force_close` (e2e): サーバー側の HTTP/3 層を閉じると `run()` が `_clients` から回収し、`run()` 自体は継続する
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した
+
+変異テストで両経路の検証を確認した。クライアント側の `is_closed()` チェックを無効化すると `Client.run()` のテストがタイムアウトで失敗し、サーバー側の 2 箇所のチェックを無効化すると `_clients` の回収テストが失敗する。`uv run pytest tests/ --timeout=30` の 1104 件が全て通る。

@@ -324,6 +324,8 @@
 
 ### misc
 
+- [UPDATE] `http3.Connection` にテスト専用の `_test_force_close()` を追加する
+  - @voluntas
 - [UPDATE] `http2.Connection` にテスト専用の `_test_force_close()` を追加する
   - @voluntas
 
