@@ -1,7 +1,7 @@
 # H2Session::reject_session が応答の submit / 送出失敗を握り潰す
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h2-reject-session-submit-failure
 - Polished: 2026-09-12
 
@@ -38,3 +38,13 @@
 - `tests/prop_webtransport_h2.py` の reject_session PBT の docstring を更新すること
 - `CHANGES.md` の `## develop` に FIX エントリが追加されていること
 - 既存のテストが引き続き通過すること
+
+## 解決方法
+
+- `H2Session::reject_session` に `session_id <= 0` の入力検証を追加し、`std::invalid_argument` (nanobind の既定翻訳で `ValueError`) にした。接続ガードの直後に置くため、クライアントセッションでは従来どおり no-op
+- `nghttp2_submit_response` の戻り値が非 0 のときは `H2EventType::Error` を push するようにした (`session_id` / `error_code = -rv` / `error_message = nghttp2_strerror(rv)`)
+- `nghttp2_session_callbacks_set_on_frame_not_send_callback` を登録し、応答 HEADERS が送出時に非 fatal エラー (同一ストリームへの再応答の STREAM_SHUT_WR、リセット済みストリームの STREAM_CLOSED 等) で破棄された場合も同じ形式の `H2EventType::Error` を push するようにした。コールバック内では nghttp2 のセッション操作 API を呼ばない (再入防止)
+- 失敗時もセッション状態の更新 (非 2xx の削除 / 2xx の `is_terminated` と `capsule_buffer` 破棄) は成功時と同じく無条件に行う (既存挙動の維持)
+- `tests/test_webtransport_h2_reject_session.py` に、0 以下の session_id で `ValueError`、同一ストリームへの 2 回目の応答で ERROR 512、RST_STREAM 後の応答で ERROR 510、失敗後も両ハーフクローズで SessionClosed が発火しないことのテストを追加した。`tests/prop_webtransport_h2.py` の docstring と負値戦略も更新した
+- `skills/webtransport-py/SKILL.md` に入力検証と ERROR 観測 (低レベルのみ) を追記し、`CHANGES.md` の develop に [FIX] エントリを追加した
+- 単体 26 件・h2 低レベル / prop 266 件・h2 e2e 61 件の通過を確認し、全テストは実装コミット時のフックで通過した
