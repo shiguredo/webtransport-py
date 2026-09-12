@@ -471,6 +471,9 @@ class Client:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: 接続済みで data が 1 MiB 超の場合
         """
         if self._session is None or self._session_id < 0:
             return
@@ -490,6 +493,9 @@ class Client:
 
         Args:
             data: 送信データ
+
+        Raises:
+            ValueError: 接続済みで data が 1 MiB 超の場合
         """
         if self._session is None or self._session_id < 0:
             return

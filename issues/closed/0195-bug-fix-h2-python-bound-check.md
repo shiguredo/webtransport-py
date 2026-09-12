@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の Python 境界入力にサイズ上限を設ける
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-h2-python-bound-check
 - Polished: 2026-09-09
 
@@ -28,3 +28,13 @@
 - `tests/` に境界値テストを追加すること
 - `CHANGES.md` の develop に FIX エントリが追加されていること
 - 既存のテスト全 976 件が引き続き通過すること
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` の匿名 namespace に `kMaxPythonInputBytes` (1 MiB) と `check_python_input_size(name, size)` を追加し、`H2SessionConfig` の既定カプセルペイロード上限と同値であることを `static_assert` で保証した
+- `receive` / `send_stream_data` / `send_datagram` の 3 バインディングで、`nb::bytes` から `std::vector` へコピーする前に生の入力バイト数を検査し、1 MiB 超は `std::invalid_argument` (nanobind の既定翻訳で `ValueError`) にした。判定は `>` のため 1 MiB ちょうどは通す
+- 3 バインディングの docstring に「data が 1 MiB 超の場合は ValueError」を追記し、`src/webtransport/h2/client.py` / `server.py` の `send_stream_data` / `send_datagram` docstring にも `Raises: ValueError` を追記した
+- `skills/webtransport-py/SKILL.md` に `SessionWriter` / `h2.Client` の 1 MiB 上限を追記した
+- `tests/test_webtransport_h2_input_limit.py` を新規作成し、3 経路の 1 MiB 超で `ValueError` になり入力を C++ 側へ渡さないこと、終了済みセッションでも入力検査が先に走ること、1 MiB ちょうどがローカル検査を通って送信待ちに積まれることを検証した
+- `CHANGES.md` の develop に FIX エントリを追加した
+- 全 1029 テストが通過することを確認した

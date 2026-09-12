@@ -107,6 +107,8 @@
   - @voluntas
 - [UPDATE] nghttp3 の webtransport ブランチを最新化する
   - @voluntas
+- [FIX] WebTransport over HTTP/2 の `h2.Session.receive` / `send_stream_data` / `send_datagram` に 1 MiB の入力サイズ上限を追加し、超過は `ValueError` にする
+  - @voluntas
 - [FIX] WebTransport over HTTP/3 のデータストリームリセットで受信したエラーコードを unsigned 32-bit のアプリコードに復元して `on_stream_reset` に配信する
   - @voluntas
 - [FIX] WebTransport over HTTP/3 の `Client.connect` の SETTINGS 受信判定を制御ストリーム ID のヒューリスティックから SETTINGS の直接判定に修正する
