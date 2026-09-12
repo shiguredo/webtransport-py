@@ -2,54 +2,13 @@
 
 from __future__ import annotations
 
-from conftest import _drain_events
+from conftest import (
+    _create_http2_pair,
+    _drain_events,
+    _h2_pump,
+)
 
 from webtransport import http2
-
-
-def _create_connection_pair() -> tuple[http2.Connection, http2.Connection]:
-    """クライアントとサーバーのペアを作成して SETTINGS を交換する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http2.Connection.create_client(http2.Config())
-    server_config = http2.Config()
-    server_config.is_server = True
-    server = http2.Connection.create_server(server_config)
-    _exchange_settings(client, server)
-    return client, server
-
-
-def _exchange_settings(client: http2.Connection, server: http2.Connection) -> None:
-    """SETTINGS フレームを交換してセッションを確立する
-
-    双方の送信データが無くなるまで送信と受信を繰り返す
-    """
-    for _ in range(10):
-        client_data = client.send()
-        if client_data:
-            server.receive(client_data)
-
-        server_data = server.send()
-        if server_data:
-            client.receive(server_data)
-
-        if not client_data and not server_data:
-            break
-
-
-def _pump(src: http2.Connection, dst: http2.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    send() は 1 回の呼び出しでフレームが無くなるまで返すとは限らない
-    ため、送信データが無くなるまで繰り返す
-    """
-    for _ in range(10):
-        data = src.send()
-        if data:
-            dst.receive(data)
-        if not data:
-            break
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -64,7 +23,7 @@ def _request_headers() -> list[tuple[str, str]]:
 
 def test_http2_terminate_session() -> None:
     """GOAWAY 送信後にセッションが即時終了状態になることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # セッションを即時終了する (GOAWAY が送信キューに積まれる)
     assert client.terminate_session(42, 2) is True
@@ -79,7 +38,7 @@ def test_http2_terminate_session() -> None:
     # GOAWAY を送出すると送信待ちが無くなる
     # (goaway() と異なり GOAWAY 送信後に want_read / want_write が 0 になる
     # ことが保証される)
-    _pump(client, server)
+    _h2_pump(client, server)
     assert client.want_write() is False
     assert client.is_closed() is False
 
@@ -104,7 +63,7 @@ def test_http2_terminate_session_after_goaway() -> None:
     受信処理される (GO_AWAY イベントは 1 件のみ。nghttp2 の内部処理に
     依存する)
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     client.goaway()
     assert client.terminate_session(0, 0) is True
@@ -137,7 +96,7 @@ def test_http2_terminate_session_last_stream_id_parity() -> None:
     パリティ違反を nghttp2 に渡すと受信処理が無視状態になってしまう
     ため、C++ 側のガードで呼び出し前に False を返す
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # クライアントセッションで奇数 (自分が開始したストリーム ID) は False
     assert client.terminate_session(0, 1) is False
@@ -150,7 +109,7 @@ def test_http2_terminate_session_last_stream_id_parity() -> None:
     # パリティ違反の後も通信が継続できる (受信処理が壊れない)
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
     assert any(event.type == http2.EventType.HEADERS for event in _drain_events(server))
 
     # 正しいパリティなら成功する (クライアントは偶数 / サーバーは奇数)
@@ -160,7 +119,7 @@ def test_http2_terminate_session_last_stream_id_parity() -> None:
 
 def test_http2_set_local_window_size_increase() -> None:
     """ローカルウィンドウの増加が WINDOW_UPDATE でピアへ通知されることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # コネクションのローカルウィンドウを増加させる
     assert client.set_local_window_size(0, 131072) is True
@@ -169,7 +128,7 @@ def test_http2_set_local_window_size_increase() -> None:
     assert client.local_window_size == 131072
 
     # WINDOW_UPDATE が送出され、ピアのリモートウィンドウ残量が増える
-    _pump(client, server)
+    _h2_pump(client, server)
     assert server.remote_window_size == 131072
     assert any(
         event.type == http2.EventType.WINDOW_UPDATE and event.stream_id == 0
@@ -179,10 +138,10 @@ def test_http2_set_local_window_size_increase() -> None:
     # ストリームのローカルウィンドウも増加させるとストリーム単位で通知される
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     assert client.set_local_window_size(stream_id, 131072) is True
-    _pump(client, server)
+    _h2_pump(client, server)
     assert server.stream_remote_window_size(stream_id) == 131072
     assert any(
         event.type == http2.EventType.WINDOW_UPDATE and event.stream_id == stream_id
@@ -199,7 +158,7 @@ def test_http2_set_local_window_size_decrease() -> None:
     こととして現れる。コネクションとストリームの両方を減らす (片方だけ
     減らすと、減らしていない側の WINDOW_UPDATE が送出されるため)
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # コネクションのローカルウィンドウを 32768 に減少させる
     assert client.set_local_window_size(0, 32768) is True
@@ -209,7 +168,7 @@ def test_http2_set_local_window_size_decrease() -> None:
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # ストリームのローカルウィンドウも 32768 に減少させる
     assert client.set_local_window_size(stream_id, 32768) is True
@@ -218,7 +177,7 @@ def test_http2_set_local_window_size_decrease() -> None:
     # (通常のウィンドウサイズなら 32767 バイトの受信で送出される)
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"0" * 32767, False)
-    _pump(server, client)
+    _h2_pump(server, client)
 
     assert client.want_write() is False
     assert not any(event.type == http2.EventType.WINDOW_UPDATE for event in _drain_events(server))
@@ -226,7 +185,7 @@ def test_http2_set_local_window_size_decrease() -> None:
 
 def test_http2_session_control_guards() -> None:
     """ガード経路で False になることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # 負の window_size は False
     assert client.set_local_window_size(0, -1) is False
@@ -240,7 +199,7 @@ def test_http2_session_control_guards() -> None:
     # GOAWAY 受信後のガード確認: graceful shutdown では接続は閉じないため、
     # セッション制御 API は継続する (RFC 9113 6.8)
     client.goaway()
-    _pump(client, server)
+    _h2_pump(client, server)
     assert server.is_closed() is False
     assert server.set_local_window_size(0, 65535) is True
     assert server.terminate_session(0, 0) is True
