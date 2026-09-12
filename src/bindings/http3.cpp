@@ -484,7 +484,7 @@ void Http3Connection::close_stream(int64_t stream_id, uint64_t error_code) {
   (void)nghttp3_conn_close_stream(conn_, stream_id, error_code);
 }
 
-void Http3Connection::goaway(int64_t id) {
+void Http3Connection::goaway() {
   if (!conn_ || closed_) {
     return;
   }
@@ -1350,8 +1350,8 @@ void bind_http3(nb::module_& m) {
                    "0x0100) -> None"),
            "QUIC ストリーム終了を nghttp3 に通知する (既定は H3_NO_ERROR)")
       .def("goaway", &Http3Connection::goaway, nb::lock_self(),
-           nb::arg("id") = 0, nb::sig("def goaway(self, id: int = 0) -> None"),
-           "GOAWAY を送信")
+           nb::sig("def goaway(self) -> None"),
+           "GOAWAY を送信 (GOAWAY ID は nghttp3 が算出する)")
       .def("submit_trailers", &Http3Connection::submit_trailers,
            nb::lock_self(), nb::arg("stream_id"), nb::arg("headers"),
            nb::sig("def submit_trailers(self, stream_id: int, headers: "

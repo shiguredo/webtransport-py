@@ -221,7 +221,7 @@ def test_http3_submit_shutdown_notice_then_goaway() -> None:
     # 一切送っていないため、サーバーの GOAWAY ID は max_stream_id_bidi
     # 初期値 -4 + 4 = 0 になる (RFC 9114 5.2 節の "MAY be zero if no
     # requests or pushes were processed")
-    server.goaway(0)
+    server.goaway()
     _pump(server, client)
     event = client.next_event()
     assert event is not None
@@ -241,7 +241,7 @@ def test_http3_submit_shutdown_notice_after_goaway_fails() -> None:
     """
     _client, server = _create_connection_pair()
 
-    server.goaway(0)
+    server.goaway()
     assert server.submit_shutdown_notice() is False
 
 

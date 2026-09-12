@@ -552,8 +552,8 @@ def submit_request(stream_id: int, headers: list[tuple[str, str]]) -> bool
 def submit_response(stream_id: int, headers: list[tuple[str, str]]) -> bool
 def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
 def reset_stream(stream_id: int, error_code: int = 0) -> None
-def close_stream(stream_id: int, error_code: int = 0) -> None  # QUIC ストリーム終了を nghttp3 に通知
-def goaway(id: int = 0) -> None
+def close_stream(stream_id: int, error_code: int = 0x0100) -> None  # QUIC ストリーム終了を nghttp3 に通知 (既定 H3_NO_ERROR)
+def goaway() -> None  # GOAWAY を送信 (GOAWAY ID は nghttp3 が算出する)
 
 # 送信側拡張
 def submit_trailers(stream_id: int, headers: list[tuple[str, str]]) -> bool  # トレーラ

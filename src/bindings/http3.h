@@ -244,7 +244,14 @@ class Http3Connection {
    * 抑止する)。
    * @param id GOAWAY ID (現状は無視される)
    */
-  void goaway(int64_t id = 0);
+  /**
+   * GOAWAY を送信する
+   *
+   * GOAWAY ID は nghttp3 が内部で算出する (サーバーは受信済み最大双方向
+   * ストリーム ID、クライアントは 0)。nghttp3 に ID を指定する API が無い
+   * ため引数は取らない
+   */
+  void goaway();
 
   /**
    * トレーラを送信
