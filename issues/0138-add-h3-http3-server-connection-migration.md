@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 と HTTP/3 の高レベル Server で Connection Migration を受け付ける
 
 - Created: 2026-08-27
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-h3-http3-server-connection-migration
 - Polished: {YYYY-MM-DD}
 
@@ -44,3 +44,17 @@ RFC 9000 Section 9 Connection Migration を `h3.Server` と `http3.Server` の�
 
 - `issues/closed/0003-add-quic-connection-migration.md` — quic 層の Connection Migration 実装 (本 issue の前提)
 - `issues/closed/0114-bug-fix-http3-server-accept-exception.md` — 本 issue で書き換える accept 経路の `RuntimeError` 捕捉分岐を追加した修正
+
+## 解決方法
+
+`h3.Server` と `http3.Server` で Connection Migration を受け付け、`h3.Client` / `http3.Client` に `migrate()` を追加した。
+
+- 両サーバーに `quic.Server` と同じ DCID 索引 (`_dcid_index` / `_conn_dcids` / `_refresh_dcid_index` / `_drop_dcid_index` / `_addr_of` / `_remove_client`) を追加した。索引は自側が発行した 8 バイト SCID (= ピアから見た DCID) を登録し、short header の `[1:9]` で照合する
+- `run()` の受信経路を書き換えた。unknown アドレスからのパケットは Long / Short を判定し、Short なら DCID 索引で既存接続を引いて `receive` する。`ReceiveResult.ACCEPTED` なら `_clients` のアドレスキーを新アドレスへ張り替え、以降の `_process_quic_events` / `_process_webtransport_events` / `_send_to` はすべて新 addr を使う。Long header は従来どおり新規 accept する
+- 接続の登録解除を `_remove_client` に集約し、索引からも CID を外すようにした (`del self._clients[addr]` の 4 箇所を置換)。タイマー分岐の削除も同様
+- 移行先アドレスから `ReceiveResult.CLOSED` が返った場合は、登録済みの旧アドレスを通知先にして `_process_quic_events` に流す (`event_addr`)
+- `h3.Client.migrate()` / `http3.Client.migrate()` を追加した。`quic.Client.migrate` と同じ手順で、接続と上位層の状態を維持したままソケットとアドレスを差し替える。issue の補足にあった「追加要否」は、これが無いと h3 / http3 サーバーの移行受付を e2e で検証できないため **追加する** と判断した
+- テストを 2 本追加した。`test_connection_migration_continues_session` (h3) と `test_connection_migration_continues_request` (http3) で、移行前後の双方向通信の継続、サーバーが観測する addr の切り替わり、`_clients` の旧キーが残らないことを検証する
+- RFC 9000 Section 9 の Path Validation 待ちは本 issue のスコープ外 (quic 層の方針に揃える)
+
+移行フォールバックを無効化すると追加した 2 テストが失敗することを確認した。`uv run pytest tests/ --timeout=30` の 1086 件が全て通る。
