@@ -91,6 +91,7 @@ class Server:
             Callable[[int, list[tuple[str, str]], ResponseWriter], Awaitable[None]] | None
         ) = None
         self._on_data: Callable[[int, bytes, ResponseWriter], Awaitable[None]] | None = None
+        self._on_stream_end: Callable[[int, ResponseWriter], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -133,6 +134,20 @@ class Server:
             callback: async def callback(stream_id: int, data: bytes, response_writer: ResponseWriter) -> None
         """
         self._on_data = callback
+
+    def on_stream_end(
+        self,
+        callback: Callable[[int, ResponseWriter], Awaitable[None]],
+    ) -> None:
+        """リクエストボディ終端 (END_STREAM) 受信時のコールバックを設定する
+
+        POST などのリクエストボディの受信完了を検知してから応答を送るために
+        使う。RESET_STREAM などで終了した場合は呼ばれない。
+
+        Args:
+            callback: async def callback(stream_id: int, response_writer: ResponseWriter) -> None
+        """
+        self._on_stream_end = callback
 
     async def start(self) -> None:
         """サーバーを開始する"""
@@ -212,6 +227,10 @@ class Server:
                     elif event.type == http2_low.EventType.DATA:
                         if self._on_data is not None:
                             await self._on_data(event.stream_id, event.data, response_writer)
+
+                    elif event.type == http2_low.EventType.STREAM_END:
+                        if self._on_stream_end is not None:
+                            await self._on_stream_end(event.stream_id, response_writer)
 
                     elif event.type == http2_low.EventType.GO_AWAY:
                         # RFC 9113 Section 6.8 の graceful shutdown: GOAWAY
