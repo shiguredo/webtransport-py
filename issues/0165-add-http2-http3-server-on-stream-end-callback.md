@@ -1,7 +1,7 @@
 # http2.Server と http3.Server にリクエストボディ終端通知の on_stream_end コールバックを追加する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-http2-http3-server-on-stream-end-callback
 - Polished: {YYYY-MM-DD}
 
@@ -33,3 +33,15 @@
 - `examples/http3/server.py` が POST 応答を正しく実装できること
 - `tests/` に `on_stream_end` の発火を検証するテストを http2 / http3 に追加すること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+`http2.Server` と `http3.Server` に `on_stream_end` コールバックを追加した。
+
+- `http2.Server.on_stream_end(stream_id, response_writer)`: `_handle_client` の `STREAM_END` イベントで発火する。低レベル `Http2Connection` は HEADERS / DATA の END_STREAM で `StreamEnd` を 1 回だけ発火するため、そのまま通知経路にできる
+- `http3.Server.on_stream_end(stream_id, addr)`: 高レベル `http3.Client` と同じく、受信した QUIC FIN を `ClientConnection.finished_streams` に溜め、HTTP/3 層のイベントを処理したあとに通知する単一経路にした。ヘッダーと FIN が同一の QUIC STREAM_DATA で届く正当なワイヤパターン (RFC 9114 Section 4.1 と Section 6 のフレーム境界の独立性) でも二重発火しない。コールバック未設定でも滞留しないよう、溜めた分は必ず取り出す
+- `examples/http2/server.py` と `examples/http3/server.py` を「`on_request` でボディバッファを用意し、`on_data` で溜め、`on_stream_end` で応答する」形に更新した
+- `skills/webtransport-py/SKILL.md` のサーバーコールバック一覧に `on_stream_end` を追記し、通知経路の性質 (h3 は FIN の単一経路、h2 は END_STREAM) を明記した
+- テストを 4 本追加した。http2 の `test_server_on_stream_end_fires_after_body` / `test_server_on_stream_end_fires_for_bodyless_request`、http3 の `test_server_on_stream_end_fires_after_body` (ボディを 2 回に分けて送出) / `test_server_on_stream_end_fires_for_bodyless_request`。いずれも呼び出し順と回数、同じ stream_id であることを検証する
+
+h3 の通知経路を低レベル `STREAM_END` イベント方式に戻すと新しい 2 テストが失敗することも確認し、テストが二重発火の回帰ピンとして機能することを検証した。`uv run pytest tests/ --timeout=30` の 1064 件が全て通る。
