@@ -2529,6 +2529,18 @@ bool H2Session::is_closed() const {
   return closed_;
 }
 
+uint64_t H2Session::get_send_credit(int32_t session_id) const {
+  auto it = wt_sessions_.find(session_id);
+  if (it == wt_sessions_.end()) {
+    return 0;
+  }
+  // オーバーフロー安全な残量計算 (bytes_sent > max なら残量 0)
+  if (it->second.bytes_sent >= it->second.max_data_local) {
+    return 0;
+  }
+  return it->second.max_data_local - it->second.bytes_sent;
+}
+
 std::vector<int32_t> H2Session::get_session_ids() const {
   std::vector<int32_t> result;
   for (const auto& pair : wt_sessions_) {
@@ -3294,6 +3306,10 @@ void bind_webtransport_h2(nb::module_& m) {
            nb::sig("def want_write(self) -> bool"), "送信待ちデータがあるか")
       .def("is_closed", &H2Session::is_closed, nb::lock_self(),
            nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
+      .def("get_send_credit", &H2Session::get_send_credit, nb::lock_self(),
+           nb::arg("session_id"),
+           nb::sig("def get_send_credit(self, session_id: int) -> int"),
+           "セッションレベルの送信可能残量を返す (観測専用)")
       .def("get_session_ids", &H2Session::get_session_ids, nb::lock_self(),
            nb::sig("def get_session_ids(self) -> list[int]"),
            "確立されたセッション ID のリストを取得")

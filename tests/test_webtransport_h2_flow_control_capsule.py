@@ -353,3 +353,59 @@ def test_wt_max_data_first_capsule_no_decrease_does_not_close() -> None:
 
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(50))
     _assert_flow_control_error_sent(server, "WT_MAX_DATA decreased")
+
+
+def test_get_send_credit_observes_remaining_credit() -> None:
+    """get_send_credit がセッションレベルの送信残量を返すことを確認 (観測専用 API)
+
+    初期値は対向 (サーバー) の wt_initial_max_data と一致し、送信するたびに
+    減る。枯渇後は 0 になる。存在しないセッション ID では 0 を返す。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    initial_credit = client.get_send_credit(session_id)
+    assert initial_credit == h2.Config().wt_initial_max_data
+
+    # 送信すると残量が減る
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+    body = b"x" * 100
+    client.send_stream_data(session_id, stream_id, body, fin=True)
+    _h2_pump(client, server)
+
+    assert client.get_send_credit(session_id) == initial_credit - len(body)
+
+    # 存在しないセッション ID では 0
+    assert client.get_send_credit(session_id + 2) == 0
+
+
+def test_get_send_credit_reaches_zero_when_exhausted() -> None:
+    """セッションクレジットが枯渇すると get_send_credit が 0 になることを確認
+
+    既定の 1 MiB ではストリームクレジット (262144) が先に尽きて保留キューに
+    積まれるため、セッションクレジットを小さくした設定で枯渇させる。
+    """
+    client_config = h2.Config()
+    client_config.wt_initial_max_data = 4096
+    client_config.wt_initial_max_stream_data = 8192
+    server_config = h2.Config()
+    server_config.is_server = True
+    # クライアントから見た送信クレジットは対向 (サーバー) の広告値で決まる
+    server_config.wt_initial_max_data = 4096
+    server_config.wt_initial_max_stream_data = 8192
+    client = h2.Session.create_client(client_config)
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+    session_id = _connect_h2_session(client, server)
+
+    assert client.get_send_credit(session_id) == 4096
+
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+    # セッションクレジットを使い切る (ストリームクレジットは十分にある)
+    client.send_stream_data(session_id, stream_id, b"y" * 4096)
+    _h2_pump(client, server)
+
+    assert client.get_send_credit(session_id) == 0

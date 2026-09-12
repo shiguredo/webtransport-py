@@ -652,6 +652,7 @@ def next_event() -> Event | None
 def is_closed() -> bool
 def get_session_ids() -> list[int]
 def get_stream_ids(session_id: int) -> list[int]  # セッションに属するストリーム ID
+def get_send_credit(session_id: int) -> int  # セッションレベルの送信可能残量 (観測専用。未知 ID は 0)
 ```
 
 `reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。`receive` / `send_stream_data` / `send_datagram` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。`reject_session` は `session_id` が 0 以下なら `ValueError` を送出する (クライアントセッションでは no-op)。応答の submit / 送出に失敗した場合は ERROR イベントを発火する (送出失敗は次に `send()` / `receive()` を呼んだ時に観測される。低レベル `next_event()` のみ。高レベル `Server` / `Client` は 0x50 以外の ERROR を `on_error` に渡さない)。
