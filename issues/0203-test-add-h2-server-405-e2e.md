@@ -1,7 +1,7 @@
 # 高レベル h2 Server の 405 拒否 (Allow: CONNECT) を e2e で検証する
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/test-h2-server-405-e2e
 - Polished: {YYYY-MM-DD}
 
@@ -27,3 +27,13 @@ closed/0173 で非 WT リクエストへの 405 と、`reject_session(405)` へ�
 
 - 高レベル `h2.Server.on_session_request` が 405 を返したとき、Sans-IO クライアントの HEADERS イベントで `:status` 405 と `allow: CONNECT` が観測できる e2e テストが追加されていること
 - 既存のテストが引き続き通過すること
+
+## 解決方法
+
+`tests/test_e2e_webtransport_h2.py` に 405 拒否の e2e テストを追加した。
+
+- `test_h2_server_rejects_session_with_405_and_allow` を追加した。高レベル `h2.Server.on_session_request` が 405 を返す経路を、TLS / asyncio を挟んだ実経路で検証する。Sans-IO クライアントの HEADERS イベントで `:status` が 405、`allow` が CONNECT であることを表明する
+- 応答ヘッダーを観測するクライアントには `webtransport.http2.Connection` を使う。既存の `_h2_server_with_sans_io_client` は `h2_low.Session` を生成し、`SESSION_REJECTED` の `headers` が空で `Allow` を観測できないため、`http2.Connection` 版の補助ヘルパー (`_h2_server_with_http2_connection_client` / `_send_all_http2_data` / `_pump_http2_connection`) を同ファイルに追加した
+- 変更対象は `tests/test_e2e_webtransport_h2.py` と `CHANGES.md` の `### misc` のみで、`tests/conftest.py` への追加は不要だった
+
+`uv run pytest tests/ --timeout=30` の 1073 件が全て通る。
