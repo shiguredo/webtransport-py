@@ -678,8 +678,10 @@ async def test_large_echo_over_initial_recv_window(test_certificates):
         # (送信と受信は client.run() のループが処理する)
         await client.send_stream_data(stream_id, payload)
 
-        # 再開放が機能しないと echo が完了せずタイムアウトする
-        await asyncio.wait_for(echo_completed.wait(), timeout=60.0)
+        # 再開放が機能しないと echo が完了せずタイムアウトする。
+        # CI の pytest-timeout (30 秒) で先に殺されないよう、実測 (ローカルで
+        # 約 8 秒) に余裕を足した 10 秒を上限にする
+        await asyncio.wait_for(echo_completed.wait(), timeout=10.0)
 
         assert server_received == len(payload)
         assert client_received == len(payload)

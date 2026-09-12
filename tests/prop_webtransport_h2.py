@@ -310,6 +310,30 @@ def prop_close_session_arbitrary(session_id: int, error_code: int, reason: str):
     session.close_session(session_id, error_code, reason)
 
 
+@given(st.integers(min_value=0, max_value=2**32 - 1), st.binary(min_size=1, max_size=1200))
+@settings(max_examples=100)
+def prop_send_datagram_to_closed_session_ignored(error_code: int, data: bytes):
+    """自分で閉じたセッション ID へのデータグラム送信が送出されないことを確認
+
+    セッションは CONNECT ストリームのクローズで終了し (refs/webtrans/
+    draft-ietf-webtrans-http2-15.txt Section 3.4)、実装は終了したセッション
+    ID への送信を無視する (仕様強制ではなく実装ポリシー)。任意 ID への送信を
+    検証する prop_send_datagram_arbitrary とは異なり、close_session で
+    明示的に終了させたセッション ID を使う (session_ids_ からの削除経路を
+    通る)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    client.close_session(session_id, error_code, "closed by property")
+    # close_session 自身が積んだ WT_CLOSE_SESSION カプセルを空にする
+    assert client.send() is not None
+    assert client.get_session_ids() == []
+
+    # 終了済みセッション ID への送信は送出されない
+    client.send_datagram(session_id, data)
+    assert client.send() is None
+
+
 # ========== drain_session の堅牢性テスト ==========
 
 

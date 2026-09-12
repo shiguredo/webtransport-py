@@ -508,10 +508,17 @@ async def test_unidirectional_stream(test_certificates):
 
 @pytest.mark.asyncio
 async def test_session_close_notifies_server(test_certificates):
-    """クライアントの close_session がサーバーに通知されることを確認"""
+    """クライアントの close_session がサーバーに通知されることを確認
+
+    close() は run() の受信ループが動いていないとピアの CONNECT ストリーム
+    クローズを観測できない。固定 sleep ではなく「サーバーが送ったデータグラム
+    をクライアントの run() が受信した」という観測を待つことで、run() の起動を
+    決定的に確認してから close() する。
+    """
     from webtransport.h2 import Client, Server
 
     session_closed = asyncio.Event()
+    client_ready = asyncio.Event()
 
     server = Server(
         host="127.0.0.1",
@@ -520,9 +527,14 @@ async def test_session_close_notifies_server(test_certificates):
         keyfile=test_certificates["keyfile"],
     )
 
+    async def on_session_ready(session_writer) -> None:
+        # run() が動いていなければクライアントはこのデータグラムを処理できない
+        await session_writer.send_datagram(b"ready")
+
     async def on_session_closed(session_writer) -> None:
         session_closed.set()
 
+    server.on_session_ready(on_session_ready)
     server.on_session_closed(on_session_closed)
     await server.start()
 
@@ -530,6 +542,11 @@ async def test_session_close_notifies_server(test_certificates):
         url=f"https://127.0.0.1:{server.actual_port}/webtransport",
         verify_peer=False,
     )
+
+    async def on_datagram(data: bytes) -> None:
+        client_ready.set()
+
+    client.on_datagram(on_datagram)
     await client.connect()
 
     async def run_client() -> None:
@@ -539,7 +556,7 @@ async def test_session_close_notifies_server(test_certificates):
             pass
 
     client_task = asyncio.create_task(run_client())
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(client_ready.wait(), timeout=5.0)
     await client.close()
 
     await asyncio.wait_for(session_closed.wait(), timeout=5.0)
@@ -1284,7 +1301,8 @@ async def test_client_on_session_ready_fires(test_certificates):
 
     await asyncio.wait_for(ready_event.wait(), timeout=5.0)
 
-    # 発火は 1 回だけ
+    # 追加発火がないことを確認するための settle 待ち (イベント待ちでは
+    # 表現できない)
     await asyncio.sleep(0.1)
     assert ready_stream_ids == [client.session_id]
 
@@ -1343,6 +1361,8 @@ async def test_client_on_session_ready_after_connect(test_certificates):
 
     await asyncio.wait_for(ready_event.wait(), timeout=5.0)
 
+    # 追加発火がないことを確認するための settle 待ち (イベント待ちでは
+    # 表現できない)
     await asyncio.sleep(0.1)
     assert ready_stream_ids == [client.session_id]
 

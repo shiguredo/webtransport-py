@@ -246,6 +246,29 @@ def prop_send_datagram_arbitrary(session_id: int, data: bytes):
     assert _encode_wt_datagram(established_session_id, data) in client.get_datagrams_to_send()
 
 
+@given(st.integers(min_value=0, max_value=2**62 - 1), st.binary(min_size=1, max_size=1200))
+@settings(max_examples=100)
+def prop_send_datagram_to_closed_session_ignored(error_code: int, data: bytes):
+    """自分で閉じたセッション ID へのデータグラム送信が送出されないことを確認
+
+    WT_CLOSE_SESSION の送信でセッションは終了し、終了を学習したエンドポイント
+    は新しいデータグラムを送ってはならない (refs/webtrans/
+    draft-ietf-webtrans-http3-16.txt Section 6)。任意 ID への送信を検証する
+    prop_send_datagram_arbitrary とは異なり、close_session で明示的に
+    終了させたセッション ID を使う (session_ids_ からの削除経路を通る)。
+    """
+    client, _server, established_session_id = _establish_session()
+    client.close_session(established_session_id, error_code, "closed by property")
+    # close_session 自身が積んだ WT_CLOSE_SESSION カプセルをカラにする
+    assert client.get_streams_to_send() != []
+    assert client.get_datagrams_to_send() == []
+    assert client.get_session_ids() == []
+
+    # 終了済みセッション ID への送信はキューに現れない
+    client.send_datagram(established_session_id, data)
+    assert client.get_datagrams_to_send() == []
+
+
 # ========== close_stream の堅牢性テスト ==========
 
 
