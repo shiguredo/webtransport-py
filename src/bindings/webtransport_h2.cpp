@@ -1088,6 +1088,47 @@ uint64_t H2Session::allocate_stream_id(int32_t session_id,
   return stream_id;
 }
 
+bool H2Session::verify_origin(
+    const std::vector<std::pair<std::string, std::string>>& headers) const {
+  // 許可リストが空 (未設定) の場合は従来どおり全オリジンを受理する
+  if (config_.allowed_origins.empty()) {
+    return true;
+  }
+
+  // Origin ヘッダーが無いリクエストは受理する
+  // (draft-ietf-webtrans-http2-15 Section 3.2: 非ブラウザクライアントでは
+  // OPTIONAL)
+  std::string origin;
+  bool has_origin = false;
+  bool multiple_origins = false;
+  for (const auto& header : headers) {
+    if (header.first == "origin") {
+      if (has_origin) {
+        multiple_origins = true;
+      }
+      has_origin = true;
+      origin = header.second;
+    }
+  }
+
+  // 複数・空値の Origin は検証失敗として扱う (RFC 6454 の serialized
+  // origin は単一かつ非空)
+  if (multiple_origins || (has_origin && origin.empty())) {
+    return false;
+  }
+
+  if (!has_origin) {
+    return true;
+  }
+
+  for (const auto& allowed_origin : config_.allowed_origins) {
+    if (origin == allowed_origin) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void H2Session::push_event(H2Event event) {
   events_.push_back(std::move(event));
 }
@@ -2608,6 +2649,14 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             }
           }
           if (is_connect && is_webtransport) {
+            // draft-15 Section 3.2: Origin ヘッダーがある場合は検証 MUST。
+            // 検証失敗は 403 で拒否する (同 Section の SHOULD)
+            if (!h2_session->verify_origin(it->second)) {
+              h2_session->pending_headers_.erase(it);
+              h2_session->reject_session(stream_id, 403);
+              break;
+            }
+
             // WebTransport セッション情報を作成
             WtSessionInfo wt_session;
             wt_session.http2_stream_id = stream_id;
@@ -3068,7 +3117,9 @@ void bind_webtransport_h2(nb::module_& m) {
       .def_rw("wt_pre_accept_buffer_limit",
               &H2SessionConfig::wt_pre_accept_buffer_limit)
       .def_rw("wt_max_capsule_payload_size",
-              &H2SessionConfig::wt_max_capsule_payload_size);
+              &H2SessionConfig::wt_max_capsule_payload_size)
+      .def_rw("allowed_origins", &H2SessionConfig::allowed_origins,
+              "許可オリジンリスト (空なら Origin 検証を行わない)");
 
   // H2EventType
   nb::enum_<H2EventType>(h2_mod, "EventType",

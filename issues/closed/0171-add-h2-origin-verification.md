@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 のサーバーに Origin 検証 (allowed_origins) を実装する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-h2-origin-verification
 - Polished: {YYYY-MM-DD}
 
@@ -34,3 +34,16 @@ draft-ietf-webtrans-http2-15 Section 3.2 は「When the request contains the Ori
 - Origin ヘッダー無しのリクエストは従来どおり受理すること
 - `tests/test_e2e_webtransport_h2.py` に Origin 検証の受理・拒否ケースを追加すること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+WebTransport over HTTP/2 のサーバーに Origin 検証を実装した。
+
+- `src/bindings/webtransport_h2.h` の `H2SessionConfig` に `allowed_origins` を追加し、`H2Session::verify_origin` を追加した。ロジックは `H3Session::verify_origin` と同一 (許可リストが空なら常に受理、Origin ヘッダー無しは受理、複数 Origin / 空値 / 許可リスト不一致は拒否。RFC 6454 の正規化は行わない byte-exact 比較)
+- `src/bindings/webtransport_h2.cpp` の CONNECT 判定成立時に `verify_origin` を呼び、失敗したら `reject_session(stream_id, 403)` で拒否するようにした (draft-15 Section 3.2 の MUST と 403 SHOULD)。`allowed_origins` を nanobind で公開し、型スタブを再生成した
+- `src/webtransport/h2/server.py` の `Server.__init__` に `allowed_origins: list[str] | None = None` を追加し、接続ごとの Config に反映するようにした (`h3.Server` と対称)
+- **副産物の修正**: `_handle_client` は `peername` が `None` の場合に `on_session_request` をスキップして accept していた。Origin 検証や認可をアプリに委ねた設計で検証を素通りできてしまうため、`None` の場合は空 tuple を渡して必ず呼ぶように変更した (docstring も更新)
+- テストを 4 本追加した。`test_h2_server_rejects_disallowed_origin` (403 と SESSION_REJECTED)、`test_h2_server_accepts_allowed_origin`、`test_h2_server_accepts_request_without_origin`、`test_h2_server_without_allowed_origins_accepts_any_origin` (既定の後方互換)
+- `skills/webtransport-py/SKILL.md` の `h2.Server` / `h2.Config` の記述を更新した
+
+`verify_origin` の共通ヘルパー化 (h3 との重複解消) は 0125 (重複コード共通化) の範囲として見送った。`uv run pytest tests/ --timeout=30` の 1097 件が全て通る。

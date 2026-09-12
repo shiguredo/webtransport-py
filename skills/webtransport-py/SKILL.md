@@ -199,7 +199,7 @@ async def close() -> None
 
 `h2.Client` / `h2.Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
 
-`h2.Server.__init__(host, port, certfile, keyfile, config=None)` (証明書は必須)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
+`h2.Server.__init__(host, port, certfile, keyfile, config=None, allowed_origins=None)` (証明書は必須)。`allowed_origins` は h3.Server と対称で、None と空リストはどちらも全オリジンを受理する (draft-15 Section 3.2 の Origin 検証 MUST。Origin ヘッダー無しは受理する)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
 
 ```python
 # on_session_ready(session_writer: SessionWriter)
@@ -664,7 +664,7 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
 - `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `wt_pre_accept_buffer_limit=65536` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`
-- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100` / `wt_pre_accept_buffer_limit=65536` / `wt_max_capsule_payload_size=1048576`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)
+- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100` / `wt_pre_accept_buffer_limit=65536` / `wt_max_capsule_payload_size=1048576` / `allowed_origins=[]`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)。`allowed_origins` が空なら Origin 検証を行わない
 
 ## イベント型 (EventType)
 

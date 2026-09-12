@@ -169,6 +169,7 @@ class Server:
         certfile: str,
         keyfile: str,
         config: h2_low.Config | None = None,
+        allowed_origins: list[str] | None = None,
     ) -> None:
         """サーバーを初期化する
 
@@ -179,12 +180,16 @@ class Server:
             keyfile: 秘密鍵ファイルパス
             config: HTTP/2 / WebTransport セッション設定。省略時は既定値。
                 呼び出し元のオブジェクトは書き換えない
+            allowed_origins: 許可オリジンリスト (None と空リストは
+                どちらも全オリジンを受理する)。draft-15 Section 3.2 の
+                Origin 検証 MUST に対応する (h3.Server と対称)
         """
         self._host = host
         self._port = port
         self._certfile = certfile
         self._keyfile = keyfile
         self._user_config = config
+        self._allowed_origins: list[str] | None = allowed_origins
 
         self._server: asyncio.Server | None = None
         self._running = False
@@ -250,7 +255,8 @@ class Server:
         引数の headers は SESSION_READY イベントに載る受信 HTTP ヘッダー
         (疑似ヘッダーを含む)。addr は writer.get_extra_info('peername') の
         戻り値で、IPv6 では 4-tuple、IPv4 では 2-tuple になる。peername が
-        取得できない場合、callback は呼ばれず accept 経路に流れる。
+        取得できない場合 (対向切断直後など) は空 tuple を渡して callback を
+        呼ぶ (検証を素通りさせないため)。
 
         Args:
             callback: async def callback(
@@ -422,6 +428,8 @@ class Server:
         # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
         # 書き換えない。役割 (サーバー) は create_server が決める
         config = self._user_config if self._user_config is not None else h2_low.Config()
+        if self._allowed_origins is not None:
+            config.allowed_origins = self._allowed_origins
         try:
             session = h2_low.Session.create_server(config)
         except ValueError:
@@ -457,31 +465,32 @@ class Server:
                         should_accept = True
                         if self._on_session_request is not None:
                             # peername は対向切断直後などで None を返しうる。
-                            # None の場合は callback をスキップして accept 経路に流す
+                            # その場合も callback は呼ぶ (呼ばないと Origin
+                            # 検証や認可をアプリに委ねた設計で検証を素通り
+                            # できてしまう)。addr は空 tuple になる
                             peername = writer.get_extra_info("peername")
-                            if peername is not None:
-                                status = await self._on_session_request(
-                                    event.session_id,
-                                    event.headers,
-                                    peername,
-                                )
-                                if status is not None:
-                                    # bool は int のサブクラスなので明示的に弾く。
-                                    # float 等の非 int も受け入れない
-                                    if isinstance(status, bool) or not isinstance(status, int):
-                                        raise ValueError(
-                                            f"on_session_request must return None or int, got {type(status).__name__}: {status!r}"
-                                        )
-                                    # HTTP status code の妥当範囲は 200-599 のみ受け入れる
-                                    if not (200 <= status < 600):
-                                        raise ValueError(
-                                            f"on_session_request status_code out of range (200-599): {status}"
-                                        )
-                                    if status >= 300:
-                                        # reject。サーバー側の reject_session は非 2xx
-                                        # 応答の送出とセッションエントリの削除を行う
-                                        session.reject_session(event.session_id, status)
-                                        should_accept = False
+                            status = await self._on_session_request(
+                                event.session_id,
+                                event.headers,
+                                peername if peername is not None else (),
+                            )
+                            if status is not None:
+                                # bool は int のサブクラスなので明示的に弾く。
+                                # float 等の非 int も受け入れない
+                                if isinstance(status, bool) or not isinstance(status, int):
+                                    raise ValueError(
+                                        f"on_session_request must return None or int, got {type(status).__name__}: {status!r}"
+                                    )
+                                # HTTP status code の妥当範囲は 200-599 のみ受け入れる
+                                if not (200 <= status < 600):
+                                    raise ValueError(
+                                        f"on_session_request status_code out of range (200-599): {status}"
+                                    )
+                                if status >= 300:
+                                    # reject。サーバー側の reject_session は非 2xx
+                                    # 応答の送出とセッションエントリの削除を行う
+                                    session.reject_session(event.session_id, status)
+                                    should_accept = False
                         if should_accept:
                             session.accept_session(event.session_id)
                             session_writer = SessionWriter(writer, session, event.session_id)

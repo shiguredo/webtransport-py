@@ -122,6 +122,10 @@ struct H2SessionConfig {
   // 呼び出しごとに 1 カプセル化するため、1 MiB 超の単回送信はアプリ側で
   // 分割する前提とする
   uint64_t wt_max_capsule_payload_size = 1048576;
+
+  // 許可オリジンリスト (サーバーのみ) 。空 (未設定) なら Origin 検証を
+  // 行わず全オリジンを受理する。h3.Session の allowed_origins と対称
+  std::vector<std::string> allowed_origins;
 };
 
 /**
@@ -674,6 +678,22 @@ class H2Session {
 
   // draft-15 Section 4.3: 対向 SETTINGS / WebTransport-Init から初期 FC を設定
   void apply_peer_initial_flow_control(WtSessionInfo& wt_session) const;
+
+  /**
+   * リクエストヘッダーの Origin を検証する (サーバー用)
+   *
+   * 許可オリジンリスト (allowed_origins) が空 (未設定) の場合は常に受理し、
+   * Origin ヘッダーが無いリクエストも受理する (仕様上 Origin は非ブラウザ
+   * クライアントでは OPTIONAL)。Origin ヘッダーが複数ある場合、値が空の
+   * 場合、許可リストと一致しない場合は拒否する。照合はバイト列の完全一致
+   * であり、RFC 6454 の origin 正規化 (デフォルトポートの省略やホスト名の
+   * 大文字小文字) は行わない (H3Session::verify_origin と同一ロジック)
+   *
+   * @param headers 受信したリクエストヘッダー
+   * @return 受理してよい場合は true
+   */
+  bool verify_origin(
+      const std::vector<std::pair<std::string, std::string>>& headers) const;
 
   // draft-15 Section 4.3.2: WebTransport-Init Structured Field Dictionary
   std::string encode_webtransport_init() const;
