@@ -121,15 +121,24 @@ def prop_submit_request_arbitrary_headers(headers: list[tuple[str, str]]):
 # goaway の堅牢性テスト
 
 
-@given(st.integers(min_value=0, max_value=2**62 - 1))
-@settings(max_examples=100)
-def prop_goaway_arbitrary_id(id: int):
-    """任意の ID で goaway を呼び出してもクラッシュしない"""
+def prop_goaway_without_control_stream_is_noop():
+    """コントロールストリーム未バインドの goaway が何もしないことを確認
+
+    GOAWAY ID は nghttp3 が内部算出するため引数は取らない (旧 id 引数は
+    無視されていた)。
+    """
     config = http3.Config()
     conn = http3.Connection.create_client(config)
 
     # コントロールストリームがバインドされていない場合は何もしない
-    conn.goaway(id)
+    conn.goaway()
+    assert conn.is_closed() is False
+    # 制御 / QPACK ストリームの要求は変わらない
+    assert conn.get_required_streams() == [
+        ("control", False),
+        ("qpack_encoder", False),
+        ("qpack_decoder", False),
+    ]
 
 
 # ========== Config の生成時検証テスト ==========

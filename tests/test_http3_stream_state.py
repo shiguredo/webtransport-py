@@ -159,7 +159,7 @@ def test_http3_drained() -> None:
     # リモートストリームの終了を nghttp3 に伝えてから goaway すると
     # ドレイン状態になる (QUIC 層のストリーム終了を模した操作)
     server.close_stream(0, 0)
-    server.goaway(0)
+    server.goaway()
     # GOAWAY フレームを書き出す送信処理が完了するまではドレイン状態でない
     assert server.drained is False
     _pump(server, client)
