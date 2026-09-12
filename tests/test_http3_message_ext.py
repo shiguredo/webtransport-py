@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from conftest import _drain_events
+
 from webtransport import http3
+from webtransport.http3.constants import (
+    H3_NO_ERROR,
+    H3_REQUEST_CANCELLED,
+)
 
 
 def _pump(src: http3.Connection, dst: http3.Connection) -> None:
@@ -430,3 +436,60 @@ def test_http3_response_trailers_distinguished() -> None:
     assert not any(
         e.type == http3.EventType.HEADERS and ":status" not in dict(e.headers) for e in events
     )
+
+
+def test_http3_close_stream_default_error_code() -> None:
+    """close_stream の既定 error_code が H3_NO_ERROR であることを確認
+
+    RFC 9114 Section 8.1 の H3_NO_ERROR は 0x0100。HTTP/3 のエラーコード空間で
+    0 は予約域 (0x0000-0x00ff) のため既定値に使わない。STREAM_END イベントの
+    error_code で観測する。
+    """
+    client, server = _create_connection_pair()
+
+    assert client.submit_request(0, _request_headers()) is True
+    _pump(client, server)
+
+    # error_code を省略して閉じる
+    client.close_stream(0)
+
+    stream_end_events = [e for e in _drain_events(client) if e.type == http3.EventType.STREAM_END]
+    assert len(stream_end_events) == 1
+    assert stream_end_events[0].stream_id == 0
+    assert stream_end_events[0].error_code == H3_NO_ERROR
+    assert H3_NO_ERROR == 0x0100
+
+
+def test_http3_close_stream_explicit_error_code() -> None:
+    """close_stream に明示した error_code がそのまま観測されることを確認"""
+    client, server = _create_connection_pair()
+
+    assert client.submit_request(0, _request_headers()) is True
+    _pump(client, server)
+
+    client.close_stream(0, H3_REQUEST_CANCELLED)
+
+    stream_end_events = [e for e in _drain_events(client) if e.type == http3.EventType.STREAM_END]
+    assert len(stream_end_events) == 1
+    assert stream_end_events[0].error_code == H3_REQUEST_CANCELLED
+
+
+def test_http3_reset_stream_default_error_code_stays_zero() -> None:
+    """reset_stream の既定 error_code が 0 のままであることを確認
+
+    reset_stream の error_code は QUIC RESET_STREAM に載るアプリケーション
+    エラーコードで、HTTP/3 のエラーコードに限らない (WebTransport データ
+    ストリームは WT_APPLICATION_ERROR レンジの値をそのまま載せる)。汎用 API
+    のため close_stream のような H3 既定値を設けず、アプリ固有エラーなしを
+    意味する 0 を据え置く。
+    """
+    client, server = _create_connection_pair()
+
+    assert client.submit_request(0, _request_headers()) is True
+    _pump(client, server)
+
+    client.reset_stream(0)
+
+    reset_events = [e for e in _drain_events(client) if e.type == http3.EventType.RESET_STREAM]
+    assert len(reset_events) == 1
+    assert reset_events[0].error_code == 0

@@ -1345,10 +1345,10 @@ void bind_http3(nb::module_& m) {
                    "0) -> None"),
            "ストリームをリセット")
       .def("close_stream", &Http3Connection::close_stream, nb::lock_self(),
-           nb::arg("stream_id"), nb::arg("error_code") = 0,
+           nb::arg("stream_id"), nb::arg("error_code") = NGHTTP3_H3_NO_ERROR,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
-                   "0) -> None"),
-           "QUIC ストリーム終了を nghttp3 に通知する")
+                   "0x0100) -> None"),
+           "QUIC ストリーム終了を nghttp3 に通知する (既定は H3_NO_ERROR)")
       .def("goaway", &Http3Connection::goaway, nb::lock_self(),
            nb::arg("id") = 0, nb::sig("def goaway(self, id: int = 0) -> None"),
            "GOAWAY を送信")

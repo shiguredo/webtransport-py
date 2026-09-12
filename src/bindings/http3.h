@@ -203,6 +203,17 @@ class Http3Connection {
    * @param stream_id ストリーム ID
    * @param error_code エラーコード
    */
+  /**
+   * ストリームの読み取りを停止してリセットを要求する
+   *
+   * error_code は QUIC RESET_STREAM に載るアプリケーションエラーコードで、
+   * HTTP/3 のエラーコードに限らない (WebTransport データストリームは
+   * WT_APPLICATION_ERROR レンジの値をそのまま載せる)。汎用 API のため
+   * close_stream と異なり「状況に応じた HTTP/3 エラーコード」を既定値に
+   * できない。既定の 0 はアプリケーション固有のエラーなしを意味する
+   * (RFC 9114 Section 4.1.1 の cancel / reject を HTTP/3 として表明したい
+   * 呼び出し側は H3_REQUEST_CANCELLED / H3_REQUEST_REJECTED を明示する)
+   */
   void reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
@@ -214,7 +225,16 @@ class Http3Connection {
    * @param stream_id ストリーム ID
    * @param error_code アプリケーションエラーコード
    */
-  void close_stream(int64_t stream_id, uint64_t error_code = 0);
+  /**
+   * QUIC ストリーム終了を nghttp3 に通知する
+   *
+   * @param stream_id ストリーム ID
+   * @param error_code ストリームが終了した理由の HTTP/3 アプリケーション
+   *   エラーコード (RFC 9114 Section 8.1)。省略時は H3_NO_ERROR (0x0100)。
+   *   H3 のエラーコード空間では 0 は予約域 (0x0000-0x00ff) のため使わない
+   */
+  void close_stream(int64_t stream_id,
+                    uint64_t error_code = NGHTTP3_H3_NO_ERROR);
 
   /**
    * GOAWAY を送信
