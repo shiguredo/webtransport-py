@@ -1,7 +1,7 @@
 # conftest.py の手書きイベント取り出しループを _drain_events に寄せ替える
 
 - Created: 2026-08-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/refactor-conftest-drain-loop-consolidation
 - Polished: {YYYY-MM-DD}
 
@@ -29,3 +29,14 @@
 
 - `tests/conftest.py` 内の手書きイベント取り出しループが `_drain_events` を使う形になる
 - 全テストが通る
+
+## 解決方法
+
+`tests/conftest.py` の 3 ヘルパーに残っていた手書きのイベント取り出しループを `_drain_events` に寄せ替えた。
+
+- `_accept_session`: `_drain_events(server)` で全イベントを取り出し、`h3.EventType.SESSION_READY` でフィルタしたリストに対して「1 件以下であること (多重発火チェック)」「1 件であること (セッション確立)」を assert し、受理とセッション ID の返却を行う形にした
+- `_drain_session_ready`: 同様にフィルタしたリストから SESSION_READY が無ければ -1、あれば最後の 1 件のセッション ID を返す形にした。多重発火チェックは据え置き
+- `_connect_h2_session`: サーバー側・クライアント側の 2 箇所のループを `_drain_events` とフィルタに置き換えた。assert の種類と文言は従来どおり
+- `_drain_events` と `_EventSource` をファイル末尾から import 直後へ移し、利用箇所より前に定義されるようにした。取り出し仕様を 1 箇所に閉じ込める意図を docstring に追記した
+
+挙動は変更していない純粋なリファクタリングであり、`uv run pytest tests/ --timeout=30` の 1057 件が全て通ることを確認した。
