@@ -185,9 +185,12 @@ async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> No
 async def send_datagram(data: bytes) -> None
 async def reset_stream(stream_id: int, error_code: int = 0) -> None
 async def close_stream(stream_id: int, error_code: int = 0) -> None
+async def migrate() -> bool  # Connection Migration (ローカル UDP ソケットを差し替える)
 async def run() -> None
 async def close() -> None
 ```
+
+`migrate()` は接続と上位層の状態を維持したまま送受信のソケットとアドレスを差し替える (`quic.Client.migrate` と同じ手順)。サーバー側は DCID で接続を照合してアドレスキーを張り替える (RFC 9000 Section 9)。
 
 `close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
 
@@ -317,6 +320,7 @@ async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: boo
 
 async def request(method: str, path: str, headers: list[tuple[str, str]] | None = None) -> int
 async def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
+async def migrate() -> bool  # Connection Migration (ローカル UDP ソケットを差し替える)
 ```
 
 `request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。

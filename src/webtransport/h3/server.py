@@ -109,6 +109,12 @@ class Server:
         # bind 後のローカルアドレス (host, port)
         self._local_addr: tuple[str, int] | None = None
         self._clients: dict[tuple[str, int], ClientConnection] = {}
+        # DCID から接続を引く索引 (Connection Migration 後の unknown アドレス用)。
+        # 自側が発行した SCID (= ピアから見た DCID) は 8 バイト固定のため
+        # short header の [1:9] で照合する
+        self._dcid_index: dict[bytes, ClientConnection] = {}
+        # 接続ごとの索引登録済み CID (差し替えで退役分を消すため)
+        self._conn_dcids: dict[ClientConnection, set[bytes]] = {}
         self._running = False
         self._actual_port = 0
 
@@ -339,6 +345,46 @@ class Server:
         self._clients[addr] = client
         return client
 
+    def _refresh_dcid_index(self, client: ClientConnection) -> None:
+        """接続の発行済み SCID を DCID 索引に反映する
+
+        quic.Server と同じ方針。自側 SCID (= ピアから見た DCID) の新規発行分を
+        登録し、退役で消えた分を破棄する。8 バイト以外の CID は照会形式と
+        合わないため登録しない (安全側に破棄される)。
+        """
+        if client not in self._clients.values():
+            return
+        quic_connection = client.quic_connection
+        if quic_connection is None:
+            return
+        current = {cid for cid in quic_connection.scid if len(cid) == 8}
+        previous = self._conn_dcids.get(client, set())
+        for retired in previous - current:
+            if self._dcid_index.get(retired) is client:
+                del self._dcid_index[retired]
+        for issued in current - previous:
+            self._dcid_index[issued] = client
+        self._conn_dcids[client] = current
+
+    def _drop_dcid_index(self, client: ClientConnection) -> None:
+        """接続の CID を索引から外す"""
+        for cid in self._conn_dcids.pop(client, set()):
+            if self._dcid_index.get(cid) is client:
+                del self._dcid_index[cid]
+
+    def _addr_of(self, client: ClientConnection) -> tuple[str, int] | None:
+        """接続に紐づく現在のアドレスを返す (未登録なら None)"""
+        for known, known_client in self._clients.items():
+            if known_client is client:
+                return known
+        return None
+
+    def _remove_client(self, addr: tuple[str, int]) -> None:
+        """アドレスに紐づくクライアントを索引ごと取り除く"""
+        client = self._clients.pop(addr, None)
+        if client is not None:
+            self._drop_dcid_index(client)
+
     async def _send_to(self, addr: tuple[str, int], client: ClientConnection) -> None:
         """クライアントにデータを送信する
 
@@ -484,8 +530,7 @@ class Server:
                                 "failed to send connection close to non-compliant peer: %s",
                                 exc,
                             )
-                        if addr in self._clients:
-                            del self._clients[addr]
+                        self._remove_client(addr)
                     break
                 should_accept = True
                 if self._on_session_request is not None:
@@ -583,8 +628,7 @@ class Server:
                     await self._send_to(addr, client)
                     # CONNECTION_CLOSE 送出後にエントリを削除し、
                     # 同一アドレスからの再接続をブロックしないようにする
-                    if addr in self._clients:
-                        del self._clients[addr]
+                    self._remove_client(addr)
                     # 同一バッチに積まれた残りのイベント (クローズ後に配送される
                     # データグラム等) の処理を打ち切る
                     break
@@ -750,44 +794,80 @@ class Server:
                 )
                 addr = self._normalize_addr(raw_addr)
 
-                if addr not in self._clients:
-                    try:
-                        client = self._create_connection(addr, data)
-                    except ValueError as exc:
-                        # 設定不正は黙殺せず再 raise して run() を止める
-                        logger.warning(
-                            "failed to accept QUIC connection from %s:%d size %d first_byte %s: %s",
-                            addr[0],
-                            addr[1],
-                            len(data),
-                            data[:1].hex() if data else "none",
-                            exc,
-                        )
-                        raise
-                    except RuntimeError as exc:
-                        # パケット不正のみ破棄して継続する
-                        logger.warning(
-                            "discarding invalid QUIC packet from %s:%d size %d first_byte %s: %s",
-                            addr[0],
-                            addr[1],
-                            len(data),
-                            data[:1].hex() if data else "none",
-                            exc,
-                        )
-                        continue
-                else:
-                    client = self._clients[addr]
-                    if client.quic_connection is not None:
-                        client.quic_connection.receive(data, self._local_addr, addr)
+                # 移行先アドレスからの CLOSED 通知を配信するためのアドレス。
+                # 通常は受信アドレスと一致する
+                event_addr = addr
+                client = self._clients.get(addr)
+                if client is None:
+                    # Connection Migration 後は送信元アドレスが変わる。
+                    # Short header は DCID 索引で既存接続を引く (RFC 9000
+                    # Section 5.2 に従う DCID 照合)。Long header (Initial 等)
+                    # は新規 accept する
+                    is_long_header = bool(data) and (data[0] & 0x80) != 0
+                    if not is_long_header and len(data) >= 9:
+                        candidate = self._dcid_index.get(bytes(data[1:9]))
+                        if candidate is not None and candidate.quic_connection is not None:
+                            result = candidate.quic_connection.receive(
+                                data,
+                                self._local_addr,
+                                addr,
+                            )
+                            if result == quic.ReceiveResult.ACCEPTED:
+                                # 正当な Migration としてアドレスキーを張り替える
+                                old_addr = self._addr_of(candidate)
+                                if old_addr != addr:
+                                    if old_addr is not None:
+                                        del self._clients[old_addr]
+                                    self._clients[addr] = candidate
+                                self._refresh_dcid_index(candidate)
+                                client = candidate
+                            elif result == quic.ReceiveResult.CLOSED:
+                                # 移行先アドレスからの終了通知。登録済みの旧
+                                # アドレス (アプリから見た現アドレス) を通知先に
+                                # して後段の _process_quic_events へ流す
+                                client = candidate
+                                old_addr = self._addr_of(candidate)
+                                if old_addr is not None:
+                                    event_addr = old_addr
+                    if client is None:
+                        if not self._running:
+                            break
+                        try:
+                            client = self._create_connection(addr, data)
+                        except ValueError as exc:
+                            # 設定不正は黙殺せず再 raise して run() を止める
+                            logger.warning(
+                                "failed to accept QUIC connection from %s:%d size %d first_byte %s: %s",
+                                addr[0],
+                                addr[1],
+                                len(data),
+                                data[:1].hex() if data else "none",
+                                exc,
+                            )
+                            raise
+                        except RuntimeError as exc:
+                            # パケット不正のみ破棄して継続する
+                            logger.warning(
+                                "discarding invalid QUIC packet from %s:%d size %d first_byte %s: %s",
+                                addr[0],
+                                addr[1],
+                                len(data),
+                                data[:1].hex() if data else "none",
+                                exc,
+                            )
+                            continue
+                elif client.quic_connection is not None:
+                    client.quic_connection.receive(data, self._local_addr, addr)
+                    # CID ローテーションに追従するため接触のたびに最新化する
+                    self._refresh_dcid_index(client)
 
-                connection_alive = await self._process_quic_events(addr, client)
+                connection_alive = await self._process_quic_events(event_addr, client)
                 if not connection_alive:
                     # ピアからの CONNECTION_CLOSE への応答 (ngtcp2 が生成した
                     # CONNECTION_CLOSE) を送信してからエントリを削除する。
                     # 送信しないとピア側が応答待ちでハングする
-                    await self._send_to(addr, client)
-                    if addr in self._clients:
-                        del self._clients[addr]
+                    await self._send_to(event_addr, client)
+                    self._remove_client(event_addr)
                     continue
 
                 await self._process_webtransport_events(addr, client)
@@ -810,8 +890,7 @@ class Server:
                             "webtransport over http/3 protocol error",
                         )
                         await self._send_to(addr, client)
-                    if addr in self._clients:
-                        del self._clients[addr]
+                    self._remove_client(addr)
 
             except TimeoutError:
                 pass
@@ -831,8 +910,7 @@ class Server:
                         connection_alive = await self._process_quic_events(addr, client)
                         if not connection_alive:
                             await self._send_to(addr, client)
-                            if addr in self._clients:
-                                del self._clients[addr]
+                            self._remove_client(addr)
                             continue
                         await self._process_webtransport_events(addr, client)
 
