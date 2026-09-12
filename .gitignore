@@ -38,3 +38,4 @@ test-results/
 .tmp/
 .uv-cache/
 .uv-tools/
+.prek/
