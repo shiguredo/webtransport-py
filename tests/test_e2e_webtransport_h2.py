@@ -2278,3 +2278,146 @@ async def test_h2_server_rejects_session_with_405_and_allow(test_certificates):
         writer.close()
         await writer.wait_closed()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_on_stop_sending_fires(test_certificates):
+    """高レベル h2.Server.on_stop_sending がピアの WT_STOP_SENDING で発火することを確認
+
+    サーバーが双方向ストリームを開いてデータを送り、クライアントが
+    stop_sending で送信停止を要求する。サーバー側で stream_id と
+    アプリケーションエラーコードが観測でき、送信側が Ready 状態のため
+    低レベル層が WT_RESET_STREAM を自動で返す (draft-15 Section 6.3)。
+    """
+    from webtransport.h2 import Client, Server
+
+    received: list[tuple[int, int]] = []
+    stop_sending_received = asyncio.Event()
+    server_stream_id: list[int] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_writer):
+        stream_id = await session_writer.open_stream()
+        assert stream_id >= 0
+        server_stream_id.append(stream_id)
+        # FIN は付けない (送信側を Ready に保つ)
+        await session_writer.send_stream_data(stream_id, b"server-data")
+
+    async def on_stop_sending(stream_id, error_code, session_writer):
+        received.append((stream_id, error_code))
+        stop_sending_received.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_stop_sending(on_stop_sending)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    client_stream_ids: list[int] = []
+    client_data_received = asyncio.Event()
+
+    async def on_client_stream_data(stream_id, data):
+        client_stream_ids.append(stream_id)
+        client_data_received.set()
+
+    client.on_stream_data(on_client_stream_data)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        await asyncio.wait_for(client_data_received.wait(), timeout=5.0)
+        assert server_stream_id, "サーバーがストリームを開けませんでした"
+        stream_id = client_stream_ids[0]
+        assert stream_id == server_stream_id[0]
+
+        error_code = 0x2A
+        await client.stop_sending(stream_id, error_code)
+
+        await asyncio.wait_for(stop_sending_received.wait(), timeout=5.0)
+        assert received == [(stream_id, error_code)]
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_on_stop_sending_fires(test_certificates):
+    """高レベル h2.Client.on_stop_sending がピアの WT_STOP_SENDING で発火することを確認
+
+    クライアントが双方向ストリームを開いてデータを送り、サーバーが
+    session_writer.stop_sending で送信停止を要求する。クライアント側で
+    stream_id とアプリケーションエラーコードが観測できる。
+    """
+    from webtransport.h2 import Client, Server
+
+    received: list[tuple[int, int]] = []
+    stop_sending_received = asyncio.Event()
+    client_stream_id: list[int] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_stream_data(stream_id, data, session_writer):
+        client_stream_id.append(stream_id)
+        # 送信側を Ready に保つため FIN は付けずにエコーする
+        await session_writer.send_stream_data(stream_id, b"ack")
+        await session_writer.stop_sending(stream_id, 0x11)
+
+    server.on_stream_data(on_stream_data)
+    await server.start()
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_client_stop_sending(stream_id, error_code):
+        received.append((stream_id, error_code))
+        stop_sending_received.set()
+
+    client.on_stop_sending(on_client_stop_sending)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        stream_id = await client.open_stream()
+        assert stream_id >= 0
+        await client.send_stream_data(stream_id, b"client-data")
+
+        await asyncio.wait_for(stop_sending_received.wait(), timeout=5.0)
+        assert client_stream_id == [stream_id]
+        assert received == [(stream_id, 0x11)]
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        await client.close()
+        await server.stop()

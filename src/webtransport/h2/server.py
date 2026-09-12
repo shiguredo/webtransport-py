@@ -111,6 +111,27 @@ class SessionWriter:
             self._writer.write(send_data)
             await self._writer.drain()
 
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ピアに送信停止を要求する (WT_STOP_SENDING)
+
+        受信側の停止を要求し、送信側が Ready / Send 状態ならピアが
+        WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-15 Section 6.3 /
+        RFC 9000 Section 3.5)。
+
+        Args:
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード
+
+        Raises:
+            ValueError: stream_id が 2^62 以上の場合 (varint の上限)。
+                存在しないストリーム ID へは送出せず無視する。
+        """
+        self._session.stop_sending(self._session_id, stream_id, error_code)
+        send_data = self._session.send()
+        if send_data:
+            self._writer.write(send_data)
+            await self._writer.drain()
+
     async def close_session(self, error_code: int = 0, error_message: str = "") -> None:
         """セッションを閉じる
 
@@ -176,6 +197,7 @@ class Server:
         self._on_session_closed: Callable[[SessionWriter], Awaitable[None]] | None = None
         self._on_stream_data: Callable[[int, bytes, SessionWriter], Awaitable[None]] | None = None
         self._on_stream_reset: Callable[[int, int, SessionWriter], Awaitable[None]] | None = None
+        self._on_stop_sending: Callable[[int, int, SessionWriter], Awaitable[None]] | None = None
         self._on_datagram: Callable[[bytes, SessionWriter], Awaitable[None]] | None = None
         self._on_error: Callable[[int, str, SessionWriter], Awaitable[None]] | None = None
         self._on_goaway: Callable[[int, int, tuple[object, ...]], Awaitable[None]] | None = None
@@ -282,6 +304,26 @@ class Server:
             callback: async def callback(data: bytes, session_writer: SessionWriter) -> None
         """
         self._on_datagram = callback
+
+    def on_stop_sending(
+        self,
+        callback: Callable[[int, int, SessionWriter], Awaitable[None]],
+    ) -> None:
+        """ピアからの WT_STOP_SENDING 受信時のコールバックを設定する
+
+        ピアが送信側の停止を要求したときに、そのアプリケーションエラーコードと
+        ともに呼ばれる (draft-ietf-webtrans-http2-15 Section 6.3)。受信側の
+        低レベル層は送信側が Ready / Send 状態なら WT_RESET_STREAM を自動で
+        返すため、このコールバックは通知のみを担う。
+
+        Args:
+            callback: async def callback(
+                stream_id: int,
+                error_code: int,
+                session_writer: SessionWriter,
+            ) -> None
+        """
+        self._on_stop_sending = callback
 
     def on_error(
         self,
@@ -467,6 +509,15 @@ class Server:
                         session_writer = session_writers.get(event.session_id)
                         if session_writer is not None and self._on_stream_reset is not None:
                             await self._on_stream_reset(
+                                event.stream_id,
+                                event.error_code,
+                                session_writer,
+                            )
+
+                    elif event.type == h2_low.EventType.STOP_SENDING:
+                        session_writer = session_writers.get(event.session_id)
+                        if session_writer is not None and self._on_stop_sending is not None:
+                            await self._on_stop_sending(
                                 event.stream_id,
                                 event.error_code,
                                 session_writer,
