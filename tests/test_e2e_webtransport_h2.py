@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 
+from webtransport import http2
 from webtransport.exceptions import (
     ConnectRefusedError,
     ConnectTimeoutError,
@@ -2151,4 +2152,129 @@ async def test_client_close_skipped_without_wait(test_certificates):
         assert client._close_wait_result == "skipped"
         await asyncio.wait_for(session_closed_event.wait(), timeout=5.0)
     finally:
+        await server.stop()
+
+
+async def _h2_server_with_http2_connection_client(
+    test_certificates: dict[str, str],
+    on_session_request: Callable[
+        [int, list[tuple[str, str]], tuple[object, ...]], Awaitable[int | None]
+    ],
+) -> tuple[Server, asyncio.StreamReader, asyncio.StreamWriter, http2.Connection]:
+    """高レベル Server を起動し、http2.Connection (Sans-IO) で SETTINGS まで進める
+
+    h2_low.Session は SESSION_REJECTED の headers が空で拒否応答のヘッダーを
+    観測できないため、応答ヘッダーを見るテストでは http2.Connection を使う。
+
+    @return (server, reader, writer, client)
+    """
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    server.on_session_request(on_session_request)
+    await server.start()
+
+    reader, writer = await _open_sans_io_h2_connection(server.actual_port)
+    client = http2.Connection.create_client(http2.Config())
+
+    # preface + SETTINGS を送出し、サーバーの SETTINGS を受信する
+    _send_all_http2_data(client, writer)
+    await writer.drain()
+    received = await asyncio.wait_for(reader.read(65535), timeout=2.0)
+    assert received
+    client.receive(received)
+
+    return server, reader, writer, client
+
+
+def _send_all_http2_data(client: http2.Connection, writer: asyncio.StreamWriter) -> None:
+    """Sans-IO http2.Connection の送信バッファを全てワイヤへ送出する"""
+    while True:
+        data = client.send()
+        if data is None:
+            break
+        writer.write(data)
+
+
+async def _pump_http2_connection(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    client: http2.Connection,
+    want_types: set[http2.EventType],
+) -> list[http2.Event]:
+    """Sans-IO http2.Connection をサーバーと往復させ、目的種別のイベントを収集する
+
+    want_types に該当するイベントが揃うか、接続終了 (EOF)・タイムアウト
+    (5 秒) まで繰り返す。
+    """
+    events: list[http2.Event] = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        _send_all_http2_data(client, writer)
+        await writer.drain()
+        try:
+            received = await asyncio.wait_for(reader.read(65535), timeout=0.2)
+        except TimeoutError:
+            continue
+        if not received:
+            break  # サーバーが接続を閉じた
+        client.receive(received)
+        while True:
+            event = client.next_event()
+            if event is None:
+                break
+            events.append(event)
+        if any(e.type in want_types for e in events):
+            break
+    return events
+
+
+@pytest.mark.asyncio
+async def test_h2_server_rejects_session_with_405_and_allow(test_certificates):
+    """on_session_request の 405 拒否で :status 405 と allow: CONNECT が届くことを確認
+
+    draft-ietf-webtrans-http2-15 Section 3.2 の 405 SHOULD を高レベル
+    Server のアプリコールバック (on_session_request) から発行できることを、
+    TLS / asyncio を挟んだ実経路で検証する。RFC 9110 Section 15.5.6 の MUST
+    に従い Allow: CONNECT が応答ヘッダーに載る。応答ヘッダーの観測には
+    http2.Connection (Sans-IO) を使う (h2.Session は headers が空)。
+    """
+
+    async def on_session_request(session_id, headers, addr):
+        return 405
+
+    server, reader, writer, client = await _h2_server_with_http2_connection_client(
+        test_certificates, on_session_request
+    )
+    try:
+        stream_id = client.submit_request(
+            [
+                (":method", "CONNECT"),
+                (":protocol", "webtransport"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/webtransport"),
+            ]
+        )
+        assert stream_id > 0
+        client.send_data(stream_id, b"", eof=True)
+
+        events = await _pump_http2_connection(
+            reader,
+            writer,
+            client,
+            want_types={http2.EventType.HEADERS},
+        )
+        headers_events = [e for e in events if e.type == http2.EventType.HEADERS]
+        assert len(headers_events) == 1
+        assert headers_events[0].stream_id == stream_id
+        response_headers = dict(headers_events[0].headers)
+        assert response_headers[":status"] == "405"
+        assert response_headers["allow"] == "CONNECT"
+    finally:
+        writer.close()
+        await writer.wait_closed()
         await server.stop()

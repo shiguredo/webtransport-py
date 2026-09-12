@@ -310,6 +310,8 @@
 
 ### misc
 
+- [UPDATE] 高レベル h2 Server の 405 拒否 (Allow: CONNECT) を e2e で検証する
+  - @voluntas
 - [UPDATE] PBT にセッション終了後の送信無視の property を追加し、e2e テストの固定 sleep と過大なタイムアウトを解消する
   - @voluntas
 - [UPDATE] HTTP/2 テストの SETTINGS 交換 / ポンプ / 接続ペアのヘルパーを conftest.py に集約する
