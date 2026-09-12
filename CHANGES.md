@@ -23,6 +23,8 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
   - @voluntas
+- [ADD] QUIC のピアからの STOP_SENDING を `quic.EventType.STOP_SENDING` として伝播し、`quic.Client` / `quic.Server` に `on_stop_sending` を追加する
+  - @voluntas
 - [ADD] `http2.Event` に PING の `opaque_data` / `ack` と WINDOW_UPDATE の `window_size_increment` を追加し、`http2.Connection.ping` で opaque data を指定できるようにする
   - @voluntas
 - [ADD] `http2.Server` と `http3.Server` にリクエストボディ終端 (`on_stream_end`) コールバックを追加する

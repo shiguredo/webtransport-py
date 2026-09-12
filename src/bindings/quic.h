@@ -115,6 +115,7 @@ enum class QuicEventType {
   EarlyDataRejected,
   PathValidated,
   PathValidationFailed,
+  StopSending,
 };
 
 /**
@@ -789,6 +790,21 @@ class QuicConnection {
                              uint64_t app_error_code,
                              void* user_data,
                              void* stream_user_data);
+  /**
+   * STOP_SENDING 受信コールバック
+   *
+   * ピアが送信側の停止を要求したときに呼ばれる
+   * (RFC 9000 Section 19.5)。アプリケーションエラーコードを
+   * StopSending イベントとして伝播する (draft-ietf-webtrans-http3-16
+   * Section 4.4 の「Those signals are propagated by the WebTransport
+   * implementation to the application」)。
+   */
+  static int recv_stop_sending_cb(ngtcp2_conn* conn,
+                                  int64_t stream_id,
+                                  uint64_t app_error_code,
+                                  void* user_data,
+                                  void* stream_user_data);
+
   static int recv_datagram_cb(ngtcp2_conn* conn,
                               uint32_t flags,
                               const uint8_t* data,

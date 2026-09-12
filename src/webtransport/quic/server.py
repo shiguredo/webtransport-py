@@ -115,7 +115,19 @@ class Server:
             Callable[[int, bytes, bool, tuple[str, int]], Awaitable[None]] | None
         ) = None
         self._on_datagram: Callable[[bytes, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_stop_sending: Callable[[int, int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_connection_closed: Callable[[tuple[str, int]], Awaitable[None]] | None = None
+
+    def on_stop_sending(
+        self,
+        callback: Callable[[int, int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """ピアからの STOP_SENDING 受信時のコールバックを設定する
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int, addr: tuple[str, int]) -> None
+        """
+        self._on_stop_sending = callback
 
     @property
     def host(self) -> str:
@@ -402,6 +414,9 @@ class Server:
         elif event.type == quic_low.EventType.DATAGRAM:
             if self._on_datagram is not None:
                 await self._on_datagram(event.data, addr)
+        elif event.type == quic_low.EventType.STOP_SENDING:
+            if self._on_stop_sending is not None:
+                await self._on_stop_sending(event.stream_id, event.error_code, addr)
         elif event.type == quic_low.EventType.CONNECTION_CLOSED:
             if self._on_connection_closed is not None:
                 await self._on_connection_closed(addr)
