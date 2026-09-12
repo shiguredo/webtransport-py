@@ -1397,6 +1397,8 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
 
   // ヘッダー名は静的文字列リテラルを使用
   static const char* header_status = ":status";
+  static const char* header_allow = "allow";
+  static const char* allow_connect = "CONNECT";
   // ステータスコード値は submit_response 呼び出し中有効である必要がある
   std::string status_value = std::to_string(status_code);
 
@@ -1405,6 +1407,17 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
        reinterpret_cast<uint8_t*>(status_value.data()), strlen(header_status),
        status_value.size(), NGHTTP3_NV_FLAG_NONE},
   };
+
+  // RFC 9110 Section 15.5.6 は 405 応答に Allow ヘッダーを含めることを
+  // MUST とする。WebTransport エンドポイントが受け付ける唯一のメソッドは
+  // CONNECT であるため、405 のときのみ Allow: CONNECT を載せる
+  // (非 WebTransport リクエストへの 405 応答にも同じ値が載る)
+  if (status_code == 405) {
+    nva.push_back({reinterpret_cast<uint8_t*>(const_cast<char*>(header_allow)),
+                   reinterpret_cast<uint8_t*>(const_cast<char*>(allow_connect)),
+                   strlen(header_allow), strlen(allow_connect),
+                   NGHTTP3_NV_FLAG_NONE});
+  }
 
   // submit_response の成否を確認する (失敗時は未送出のまま)
   (void)nghttp3_conn_submit_response(conn_, stream_id, nva.data(), nva.size(),
@@ -2366,11 +2379,22 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
   }
 
   // CONNECT 判定されなかったサーバー側ストリーム (通常の HTTP リクエスト等)
-  // の QPACK ブロック中 fin 記録を除去する。CONNECT 判定されたストリームの
-  // 記録は receive_stream_data の後段で pending_pre_accept_fin_session_ids_
-  // へ移行されるため、ここでは除去しない
+  // の QPACK ブロック中 fin 記録を除去し、非 WebTransport リクエストには
+  // 405 (Allow: CONNECT) を返してストリームを終端する。CONNECT 判定された
+  // ストリームの記録は receive_stream_data の後段で
+  // pending_pre_accept_fin_session_ids_ へ移行されるため、ここでは除去しない
   if (session->is_server_ && !(is_connect && is_webtransport)) {
     session->pending_qpack_blocked_fin_stream_ids_.erase(stream_id);
+    // WebTransport エンドポイントとして、非 WebTransport リクエストには
+    // 405 (Allow: CONNECT) を返してストリームを終端する。
+    // draft-ietf-webtrans-http3-16 Section 3.2 の 405 SHOULD は
+    // extended CONNECT + :protocol=webtransport-h3 が対象だが、通常の
+    // HTTP リクエストへの 405 は WebTransport 専用エンドポイントとしての
+    // 実装ポリシーである (h2 の非 WebTransport リクエストへの 405 と同じ)。
+    // 未対応 :protocol の extended CONNECT には RFC 9220 Section 3 の 501
+    // SHOULD があるが、同じく 405 を返す方針とする (:authority のみの
+    // 古典 CONNECT もここに到達する)
+    session->reject_session(stream_id, 405);
   }
 
   session->pending_headers_.erase(it);
@@ -2801,7 +2825,9 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::arg("stream_id"), nb::arg("status_code"),
            nb::sig("def reject_session(self, stream_id: int, status_code: int) "
                    "-> None"),
-           "WebTransport セッションを拒否 (サーバー用)")
+           "WebTransport セッションを拒否 (サーバー用。405 の場合は "
+           "Allow: CONNECT を応答に含める。非 WebTransport リクエストへの "
+           "405 応答にも使う)")
       .def("open_stream", &H3Session::open_stream, nb::lock_self(),
            nb::arg("session_id"), nb::arg("stream_id"),
            nb::arg("is_unidirectional"),
