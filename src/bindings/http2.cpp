@@ -302,6 +302,12 @@ void Http2Connection::goaway(uint32_t error_code) {
   goaway_sent_ = true;
 }
 
+void Http2Connection::test_force_close() {
+  // テスト専用。nghttp2 の mem_recv / mem_send が負値を返した経路と同じ
+  // 状態 (closed_ のみを立て、イベントは push しない)
+  closed_ = true;
+}
+
 void Http2Connection::ping(const std::vector<uint8_t>& opaque_data) {
   if (!session_ || closed_) {
     return;
@@ -1170,6 +1176,9 @@ void bind_http2(nb::module_& m) {
            nb::arg("error_code") = 0,
            nb::sig("def goaway(self, error_code: int = 0) -> None"),
            "GOAWAY を送信")
+      .def("_test_force_close", &Http2Connection::test_force_close,
+           nb::lock_self(),
+           "テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)")
       .def(
           "ping",
           [](Http2Connection& self, nb::bytes opaque_data) {

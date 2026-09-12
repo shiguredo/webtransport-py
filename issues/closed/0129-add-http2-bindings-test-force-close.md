@@ -1,7 +1,7 @@
 # HTTP/2 bindings にテスト専用の `closed_` 強制セットヘルパを追加する
 
 - Created: 2026-08-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-http2-bindings-test-force-close
 - Polished: {YYYY-MM-DD}
 
@@ -47,3 +47,18 @@
 - 変更対象: `tests/test_e2e_http2.py`
   - 0113 で保留になった「フレームエラー経路の独立検証」テストを追加。既存 2 テスト (`test_client_run_exits_on_close` / `test_client_run_exits_on_goaway_injection`) と並べる
 - 変更対象外: production コード (`src/webtransport/http2/client.py` / `server.py`) からは `_test_force_close()` を呼ばない
+
+## 解決方法
+
+`http2.Connection` にテスト専用の `_test_force_close()` を追加した。
+
+- `src/bindings/http2.h` に `test_force_close()` の宣言と「テスト専用。production からは呼ばない」旨の docstring を追加した
+- `src/bindings/http2.cpp` で `closed_ = true` のみを立てる実装を追加し、`_test_force_close` としてバインドした (イベントは push しない = フレームエラー経路と同じ観測)
+- **型スタブの生成設定を変更**: nanobind の stubgen は先頭アンダースコアのメンバーを既定で出力しないため、`CMakeLists.txt` の `nanobind_add_stub(http2_stub ...)` に `INCLUDE_PRIVATE` を追加した。生成される `src/webtransport/http2/__init__.pyi` に `def _test_force_close(self) -> None` が載り、`ty check` と `ruff check` を通ることを確認した (`.pyi` は生成物のため git 管理外)
+- テストを 3 本追加した
+  - `test_http2_test_force_close_helper` (低レベル): 呼び出し後に `is_closed()` が True、`next_event()` が None、`send()` が None になる
+  - `test_http2_test_force_close_does_not_affect_peer` (低レベル): ピア側の接続は閉じない
+  - `test_client_run_exits_on_low_level_force_close` (e2e): 実 Server-Client 対で接続後に `client._connection._test_force_close()` を呼び、GO_AWAY 経路も TCP EOF 経路も close() 経路も使わずに `Client.run()` が終了する
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した
+
+e2e テストは `Client.run` の `is_closed()` チェックを無効化するとタイムアウトで失敗することを確認した (チェック単独の効果を検証できている)。`uv run pytest tests/ --timeout=30` の 1100 件が全て通る。

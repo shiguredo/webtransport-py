@@ -541,6 +541,48 @@ async def test_client_run_exits_on_close(test_certificates):
 
 
 @pytest.mark.asyncio
+async def test_client_run_exits_on_low_level_force_close(test_certificates):
+    """低レベルの自主クローズで Client.run() が終了することを単独検証する
+
+    フレームエラーで `nghttp2_session_mem_recv` / `mem_send` が負値を返した
+    経路では GO_AWAY イベントも TCP EOF も発火しないため、`run()` は
+    低レベルの `is_closed()` を見て終了する。この負値経路は Python から
+    誘発困難なため、テスト専用 `_test_force_close()` で同じ状態を作る。
+    """
+    from webtransport.http2 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+    assert client.is_connected is True
+
+    run_task = asyncio.create_task(client.run())
+    await asyncio.sleep(0.05)
+    assert not run_task.done()
+
+    # GO_AWAY も TCP EOF も close() も使わずに低レベルを閉じる
+    client._connection._test_force_close()
+
+    # is_closed() チェックが効いていれば数秒以内に run() が終了する
+    await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done() is True
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_client_run_continues_after_goaway_injection(test_certificates):
     """GOAWAY フレーム受信後も Client.run() が継続することを回帰確認する
 
