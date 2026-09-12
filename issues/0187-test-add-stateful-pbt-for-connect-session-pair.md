@@ -1,7 +1,7 @@
 # 確立済み Client / Server ペアへの API 呼び出し系列を検証するステートフル PBT (RuleBasedStateMachine) を導入する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/test-add-stateful-pbt-for-connect-session-pair
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,20 @@
 - 既知バグ (0145 / 0146 / 0156 / 0157 / 0158 / 0159 / 0089 / 0181) の回帰を検出できること
 - ステートフル PBT の実行時間が CI の許容範囲 (数分以内) に収まること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+`RuleBasedStateMachine` によるステートフル PBT を h3 / h2 / quic の 3 モジュールに追加した。既存の 12 の `prop_*` ファイルはそのまま残している。
+
+- `tests/prop_h3_stateful.py`: 確立済み h3 ペアへの `open_stream` / `send_stream_data` / `reset_stream` / `send_datagram` / `close_session` と pump の系列を駆動する。invariant は「SessionClosed が side ごとに高々 1 回」「セッション ID に重複が無い」「正当な操作系列で ERROR イベントが積まれない」で、0145 の QPACK ブロック中 DATA pipeline の SIGABRT 回帰ピンとして機能する
+- `tests/prop_h2_stateful.py`: 確立済み h2 ペアへの同種の系列。`get_send_credit` の範囲 (0 以上・広告値以下) を invariant に加え、0156 のフロー制御クレジット回帰ピンとする
+- `tests/prop_quic_stateful.py`: 確立済み QUIC ペアへの `open_stream` / `send_stream_data` / `reset_stream` / `send_datagram` / `close` と pump の系列。加えて Config の境界値 (`max_data` / `max_streams_bidi` の uint64 全域) で abort せず `ValueError` / `RuntimeError` になることを検証する (0146 の回帰ピン)
+- 確立済みペアの作成手順は各ファイル内に持つ (stateful PBT は 1 例ごとに状態を作り直すため)
+
+実装中に判明した点:
+
+- h2 の `Session.open_stream` は stream ID を引数に取らず払い出す (0, 4, 8, ...)。h3 とは API が異なるため、開いた ID を記録して後続 rule が使う形にした
+- rule が機械の状態に依存して早期 return すると Hypothesis が `FlakyStrategyDefinition` (data generation の非一貫性) として検出する。`send_datagram` などの rule は無条件に呼び、無効な操作は API 側が黙って無視する形にした
+- quic の stateful PBT は pacing 期限を待つ conftest の pump を使うと 1 例あたり十数秒かかったため、待機なしの軽量 pump (最大 10 往復) に置き換えた。3 ファイル合計で 1 秒未満で完走する
+
+`uv run pytest tests/ --timeout=60` の 1114 件が全て通る。
