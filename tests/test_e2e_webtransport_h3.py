@@ -2998,3 +2998,183 @@ async def test_close_releases_socket_on_callback_error(test_certificates):
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_on_session_request_accepts(test_certificates):
+    """on_session_request が None を返すと accept 経路が動作することを確認
+
+    コールバック引数には受信 CONNECT ヘッダー (疑似ヘッダーを含む) と
+    正規化済み addr が渡り、セッションが確立して on_session_ready が発火する。
+    """
+    from webtransport.h3 import Client, Server
+
+    received_headers: list[tuple[str, str]] = []
+    received_addr: list[tuple[str, int]] = []
+    session_ready_event = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_request(session_id, headers, addr):
+        received_headers.extend(headers)
+        received_addr.append(addr)
+        # None を返すと accept 経路に流れる (戻り値の型を明示するため変数に置く)
+        decision: int | None = None
+        return decision
+
+    async def on_session_ready(session_id, addr):
+        session_ready_event.set()
+
+    server.on_session_request(on_session_request)
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    try:
+        await client.connect()
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+
+        # 受信 CONNECT ヘッダーが渡る
+        header_map = dict(received_headers)
+        assert header_map[":method"] == "CONNECT"
+        assert header_map[":path"] == "/webtransport"
+        # addr は (host, port) の 2 要素に正規化されている
+        assert received_addr
+        assert len(received_addr[0]) == 2
+        assert received_addr[0][0] == "127.0.0.1"
+        assert isinstance(received_addr[0][1], int)
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_on_session_request_rejects_with_non_2xx(test_certificates):
+    """on_session_request の非 2xx でセッションが拒否されることを確認
+
+    draft-ietf-webtrans-http3-16 Section 3.2 の 403 SHOULD をアプリの
+    コールバックから発行できる。on_session_ready は発火せず、クライアントの
+    connect() は HandshakeFailedError を送出する。
+    """
+    from webtransport.h3 import Client, Server
+
+    session_ready_event = asyncio.Event()
+    reject_statuses: list[int] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_request(session_id, headers, addr):
+        reject_statuses.append(403)
+        return 403
+
+    async def on_session_ready(session_id, addr):
+        session_ready_event.set()
+
+    server.on_session_request(on_session_request)
+    server.on_session_ready(on_session_ready)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    try:
+        with pytest.raises(HandshakeFailedError):
+            await client.connect()
+        assert client.is_connected is False
+        assert reject_statuses == [403]
+        # 拒否経路では on_session_ready が発火しない
+        assert session_ready_event.is_set() is False
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [True, False, 1.5, "403", 199, 600, -1],
+    ids=["true", "false", "float", "str", "199", "600", "negative"],
+)
+async def test_on_session_request_invalid_return_raises(test_certificates, status):
+    """on_session_request の不正な戻り値で ValueError が送出されることを確認
+
+    bool (int のサブクラス)・非 int・範囲外 (200 未満 / 600 以上 / 負値) を
+    拒否する。検証は on_session_request を呼ぶ `_process_webtransport_events`
+    の中で行われ、例外はサーバーの run() を停止させる (クライアントには応答が
+    返らず connect がタイムアウトする)。
+    """
+    from webtransport.h3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_request(session_id, headers, addr):
+        return status
+
+    server.on_session_request(on_session_request)
+    await server.start()
+
+    async def run_server():
+        await server.run()
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+    try:
+        # 応答が返らないため client.connect() はタイムアウトする。送出された
+        # ValueError を確認したいので、connect の完了は待たずに投げっぱなしにする
+        connect_task = asyncio.create_task(client.connect())
+
+        with pytest.raises(ValueError, match="on_session_request"):
+            await asyncio.wait_for(server_task, timeout=5.0)
+
+        if not connect_task.done():
+            connect_task.cancel()
+        await asyncio.gather(connect_task, return_exceptions=True)
+    finally:
+        if not server_task.done():
+            server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()

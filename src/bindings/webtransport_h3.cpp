@@ -2324,6 +2324,9 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
     H3Event event;
     event.type = H3EventType::SessionReady;
     event.session_id = stream_id;
+    // アプリが on_session_request で CONNECT ヘッダー (Origin 等) を検証して
+    // 拒否できるように、受信ヘッダーを載せる
+    event.headers = headers;
     session->push_event(std::move(event));
   } else if (!session->is_server_ && !status.empty()) {
     // クライアント: WebTransport セッション応答の処理。
@@ -2702,7 +2705,9 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_ro("error_message", &H3Event::error_message)
       .def_ro("status_code", &H3Event::status_code,
               "SessionRejected 発火時の HTTP status code。他イベントでは 0 "
-              "(パース失敗・範囲外は 0 に丸められる)");
+              "(パース失敗・範囲外は 0 に丸められる)")
+      .def_ro("headers", &H3Event::headers,
+              "SESSION_READY 発火時の受信 CONNECT ヘッダー。他イベントでは空");
 
   // StreamInfo
   nb::class_<StreamInfo>(h3_mod, "StreamInfo", "WebTransport ストリーム情報")
