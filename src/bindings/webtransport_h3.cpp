@@ -146,6 +146,12 @@ H3Session::H3Session(H3Session&& other) noexcept
       pending_datagrams_(std::move(other.pending_datagrams_)),
       pending_headers_(std::move(other.pending_headers_)),
       session_ids_(std::move(other.session_ids_)),
+      accepted_session_ids_(std::move(other.accepted_session_ids_)),
+      pre_accept_buffered_bytes_(std::move(other.pre_accept_buffered_bytes_)),
+      pre_accept_stream_session_ids_(
+          std::move(other.pre_accept_stream_session_ids_)),
+      rejected_pre_accept_stream_ids_(
+          std::move(other.rejected_pre_accept_stream_ids_)),
       pending_fin_session_ids_(std::move(other.pending_fin_session_ids_)),
       pending_pre_accept_fin_session_ids_(
           std::move(other.pending_pre_accept_fin_session_ids_)),
@@ -186,6 +192,12 @@ H3Session& H3Session::operator=(H3Session&& other) noexcept {
     pending_datagrams_ = std::move(other.pending_datagrams_);
     pending_headers_ = std::move(other.pending_headers_);
     session_ids_ = std::move(other.session_ids_);
+    accepted_session_ids_ = std::move(other.accepted_session_ids_);
+    pre_accept_buffered_bytes_ = std::move(other.pre_accept_buffered_bytes_);
+    pre_accept_stream_session_ids_ =
+        std::move(other.pre_accept_stream_session_ids_);
+    rejected_pre_accept_stream_ids_ =
+        std::move(other.rejected_pre_accept_stream_ids_);
     pending_fin_session_ids_ = std::move(other.pending_fin_session_ids_);
     pending_pre_accept_fin_session_ids_ =
         std::move(other.pending_pre_accept_fin_session_ids_);
@@ -284,6 +296,18 @@ nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
                                            const uint8_t* data,
                                            size_t length,
                                            bool fin) {
+  // 上限超過で拒否した受理前ストリームへのデータは nghttp3 へ渡さない。
+  // nghttp3_conn_close_stream 後の再投入でストリームが再生成されるのを防ぐ。
+  // 受け取ったバイト数は消費済みとして返す (高レベル層は戻り値を使用しないが、
+  // 既存の戻り値契約に合わせて全量消費とする)。FIN でピアの送信が完了したら
+  // 再投入防止の記録を解放する
+  if (rejected_pre_accept_stream_ids_.count(stream_id) > 0) {
+    if (fin) {
+      rejected_pre_accept_stream_ids_.erase(stream_id);
+    }
+    return static_cast<nghttp3_ssize>(length);
+  }
+
   // タイムスタンプを 0 にして read_stream2 を使用
   // nghttp3 は WebTransport データストリームのヘッダを自動的にパースし、
   // recv_wt_data コールバックを呼び出す
@@ -337,8 +361,95 @@ nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
     if (!wt_close_session_error) {
       closed_ = true;
     }
+  } else {
+    enforce_pre_accept_buffer_limit(stream_id, length,
+                                    static_cast<size_t>(consumed), fin);
   }
   return consumed;
+}
+
+void H3Session::enforce_pre_accept_buffer_limit(int64_t stream_id,
+                                                size_t length,
+                                                size_t consumed,
+                                                bool fin) {
+  if (!conn_ || consumed > length) {
+    return;
+  }
+
+  // WebTransport データストリーム以外 (CONNECT・制御・QPACK 等) は -1。
+  // これらを計数・拒否の対象にしない
+  int64_t session_id = nghttp3_conn_get_stream_wt_session_id(conn_, stream_id);
+  if (session_id < 0) {
+    return;
+  }
+
+  // 受理確定済み (accepted_session_ids_) のセッションは計数しない (受理確定時に
+  // nghttp3 のバッファも解除される)
+  if (accepted_session_ids_.count(session_id) > 0) {
+    return;
+  }
+
+  // nghttp3 が今回内部バッファへ取り込んだバイト数。認識用バイト
+  // (ストリームタイプ・session ID varint) は consumed に含まれるため
+  // 計数対象外になる
+  size_t buffered = length - consumed;
+  if (buffered == 0) {
+    return;
+  }
+
+  uint64_t& total = pre_accept_buffered_bytes_[stream_id];
+  total += static_cast<uint64_t>(buffered);
+  pre_accept_stream_session_ids_[stream_id] = session_id;
+  if (total <= config_.wt_pre_accept_buffer_limit) {
+    return;
+  }
+
+  // 上限超過: 計数を破棄し、以後のデータを受理しないよう記録する。FIN を
+  // 伴う場合はピアの送信が完了しているため記録しない。記録は FIN
+  // (receive_stream_data / read_from_nghttp3) で解放する。ピアの
+  // RESET_STREAM では解放しない: close_stream はアプリ起点のリセットからも
+  // 呼ばれ、その場合はピアが送信を続け得るため、解放すると nghttp3 の
+  // ストリーム再生成を招く。記録の大きさは、高レベル層が
+  // extend_max_streams_bidi / extend_max_streams_uni を呼ばなければ広告済みの
+  // 初期同時ストリーム数で有界になる。headers_guards_ に保持中のデータは
+  // read_from_nghttp3 の先頭で、以後の受信は receive_stream_data の先頭で
+  // 破棄される
+  forget_pre_accept_stream(stream_id);
+  if (!fin) {
+    rejected_pre_accept_stream_ids_.insert(stream_id);
+  }
+
+  // 高レベル層に QUIC STOP_SENDING の送出を要求する (draft-ietf-webtrans-http3-16
+  // Section 4.6: 上限を超えたストリームは RESET_STREAM または STOP_SENDING を
+  // WT_BUFFERED_STREAM_REJECTED で送って閉じる)
+  H3Event event;
+  event.type = H3EventType::StopSending;
+  event.stream_id = stream_id;
+  event.session_id = session_id;
+  event.error_code = NGHTTP3_WT_BUFFERED_STREAM_REJECTED;
+  push_event(std::move(event));
+
+  // nghttp3 内部の受理前バッファを解放する。read_stream2 から戻った後
+  // (コールバック外) のため再入にはならない
+  (void)nghttp3_conn_close_stream(conn_, stream_id,
+                                  NGHTTP3_WT_BUFFERED_STREAM_REJECTED);
+}
+
+void H3Session::forget_pre_accept_stream(int64_t stream_id) {
+  pre_accept_buffered_bytes_.erase(stream_id);
+  pre_accept_stream_session_ids_.erase(stream_id);
+}
+
+void H3Session::forget_pre_accept_session(int64_t session_id) {
+  for (auto it = pre_accept_stream_session_ids_.begin();
+       it != pre_accept_stream_session_ids_.end();) {
+    if (it->second == session_id) {
+      pre_accept_buffered_bytes_.erase(it->first);
+      it = pre_accept_stream_session_ids_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void H3Session::process_after_read(int64_t stream_id, bool fin) {
@@ -507,6 +618,16 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
       stream_id == qpack_encoder_stream_id_ ||
       stream_id == qpack_decoder_stream_id_) {
     return 0;
+  }
+
+  // 上限超過で拒否した受理前ストリームの後続データは破棄する。nghttp3 へ
+  // 渡さず、受け取ったバイト数は消費済みとして返す。FIN でピアの送信が
+  // 完了したら再投入防止の記録を解放する
+  if (rejected_pre_accept_stream_ids_.count(stream_id) > 0) {
+    if (fin) {
+      rejected_pre_accept_stream_ids_.erase(stream_id);
+    }
+    return data.size();
   }
 
   // フレーム境界ガードの対象外判定。対象外は既存どおり一括で nghttp3 へ渡す
@@ -1253,6 +1374,14 @@ bool H3Session::accept_session(int64_t stream_id) {
   // ため、二重の close_stream は発生しない
   discard_stale_2xx();
 
+  // 受理確定を記録し、受理前バッファの計数を終了する。confirm の処理中に
+  // WT_CLOSE_SESSION が処理されて session_ids_ から削除されたセッションは
+  // 挿入しない (終了済みセッションを受理済みとして残さない)
+  if (session_ids_.count(stream_id) > 0) {
+    accepted_session_ids_.insert(stream_id);
+  }
+  forget_pre_accept_session(stream_id);
+
   return true;
 }
 
@@ -1294,6 +1423,8 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
   if (status_code / 100 != 2) {
     session_ids_.erase(stream_id);
     pending_pre_accept_fin_session_ids_.erase(stream_id);
+    accepted_session_ids_.erase(stream_id);
+    forget_pre_accept_session(stream_id);
   }
 }
 
@@ -1660,6 +1791,8 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
     // セッション ID 復元 (stream_info_ の残存に依存) を壊さない
     erase_session_streams(session_id);
     session_ids_.erase(session_id);
+    accepted_session_ids_.erase(session_id);
+    forget_pre_accept_session(session_id);
 
     // セッション終了イベントを発火する。error_message は空とする
     H3Event event;
@@ -1814,6 +1947,8 @@ void H3Session::close_session(int64_t session_id,
   erase_session_streams(session_id);
 
   session_ids_.erase(session_id);
+  accepted_session_ids_.erase(session_id);
+  forget_pre_accept_session(session_id);
 
   // セッション終了イベント
   H3Event event;
@@ -2005,6 +2140,10 @@ int H3Session::stream_close_cb(nghttp3_conn* conn,
   (void)stream_user_data;
 
   auto* session = static_cast<H3Session*>(conn_user_data);
+
+  // 受理前ストリームの計数状態を破棄する (拒否済み集合は再投入防止のため
+  // 残す)
+  session->forget_pre_accept_stream(stream_id);
 
   // ストリーム終了イベント
   H3Event event;
@@ -2202,6 +2341,8 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
       // SessionRejected と同じ構造) として push し、高レベル
       // Client.connect が False を返す根拠にする
       session->session_ids_.erase(stream_id);
+      session->accepted_session_ids_.erase(stream_id);
+      session->forget_pre_accept_session(stream_id);
       H3Event rejected_event;
       rejected_event.type = H3EventType::SessionRejected;
       rejected_event.session_id = stream_id;
@@ -2214,6 +2355,9 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
       rejected_event.status_code = code;
       session->push_event(std::move(rejected_event));
     } else if (session->session_ids_.count(stream_id) > 0) {
+      // 受理確定を記録し、受理前バッファの計数を終了する
+      session->accepted_session_ids_.insert(stream_id);
+      session->forget_pre_accept_session(stream_id);
       H3Event event;
       event.type = H3EventType::SessionReady;
       event.session_id = stream_id;
@@ -2437,6 +2581,8 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
   // 当該セッションに属するストリーム情報と送信バッファを削除する
   session->erase_session_streams(session_id);
   session->session_ids_.erase(session_id);
+  session->accepted_session_ids_.erase(session_id);
+  session->forget_pre_accept_session(session_id);
 
   // 遅延クローズ保留中 (受理済みで 2xx レスポンスが発生し得る) のセッション
   // は、未送信の 2xx を破棄するため close_stream を実行する必要がある。
@@ -2494,6 +2640,11 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_rw("qpack_max_dtable_capacity",
               &H3SessionConfig::qpack_max_dtable_capacity)
       .def_rw("qpack_blocked_streams", &H3SessionConfig::qpack_blocked_streams)
+      .def_rw("wt_pre_accept_buffer_limit",
+              &H3SessionConfig::wt_pre_accept_buffer_limit,
+              "受理前 WebTransport データストリーム 1 本あたりの累計受信バイト"
+              "上限 (0 で即時拒否。超過時は WT_BUFFERED_STREAM_REJECTED で"
+              "拒否)")
       .def_rw("is_server", &H3SessionConfig::is_server)
       .def_rw("allowed_origins", &H3SessionConfig::allowed_origins,
               "許可オリジンリスト (空なら全オリジンを受理)");
