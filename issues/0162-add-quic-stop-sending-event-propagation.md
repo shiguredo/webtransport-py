@@ -1,7 +1,7 @@
 # QUIC バインディングがピアからの STOP_SENDING をアプリに一切通知しない
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-quic-stop-sending-event-propagation
 - Polished: {YYYY-MM-DD}
 
@@ -32,3 +32,16 @@ ngtcp2 はピアからの STOP_SENDING 受信通知として `recv_stop_sending`
 - エラーコードがアプリに配信されること
 - `tests/` に STOP_SENDING の伝播テストを追加すること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+QUIC バインディングにピアからの STOP_SENDING の受信と伝播を実装した。
+
+- `src/bindings/quic.h` の `QuicEventType` に `StopSending` を追加し、`recv_stop_sending_cb` を宣言した
+- `src/bindings/quic.cpp` の `initialize_client` / `initialize_server` / `initialize_server_from_packet` の 3 経路で `callbacks.recv_stop_sending` を登録した。`recv_stop_sending_cb` は `stream_id` とアプリケーションエラーコードを持つ `StopSending` イベントを push する。`stream_stop_sending` はローカル側の送信停止要求であり受信通知ではないため使わない
+- Python 側の `quic.EventType` に `STOP_SENDING` を追加した
+- 高レベル `quic.Client` に `on_stop_sending(stream_id, error_code)`、`quic.Server` に `on_stop_sending(stream_id, error_code, addr)` を追加し、受信イベントから発火するようにした (h3 / http3 の高レベル層が既に持つ `on_stream_reset` と対称)
+- `skills/webtransport-py/SKILL.md` のコールバック一覧と `quic.EventType` 一覧を更新した
+- テストを 3 本追加した。`test_stop_sending_event_propagates_error_code` と `test_stop_sending_event_exposes_stream_id` は Sans-IO 層で `close_stream` により STOP_SENDING を実際に送出させ、イベントの `stream_id` と `error_code` を検証する。`test_high_level_server_on_stop_sending` は高レベル Server の `on_stop_sending` が発火しエラーコードが配信されることを検証する
+
+`callbacks.recv_stop_sending` の登録を外すと 3 テストとも失敗することを確認し、テストが実際に伝播経路を検証していることを確かめた。`uv run pytest tests/ --timeout=30` の 1072 件が全て通る。
