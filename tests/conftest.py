@@ -564,6 +564,44 @@ def _h2_pump(src: http2.Connection | h2.Session, dst: http2.Connection | h2.Sess
             break
 
 
+def _exchange_http2_settings(client: http2.Connection, server: http2.Connection) -> None:
+    """http2.Connection 同士で SETTINGS フレームを交換してセッションを確立する
+
+    クライアントの preface + SETTINGS をサーバーへ渡し、サーバーの SETTINGS を
+    クライアントへ渡す往復を、双方の送信データが無くなるまで繰り返す
+    (_create_h2_http2_pair の http2.Connection 同士版)。
+
+    @param client クライアント Connection
+    @param server サーバー Connection
+    """
+    for _ in range(10):
+        client_data = client.send()
+        if client_data:
+            server.receive(client_data)
+        server_data = server.send()
+        if server_data:
+            client.receive(server_data)
+        if not client_data and not server_data:
+            break
+    else:
+        raise AssertionError("SETTINGS 交換が収束しませんでした")
+
+
+def _create_http2_pair() -> tuple[http2.Connection, http2.Connection]:
+    """http2.Connection のクライアント・サーバーペアを作成して初期化する
+
+    SETTINGS 交換まで完了させる。
+
+    @return (クライアント Connection, サーバー Connection)
+    """
+    client = http2.Connection.create_client(http2.Config())
+    server_config = http2.Config()
+    server_config.is_server = True
+    server = http2.Connection.create_server(server_config)
+    _exchange_http2_settings(client, server)
+    return client, server
+
+
 def _create_h2_http2_pair() -> tuple[http2.Connection, h2.Session]:
     """http2.Connection クライアントと h2.Session サーバーを作成して初期化する
 

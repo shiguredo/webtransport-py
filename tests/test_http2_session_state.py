@@ -2,52 +2,13 @@
 
 from __future__ import annotations
 
+from conftest import (
+    _create_http2_pair,
+    _exchange_http2_settings,
+    _h2_pump,
+)
+
 from webtransport import http2
-
-
-def _exchange_settings(client: http2.Connection, server: http2.Connection) -> None:
-    """SETTINGS フレームを交換してセッションを確立する
-
-    双方の送信データが無くなるまで送信と受信を繰り返す
-    """
-    for _ in range(10):
-        client_data = client.send()
-        if client_data:
-            server.receive(client_data)
-
-        server_data = server.send()
-        if server_data:
-            client.receive(server_data)
-
-        if not client_data and not server_data:
-            break
-
-
-def _create_connection_pair() -> tuple[http2.Connection, http2.Connection]:
-    """クライアントとサーバーのペアを作成して SETTINGS を交換する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http2.Connection.create_client(http2.Config())
-    server_config = http2.Config()
-    server_config.is_server = True
-    server = http2.Connection.create_server(server_config)
-    _exchange_settings(client, server)
-    return client, server
-
-
-def _pump(src: http2.Connection, dst: http2.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    send() は 1 回の呼び出しでフレームが無くなるまで返すとは限らない
-    ため、送信データが無くなるまで繰り返す
-    """
-    for _ in range(10):
-        data = src.send()
-        if data:
-            dst.receive(data)
-        if not data:
-            break
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -97,7 +58,7 @@ def test_http2_settings_after_exchange() -> None:
     server_config.initial_window_size = 131072
     server_config.max_header_list_size = 262144
     server = http2.Connection.create_server(server_config)
-    _exchange_settings(client, server)
+    _exchange_http2_settings(client, server)
 
     # ピア (サーバー) の SETTINGS はサーバーの Http2Config の値になる
     # (max_concurrent_streams と max_frame_size はデフォルト値のまま)
@@ -132,7 +93,7 @@ def test_http2_settings_after_exchange() -> None:
 
 def test_http2_outbound_queue_size() -> None:
     """送信キューのフレーム数が取得できることを確認"""
-    client, _server = _create_connection_pair()
+    client, _server = _create_http2_pair()
 
     # SETTINGS 交換後は送信キューが空
     assert client.outbound_queue_size == 0
@@ -148,7 +109,7 @@ def test_http2_outbound_queue_size() -> None:
 
 def test_http2_connection_window_sizes() -> None:
     """コネクションのウィンドウ残量が取得できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # 初期値はコネクションウィンドウサイズの 65535
     # (nghttp2 の NGHTTP2_INITIAL_CONNECTION_WINDOW_SIZE)
@@ -158,7 +119,7 @@ def test_http2_connection_window_sizes() -> None:
     # サーバーがレスポンスデータを送信するとウィンドウ残量が減る
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"0123456789", False)
@@ -166,7 +127,7 @@ def test_http2_connection_window_sizes() -> None:
     # 送信前はウィンドウが減っていない
     assert server.remote_window_size == 65535
 
-    _pump(server, client)
+    _h2_pump(server, client)
 
     # 送信側のリモートウィンドウと受信側のローカルウィンドウが
     # DATA 10 バイト分だけ減る
@@ -176,7 +137,7 @@ def test_http2_connection_window_sizes() -> None:
 
 def test_http2_stream_window_sizes() -> None:
     """ストリームのウィンドウ残量が取得できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # 存在しないストリームは None (ストリーム ID 3 は未使用の奇数 ID)
     assert client.stream_remote_window_size(3) is None
@@ -190,7 +151,7 @@ def test_http2_stream_window_sizes() -> None:
     # (nghttp2 は HEADERS の送出時にストリームを開く)
     assert client.stream_remote_window_size(stream_id) is None
 
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # ストリームのウィンドウ残量は初期値の 65535
     # (SETTINGS_INITIAL_WINDOW_SIZE の値)
@@ -202,26 +163,26 @@ def test_http2_stream_window_sizes() -> None:
     # リモートウィンドウが DATA 10 バイト分だけ減る
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"0123456789", False)
-    _pump(server, client)
+    _h2_pump(server, client)
     assert server.stream_remote_window_size(stream_id) == 65535 - 10
 
 
 def test_http2_effective_recv_data_length() -> None:
     """WINDOW_UPDATE 未送信の受信 DATA バイト数が取得できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # 受信前は 0
     assert client.effective_recv_data_length == 0
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # レスポンスデータを送信する (10 バイトはウィンドウの半分以下なので
     # WINDOW_UPDATE は送出されない)
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"0123456789", False)
-    _pump(server, client)
+    _h2_pump(server, client)
 
     # 受信データ量は WINDOW_UPDATE 未送信の間は受信バイト数のまま残る
     assert client.effective_recv_data_length == 10
@@ -245,15 +206,15 @@ def test_http2_effective_recv_data_length_window_update_reset() -> None:
     # は送出されるまで次のリセットを起こさないため、各ケースで独立した
     # 接続ペアを使う
     for sent, expected in [(32766, 32766), (32767, 0), (32768, 0)]:
-        client, server = _create_connection_pair()
+        client, server = _create_http2_pair()
 
         stream_id = client.submit_request(_request_headers())
         assert stream_id > 0
-        _pump(client, server)
+        _h2_pump(client, server)
 
         server.submit_response(stream_id, [(":status", "200")])
         server.send_data(stream_id, b"0" * sent, False)
-        _pump(server, client)
+        _h2_pump(server, client)
         assert client.effective_recv_data_length == expected
         assert client.stream_effective_recv_data_length(stream_id) == expected
 
@@ -264,7 +225,7 @@ def test_http2_effective_recv_data_length_window_update_reset() -> None:
 
 def test_http2_request_allowed() -> None:
     """新しいリクエストの送信可否が取得できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # クライアントは送信可能、サーバーセッションは送信不可
     assert client.request_allowed is True
@@ -273,7 +234,7 @@ def test_http2_request_allowed() -> None:
 
 def test_http2_stream_close() -> None:
     """ストリームの half-closed 状態が取得できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # 存在しないストリームは None (ストリーム ID 3 は未使用の奇数 ID)
     assert client.stream_local_close(3) is None
@@ -290,7 +251,7 @@ def test_http2_stream_close() -> None:
 
     # eof=True の DATA を送出するとローカル側が half-closed になる
     client.send_data(stream_id, b"", eof=True)
-    _pump(client, server)
+    _h2_pump(client, server)
     assert client.stream_local_close(stream_id) is True
 
     # ピアの END_STREAM を受信するとサーバーのリモート側が half-closed になる
@@ -305,7 +266,7 @@ def test_http2_stream_close() -> None:
     # DATA 送出で検証済み)
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"response", True)
-    _pump(server, client)
+    _h2_pump(server, client)
     assert server.stream_local_close(stream_id) is None
     assert server.stream_remote_close(stream_id) is None
     assert server.stream_remote_window_size(stream_id) is None
@@ -321,11 +282,11 @@ def test_http2_goaway_connection_keeps_state() -> None:
     既存ストリームの処理を継続するため、is_closed() は False のままで
     状態 getter も値を返し続ける。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # GOAWAY 送信後は閉鎖扱いにならず getter は値を返し続ける
     client.goaway()
-    _pump(client, server)
+    _h2_pump(client, server)
     assert client.is_closed() is False
     assert client.remote_window_size == 65535
     # request_allowed は GOAWAY 送信後に False になる (アクティブストリーム

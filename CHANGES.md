@@ -304,6 +304,8 @@
 
 ### misc
 
+- [UPDATE] HTTP/2 テストの SETTINGS 交換 / ポンプ / 接続ペアのヘルパーを conftest.py に集約する
+  - @voluntas
 - [UPDATE] 受理前 WT_CLOSE_SESSION 送出テストヘルパーを conftest.py に集約する
   - @voluntas
 - [UPDATE] テスト用の UDP パケットロス注入リレー LossyRelay とハンドシェイクロスからの回復テストを追加する

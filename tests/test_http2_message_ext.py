@@ -2,54 +2,14 @@
 
 from __future__ import annotations
 
-from conftest import _drain_events
+from conftest import (
+    _create_http2_pair,
+    _drain_events,
+    _exchange_http2_settings,
+    _h2_pump,
+)
 
 from webtransport import http2
-
-
-def _create_connection_pair() -> tuple[http2.Connection, http2.Connection]:
-    """クライアントとサーバーのペアを作成して SETTINGS を交換する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http2.Connection.create_client(http2.Config())
-    server_config = http2.Config()
-    server_config.is_server = True
-    server = http2.Connection.create_server(server_config)
-    _exchange_settings(client, server)
-    return client, server
-
-
-def _exchange_settings(client: http2.Connection, server: http2.Connection) -> None:
-    """SETTINGS フレームを交換してセッションを確立する
-
-    双方の送信データが無くなるまで送信と受信を繰り返す
-    """
-    for _ in range(10):
-        client_data = client.send()
-        if client_data:
-            server.receive(client_data)
-
-        server_data = server.send()
-        if server_data:
-            client.receive(server_data)
-
-        if not client_data and not server_data:
-            break
-
-
-def _pump(src: http2.Connection, dst: http2.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    send() は 1 回の呼び出しでフレームが無くなるまで返すとは限らない
-    ため、送信データが無くなるまで繰り返す
-    """
-    for _ in range(10):
-        data = src.send()
-        if data:
-            dst.receive(data)
-        if not data:
-            break
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -64,19 +24,19 @@ def _request_headers() -> list[tuple[str, str]]:
 
 def test_http2_submit_trailer() -> None:
     """サーバーがレスポンスの後にトレーラを送信できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # クライアントがリクエストを送信する
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # サーバーがレスポンス + DATA + トレーラを送信する (DATA は eof=False
     # で積み、トレーラ HEADERS が END_STREAM を担う)
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"response-body", False)
     assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is True
-    _pump(server, client)
+    _h2_pump(server, client)
 
     # クライアントでレスポンス HEADERS → DATA → トレーラ HEADERS → の順に
     # イベントが届く
@@ -112,19 +72,19 @@ def test_http2_submit_trailer() -> None:
 
 def test_http2_submit_trailer_after_flush() -> None:
     """送信データを flush した後でもトレーラを送信できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"response-body", False)
-    _pump(server, client)
+    _h2_pump(server, client)
 
     # DATA 送出後にトレーラを予約しても、deferred 状態の再開により送信される
     assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is True
-    _pump(server, client)
+    _h2_pump(server, client)
 
     events = _drain_events(client)
     assert any(
@@ -135,11 +95,11 @@ def test_http2_submit_trailer_after_flush() -> None:
 
 def test_http2_submit_trailer_eof_data() -> None:
     """eof=True のデータが積まれている場合はトレーラを送信できないことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # eof=True のデータを積むと END_STREAM 付き DATA になるため、その後に
     # トレーラを送信できない (RFC 9113 8.1 節)
@@ -148,7 +108,7 @@ def test_http2_submit_trailer_eof_data() -> None:
     assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is False
 
     # トレーラなしで flush すると END_STREAM 付きで終端する
-    _pump(server, client)
+    _h2_pump(server, client)
     events = _drain_events(client)
     assert not any(
         e.type == http2.EventType.HEADERS and ("x-trailer", "value") in e.headers for e in events
@@ -161,11 +121,11 @@ def test_http2_submit_trailer_eof_data() -> None:
 
 def test_http2_submit_trailer_reset_stream() -> None:
     """ストリームをリセットすると保留中のトレーラが送信されないことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"body", False)
@@ -173,7 +133,7 @@ def test_http2_submit_trailer_reset_stream() -> None:
 
     # トレーラ送信前にストリームをリセットする
     server.reset_stream(stream_id)
-    _pump(server, client)
+    _h2_pump(server, client)
 
     events = _drain_events(client)
     assert not any(
@@ -188,17 +148,17 @@ def test_http2_submit_trailer_after_eof_data() -> None:
     トレーラ HEADERS が END_STREAM を担うため、予約済みストリームの
     eof=True は無効化される
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     server.submit_response(stream_id, [(":status", "200")])
     assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is True
     # eof=True でもトレーラが END_STREAM を担うため、eof は無効化される
     server.send_data(stream_id, b"response-body", True)
-    _pump(server, client)
+    _h2_pump(server, client)
 
     events = _drain_events(client)
     assert any(
@@ -209,17 +169,17 @@ def test_http2_submit_trailer_after_eof_data() -> None:
 
 def test_http2_submit_priority_update() -> None:
     """クライアントが PRIORITY_UPDATE フレームを送信できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # 優先度を更新する (incremental 付き)。連続送信で優先度の再更新
     # (RFC 9218 の再更新) ができることも確認する
     assert client.submit_priority_update(stream_id, 5, True) is True
     assert client.submit_priority_update(stream_id, 0, False) is True
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # サーバーで PriorityUpdate イベントを受信する (stream_id と
     # priority field value を含む)
@@ -240,16 +200,16 @@ def test_http2_priority_update_noop_without_no_rfc7540_priorities() -> None:
     server_config.is_server = True
     server_config.no_rfc7540_priorities = False
     server = http2.Connection.create_server(server_config)
-    _exchange_settings(client, server)
+    _exchange_http2_settings(client, server)
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # ピアが NO_RFC7540_PRIORITIES=0 を送信しているため noop (成功) になり、
     # PRIORITY_UPDATE フレームは送出されない
     assert client.submit_priority_update(stream_id, 0, False) is True
-    _pump(client, server)
+    _h2_pump(client, server)
     assert not any(e.type == http2.EventType.PRIORITY_UPDATE for e in _drain_events(server))
 
 
@@ -259,11 +219,11 @@ def test_http2_change_extpri_stream_priority() -> None:
     ローカルなスケジューリング変更のみでワイヤ上の効果が無いため、
     返り値での確認となる
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # urgency の境界値 (0 と 7) と incremental の両方を確認する
     assert server.change_extpri_stream_priority(stream_id, 0, True) is True
@@ -274,11 +234,11 @@ def test_http2_change_extpri_stream_priority() -> None:
 
 def test_http2_submit_push_promise() -> None:
     """サーバーが Server Push を宣言できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # プッシュするリクエストを宣言する
     push_headers = [
@@ -289,7 +249,7 @@ def test_http2_submit_push_promise() -> None:
     ]
     promised_stream_id = server.submit_push_promise(stream_id, push_headers)
     assert promised_stream_id > 0
-    _pump(server, client)
+    _h2_pump(server, client)
 
     # クライアントで PushPromise イベントを受信する (promised stream ID と
     # ヘッダーを含む)
@@ -304,7 +264,7 @@ def test_http2_submit_push_promise() -> None:
     # 通常のレスポンスと同じフロー)
     server.submit_response(promised_stream_id, [(":status", "200")])
     server.send_data(promised_stream_id, b"pushed-body", True)
-    _pump(server, client)
+    _h2_pump(server, client)
     events = _drain_events(client)
     pushed_data = b"".join(
         e.data
@@ -331,11 +291,11 @@ def test_http2_select_alpn() -> None:
 
 def test_http2_message_ext_guards() -> None:
     """利用できない側で False / -1 になることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # サーバーセッションでは PRIORITY_UPDATE を送信できない
     assert server.submit_priority_update(stream_id, 0, False) is False
@@ -368,7 +328,7 @@ def test_http2_message_ext_guards() -> None:
     # 存在しないストリームへの PRIORITY_UPDATE は送出される (nghttp2 は
     # stream_id の存在を検証しない。RFC 9218 では受信側の扱いに委ねられる)
     assert client.submit_priority_update(999, 0, False) is True
-    _pump(client, server)
+    _h2_pump(client, server)
     assert any(
         e.type == http2.EventType.PRIORITY_UPDATE and e.stream_id == 999
         for e in _drain_events(server)
@@ -380,7 +340,7 @@ def test_http2_message_ext_guards() -> None:
     server.send_data(stream_id, b"body", False)
     assert server.submit_trailer(stream_id, [("x-trailer", "first")]) is True
     assert server.submit_trailer(stream_id, [("x-trailer", "second")]) is False
-    _pump(server, client)
+    _h2_pump(server, client)
     assert any(
         e.type == http2.EventType.HEADERS and ("x-trailer", "first") in e.headers
         for e in _drain_events(client)
@@ -399,12 +359,12 @@ def test_http2_goaway_connection_guards() -> None:
     等) は closed_ 起因のガードだけがあり、GOAWAY では塞がれない。
     """
     # クライアント側が GOAWAY を送信する場合 (サーバーの GOAWAY 受信)
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
     client.goaway()
-    _pump(client, server)
+    _h2_pump(client, server)
     assert server.is_closed() is False
     # 新規ストリームの開始 (push promise) は抑止される
     assert server.submit_push_promise(stream_id, _request_headers()) == -1
@@ -417,12 +377,12 @@ def test_http2_goaway_connection_guards() -> None:
     # クライアント側が GOAWAY を受信する場合 (サーバーの GOAWAY 送信)。
     # クライアントセッションでは is_server_ ガードに抵触しない
     # submit_priority_update / change_extpri で検証する
-    client2, server2 = _create_connection_pair()
+    client2, server2 = _create_http2_pair()
     stream_id2 = client2.submit_request(_request_headers())
     assert stream_id2 > 0
-    _pump(client2, server2)
+    _h2_pump(client2, server2)
     server2.goaway()
-    _pump(server2, client2)
+    _h2_pump(server2, client2)
     assert client2.is_closed() is False
     assert client2.submit_request(_request_headers()) == -1
     assert client2.submit_priority_update(stream_id2, 0, False) is True
@@ -436,17 +396,17 @@ def test_http2_goaway_after_response_delivered() -> None:
     ストリームへのレスポンス (HEADERS + DATA) を送出し、クライアントが
     HEADERS / DATA イベントとして受信できることを検証する。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http2_pair()
 
     # クライアントがリクエストを送信する
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
-    _pump(client, server)
+    _h2_pump(client, server)
 
     # クライアントが GOAWAY を送信し、サーバーが受信する
     # (接続は閉じず graceful shutdown になる)
     client.goaway()
-    _pump(client, server)
+    _h2_pump(client, server)
     assert server.is_closed() is False
 
     # GOAWAY 受信後に進行中ストリームへのレスポンス送出が継続する

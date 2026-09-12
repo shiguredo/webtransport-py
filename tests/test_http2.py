@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from conftest import _drain_events
+from conftest import (
+    _drain_events,
+    _exchange_http2_settings,
+    _h2_pump,
+)
 
 from webtransport import http2
 
@@ -114,35 +118,6 @@ def test_http2_connection_client_request():
     assert len(data) > 0
 
 
-def _exchange_settings(client: http2.Connection, server: http2.Connection) -> None:
-    """SETTINGS フレームを交換してセッションを確立する"""
-    for _ in range(10):
-        client_data = client.send()
-        if client_data:
-            server.receive(client_data)
-
-        server_data = server.send()
-        if server_data:
-            client.receive(server_data)
-
-        if not client_data and not server_data:
-            break
-
-
-def _pump(src: http2.Connection, dst: http2.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    send() は 1 回の呼び出しでフレームが無くなるまで返すとは限らない
-    ため、送信データが無くなるまで繰り返す
-    """
-    for _ in range(10):
-        data = src.send()
-        if data:
-            dst.receive(data)
-        if not data:
-            break
-
-
 def test_http2_request_body_reaches_server():
     """submit_request の後に send_data したリクエストボディがサーバーに届くことを確認
 
@@ -154,7 +129,7 @@ def test_http2_request_body_reaches_server():
     server_config = http2.Config()
     server_config.is_server = True
     server = http2.Connection.create_server(server_config)
-    _exchange_settings(client, server)
+    _exchange_http2_settings(client, server)
 
     headers = [
         (":method", "POST"),
@@ -167,7 +142,7 @@ def test_http2_request_body_reaches_server():
 
     body = b"request-body"
     client.send_data(stream_id, body, eof=True)
-    _pump(client, server)
+    _h2_pump(client, server)
 
     events = _drain_events(server)
     data_events = [event for event in events if event.type == http2.EventType.DATA]
