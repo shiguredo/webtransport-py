@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の WT_STOP_SENDING に対する WT_RESET_STREAM 自動応答と高レベルイベント配信を実装する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/add-h2-wt-stop-sending-auto-reset-response
 - Polished: {YYYY-MM-DD}
 
@@ -31,3 +31,20 @@ draft-ietf-webtrans-http2-15 Section 6.3 は「the recipient of a WT_STOP_SENDIN
 - 高レベル `on_stop_sending` (仮) コールバックでアプリが STOP_SENDING を検知できること
 - `tests/` に WT_STOP_SENDING の自動応答テストを追加すること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+WT_STOP_SENDING への自動応答と高レベルイベント配信を実装した。
+
+- `src/bindings/webtransport_h2.cpp` の `handle_wt_stop_sending` で、対象ストリームの情報を持つ場合 (`known_stream`) に `reset_stream(session_id, stream_id, error_code)` を呼び、送信側が Ready / Send 状態なら WT_RESET_STREAM を自動送出するようにした。エラーコードは受信した WT_STOP_SENDING から複製する (draft-15 Section 6.3 の can)。送信側が既に終端 (DataSent / ResetSent) の場合は `reset_stream` 側のガード (draft-15 Section 6.2 の MUST NOT) で送出されない
+- `src/webtransport/h2/client.py` に `on_stop_sending(stream_id, error_code)`、`src/webtransport/h2/server.py` に `on_stop_sending(stream_id, error_code, session_writer)` を追加し、低レベルの `STOP_SENDING` イベントを配信するようにした
+- 同じく両面に `stop_sending` 送信 API を追加した (`h2.Client.stop_sending` / `SessionWriter.stop_sending`)。既存の `reset_stream` と対称で、無いと自動応答を e2e で検証できないため
+- テストを 4 本追加した
+  - `test_stop_sending_on_ready_stream_auto_resets` (低レベル): サーバーが開いた Ready 状態のストリームへ WT_STOP_SENDING を送ると、エラーコードを複製し Reliable Size が送信済みバイト数と一致する WT_RESET_STREAM がワイヤに載る
+  - `test_stop_sending_on_terminal_stream_does_not_auto_reset` (低レベル): 送信側が FIN 送出済みのストリームには自動応答しない (STOP_SENDING イベント自体は届く)
+  - `test_server_on_stop_sending_fires` / `test_client_on_stop_sending_fires` (e2e): 高レベル両面のコールバックが stream_id とエラーコードを配信する
+- `skills/webtransport-py/SKILL.md` の h2 のコールバック一覧と `SessionWriter` のメソッド一覧を更新した
+
+`SESSION_DRAINING` への高レベル分岐は本 issue の対象外とした。低レベルでは `SessionDraining` イベントが既に配信されており (`tests/test_webtransport_h2_stop_sending_drain_session.py` で検証済み)、GOAWAY 系の通知は 0170 で `on_goaway` として実装済みのため重複を避けた。
+
+`uv run pytest tests/ --timeout=30` の 1093 件が全て通る。
