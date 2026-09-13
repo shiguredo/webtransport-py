@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from webtransport._common import normalize_addr, validate_cert_key_files
 from webtransport.webtransport_ext import quic as quic_low
@@ -86,6 +86,8 @@ class Server:
         self._connection_tasks: dict[quic_low.Connection, asyncio.Task[None]] = {}
         self._running = False
         self._actual_port = 0
+        # 受信待ちの上限 (秒)。接続の QUIC タイマー期限に合わせて更新する
+        self._wait = 0.1
 
         self._on_handshake_completed: Callable[[tuple[str, int]], Awaitable[None]] | None = None
         self._on_stream_data: (
@@ -553,95 +555,30 @@ class Server:
         loop = asyncio.get_running_loop()
 
         while self._running:
+            # 受信は「次の QUIC タイマー期限まで待つ 1 回」+「読めるだけ
+            # まとめて読む」で行う。1 ループ 1 パケットに固定すると、1
+            # パケットあたりのループ オーバーヘッドがそのままスループット
+            # 上限になる (まとめて受信してから ACK と MAX_STREAM_DATA を
+            # 送出することで送出間隔も詰まる)
             try:
                 data, raw_addr = await asyncio.wait_for(
                     loop.sock_recvfrom(self._socket, 65535),
-                    timeout=0.1,
+                    timeout=self._wait,
                 )
-                addr = self._normalize_addr(raw_addr)
-
-                connection = self._connections.get(addr)
-                if connection is None:
-                    # Connection Migration 後は送信元ポートが変わる。
-                    # Short header は DCID 索引で既存接続を O(1) で引く
-                    # (RFC 9000 Section 5.2 に従い DCID での照合を試みる)。
-                    # Long header (Initial 等) は新規 accept する。
-                    is_long_header = bool(data) and (data[0] & 0x80) != 0
-                    if not is_long_header and len(data) >= 9:
-                        # DCID は short header の [1:9] にある 8 バイト固定
-                        # とする (自側の発行 CID は初期 SCID 長に揃う)。
-                        # 一致しなければ破棄し、試し受信の走査は行わない
-                        candidate = self._dcid_index.get(bytes(data[1:9]))
-                        if candidate is not None:
-                            result = candidate.receive(
-                                data,
-                                self._local_addr,
-                                addr,
-                            )
-                            if result == quic_low.ReceiveResult.ACCEPTED:
-                                # 正当な Migration としてアドレスキーを張り替える
-                                old_addr = self._conn_addr.get(candidate)
-                                if old_addr != addr:
-                                    if (
-                                        old_addr is not None
-                                        and self._connections.get(old_addr) is candidate
-                                    ):
-                                        del self._connections[old_addr]
-                                    self._connections[addr] = candidate
-                                    self._conn_addr[candidate] = addr
-                                self._refresh_dcid_index(candidate)
-                                connection = candidate
-                            elif result == quic_low.ReceiveResult.CLOSED:
-                                # 終了時はイベント投入と登録外しのために
-                                # 投入する。通知先は登録済みの旧アドレスに
-                                # する。破棄時は何もしない (滞留イベントの
-                                # 誤帰属を防ぐ)
-                                self._enqueue_connection_events(
-                                    self._conn_addr.get(candidate, addr), candidate
-                                )
-                    if connection is None:
-                        # 停止競合時は新規受理せずループを抜ける (停止由来の
-                        # RuntimeError をパケット破棄ログに混ぜないため)
-                        if not self._running:
-                            break
-                        try:
-                            connection = self._accept_connection(addr, data)
-                        except ValueError as exc:
-                            # 設定不正は黙殺せず再 raise して run() を止める
-                            logger.warning(
-                                "failed to accept QUIC connection from %s:%d "
-                                "size %d first_byte %s: %s",
-                                addr[0],
-                                addr[1],
-                                len(data),
-                                data[:1].hex() if data else "none",
-                                exc,
-                            )
-                            raise
-                        except RuntimeError as exc:
-                            # パケット不正のみ破棄して継続する
-                            logger.warning(
-                                "discarding invalid QUIC packet from %s:%d "
-                                "size %d first_byte %s: %s",
-                                addr[0],
-                                addr[1],
-                                len(data),
-                                data[:1].hex() if data else "none",
-                                exc,
-                            )
-                            continue
-
-                else:
-                    connection.receive(data, self._local_addr, addr)
-                    # CID ローテーションに追従するため、接触のたびに索引を
-                    # 最新化する
-                    self._refresh_dcid_index(connection)
-
-                # アプリコールバックを待たず投入のみ行い、送信は全接続走査に委ねる
-                self._enqueue_connection_events(addr, connection)
-
             except TimeoutError:
                 pass
+            else:
+                if not self._handle_datagram(data, raw_addr):
+                    break
+                # 続きは non-blocking で読めるだけ読む。読み切ったら送信と
+                # タイマー処理へ進む
+                while True:
+                    try:
+                        data, raw_addr = self._socket.recvfrom(65535)
+                    except BlockingIOError, InterruptedError:
+                        break
+                    if not self._handle_datagram(data, raw_addr):
+                        return
 
             # 受信の有無にかかわらず全接続の送信とタイマーを処理する。
             # 1 接続のコールバック実行中も他接続の ACK と再送が止まらない
@@ -667,4 +604,122 @@ class Server:
                 except (OSError, RuntimeError) as exc:
                     logger.warning("failed to send packet: %s", exc)
 
-            await asyncio.sleep(0.001)
+            # 受信待ちは次の QUIC タイマー期限に合わせる。固定の sleep を
+            # 挟むと受信したパケット数だけ遅延が積み上がるため、待機は
+            # ソケット読み取り側に任せ、ここでは他のタスクへ 1 回譲るだけに
+            # する (タイマーが期限切れの場合は次の周回で即座に処理される)
+            self._wait = self._timeout_seconds()
+            await asyncio.sleep(0)
+
+    def _timeout_seconds(self) -> float:
+        """全接続のうち最も早い QUIC タイマー期限までの秒数を返す
+
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
+        0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
+        ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
+        送り出せない。
+        """
+        deadline: float | None = None
+        for connection in self._conn_addr:
+            timeout_ns = connection.get_timeout()
+            if timeout_ns is None:
+                continue
+            seconds = timeout_ns / 1e9
+            if deadline is None or seconds < deadline:
+                deadline = seconds
+        if deadline is None:
+            return 0.1
+        return min(max(deadline, 0.001), 0.1)
+
+    def _handle_datagram(self, data: bytes, raw_addr: tuple[Any, ...]) -> bool:
+        """受信した 1 データグラムを接続へ振り分ける
+
+        新規接続の accept と Connection Migration の照合を行い、既存接続へ
+        パケットを渡す。アプリコールバックは待たず、イベントの投入のみ行う。
+
+        Returns:
+            受信ループを継続する場合は True、停止する場合は False
+        """
+        if self._local_addr is None:
+            return False
+
+        addr = self._normalize_addr(raw_addr)
+
+        connection = self._connections.get(addr)
+        if connection is None:
+            # Connection Migration 後は送信元ポートが変わる。
+            # Short header は DCID 索引で既存接続を O(1) で引く
+            # (RFC 9000 Section 5.2 に従い DCID での照合を試みる)。
+            # Long header (Initial 等) は新規 accept する。
+            is_long_header = bool(data) and (data[0] & 0x80) != 0
+            if not is_long_header and len(data) >= 9:
+                # DCID は short header の [1:9] にある 8 バイト固定
+                # とする (自側の発行 CID は初期 SCID 長に揃う)。
+                # 一致しなければ破棄し、試し受信の走査は行わない
+                candidate = self._dcid_index.get(bytes(data[1:9]))
+                if candidate is not None:
+                    result = candidate.receive(
+                        data,
+                        self._local_addr,
+                        addr,
+                    )
+                    if result == quic_low.ReceiveResult.ACCEPTED:
+                        # 正当な Migration としてアドレスキーを張り替える
+                        old_addr = self._conn_addr.get(candidate)
+                        if old_addr != addr:
+                            if (
+                                old_addr is not None
+                                and self._connections.get(old_addr) is candidate
+                            ):
+                                del self._connections[old_addr]
+                            self._connections[addr] = candidate
+                            self._conn_addr[candidate] = addr
+                        self._refresh_dcid_index(candidate)
+                        connection = candidate
+                    elif result == quic_low.ReceiveResult.CLOSED:
+                        # 終了時はイベント投入と登録外しのために
+                        # 投入する。通知先は登録済みの旧アドレスに
+                        # する。破棄時は何もしない (滞留イベントの
+                        # 誤帰属を防ぐ)
+                        self._enqueue_connection_events(
+                            self._conn_addr.get(candidate, addr), candidate
+                        )
+            if connection is None:
+                # 停止競合時は新規受理せずループを抜ける (停止由来の
+                # RuntimeError をパケット破棄ログに混ぜないため)
+                if not self._running:
+                    return False
+                try:
+                    connection = self._accept_connection(addr, data)
+                except ValueError as exc:
+                    # 設定不正は黙殺せず再 raise して run() を止める
+                    logger.warning(
+                        "failed to accept QUIC connection from %s:%d size %d first_byte %s: %s",
+                        addr[0],
+                        addr[1],
+                        len(data),
+                        data[:1].hex() if data else "none",
+                        exc,
+                    )
+                    raise
+                except RuntimeError as exc:
+                    # パケット不正のみ破棄して継続する
+                    logger.warning(
+                        "discarding invalid QUIC packet from %s:%d size %d first_byte %s: %s",
+                        addr[0],
+                        addr[1],
+                        len(data),
+                        data[:1].hex() if data else "none",
+                        exc,
+                    )
+                    return True
+
+        else:
+            connection.receive(data, self._local_addr, addr)
+            # CID ローテーションに追従するため、接触のたびに索引を
+            # 最新化する
+            self._refresh_dcid_index(connection)
+
+        # アプリコールバックを待たず投入のみ行い、送信は全接続走査に委ねる
+        self._enqueue_connection_events(addr, connection)
+        return True

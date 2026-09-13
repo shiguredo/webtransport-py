@@ -91,6 +91,8 @@
   - @voluntas
 - [UPDATE] 依存ライブラリ (ngtcp2 / nghttp3 / nghttp2 / AWS-LC / nanobind) を固定したコミット・タグでビルドする
   - @voluntas
+- [UPDATE] QUIC の高レベル API (`quic` の Client / Server) の受信を 1 回の待機で複数パケットまとめて取り込み、待機を次の QUIC タイマー期限に委ねて大容量転送のスループットを改善する
+  - @voluntas
 - [FIX] HTTP/2 の送信バッファで先頭 1 バイトが欠落する問題と、空のボディで END_STREAM が送出されない問題を修正する
   - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループする問題、ngtcp2 の WRITE_MORE 契約違反で大容量データ転送が壊れる問題、再送時にストリームデータが破損する問題を修正する
