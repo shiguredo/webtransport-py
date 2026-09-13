@@ -33,6 +33,23 @@ namespace webtransport {
 namespace h2 {
 
 /**
+ * WebTransport over HTTP/2 のエラーコード (draft-ietf-webtrans-http2-15
+ * Section 3.4)
+ *
+ * draft-15 では 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダである。draft で
+ * 値が確定したらここだけを更新する (C++ / Python 高レベル / tests はすべて
+ * この定数と、バインディングで公開する同名の Python 定数を参照する)
+ */
+enum WtErrorCode : uint32_t {
+  // フロー制御違反 (受信上限超過など)
+  kWtFlowControlError = 0x50,
+  // ストリーム状態違反 (終端状態のストリームへの WT_STREAM など)
+  kWtStreamStateError = 0x51,
+  // 上記以外の WebTransport レベルのエラー
+  kWtError = 0x52,
+};
+
+/**
  * Capsule Type (draft-ietf-webtrans-http2-15 Section 6)
  *
  * WT_STREAM の Type は 0x190B4D3B..0x190B4D3C で、最下位ビットが FIN

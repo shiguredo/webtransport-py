@@ -5,8 +5,7 @@ WT_MAX_STREAM_DATA を超えたら WT_FLOW_CONTROL_ERROR でセッションを�
 を検証する。不正な超過データはワイヤ注入で再現する (公開 API の
 send_stream_data は送信側クレジットで塞がれ、超過分を送れないため)。
 セッション閉鎖は close_session 経由の WT_CLOSE_SESSION (error code 0x50)
-で実現され、あわせて Error イベント (0x50) を push する。0x50 は
-WT_FLOW_CONTROL_ERROR (0xTBD) のプレースホルダ (draft-15 Section 3.4)。
+で実現され、あわせて Error イベント (WT_FLOW_CONTROL_ERROR) を push する。WT_FLOW_CONTROL_ERROR (0x50) は 0xTBD のプレースホルダ (draft-15 Section 3.4)。
 """
 
 from __future__ import annotations
@@ -22,6 +21,14 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
 
 _WT_STREAM = 0x190B4D3C
 _PEER_EXCEEDED = "peer exceeded flow control limit"
@@ -41,12 +48,12 @@ def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> byt
 def _assert_flow_control_error_sent(server: h2.Session) -> None:
     """WT_FLOW_CONTROL_ERROR (0x50) の WT_CLOSE_SESSION が送出されることを確認
 
-    0x50 は draft-15 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
+    WT_FLOW_CONTROL_ERROR は draft-15 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
     確定したら更新する。
     """
     wire = server.send()
     assert wire is not None
-    assert _encode_wt_close_session_capsule(0x50, _PEER_EXCEEDED) in wire
+    assert _encode_wt_close_session_capsule(WT_FLOW_CONTROL_ERROR, _PEER_EXCEEDED) in wire
 
 
 def _assert_no_close_session_sent(server: h2.Session) -> None:
@@ -108,7 +115,7 @@ def test_wt_stream_exceeds_max_data_closes_session() -> None:
 
 
 def test_wt_stream_exceeds_flow_control_pushes_error_event() -> None:
-    """受信超過は Error イベント (0x50) を push したうえでセッションを閉じることを確認
+    """受信超過は Error イベント (WT_FLOW_CONTROL_ERROR) を push したうえでセッションを閉じることを確認
 
     カプセル値減少の検知 (Error を push しない) とは経路を分け、受信超過は
     高レベル層の on_error 通知のために Error イベントを残す。
@@ -120,7 +127,7 @@ def test_wt_stream_exceeds_flow_control_pushes_error_event() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x50
+    assert error_events[0].error_code == WT_FLOW_CONTROL_ERROR
     assert error_events[0].error_message == _PEER_EXCEEDED
     assert error_events[0].session_id == session_id
     assert error_events[0].stream_id == 0

@@ -28,6 +28,7 @@ from webtransport.webtransport_ext.h2 import (
     Event,
     EventType,
     Session,
+    WtErrorCode,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "Server",
     "Session",
     "SessionWriter",
+    "WtErrorCode",
 ]

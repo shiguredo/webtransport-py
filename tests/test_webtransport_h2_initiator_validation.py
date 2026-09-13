@@ -21,12 +21,19 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
 
 _WT_STREAM = 0x190B4D3C
 _WT_STOP_SENDING = 0x190B4D3A
 _WT_MAX_STREAM_DATA = 0x190B4D3E
 _WT_RESET_STREAM = 0x190B4D39
-_WT_STREAM_STATE_ERROR = 0x51
 
 
 def _inject(server: h2.Session, session_id: int, capsule: bytes) -> None:
@@ -39,7 +46,7 @@ def _stream_state_errors(server: h2.Session) -> list:
     return [
         event
         for event in _drain_events(server)
-        if event.type == h2.EventType.ERROR and event.error_code == _WT_STREAM_STATE_ERROR
+        if event.type == h2.EventType.ERROR and event.error_code == WT_STREAM_STATE_ERROR
     ]
 
 

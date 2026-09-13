@@ -7,7 +7,7 @@ WT_FLOW_CONTROL_ERROR」と、 Section 6.7 / 6.10 の MUST 「Maximum Streams �
 ワイヤ注入で再現する (公開 API では非コンプライアントな値を送出する
 手段が存在しないため)。セッション閉鎖は close_session 経由の
 WT_CLOSE_SESSION (error code 0x50) で実現され、ワイヤ部分列チェックで
-検証する。0x50 は WT_FLOW_CONTROL_ERROR (0xTBD) のプレースホルダ
+検証する。WT_FLOW_CONTROL_ERROR (0xTBD) のプレースホルダ
 (draft-15 Section 3.4)。
 """
 
@@ -24,6 +24,14 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
 
 # Capsule Type (draft-15 Section 6)
 _WT_MAX_DATA = 0x190B4D3D
@@ -52,12 +60,12 @@ def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> byt
 def _assert_flow_control_error_sent(server: h2.Session, error_message: str) -> None:
     """WT_FLOW_CONTROL_ERROR (0x50) の WT_CLOSE_SESSION が送出されることを確認
 
-    0x50 は draft-15 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
+    WT_FLOW_CONTROL_ERROR は draft-15 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
     確定したら更新する。
     """
     wire = server.send()
     assert wire is not None
-    assert _encode_wt_close_session_capsule(0x50, error_message) in wire
+    assert _encode_wt_close_session_capsule(WT_FLOW_CONTROL_ERROR, error_message) in wire
 
 
 def _assert_no_flow_control_error_sent(server: h2.Session) -> None:

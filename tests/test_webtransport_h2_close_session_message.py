@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 の WT_CLOSE_SESSION メッセージ検証テスト
 
 draft-15 Section 6.12 の MUST 「Application Error Message が 1024 バイト超
-または不正な UTF-8 なら WT_ERROR セッションエラー」を検証する。 0x52 は
+または不正な UTF-8 なら WT_ERROR セッションエラー」を検証する。 WT_ERROR は
 WT_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。 draft で値が
 確定したら更新する。不正メッセージは close_session へ渡さず、固定の英語
 メッセージを Error イベントと WT_CLOSE_SESSION の両方に使う。
@@ -18,8 +18,15 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
 
-_WT_ERROR = 0x52
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
+
 _MSG_TOO_LONG = "WT_CLOSE_SESSION message exceeds 1024 bytes"
 _MSG_BAD_UTF8 = "WT_CLOSE_SESSION message is not valid UTF-8"
 
@@ -40,7 +47,7 @@ def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
     """
     wire = server.send()
     assert wire is not None
-    expected = _encode_wt_close_session_capsule(_WT_ERROR, error_message.encode("utf-8"))
+    expected = _encode_wt_close_session_capsule(WT_ERROR, error_message.encode("utf-8"))
     assert expected in wire
 
 
@@ -76,7 +83,7 @@ def test_wt_close_session_message_over_1024_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_TOO_LONG
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.SESSION_CLOSED for event in events)
@@ -95,7 +102,7 @@ def test_wt_close_session_invalid_utf8_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_BAD_UTF8
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.SESSION_CLOSED for event in events)
@@ -114,7 +121,7 @@ def test_wt_close_session_overlong_utf8_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_BAD_UTF8
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.SESSION_CLOSED for event in events)

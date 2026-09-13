@@ -1,11 +1,11 @@
 """WebTransport over HTTP/2 の error_code 範囲検証テスト
 
 draft-15 Section 6.2 / 6.3 の MUST 「Application Protocol Error Code が
-0xffffffff を超えたら WT_ERROR セッションエラー」を検証する。 0x52 は
+0xffffffff を超えたら WT_ERROR セッションエラー」を検証する。 WT_ERROR は
 WT_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。 draft で値が
 確定したら更新する。 0xffffffff ちょうどは合法で、従来どおり
 StreamReset / StopSending が届く。終端状態や二重受信と同時に立っても
-範囲検証が先で、 0x51 ではなく 0x52 になる。
+範囲検証が先で、 WT_STREAM_STATE_ERROR ではなく WT_ERROR になる。
 """
 
 from __future__ import annotations
@@ -20,8 +20,15 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
 
-_WT_ERROR = 0x52
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
+
 _MAX_ERROR_CODE = 0xFFFFFFFF
 _OVER_MAX_ERROR_CODE = 0x100000000
 _MSG_RESET = "WT_RESET_STREAM error code exceeds 0xffffffff"
@@ -67,7 +74,7 @@ def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
     """
     wire = server.send()
     assert wire is not None
-    expected = _encode_wt_close_session_capsule(_WT_ERROR, error_message)
+    expected = _encode_wt_close_session_capsule(WT_ERROR, error_message)
     assert expected in wire
 
 
@@ -101,7 +108,7 @@ def test_wt_reset_stream_error_code_over_max_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_RESET
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.STREAM_RESET for event in events)
@@ -109,7 +116,7 @@ def test_wt_reset_stream_error_code_over_max_sends_wt_error() -> None:
 
 
 def test_wt_reset_stream_over_max_unknown_nonzero_sends_wt_error() -> None:
-    """未知ストリームかつ Reliable Size > 0 でも 0xffffffff 超なら 0x52 になることを確認
+    """未知ストリームかつ Reliable Size > 0 でも 0xffffffff 超なら WT_ERROR になることを確認
 
     範囲検証は未知ストリームの non-zero reliable size (0x51) より先。
     順序が入れ替わると 0x51 になる。既存の over-max テストは
@@ -128,7 +135,7 @@ def test_wt_reset_stream_over_max_unknown_nonzero_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_RESET
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.STREAM_RESET for event in events)
@@ -151,7 +158,7 @@ def test_wt_stop_sending_error_code_over_max_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_STOP
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.STOP_SENDING for event in events)
@@ -159,7 +166,7 @@ def test_wt_stop_sending_error_code_over_max_sends_wt_error() -> None:
 
 
 def test_wt_reset_stream_over_max_on_terminal_stream_sends_wt_error() -> None:
-    """終端状態のストリームへ 0xffffffff 超の WT_RESET_STREAM を送ると 0x52 になることを確認
+    """終端状態のストリームへ 0xffffffff 超の WT_RESET_STREAM を送ると WT_ERROR になることを確認
 
     範囲検証は終端状態 (0x51) より先。順序が入れ替わると 0x51 になる。
     """
@@ -180,7 +187,7 @@ def test_wt_reset_stream_over_max_on_terminal_stream_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_RESET
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.STREAM_RESET for event in events)
@@ -188,7 +195,7 @@ def test_wt_reset_stream_over_max_on_terminal_stream_sends_wt_error() -> None:
 
 
 def test_wt_stop_sending_second_over_max_sends_wt_error() -> None:
-    """2 回目の WT_STOP_SENDING が 0xffffffff 超なら 0x52 になることを確認
+    """2 回目の WT_STOP_SENDING が 0xffffffff 超なら WT_ERROR になることを確認
 
     範囲検証は二重受信 (0x51) より先。順序が入れ替わると 0x51 になる。
     """
@@ -209,7 +216,7 @@ def test_wt_stop_sending_second_over_max_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert error_events[0].error_message == _MSG_STOP
     assert error_events[0].session_id == session_id
     assert all(event.type != h2.EventType.STOP_SENDING for event in events)

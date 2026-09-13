@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 の受信ストリーム数上限テスト
 
 draft-15 Section 6.7 の MUST 「広告した Maximum Streams を超えるストリーム
-受信は WT_FLOW_CONTROL_ERROR でセッションを閉じる」を検証する。 0x50 は
+受信は WT_FLOW_CONTROL_ERROR でセッションを閉じる」を検証する。 WT_FLOW_CONTROL_ERROR は
 WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
 同一タイプ・方向の低い ID も暗黙オープンとして累積カウントし、閉じた
 ストリームも含める。
@@ -19,8 +19,15 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
 
-_WT_FLOW_CONTROL_ERROR = 0x50
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
+
 _MSG_STREAM_LIMIT = "peer exceeded Maximum Streams limit"
 
 
@@ -45,7 +52,7 @@ def _assert_flow_control_error_sent(server: h2.Session) -> None:
     """WT_FLOW_CONTROL_ERROR (0x50) の WT_CLOSE_SESSION が送出されることを確認"""
     wire = server.send()
     assert wire is not None
-    expected = _encode_wt_close_session_capsule(_WT_FLOW_CONTROL_ERROR, _MSG_STREAM_LIMIT)
+    expected = _encode_wt_close_session_capsule(WT_FLOW_CONTROL_ERROR, _MSG_STREAM_LIMIT)
     assert expected in wire
 
 
@@ -126,7 +133,7 @@ def test_wt_stream_existing_id_does_not_exceed_limit() -> None:
     """既存ストリームへの再受信は Maximum Streams 超過にならないことを確認
 
     上限ちょうどで受理した ID への 2 通目は暗黙作成経路を通らない。
-    制限チェックを lookup の前に置くと 2 通目で誤って 0x50 になる。
+    制限チェックを lookup の前に置くと 2 通目で誤って WT_FLOW_CONTROL_ERROR になる。
     """
     client, server = _create_server_with_stream_limits(max_streams_bidi=2, max_streams_uni=100)
     session_id = _connect_h2_session(client, server)
@@ -155,7 +162,7 @@ def test_wt_stream_over_max_streams_sends_flow_control_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_FLOW_CONTROL_ERROR
+    assert error_events[0].error_code == WT_FLOW_CONTROL_ERROR
     assert error_events[0].error_message == _MSG_STREAM_LIMIT
     assert error_events[0].session_id == session_id
     assert error_events[0].stream_id == 4
@@ -176,14 +183,14 @@ def test_wt_stream_empty_fin_over_max_sends_flow_control_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_FLOW_CONTROL_ERROR
+    assert error_events[0].error_code == WT_FLOW_CONTROL_ERROR
     assert error_events[0].error_message == _MSG_STREAM_LIMIT
     assert all(event.type != h2.EventType.STREAM_DATA for event in events)
     _assert_flow_control_error_sent(server)
 
 
 def test_wt_stream_over_max_after_closed_sends_flow_control_error() -> None:
-    """閉じたストリームも累積カウントし、上限超過で 0x50 になることを確認
+    """閉じたストリームも累積カウントし、上限超過で WT_FLOW_CONTROL_ERROR になることを確認
 
     上限 1 で ID 0 を FIN したあと ID 4 を送る。閉じた ID 0 を含め累積 2。
     """
@@ -198,7 +205,7 @@ def test_wt_stream_over_max_after_closed_sends_flow_control_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_FLOW_CONTROL_ERROR
+    assert error_events[0].error_code == WT_FLOW_CONTROL_ERROR
     assert error_events[0].error_message == _MSG_STREAM_LIMIT
     _assert_flow_control_error_sent(server)
 
@@ -207,7 +214,7 @@ def test_wt_reset_stream_over_max_sends_flow_control_error() -> None:
     """未知ストリームの WT_RESET_STREAM でも Maximum Streams 超過を検知することを確認
 
     Reliable Size 0 の暗黙作成は制限の対象。超過時は StreamReset を push
-    せず 0x50 でセッションを閉じる。
+    せず WT_FLOW_CONTROL_ERROR でセッションを閉じる。
     """
     client, server = _create_server_with_stream_limits(max_streams_bidi=1, max_streams_uni=100)
     session_id = _connect_h2_session(client, server)
@@ -217,14 +224,14 @@ def test_wt_reset_stream_over_max_sends_flow_control_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_FLOW_CONTROL_ERROR
+    assert error_events[0].error_code == WT_FLOW_CONTROL_ERROR
     assert error_events[0].error_message == _MSG_STREAM_LIMIT
     assert all(event.type != h2.EventType.STREAM_RESET for event in events)
     _assert_flow_control_error_sent(server)
 
 
 def test_wt_stream_uni_over_max_sends_flow_control_error() -> None:
-    """単方向の Maximum Streams 超過も 0x50 になることを確認
+    """単方向の Maximum Streams 超過も WT_FLOW_CONTROL_ERROR になることを確認
 
     クライアント起点単方向は ID 2, 6, ... 。上限 1 に対して ID 6 は累積 2。
     """
@@ -235,15 +242,15 @@ def test_wt_stream_uni_over_max_sends_flow_control_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_FLOW_CONTROL_ERROR
+    assert error_events[0].error_code == WT_FLOW_CONTROL_ERROR
     assert error_events[0].error_message == _MSG_STREAM_LIMIT
     _assert_flow_control_error_sent(server)
 
 
 def test_wt_reset_stream_over_max_error_code_sends_wt_error() -> None:
-    """ストリーム数超過と同時に error_code が範囲外なら 0x52 が先になることを確認
+    """ストリーム数超過と同時に error_code が範囲外なら WT_ERROR が先になることを確認
 
-    順序が入れ替わると 0x50 になる。
+    順序が入れ替わると WT_FLOW_CONTROL_ERROR になる。
     """
     client, server = _create_server_with_stream_limits(max_streams_bidi=1, max_streams_uni=100)
     session_id = _connect_h2_session(client, server)
@@ -255,14 +262,14 @@ def test_wt_reset_stream_over_max_error_code_sends_wt_error() -> None:
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x52
+    assert error_events[0].error_code == WT_ERROR
     assert all(event.type != h2.EventType.STREAM_RESET for event in events)
 
 
 def test_wt_reset_stream_over_max_nonzero_reliable_size_sends_state_error() -> None:
-    """ストリーム数超過と同時に未知ストリームの Reliable Size > 0 なら 0x51 が先になることを確認
+    """ストリーム数超過と同時に未知ストリームの Reliable Size > 0 なら WT_STREAM_STATE_ERROR が先になることを確認
 
-    順序が入れ替わると 0x50 になる。
+    順序が入れ替わると WT_FLOW_CONTROL_ERROR になる。
     """
     client, server = _create_server_with_stream_limits(max_streams_bidi=1, max_streams_uni=100)
     session_id = _connect_h2_session(client, server)
@@ -272,7 +279,7 @@ def test_wt_reset_stream_over_max_nonzero_reliable_size_sends_state_error() -> N
     events = _drain_events(server)
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x51
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
     assert error_events[0].error_message == (
         "WT_RESET_STREAM non-zero reliable size, unknown stream"
     )

@@ -16,6 +16,13 @@ from webtransport.exceptions import (
 )
 from webtransport.h2 import Server
 from webtransport.webtransport_ext import h2 as h2_low
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
 def _encode_h2_wt_stream_data_frame(http2_stream_id: int, wt_stream_id: int, data: bytes) -> bytes:
@@ -702,7 +709,7 @@ async def test_recv_flow_control_violation_notifies_on_error(test_certificates):
     公開 API の send_stream_data は送信側クレジットで塞がれるため、クライアント
     の TLS ソケットへ WT_STREAM カプセルを直接書き込んで超過を再現する。
     サーバーのストリーム受信上限を 4 バイトにし、5 バイトを注入する。
-    0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+    WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15 Section 3.4 の 0xTBD) の
     プレースホルダ。draft で値が確定したら更新する。
     """
     from webtransport.h2 import Client, Config, Server
@@ -753,7 +760,7 @@ async def test_recv_flow_control_violation_notifies_on_error(test_certificates):
     await client._writer.drain()
 
     await asyncio.wait_for(error_received.wait(), timeout=5.0)
-    assert error_codes == [0x50]
+    assert error_codes == [WT_FLOW_CONTROL_ERROR]
     assert error_messages == ["peer exceeded flow control limit"]
     assert stream_payloads == []
     assert config.is_server is False
@@ -770,7 +777,7 @@ async def test_client_recv_flow_control_violation_notifies_on_error(test_certifi
     公開 API の send_stream_data は送信側クレジットで塞がれるため、サーバー
     の TLS ソケットへ WT_STREAM カプセルを直接書き込んで超過を再現する。
     クライアントのストリーム受信上限を 4 バイトにし、5 バイトを注入する。
-    0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+    WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15 Section 3.4 の 0xTBD) の
     プレースホルダ。draft で値が確定したら更新する。
     """
     from webtransport.h2 import Client, Config, Server, SessionWriter
@@ -831,7 +838,7 @@ async def test_client_recv_flow_control_violation_notifies_on_error(test_certifi
     await session_writers[0]._writer.drain()
 
     await asyncio.wait_for(error_received.wait(), timeout=5.0)
-    assert error_codes == [0x50]
+    assert error_codes == [WT_FLOW_CONTROL_ERROR]
     assert error_messages == ["peer exceeded flow control limit"]
     assert stream_payloads == []
     assert client_config.is_server is False
@@ -848,9 +855,9 @@ async def test_server_stream_state_error_does_not_notify_on_error(test_certifica
     """WT_STREAM_STATE_ERROR (0x51) はサーバーの on_error に届かないことを確認
 
     FIN 後の終端ストリームへデータ付き WT_STREAM を注入すると C++ は
-    Error 0x51 を push してセッションを閉じる。高レベルは 0x50 のみを
+    Error WT_STREAM_STATE_ERROR を push してセッションを閉じる。高レベルは WT_FLOW_CONTROL_ERROR のみを
     on_error に渡すため、コールバックは発火しない。クライアントが
-    WT_CLOSE_SESSION を受けてセッション終了することをもって 0x51 経路を
+    WT_CLOSE_SESSION を受けてセッション終了することをもって WT_STREAM_STATE_ERROR 経路を
     確認する。
     """
     from webtransport.h2 import Client, Server
@@ -917,9 +924,9 @@ async def test_client_stream_state_error_does_not_notify_on_error(test_certifica
     """WT_STREAM_STATE_ERROR (0x51) はクライアントの on_error に届かないことを確認
 
     サーバーが FIN 後の終端ストリームへデータ付き WT_STREAM を注入する。
-    クライアントは 0x51 でセッションを閉じるが on_error は発火しない。
+    クライアントは WT_STREAM_STATE_ERROR でセッションを閉じるが on_error は発火しない。
     サーバーが WT_CLOSE_SESSION を受けてセッション終了することをもって
-    0x51 経路を確認する。
+    WT_STREAM_STATE_ERROR 経路を確認する。
     """
     from webtransport.h2 import Client, Server, SessionWriter
 
