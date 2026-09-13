@@ -1,7 +1,7 @@
 # 型スタブをスタブパッケージ化して高レベル Client / Server / 例外を型検査に露出する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-type-stubs-package-layout
 - Polished: {YYYY-MM-DD}
 
@@ -38,3 +38,15 @@
 - `[tool.ty.rules] unresolved-import = "ignore"` を撤去できること
 - 既存 issue 0077 と 0088 を closed にできる状態になること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `CMakeLists.txt` の 6 本の `nanobind_add_stub` と `file(WRITE)` による `__init__.pyi` 生成を廃止し、`nanobind_add_stub` 1 回 (RECURSIVE + INCLUDE_PRIVATE + OUTPUT_PATH) で `webtransport_ext` をスタブパッケージとして出力するようにした。出力は `_build/webtransport_ext/{__init__,quic,http2,http3,h3,h2}.pyi` の 6 本
+- `Makefile` の `develop` を新レイアウトに合わせ、旧レイアウトの兄弟 `.pyi` (`src/webtransport/*.pyi` と `src/webtransport/{quic,http2,http3}/__init__.pyi`) を毎回削除してから `_build/webtransport_ext` を `src/webtransport/webtransport_ext` へコピーするようにした。兄弟 `.pyi` は PEP 561 の解決順でサブパッケージの `__init__.py` を隠すため、削除しないと高レベル API が型検査から消える
+- `scripts/normalize_stubs.py` を追加し、生成物の絶対 import を相対 import へ書き換えて ruff で整形・ソートしたうえでスタブを追跡するようにした。追跡しないと CI の `prek` (`ty`) がビルド成果物の無いチェックアウトで `webtransport.webtransport_ext` を解決できず失敗する
+- `Makefile` の `develop` は生成結果と追跡ファイルの `diff -r` を取り、スタブの更新漏れを検出する
+- `pyproject.toml` の `[tool.ty.rules] unresolved-import = "ignore"` を撤去した。ty のエラーは 0 件
+- `[tool.ty.src] include` を `["src", "examples"]` に広げた。examples は 0 エラー。tests は 57 件の潜在エラーがあり本 issue の範囲を超えるため別途対応とする
+- wheel の中身が `webtransport/webtransport_ext/*.pyi` + `webtransport/py.typed` になり、`make develop` のレイアウトと一致することを確認した
+- `webtransport` の高レベル API (`quic.Client` / `h3.Server` / `http2.ResponseWriter` / 例外 4 種など) が型検査から見えるようになったことを、リポジトリ外の型検査用ファイルで確認した
+- 全テストが通ることを確認した

@@ -10,10 +10,23 @@ develop:
 	uv sync --inexact
 	uv pip install --no-build-isolation -e .
 	cp _build/*.so _build/py.typed src/webtransport/
-	cp _build/webtransport_ext.pyi _build/__init__.pyi _build/h3.pyi _build/h2.pyi src/webtransport/
-	cp _build/quic.pyi src/webtransport/quic/__init__.pyi
-	cp _build/http2.pyi src/webtransport/http2/__init__.pyi
-	cp _build/http3.pyi src/webtransport/http3/__init__.pyi
+	# 旧レイアウトの型スタブ (兄弟 .pyi) は PEP 561 の解決順でサブパッケージの
+	# __init__.py を隠すため、ビルドのたびに取り除く
+	rm -f src/webtransport/*.pyi
+	rm -f src/webtransport/quic/__init__.pyi
+	rm -f src/webtransport/http2/__init__.pyi
+	rm -f src/webtransport/http3/__init__.pyi
+	rm -rf src/webtransport/webtransport_ext
+	# 追跡しているスタブと一致させるため、生成物に後処理をかけてからコピーする。
+	# stubgen の出力は import が非ソートで、`from webtransport_ext import ...`
+	# という解決不能な絶対 import を含むため、ruff と相対 import への書き換えで
+	# 整える
+	uv run python scripts/normalize_stubs.py _build/webtransport_ext
+	cp -R _build/webtransport_ext src/webtransport/webtransport_ext
+	# 追跡しているスタブが生成結果と一致することを確認する (乖離していれば
+	# ここで失敗するので、stub の更新漏れに気付ける)
+	diff -r _build/webtransport_ext src/webtransport/webtransport_ext
+
 
 test:
 	uv run pytest tests/ -v --timeout=30

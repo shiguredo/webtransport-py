@@ -26,6 +26,12 @@ worktrees/
 *.so
 py.typed
 
+# 型スタブは nanobind の stubgen で生成するが、PEP 561 の解決順で
+# webtransport/__init__.py を隠さないようスタブパッケージとして配置し、
+# 型検査をビルド成果物に依存させないため追跡する
+!src/webtransport/webtransport_ext/
+!src/webtransport/webtransport_ext/*.pyi
+
 .DS_Store
 
 # pytest-playwright の成果物出力先

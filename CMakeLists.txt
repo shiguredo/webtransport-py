@@ -311,73 +311,32 @@ endif()
 target_compile_options(webtransport_ext PRIVATE -fvisibility=hidden)
 
 # 型スタブ (.pyi) ファイルの自動生成
+#
+# nanobind の stubgen を再帰モードで 1 回だけ呼び、webtransport_ext を
+# スタブパッケージ (webtransport_ext/__init__.pyi + 各サブモジュールの .pyi)
+# として出力する。旧構成の「webtransport_ext.pyi + 兄弟 .pyi」は PEP 561 の
+# 解決順で webtransport/__init__.py を隠し、高レベル API (Client / Server /
+# 例外) が型検査から消えるため廃止した。
+#
+# INCLUDE_PRIVATE: `_test_force_close` のようなテスト専用ヘルパは先頭
+# アンダースコアを持つため、既定では stubgen が出力しない
 nanobind_add_stub(
   webtransport_stub
   MODULE webtransport_ext
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext.pyi
-  PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
-  DEPENDS webtransport_ext
-  MARKER_FILE py.typed
-)
-
-nanobind_add_stub(
-  quic_stub
-  MODULE webtransport_ext.quic
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/quic.pyi
-  PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
-  DEPENDS webtransport_ext
-)
-
-# INCLUDE_PRIVATE: `_test_force_close` のようなテスト専用ヘルパは先頭
-# アンダースコアを持つため、既定では stubgen が出力しない
-nanobind_add_stub(
-  http2_stub
-  MODULE webtransport_ext.http2
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/http2.pyi
-  PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
-  DEPENDS webtransport_ext
+  RECURSIVE
   INCLUDE_PRIVATE
-)
-
-# INCLUDE_PRIVATE: `_test_force_close` のようなテスト専用ヘルパは先頭
-# アンダースコアを持つため、既定では stubgen が出力しない
-nanobind_add_stub(
-  http3_stub
-  MODULE webtransport_ext.http3
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/http3.pyi
+  OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}
+  OUTPUT
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/__init__.pyi
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/quic.pyi
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/http2.pyi
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/http3.pyi
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/h3.pyi
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/h2.pyi
   PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
   DEPENDS webtransport_ext
-  INCLUDE_PRIVATE
+  MARKER_FILE ${CMAKE_CURRENT_BINARY_DIR}/py.typed
 )
-
-nanobind_add_stub(
-  h3_stub
-  MODULE webtransport_ext.h3
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/h3.pyi
-  PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
-  DEPENDS webtransport_ext
-)
-
-nanobind_add_stub(
-  h2_stub
-  MODULE webtransport_ext.h2
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/h2.pyi
-  PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
-  DEPENDS webtransport_ext
-)
-
-# __init__.pyi を生成 (型エクスポート用)
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/__init__.pyi
-"\"\"\"WebTransport (Sans-IO) type stubs\"\"\"
-
-from . import quic as quic
-from . import http2 as http2
-from . import http3 as http3
-from . import h3 as h3
-from . import h2 as h2
-
-__all__: list[str]
-")
 
 # Wheel に配置するためのインストール先を指定
 set(PY_PACKAGE "webtransport")
@@ -387,14 +346,8 @@ install(TARGETS webtransport_ext
 )
 
 # 型スタブファイルとマーカーファイルをインストール
-install(FILES
-  ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext.pyi
-  ${CMAKE_CURRENT_BINARY_DIR}/quic.pyi
-  ${CMAKE_CURRENT_BINARY_DIR}/http2.pyi
-  ${CMAKE_CURRENT_BINARY_DIR}/http3.pyi
-  ${CMAKE_CURRENT_BINARY_DIR}/h3.pyi
-  ${CMAKE_CURRENT_BINARY_DIR}/h2.pyi
-  ${CMAKE_CURRENT_BINARY_DIR}/__init__.pyi
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext
   DESTINATION ${PY_PACKAGE}
+  FILES_MATCHING PATTERN "*.pyi"
 )
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/py.typed DESTINATION ${PY_PACKAGE})
