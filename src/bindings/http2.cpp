@@ -779,7 +779,7 @@ Http2EventType classify_headers_event(
 
 int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
                                             const nghttp2_frame* frame,
-                                            void* user_data) {
+                                            void* user_data) noexcept {
   auto* self = static_cast<Http2Connection*>(user_data);
 
   switch (frame->hd.type) {
@@ -918,7 +918,7 @@ int Http2Connection::on_data_chunk_recv_callback(nghttp2_session* session,
                                                  int32_t stream_id,
                                                  const uint8_t* data,
                                                  size_t len,
-                                                 void* user_data) {
+                                                 void* user_data) noexcept {
   auto* self = static_cast<Http2Connection*>(user_data);
 
   Http2Event event;
@@ -933,7 +933,7 @@ int Http2Connection::on_data_chunk_recv_callback(nghttp2_session* session,
 int Http2Connection::on_stream_close_callback(nghttp2_session* session,
                                               int32_t stream_id,
                                               uint32_t error_code,
-                                              void* user_data) {
+                                              void* user_data) noexcept {
   auto* self = static_cast<Http2Connection*>(user_data);
   self->stream_buffers_.erase(stream_id);
   self->pending_headers_.erase(stream_id);
@@ -950,7 +950,7 @@ int Http2Connection::on_header_callback(nghttp2_session* session,
                                         const uint8_t* value,
                                         size_t valuelen,
                                         uint8_t flags,
-                                        void* user_data) {
+                                        void* user_data) noexcept {
   auto* self = static_cast<Http2Connection*>(user_data);
 
   if (frame->hd.type == NGHTTP2_HEADERS ||
@@ -966,7 +966,7 @@ int Http2Connection::on_header_callback(nghttp2_session* session,
 
 int Http2Connection::on_begin_headers_callback(nghttp2_session* session,
                                                const nghttp2_frame* frame,
-                                               void* user_data) {
+                                               void* user_data) noexcept {
   auto* self = static_cast<Http2Connection*>(user_data);
 
   if (frame->hd.type == NGHTTP2_HEADERS ||
@@ -984,7 +984,7 @@ nghttp2_ssize Http2Connection::data_source_read_callback(
     size_t length,
     uint32_t* data_flags,
     nghttp2_data_source* source,
-    void* user_data) {
+    void* user_data) noexcept {
   auto* self = static_cast<Http2Connection*>(user_data);
 
   auto it = self->stream_buffers_.find(stream_id);

@@ -732,13 +732,13 @@ class QuicConnection {
   const ngtcp2_transport_params* get_local_transport_params() const;
 
   // ngtcp2 コールバック
-  static int client_initial_cb(ngtcp2_conn* conn, void* user_data);
+  static int client_initial_cb(ngtcp2_conn* conn, void* user_data) noexcept;
   static int recv_crypto_data_cb(ngtcp2_conn* conn,
                                  ngtcp2_encryption_level encryption_level,
                                  uint64_t offset,
                                  const uint8_t* data,
                                  size_t datalen,
-                                 void* user_data);
+                                 void* user_data) noexcept;
   static int encrypt_cb(uint8_t* dest,
                         const ngtcp2_crypto_aead* aead,
                         const ngtcp2_crypto_aead_ctx* aead_ctx,
@@ -747,7 +747,7 @@ class QuicConnection {
                         const uint8_t* nonce,
                         size_t noncelen,
                         const uint8_t* aad,
-                        size_t aadlen);
+                        size_t aadlen) noexcept;
   static int decrypt_cb(uint8_t* dest,
                         const ngtcp2_crypto_aead* aead,
                         const ngtcp2_crypto_aead_ctx* aead_ctx,
@@ -756,11 +756,11 @@ class QuicConnection {
                         const uint8_t* nonce,
                         size_t noncelen,
                         const uint8_t* aad,
-                        size_t aadlen);
+                        size_t aadlen) noexcept;
   static int hp_mask_cb(uint8_t* dest,
                         const ngtcp2_crypto_cipher* hp,
                         const ngtcp2_crypto_cipher_ctx* hp_ctx,
-                        const uint8_t* sample);
+                        const uint8_t* sample) noexcept;
   static int recv_stream_data_cb(ngtcp2_conn* conn,
                                  uint32_t flags,
                                  int64_t stream_id,
@@ -768,28 +768,28 @@ class QuicConnection {
                                  const uint8_t* data,
                                  size_t datalen,
                                  void* user_data,
-                                 void* stream_user_data);
+                                 void* stream_user_data) noexcept;
   static int acked_stream_data_offset_cb(ngtcp2_conn* conn,
                                          int64_t stream_id,
                                          uint64_t offset,
                                          uint64_t datalen,
                                          void* user_data,
-                                         void* stream_user_data);
+                                         void* stream_user_data) noexcept;
   static int stream_open_cb(ngtcp2_conn* conn,
                             int64_t stream_id,
-                            void* user_data);
+                            void* user_data) noexcept;
   static int stream_close_cb(ngtcp2_conn* conn,
                              uint32_t flags,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int stream_reset_cb(ngtcp2_conn* conn,
                              int64_t stream_id,
                              uint64_t final_size,
                              uint64_t app_error_code,
                              void* user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   /**
    * STOP_SENDING 受信コールバック
    *
@@ -803,22 +803,23 @@ class QuicConnection {
                                   int64_t stream_id,
                                   uint64_t app_error_code,
                                   void* user_data,
-                                  void* stream_user_data);
+                                  void* stream_user_data) noexcept;
 
   static int recv_datagram_cb(ngtcp2_conn* conn,
                               uint32_t flags,
                               const uint8_t* data,
                               size_t datalen,
-                              void* user_data);
-  static int handshake_completed_cb(ngtcp2_conn* conn, void* user_data);
+                              void* user_data) noexcept;
+  static int handshake_completed_cb(ngtcp2_conn* conn,
+                                    void* user_data) noexcept;
   static void rand_cb(uint8_t* dest,
                       size_t destlen,
-                      const ngtcp2_rand_ctx* rand_ctx);
+                      const ngtcp2_rand_ctx* rand_ctx) noexcept;
   static int get_new_connection_id_cb(ngtcp2_conn* conn,
                                       ngtcp2_cid* cid,
                                       uint8_t* token,
                                       size_t cidlen,
-                                      void* user_data);
+                                      void* user_data) noexcept;
   static int update_key_cb(ngtcp2_conn* conn,
                            uint8_t* rx_secret,
                            uint8_t* tx_secret,
@@ -829,36 +830,38 @@ class QuicConnection {
                            const uint8_t* current_rx_secret,
                            const uint8_t* current_tx_secret,
                            size_t secretlen,
-                           void* user_data);
+                           void* user_data) noexcept;
   static int recv_retry_cb(ngtcp2_conn* conn,
                            const ngtcp2_pkt_hd* hd,
-                           void* user_data);
+                           void* user_data) noexcept;
   static void delete_crypto_aead_ctx_cb(ngtcp2_conn* conn,
                                         ngtcp2_crypto_aead_ctx* aead_ctx,
-                                        void* user_data);
+                                        void* user_data) noexcept;
   static void delete_crypto_cipher_ctx_cb(ngtcp2_conn* conn,
                                           ngtcp2_crypto_cipher_ctx* cipher_ctx,
-                                          void* user_data);
+                                          void* user_data) noexcept;
   static int get_path_challenge_data_cb(ngtcp2_conn* conn,
                                         uint8_t* data,
-                                        void* user_data);
+                                        void* user_data) noexcept;
   static int version_negotiation_cb(ngtcp2_conn* conn,
                                     uint32_t version,
                                     const ngtcp2_cid* client_dcid,
-                                    void* user_data);
+                                    void* user_data) noexcept;
   static int path_validation_cb(ngtcp2_conn* conn,
                                 uint32_t flags,
                                 const ngtcp2_path* path,
                                 const ngtcp2_path* fallback_path,
                                 ngtcp2_path_validation_result res,
-                                void* user_data);
-  static int tls_early_data_rejected_cb(ngtcp2_conn* conn, void* user_data);
+                                void* user_data) noexcept;
+  static int tls_early_data_rejected_cb(ngtcp2_conn* conn,
+                                        void* user_data) noexcept;
 
   // BoringSSL セッションチケット受信コールバック
-  static int new_session_cb(SSL* ssl, SSL_SESSION* session);
+  static int new_session_cb(SSL* ssl, SSL_SESSION* session) noexcept;
 
   // BoringSSL カスタム証明書検証コールバック
-  static ssl_verify_result_t custom_verify_cb(SSL* ssl, uint8_t* out_alert);
+  static ssl_verify_result_t custom_verify_cb(SSL* ssl,
+                                              uint8_t* out_alert) noexcept;
 
   // ヘルパー
   void push_event(QuicEvent event);

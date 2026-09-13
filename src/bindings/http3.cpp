@@ -921,7 +921,7 @@ int Http3Connection::acked_stream_data_cb(nghttp3_conn* conn,
                                           int64_t stream_id,
                                           uint64_t datalen,
                                           void* conn_user_data,
-                                          void* stream_user_data) {
+                                          void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   // ACK されたデータを stream_buffers_ から削除する
@@ -962,7 +962,7 @@ int Http3Connection::stream_close_cb(nghttp3_conn* conn,
                                      int64_t stream_id,
                                      uint64_t app_error_code,
                                      void* conn_user_data,
-                                     void* stream_user_data) {
+                                     void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   Http3Event event;
@@ -981,7 +981,7 @@ int Http3Connection::recv_data_cb(nghttp3_conn* conn,
                                   const uint8_t* data,
                                   size_t datalen,
                                   void* conn_user_data,
-                                  void* stream_user_data) {
+                                  void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   Http3Event event;
@@ -997,14 +997,14 @@ int Http3Connection::deferred_consume_cb(nghttp3_conn* conn,
                                          int64_t stream_id,
                                          size_t consumed,
                                          void* conn_user_data,
-                                         void* stream_user_data) {
+                                         void* stream_user_data) noexcept {
   return 0;
 }
 
 int Http3Connection::begin_headers_cb(nghttp3_conn* conn,
                                       int64_t stream_id,
                                       void* conn_user_data,
-                                      void* stream_user_data) {
+                                      void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
   self->pending_headers_[stream_id] = {};
   return 0;
@@ -1017,7 +1017,7 @@ int Http3Connection::recv_header_cb(nghttp3_conn* conn,
                                     nghttp3_rcbuf* value,
                                     uint8_t flags,
                                     void* conn_user_data,
-                                    void* stream_user_data) {
+                                    void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   auto name_vec = nghttp3_rcbuf_get_buf(name);
@@ -1058,7 +1058,7 @@ int Http3Connection::end_headers_cb(nghttp3_conn* conn,
                                     int64_t stream_id,
                                     int fin,
                                     void* conn_user_data,
-                                    void* stream_user_data) {
+                                    void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   auto it = self->pending_headers_.find(stream_id);
@@ -1087,7 +1087,7 @@ int Http3Connection::end_headers_cb(nghttp3_conn* conn,
 int Http3Connection::begin_trailers_cb(nghttp3_conn* conn,
                                        int64_t stream_id,
                                        void* conn_user_data,
-                                       void* stream_user_data) {
+                                       void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
   self->pending_headers_[stream_id] = {};
   return 0;
@@ -1100,7 +1100,7 @@ int Http3Connection::recv_trailer_cb(nghttp3_conn* conn,
                                      nghttp3_rcbuf* value,
                                      uint8_t flags,
                                      void* conn_user_data,
-                                     void* stream_user_data) {
+                                     void* stream_user_data) noexcept {
   return recv_header_cb(conn, stream_id, token, name, value, flags,
                         conn_user_data, stream_user_data);
 }
@@ -1109,7 +1109,7 @@ int Http3Connection::end_trailers_cb(nghttp3_conn* conn,
                                      int64_t stream_id,
                                      int fin,
                                      void* conn_user_data,
-                                     void* stream_user_data) {
+                                     void* stream_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   auto it = self->pending_headers_.find(stream_id);
@@ -1138,7 +1138,7 @@ int Http3Connection::stop_sending_cb(nghttp3_conn* conn,
                                      int64_t stream_id,
                                      uint64_t app_error_code,
                                      void* conn_user_data,
-                                     void* stream_user_data) {
+                                     void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
   auto* self = static_cast<Http3Connection*>(conn_user_data);
@@ -1157,7 +1157,7 @@ int Http3Connection::reset_stream_cb(nghttp3_conn* conn,
                                      int64_t stream_id,
                                      uint64_t app_error_code,
                                      void* conn_user_data,
-                                     void* stream_user_data) {
+                                     void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
   auto* self = static_cast<Http3Connection*>(conn_user_data);
@@ -1176,7 +1176,7 @@ int Http3Connection::reset_stream_cb(nghttp3_conn* conn,
 
 int Http3Connection::shutdown_cb(nghttp3_conn* conn,
                                  int64_t id,
-                                 void* conn_user_data) {
+                                 void* conn_user_data) noexcept {
   auto* self = static_cast<Http3Connection*>(conn_user_data);
 
   Http3Event event;
@@ -1189,7 +1189,7 @@ int Http3Connection::shutdown_cb(nghttp3_conn* conn,
 
 int Http3Connection::recv_settings2_cb(nghttp3_conn* conn,
                                        const nghttp3_proto_settings* settings,
-                                       void* conn_user_data) {
+                                       void* conn_user_data) noexcept {
   // 素の HTTP/3 では設定を受け取った時点で追加処理は不要
   (void)conn;
   (void)settings;
@@ -1203,7 +1203,7 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
                                             size_t veccnt,
                                             uint32_t* pflags,
                                             void* conn_user_data,
-                                            void* stream_user_data) {
+                                            void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
   auto* self = static_cast<Http3Connection*>(conn_user_data);

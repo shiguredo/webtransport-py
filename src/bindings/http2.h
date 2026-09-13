@@ -457,17 +457,17 @@ class Http2Connection {
   // nghttp2 コールバック
   static int on_frame_recv_callback(nghttp2_session* session,
                                     const nghttp2_frame* frame,
-                                    void* user_data);
+                                    void* user_data) noexcept;
   static int on_data_chunk_recv_callback(nghttp2_session* session,
                                          uint8_t flags,
                                          int32_t stream_id,
                                          const uint8_t* data,
                                          size_t len,
-                                         void* user_data);
+                                         void* user_data) noexcept;
   static int on_stream_close_callback(nghttp2_session* session,
                                       int32_t stream_id,
                                       uint32_t error_code,
-                                      void* user_data);
+                                      void* user_data) noexcept;
   static int on_header_callback(nghttp2_session* session,
                                 const nghttp2_frame* frame,
                                 const uint8_t* name,
@@ -475,17 +475,17 @@ class Http2Connection {
                                 const uint8_t* value,
                                 size_t valuelen,
                                 uint8_t flags,
-                                void* user_data);
+                                void* user_data) noexcept;
   static int on_begin_headers_callback(nghttp2_session* session,
                                        const nghttp2_frame* frame,
-                                       void* user_data);
+                                       void* user_data) noexcept;
   static nghttp2_ssize data_source_read_callback(nghttp2_session* session,
                                                  int32_t stream_id,
                                                  uint8_t* buf,
                                                  size_t length,
                                                  uint32_t* data_flags,
                                                  nghttp2_data_source* source,
-                                                 void* user_data);
+                                                 void* user_data) noexcept;
 
   // ヘルパー
   void push_event(Http2Event event);

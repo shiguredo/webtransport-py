@@ -2633,7 +2633,7 @@ nghttp2_ssize H2Session::send_callback(nghttp2_session* session,
                                        const uint8_t* data,
                                        size_t length,
                                        int flags,
-                                       void* user_data) {
+                                       void* user_data) noexcept {
   (void)session;
   (void)flags;
 
@@ -2645,7 +2645,7 @@ nghttp2_ssize H2Session::send_callback(nghttp2_session* session,
 
 int H2Session::on_frame_recv_callback(nghttp2_session* session,
                                       const nghttp2_frame* frame,
-                                      void* user_data) {
+                                      void* user_data) noexcept {
   (void)session;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
@@ -2978,7 +2978,7 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
                                            int32_t stream_id,
                                            const uint8_t* data,
                                            size_t len,
-                                           void* user_data) {
+                                           void* user_data) noexcept {
   (void)session;
   (void)flags;
 
@@ -3035,7 +3035,7 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
 int H2Session::on_stream_close_callback(nghttp2_session* session,
                                         int32_t stream_id,
                                         uint32_t error_code,
-                                        void* user_data) {
+                                        void* user_data) noexcept {
   (void)session;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
@@ -3060,7 +3060,7 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
 int H2Session::on_frame_not_send_callback(nghttp2_session* session,
                                           const nghttp2_frame* frame,
                                           int lib_error_code,
-                                          void* user_data) {
+                                          void* user_data) noexcept {
   (void)session;
 
   // HEADERS フレームの送出失敗を観測対象にする (H2Session が送出するのは
@@ -3094,7 +3094,7 @@ int H2Session::on_header_callback(nghttp2_session* session,
                                   const uint8_t* value,
                                   size_t valuelen,
                                   uint8_t flags,
-                                  void* user_data) {
+                                  void* user_data) noexcept {
   (void)session;
   (void)flags;
 
@@ -3111,7 +3111,7 @@ int H2Session::on_header_callback(nghttp2_session* session,
 
 int H2Session::on_begin_headers_callback(nghttp2_session* session,
                                          const nghttp2_frame* frame,
-                                         void* user_data) {
+                                         void* user_data) noexcept {
   (void)session;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
@@ -3127,7 +3127,7 @@ nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
                                                    size_t length,
                                                    uint32_t* data_flags,
                                                    nghttp2_data_source* source,
-                                                   void* user_data) {
+                                                   void* user_data) noexcept {
   (void)session;
   (void)source;
 

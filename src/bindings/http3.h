@@ -488,27 +488,27 @@ class Http3Connection {
                                   int64_t stream_id,
                                   uint64_t datalen,
                                   void* conn_user_data,
-                                  void* stream_user_data);
+                                  void* stream_user_data) noexcept;
   static int stream_close_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int recv_data_cb(nghttp3_conn* conn,
                           int64_t stream_id,
                           const uint8_t* data,
                           size_t datalen,
                           void* conn_user_data,
-                          void* stream_user_data);
+                          void* stream_user_data) noexcept;
   static int deferred_consume_cb(nghttp3_conn* conn,
                                  int64_t stream_id,
                                  size_t consumed,
                                  void* conn_user_data,
-                                 void* stream_user_data);
+                                 void* stream_user_data) noexcept;
   static int begin_headers_cb(nghttp3_conn* conn,
                               int64_t stream_id,
                               void* conn_user_data,
-                              void* stream_user_data);
+                              void* stream_user_data) noexcept;
   static int recv_header_cb(nghttp3_conn* conn,
                             int64_t stream_id,
                             int32_t token,
@@ -516,16 +516,16 @@ class Http3Connection {
                             nghttp3_rcbuf* value,
                             uint8_t flags,
                             void* conn_user_data,
-                            void* stream_user_data);
+                            void* stream_user_data) noexcept;
   static int end_headers_cb(nghttp3_conn* conn,
                             int64_t stream_id,
                             int fin,
                             void* conn_user_data,
-                            void* stream_user_data);
+                            void* stream_user_data) noexcept;
   static int begin_trailers_cb(nghttp3_conn* conn,
                                int64_t stream_id,
                                void* conn_user_data,
-                               void* stream_user_data);
+                               void* stream_user_data) noexcept;
   static int recv_trailer_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              int32_t token,
@@ -533,26 +533,28 @@ class Http3Connection {
                              nghttp3_rcbuf* value,
                              uint8_t flags,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int end_trailers_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              int fin,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int stop_sending_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int reset_stream_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* conn_user_data,
-                             void* stream_user_data);
-  static int shutdown_cb(nghttp3_conn* conn, int64_t id, void* conn_user_data);
+                             void* stream_user_data) noexcept;
+  static int shutdown_cb(nghttp3_conn* conn,
+                         int64_t id,
+                         void* conn_user_data) noexcept;
   static int recv_settings2_cb(nghttp3_conn* conn,
                                const nghttp3_proto_settings* settings,
-                               void* conn_user_data);
+                               void* conn_user_data) noexcept;
 
   // ヘルパー
   void push_event(Http3Event event);
@@ -564,7 +566,7 @@ class Http3Connection {
                                     size_t veccnt,
                                     uint32_t* pflags,
                                     void* conn_user_data,
-                                    void* stream_user_data);
+                                    void* stream_user_data) noexcept;
 
   bool is_server_;
   Http3Config config_;
