@@ -340,18 +340,27 @@ class Client:
             )
             sent += 1
 
-    async def _receive(self, timeout: float = 0.1) -> None:
+    async def _receive(self, timeout: float = 0.1) -> int:
         """データを受信する
 
-        timeout はソケット読み取りの待ち時間。呼び出し側は QUIC の次の
+        timeout は最初の 1 パケットを待つ上限。呼び出し側は QUIC の次の
         タイムアウト期限に合わせて渡す。待っている間にタイマー処理
         (再送・ACK・pacing) ができないとスループットが大きく落ちるため、
         期限までに受信が無ければ戻って呼び出し側にタイマーを処理させる。
+
+        ソケットに溜まっている分は non-blocking で読み切る。1 回の
+        ウェイクアップで 1 パケットしか読まないと、ループ 1 周あたりの
+        待機とイベント処理がそのままスループット上限になる。受信した
+        パケットの処理時刻は ngtcp2 の RTT 計測にも使われるため、読むのが
+        遅れると RTT が過大に見積もられ pacing と PTO も過大になる。
+
+        Returns:
+            受信したパケット数
         """
         if self._connection is None or self._socket is None:
-            return
+            return 0
         if self._local_addr is None:
-            return
+            return 0
 
         loop = asyncio.get_running_loop()
         try:
@@ -360,10 +369,17 @@ class Client:
                 timeout=timeout,
             )
         except TimeoutError:
-            return
+            return 0
 
-        remote = self._normalize_addr(raw_remote)
-        self._connection.receive(data, self._local_addr, remote)
+        received = 0
+        while True:
+            remote = self._normalize_addr(raw_remote)
+            self._connection.receive(data, self._local_addr, remote)
+            received += 1
+            try:
+                data, raw_remote = self._socket.recvfrom(65535)
+            except BlockingIOError, InterruptedError:
+                return received
 
     def _timeout_seconds(self) -> float:
         """QUIC の次のタイムアウトまでの秒数を返す
@@ -589,7 +605,7 @@ class Client:
         try:
             while self._running:
                 try:
-                    await self._receive(self._wait)
+                    received = await self._receive(self._wait)
                 except OSError:
                     if not self._running:
                         break
@@ -617,13 +633,12 @@ class Client:
                     # 無ければ戻ってタイマーを処理する
                     self._wait = self._timeout_seconds()
 
-                # 送信を続けられている間は sleep しない。sock_sendto は毎回
-                # イベントループへ制御を返すため、他タスクを止めない。
-                # 送信が無かったときは次の送信機会 (pacing 期限 / PTO /
-                # ACK タイマー) まで待つ。固定 0.01 秒で待つと pacing 律速時に
-                # スループットが 1 桁落ちる
-                if sent == 0:
-                    await asyncio.sleep(self._wait)
+                # 待機は _receive 側の受信待ちに任せる。ここで重ねて sleep
+                # すると、受信のたびに期限ぶんの遅延が積み上がり、RTT の
+                # 過大評価 (pacing / PTO の過大化) を招く。受信も送信も無く
+                # 即座に戻ってきた場合だけ他のタスクへ 1 回譲る
+                if received == 0 and sent == 0:
+                    await asyncio.sleep(0)
         except asyncio.CancelledError:
             # 外部からのキャンセルでも connect() の待機者と受信待機者を
             # 永久待機させない
