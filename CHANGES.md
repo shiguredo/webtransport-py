@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] 型スタブをスタブパッケージ化し、高レベル `Client` / `Server` / 例外を型検査に露出する (`[tool.ty.rules] unresolved-import` の抑止を撤去)
+  - @voluntas
+
 - [UPDATE] deps.json の ngtcp2 / nghttp3 をブランチ参照からコミットハッシュ指定に変え、wheel ビルドを再現可能にする
   - @voluntas
 

@@ -524,12 +524,9 @@ markers = [
   "browser: 実ブラウザ (Chromium) を使う E2E テスト",
 ]
 
-[tool.ty.rules]
-unresolved-import = "ignore"
-
 # ty-pre-commit は全体検査のため、診断対象をパッケージ本体に絞る
 [tool.ty.src]
-include = ["src"]
+include = ["src", "examples"]
 
 # TOML フォーマッタ・リンタ (tombi) の設定。tombi.toml を廃止して pyproject.toml へ統合した
 [tool.tombi]
