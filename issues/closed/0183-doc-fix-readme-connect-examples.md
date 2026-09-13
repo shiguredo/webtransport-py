@@ -1,7 +1,7 @@
 # README の h3 / h2 クライアント例の connect() が例外送出型に対して bool 判定のまま常に「接続失敗」で終了する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/doc-fix-readme-connect-examples
 - Polished: {YYYY-MM-DD}
 
@@ -36,3 +36,11 @@ README の h3 クライアント例と h2 クライアント例は `if not await
 - README の h3 / h2 クライアント例がコピー&ペーストで動作すること
 - `WebTransportConnectError` の import 例も含まれること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `README.md` の h3 クライアント例と h2 クライアント例を `try: await client.connect() / except WebTransportConnectError as exc: print(f"接続失敗: {exc}"); return` の形に修正した
+- 両例の import に `from webtransport.exceptions import WebTransportConnectError` を追加した (`examples/webtransport/h3_client.py` / `h2_client.py` と同じ書き方に揃えた)
+- QUIC クライアント例は `quic.Client.connect` が `-> bool` のため変更していない
+- README の Python コードブロック 6 件が構文解析を通ることを確認した
+- 実際に h3 サーバーを起動し、README の h3 クライアント例を実行して接続が成功する (例外で return しない) ことを確認した。サーバー側で `Hello via stream!` と `Hello via datagram!` の受信を確認済み
