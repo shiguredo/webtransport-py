@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] ローカルの ruff を prek.toml と同じ 0.16.6 に固定し、CI との検出結果の食い違いをなくす
+  - @voluntas
+
 - [UPDATE] print 駆動のデバッグテスト `test_debug_quic.py` / `test_debug_quic_handshake.py` / `test_debug_webtransport_h3.py` を削除する
   - @voluntas
 

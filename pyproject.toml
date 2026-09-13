@@ -31,6 +31,9 @@ dev = [
   { include-group = "test" },
   { include-group = "example" },
   { include-group = "build" },
+  # prek.toml の ruff-pre-commit と同じバージョンに固定する。ローカルと CI で
+  # 検出結果が食い違わないようにするため、更新時は両方を同時に上げる
+  "ruff==0.16.6",
   # 実ブラウザ (Chromium) を使った WebTransport E2E テスト用
   "playwright~=1.62.0",
   "pytest-playwright~=0.9.0",
