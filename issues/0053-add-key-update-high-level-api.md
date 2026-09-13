@@ -1,7 +1,7 @@
 # 高レベル API に鍵更新 (initiate_key_update) を露出する
 
 - Created: 2026-08-09
-- Completed: YYYY-MM-DD
+- Completed: 2026-09-13
 - Branch: feature/add-key-update-high-level-api
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -43,4 +43,11 @@ Sans I/O API に存在する `QuicConnection.initiate_key_update()` を、asynci
 
 ## 解決方法
 
-(実装時に追記する)
+- `quic.Client` / `h3.Client` / `http3.Client` に `initiate_key_update() -> bool`、`quic.Server` / `h3.Server` / `http3.Server` に `initiate_key_update(addr: tuple[str, int]) -> bool` を追加した。いずれも同期メソッドで、各層が保持する `QuicConnection.initiate_key_update()` へ委譲する。接続 (または対象クライアント) が無い場合は False を返す
+- docstring に「ハンドシェイク完了前や `HANDSHAKE_CONFIRMED` 未成立では False」「鍵更新の確認前に連続で呼ぶと 2 回目は False (RFC 9001 Section 6.1 の MUST)」を明記した
+- 高レベル経由の検証を 3 層に追加した (`tests/test_e2e_quic.py` / `tests/test_e2e_http3.py` / `tests/test_e2e_webtransport_h3.py`)。接続前と未登録アドレスで False、接続後に True、確認前の連続呼び出しで False を確認する
+- quic 層のテストでは鍵更新後も同一ストリームで送受信が継続することを確認した
+- サーバー側の鍵更新はクライアント側の鍵更新の確認が済むまで開始できないため、テストは「サーバー側で開始 → クライアント側で開始」の順に検証する
+- `skills/webtransport-py/SKILL.md` の高レベル API リファレンスに Client / Server 双方の `initiate_key_update` を追記した
+- Sans I/O 側のバインディングとガードロジックは変更していない
+- 全テストが通ることを確認した

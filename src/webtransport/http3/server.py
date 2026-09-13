@@ -246,6 +246,26 @@ class Server:
             raise TypeError(f"expected port int, got {type(port).__name__}")
         return (str(host), port)
 
+    def initiate_key_update(self, addr: tuple[str, int]) -> bool:
+        """指定クライアントの TLS 鍵更新 (RFC 9001 Section 6) を開始する
+
+        ハンドシェイク完了前や `HANDSHAKE_CONFIRMED` 未成立の場合は False を
+        返す。鍵更新の確認 (ピアからの応答) 前に連続して呼ぶと 2 回目は
+        False になる (RFC 9001 Section 6.1 の MUST)。実際の鍵の切り替えは
+        以後に送信するパケットで行われる。
+
+        Args:
+            addr: クライアントアドレス
+
+        Returns:
+            鍵更新を開始できた場合は True (未登録のアドレスも False)
+        """
+        client = self._clients.get(addr)
+        if client is None or client.quic_connection is None:
+            return False
+
+        return client.quic_connection.initiate_key_update()
+
     async def start(self) -> None:
         """サーバーを開始する"""
         _validate_cert_key_files(self._certfile, self._keyfile)

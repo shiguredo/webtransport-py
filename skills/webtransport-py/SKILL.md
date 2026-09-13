@@ -123,6 +123,7 @@ async def send_datagram(addr: tuple[str, int], session_id: int, data: bytes) -> 
 async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
 async def close_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
 async def open_stream(addr: tuple[str, int], session_id: int, unidirectional: bool = True) -> int
+def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 async def start() -> None
 async def run() -> None
 async def stop() -> None
@@ -245,6 +246,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 async def open_stream(addr: tuple[str, int], bidirectional: bool = True) -> int
 async def send_stream_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(addr: tuple[str, int], data: bytes) -> None
+def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
 
 `quic.Client`:
@@ -284,6 +286,7 @@ async def wait_for_stream_reset(stream_id: int, timeout: float = 10.0) -> int  #
 def discard_recv_state(stream_id: int) -> None  # ストリーム受信状態を明示的に破棄する
 async def send_datagram(data: bytes) -> None
 async def migrate() -> bool  # Connection Migration
+def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
 def register_early_data(data: bytes, fin: bool = False) -> None  # 0-RTT として送信するデータを登録 (connect() の前のみ。登録ごとに双方向ストリームを 1 本開く)
 def export_session_ticket() -> bytes
@@ -314,6 +317,7 @@ def was_early_data_attempted() -> bool
 
 async def submit_response(addr: tuple[str, int], stream_id: int, headers: list[tuple[str, str]]) -> None
 async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
+def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
 
 `on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。
@@ -331,6 +335,7 @@ async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: boo
 async def request(method: str, path: str, headers: list[tuple[str, str]] | None = None) -> int
 async def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def migrate() -> bool  # Connection Migration (ローカル UDP ソケットを差し替える)
+def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 ```
 
 `request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。
@@ -388,7 +393,7 @@ def initiate_migration(local_addr: tuple[str, int], remote_addr: tuple[str, int]
 streams_bidi_left -> int | None  # 開設可能な残り双方向ストリーム数
 streams_uni_left -> int | None  # 開設可能な残り単方向ストリーム数
 def keep_alive_timeout(timeout_ns: int) -> None  # keep-alive タイムアウト (UINT64_MAX で無効化)
-def initiate_key_update() -> bool  # 鍵更新
+def initiate_key_update() -> bool  # 鍵更新 (Sans I/O)
 def extend_max_offset(datalen: int) -> None  # コネクション全体のフロー制御拡張
 def extend_max_stream_offset(stream_id: int, datalen: int) -> bool  # ストリームのフロー制御拡張
 def extend_max_streams_bidi(n: int) -> None
