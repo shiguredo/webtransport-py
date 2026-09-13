@@ -10,6 +10,7 @@ import asyncio
 import ssl
 from typing import TYPE_CHECKING, Literal, Self
 
+from webtransport._common import parse_wt_url
 from webtransport.exceptions import (
     ConnectRefusedError,
     ConnectTimeoutError,
@@ -233,23 +234,8 @@ class Client:
         self._on_goaway = callback
 
     def _parse_url(self, url: str) -> tuple[str, int, str]:
-        """URL をパースする"""
-        url = url.replace("https://", "")
-        if "/" in url:
-            host_port, path = url.split("/", 1)
-            path = "/" + path
-        else:
-            host_port = url
-            path = "/"
-
-        if ":" in host_port:
-            host, port_str = host_port.split(":")
-            port = int(port_str)
-        else:
-            host = host_port
-            port = 443
-
-        return host, port, path
+        """URL をパースする (実装は _common に集約)"""
+        return parse_wt_url(url)
 
     async def _send_pending(self) -> None:
         """送信待ちデータを送信する"""

@@ -11,6 +11,7 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
+from webtransport._common import destination_for_packet, normalize_addr
 from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
@@ -302,29 +303,15 @@ class Client:
             )
         self._early_data_queue.clear()
 
-    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
-        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
-        host = addr[0]
-        port = addr[1]
-        if not isinstance(port, int):
-            raise TypeError(f"expected port int, got {type(port).__name__}")
-        return (str(host), port)
+    # 実装は _common.normalize_addr に集約する (self を使わないため staticmethod)
+    _normalize_addr = staticmethod(normalize_addr)
 
     def _destination_for_packet(
         self,
         packet: quic_low.Packet,
     ) -> tuple[str, int]:
-        """パケットの送信先アドレスを決める
-
-        パス情報が埋まっている場合はそれを使い、未設定なら接続先にフォールバックする。
-        """
-        if packet.remote_host and packet.remote_port:
-            return (packet.remote_host, packet.remote_port)
-        # 数値リモートがあればそれを使い、なければホスト名にフォールバック
-        # する (C++ 側で解決されるが family 食い違いの余地が残る)
-        if self._remote_addr is not None:
-            return self._remote_addr
-        return (self._host, self._port)
+        """パケットの送信先アドレスを決める (実装は _common に集約)"""
+        return destination_for_packet(packet, self._remote_addr, self._host, self._port)
 
     async def _send_pending(self) -> int:
         """送信待ちパケットを送出できるだけ送出する

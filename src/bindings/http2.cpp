@@ -6,6 +6,8 @@
 
 #include "http2.h"
 
+#include "header_convert.h"
+
 #include <cstring>
 #include <stdexcept>
 
@@ -195,20 +197,7 @@ int32_t Http2Connection::submit_request(
   }
 
   // ヘッダーを nghttp2_nv に変換
-  std::vector<nghttp2_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp2_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP2_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
 
   // データプロバイダを常に渡す。未設定だと nghttp2 が HEADERS に
   // END_STREAM を付け、後続の send_data が DATA を送出できなくなる。
@@ -236,20 +225,7 @@ void Http2Connection::submit_response(
   }
 
   // ヘッダーを nghttp2_nv に変換
-  std::vector<nghttp2_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp2_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP2_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
 
   // データプロバイダの設定
   nghttp2_data_provider2 data_prd;
@@ -536,20 +512,7 @@ int32_t Http2Connection::submit_push_promise(
   }
 
   // ヘッダーを nghttp2_nv に変換
-  std::vector<nghttp2_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp2_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP2_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
 
   // 成功で promised stream ID を返す。失敗時は nghttp2 の負のエラーコード
   // を -1 に正規化して返す (既存の submit_request と同じ契約)
@@ -998,19 +961,7 @@ nghttp2_ssize Http2Connection::data_source_read_callback(
     }
 
     // トレーラを nghttp2_nv に変換
-    std::vector<nghttp2_nv> nva;
-    nva.reserve(trailer_it->second.size());
-    for (const auto& [name, value] : trailer_it->second) {
-      nghttp2_nv nv;
-      nv.name =
-          const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-      nv.namelen = name.size();
-      nv.value =
-          const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-      nv.valuelen = value.size();
-      nv.flags = NGHTTP2_NV_FLAG_NONE;
-      nva.push_back(nv);
-    }
+    std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(trailer_it->second);
 
     *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     if (nghttp2_submit_trailer(self->session_, stream_id, nva.data(),

@@ -11,6 +11,13 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport._common import (
+    bind_http3_uni_streams,
+    destination_for_packet,
+    normalize_addr,
+    open_http3_uni_streams,
+    parse_wt_url,
+)
 from webtransport.exceptions import (
     ConnectRefusedError,
     ConnectTimeoutError,
@@ -201,44 +208,18 @@ class Client:
         self._on_datagram = callback
 
     def _parse_url(self, url: str) -> tuple[str, int, str]:
-        """URL をパースする"""
-        url = url.replace("https://", "")
-        if "/" in url:
-            host_port, path = url.split("/", 1)
-            path = "/" + path
-        else:
-            host_port = url
-            path = "/"
+        """URL をパースする (実装は _common に集約)"""
+        return parse_wt_url(url)
 
-        if ":" in host_port:
-            host, port_str = host_port.split(":")
-            port = int(port_str)
-        else:
-            host = host_port
-            port = 443
-
-        return host, port, path
-
-    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
-        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
-        host = addr[0]
-        port = addr[1]
-        if not isinstance(port, int):
-            raise TypeError(f"expected port int, got {type(port).__name__}")
-        return (str(host), port)
+    # 実装は _common.normalize_addr に集約する (self を使わないため staticmethod)
+    _normalize_addr = staticmethod(normalize_addr)
 
     def _destination_for_packet(
         self,
         packet: quic.Packet,
     ) -> tuple[str, int]:
-        """パケットの送信先アドレスを決める"""
-        if packet.remote_host and packet.remote_port:
-            return (packet.remote_host, packet.remote_port)
-        # 数値リモートがあればそれを使い、なければホスト名にフォールバック
-        # する (C++ 側で解決されるが family 食い違いの余地が残る)
-        if self._remote_addr is not None:
-            return self._remote_addr
-        return (self._host, self._port)
+        """パケットの送信先アドレスを決める (実装は _common に集約)"""
+        return destination_for_packet(packet, self._remote_addr, self._host, self._port)
 
     async def _send_pending(self) -> int:
         """送信待ちデータを送出できるだけ送出する
@@ -298,14 +279,15 @@ class Client:
         if self._quic_connection is None or self._webtransport_session is None:
             return
 
-        control_stream_id = self._quic_connection.open_stream(False)
-        self._webtransport_session.bind_control_stream(control_stream_id)
-
-        encoder_stream_id = self._quic_connection.open_stream(False)
-        self._webtransport_session.bind_qpack_encoder_stream(encoder_stream_id)
-
-        decoder_stream_id = self._quic_connection.open_stream(False)
-        self._webtransport_session.bind_qpack_decoder_stream(decoder_stream_id)
+        control_stream_id, encoder_stream_id, decoder_stream_id = open_http3_uni_streams(
+            self._quic_connection
+        )
+        bind_http3_uni_streams(
+            self._webtransport_session,
+            control_stream_id,
+            encoder_stream_id,
+            decoder_stream_id,
+        )
 
     async def _resolve_remote(self, host: str, port: int) -> list[tuple[socket.AddressFamily, str]]:
         """ホストを解決して (family, 数値 IP) の候補列を返す

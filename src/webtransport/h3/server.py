@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import socket
 from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport._common import (
+    bind_http3_uni_streams,
+    normalize_addr,
+    open_http3_uni_streams,
+    validate_cert_key_files,
+)
 from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
@@ -21,29 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
-
-
-def _validate_cert_key_files(certfile: str | None, keyfile: str | None) -> None:
-    """証明書と鍵ファイルの存在と読み取り可能性を検証する
-
-    None は未設定として検証を素通りする (接続時に既定動作になる)。
-    起動後の削除・権限変更は run() 時の再 raise で検出する。
-
-    Args:
-        certfile: 証明書ファイルパス
-        keyfile: 秘密鍵ファイルパス
-
-    Raises:
-        FileNotFoundError: ファイルが存在しない場合
-        PermissionError: ファイルが読み取り不可の場合
-    """
-    for name, path in (("certfile", certfile), ("keyfile", keyfile)):
-        if path is None:
-            continue
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"{name} not found: {path}")
-        if not os.access(path, os.R_OK):
-            raise PermissionError(f"{name} is not readable: {path}")
 
 
 class ClientConnection:
@@ -254,17 +236,12 @@ class Server:
         """
         self._on_datagram = callback
 
-    def _normalize_addr(self, addr: tuple[object, ...]) -> tuple[str, int]:
-        """recvfrom / getsockname のアドレスを (str, int) に正規化する"""
-        host = addr[0]
-        port = addr[1]
-        if not isinstance(port, int):
-            raise TypeError(f"expected port int, got {type(port).__name__}")
-        return (str(host), port)
+    # 実装は _common.normalize_addr に集約する (self を使わないため staticmethod)
+    _normalize_addr = staticmethod(normalize_addr)
 
     async def start(self) -> None:
         """サーバーを開始する"""
-        _validate_cert_key_files(self._certfile, self._keyfile)
+        validate_cert_key_files(self._certfile, self._keyfile)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
         self._socket.bind((self._host, self._port))
@@ -424,14 +401,15 @@ class Server:
         if client.streams_setup:
             return
 
-        control_stream_id = client.quic_connection.open_stream(False)
-        client.webtransport_session.bind_control_stream(control_stream_id)
-
-        encoder_stream_id = client.quic_connection.open_stream(False)
-        client.webtransport_session.bind_qpack_encoder_stream(encoder_stream_id)
-
-        decoder_stream_id = client.quic_connection.open_stream(False)
-        client.webtransport_session.bind_qpack_decoder_stream(decoder_stream_id)
+        control_stream_id, encoder_stream_id, decoder_stream_id = open_http3_uni_streams(
+            client.quic_connection
+        )
+        bind_http3_uni_streams(
+            client.webtransport_session,
+            control_stream_id,
+            encoder_stream_id,
+            decoder_stream_id,
+        )
 
         # クライアントからの双方向ストリームを受け入れる準備
         client.webtransport_session.set_max_client_streams_bidi(100)

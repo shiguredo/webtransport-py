@@ -6,6 +6,10 @@
 
 #include "webtransport_h2.h"
 
+#include "header_convert.h"
+
+#include "header_convert.h"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -1858,22 +1862,10 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
     return -1;
   }
 
-  // URL をパース
+  // URL をパース (`://` を含まない URL は失敗)
   std::string authority;
   std::string path;
-
-  size_t scheme_end = url.find("://");
-  if (scheme_end != std::string::npos) {
-    size_t host_start = scheme_end + 3;
-    size_t path_start = url.find('/', host_start);
-    if (path_start != std::string::npos) {
-      authority = url.substr(host_start, path_start - host_start);
-      path = url.substr(path_start);
-    } else {
-      authority = url.substr(host_start);
-      path = "/";
-    }
-  } else {
+  if (!bindings::parse_authority_path(url, &authority, &path)) {
     return -1;
   }
 
@@ -1884,43 +1876,18 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
   std::string protocol = "webtransport";
   std::string wt_init = encode_webtransport_init();
 
-  std::vector<nghttp2_nv> nva;
-  nva.push_back(
-      {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":method")),
-       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(method.c_str())),
-       7, method.size(), NGHTTP2_NV_FLAG_NONE});
-  nva.push_back(
-      {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":scheme")),
-       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(scheme.c_str())),
-       7, scheme.size(), NGHTTP2_NV_FLAG_NONE});
-  nva.push_back(
-      {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":authority")),
-       const_cast<uint8_t*>(
-           reinterpret_cast<const uint8_t*>(authority.c_str())),
-       10, authority.size(), NGHTTP2_NV_FLAG_NONE});
-  nva.push_back(
-      {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":path")),
-       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(path.c_str())), 5,
-       path.size(), NGHTTP2_NV_FLAG_NONE});
-  nva.push_back(
-      {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(":protocol")),
-       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(protocol.c_str())),
-       9, protocol.size(), NGHTTP2_NV_FLAG_NONE});
-
+  std::vector<std::pair<std::string, std::string>> headers = {
+      {":method", method}, {":scheme", scheme},     {":authority", authority},
+      {":path", path},     {":protocol", protocol},
+  };
   // draft-15 Section 3.2: Web 文脈では Origin 必須
   if (!origin.empty()) {
-    nva.push_back(
-        {const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>("origin")),
-         const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(origin.c_str())),
-         6, origin.size(), NGHTTP2_NV_FLAG_NONE});
+    headers.emplace_back("origin", origin);
   }
-
   // draft-15 Section 4.3.2: 初期フロー制御をヘッダーでも伝える
-  nva.push_back(
-      {const_cast<uint8_t*>(
-           reinterpret_cast<const uint8_t*>("webtransport-init")),
-       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(wt_init.c_str())),
-       17, wt_init.size(), NGHTTP2_NV_FLAG_NONE});
+  headers.emplace_back("webtransport-init", wt_init);
+
+  std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
 
   // Capsule データ送信用のデータプロバイダー
   nghttp2_data_provider2 data_prd;
