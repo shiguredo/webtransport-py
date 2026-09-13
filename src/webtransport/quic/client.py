@@ -376,6 +376,14 @@ class Client:
             remote = self._normalize_addr(raw_remote)
             self._connection.receive(data, self._local_addr, remote)
             received += 1
+            # ハンドシェイク完了前は 1 パケットずつ戻す。複数パケットを
+            # まとめて読むと、送信待ちの 0-RTT early data を送出する前に
+            # ハンドシェイク完了を処理してしまい、early data がハンドシェイク
+            # 完了後に送出される (サーバー側で early data をハンドシェイク
+            # 完了前に観測できなくなる) ことがある。ハンドシェイク中の
+            # パケット数は僅少なので、まとめ取りの利得も無い
+            if not self._connection.is_handshake_completed():
+                return received
             try:
                 data, raw_remote = self._socket.recvfrom(65535)
             except BlockingIOError, InterruptedError:

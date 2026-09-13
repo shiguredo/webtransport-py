@@ -97,7 +97,7 @@
   - @voluntas
 - [UPDATE] WebTransport over HTTP/2 / HTTP/2 の高レベル API (`h2` / `http2` の Client / Server) で、受信のたびに挟んでいた固定 sleep を廃止して大容量転送のスループットを改善する
   - @voluntas
-- [FIX] WebTransport over HTTP/3 のサーバーが、タイマーが遠い状態でアプリが積んだ送信 (ストリーム解放の RESET_STREAM 等) を次にパケットが届くまで送出しない問題を修正する
+- [FIX] WebTransport over HTTP/3 と HTTP/3 のサーバーが、QUIC タイマーが遠い状態でアプリが積んだ送信 (ストリーム解放の RESET_STREAM 等) を次にパケットが届くまで送出しない問題を修正する
   - @voluntas
 - [FIX] HTTP/2 の送信バッファで先頭 1 バイトが欠落する問題と、空のボディで END_STREAM が送出されない問題を修正する
   - @voluntas

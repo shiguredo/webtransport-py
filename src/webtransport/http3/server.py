@@ -582,17 +582,11 @@ class Server:
                         # ないため、HTTP/3 層の drain は受信経路に委ねる
                         if client.http3_connection is not None:
                             await self._drain_quic_events(client_addr, client)
-                # HTTP/3 プロトコルエラーで自主クローズした client を回収する。
-                # 受信成功後分岐と対称に close 前に _send_to を通し、
-                # HTTP/3 が生成した残存バイト列を吐き切ってから CONNECTION_CLOSE を送る
-                if client.http3_connection is not None and client.http3_connection.is_closed():
-                    await self._send_to(client_addr, client)
-                    await self._close_client_connection_on_h3_error(client_addr, client)
-                    continue
-                # 受信もタイマーも無い周でも送信待ちを掃く。タイマーが遠い
-                # (idle timeout のみ等) 状態でアプリが送信を積むと、次に
-                # パケットが届くまで送信されなくなってしまう
-                await self._send_to(client_addr, client)
+                # 受信もタイマーも無い周でも HTTP/3 層のイベントを処理し、
+                # 送信待ちを掃く。低レベルへ直接入力されたイベントを
+                # データグラムの到着待ちにせず、アプリが積んだ送信
+                # (タイマーが遠い状態の RESET_STREAM 等) も滞留させない
+                await self._process_http3_events(client_addr, client)
 
             # 受信待ちは次の QUIC タイマー期限に合わせる。固定の sleep を
             # 挟むと受信したパケット数だけ遅延が積み上がるため、待機は
@@ -697,6 +691,18 @@ class Server:
             return True
 
         await self._drain_quic_events(addr, client)
+        await self._process_http3_events(addr, client)
+        return True
+
+    async def _process_http3_events(self, addr: tuple[str, int], client: ClientConnection) -> None:
+        """HTTP/3 層のイベントを処理し、送信と終了回収まで行う
+
+        受信の有無にかかわらず毎周回呼ぶ。低レベル層へ直接入力された
+        イベント (テスト) や、タイマー処理・再送で生じたイベントも
+        データグラムの到着を待たずに処理するため。
+        """
+        if client.quic_connection is None or client.http3_connection is None:
+            return
 
         while True:
             http3_event = client.http3_connection.next_event()
@@ -764,8 +770,7 @@ class Server:
 
         await self._send_to(addr, client)
 
-        # 受信成功後の分岐: HTTP/3 プロトコルエラーで低レベルが
-        # 自主クローズしていたら CONNECTION_CLOSE を送出して回収する
+        # HTTP/3 プロトコルエラーで低レベルが自主クローズしていたら
+        # CONNECTION_CLOSE を送出して回収する
         if client.http3_connection is not None and client.http3_connection.is_closed():
             await self._close_client_connection_on_h3_error(addr, client)
-        return True
