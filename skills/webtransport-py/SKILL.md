@@ -30,7 +30,7 @@ uv add webtransport-py
 
 ## モジュール構成
 
-トップレベル `webtransport` パッケージはサブモジュール 5 つのみを公開する。
+トップレベル `webtransport` パッケージが公開するサブモジュールは次の 5 つ。例外クラス (`WebTransportConnectError` と派生 3 クラス) もトップレベルから import できる。
 
 | モジュール | 提供内容 | Sans I/O の主クラス | asyncio API | トランスポート |
 |---|---|---|---|---|
@@ -47,7 +47,9 @@ uv add webtransport-py
 いずれのモジュールも次の共通パターンを持つ。
 
 - サーバー: コンストラクタ → `on_*()` でコールバック登録 → `async with server:` → `await server.run()`
-- クライアント: コンストラクタ → `on_*()` でコールバック登録 → `await client.connect()` (成功は例外なしの正常復帰、失敗は `WebTransportConnectError` 派生の具体例外) → 送信 → `await client.run()` → `await client.close()`
+- クライアント: コンストラクタ → `on_*()` でコールバック登録 → `await client.connect()` → 送信 → `await client.run()` → `await client.close()`
+  - `h3.Client` / `h2.Client` の `connect()` は `-> None` で、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する
+  - `quic.Client` / `http2.Client` の `connect()` は `-> bool` で例外を送出しない。`http2.Client` は成功時に `True` を返す (TCP + TLS の確立のみを見る)
 - コールバックはすべて async 関数を渡す
 - `run()` は受信ループなので、クライアントでは `asyncio.wait_for(client.run(), timeout=...)` や `asyncio.create_task()` と組み合わせる。例外は `quic.Client` で、`connect()` がバックグラウンド受信タスクを起動するため `run()` は接続終了を待つだけの完了待ちになる (起動しなくても受信イベントは処理される。`asyncio.create_task(client.run())` で接続終了まで待てる)
 
@@ -115,7 +117,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`h3.Server.__init__(host, port, certfile=None, keyfile=None, idle_timeout_ns=30_000_000_000, allowed_origins=None)`。`allowed_origins` は None / 空リストで全オリジンを受理する。セッションはサーバーが自動で accept する。プロパティは `host` / `port` / `actual_port` / `is_running`。主なメソッド:
+`h3.Server.__init__(host, port, certfile=None, keyfile=None, idle_timeout_ns=30_000_000_000, allowed_origins=None, quic_config=None)`。`allowed_origins` は None / 空リストで全オリジンを受理する。`quic_config` は QUIC 層の設定で、省略時は既定値。`alpn_protocols` / `idle_timeout_ns` は常に、`cert_file` / `key_file` は `certfile` / `keyfile` を指定した場合に上書きされる。セッションはサーバーが自動で accept する。プロパティは `host` / `port` / `actual_port` / `is_running`。主なメソッド:
 
 ```python
 async def send_stream_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
@@ -153,7 +155,6 @@ async def main() -> None:
     # on_stream_reset(stream_id: int, error_code: int | None)
     #   error_code はレンジ外または予約済みコードポイントでは None
     #   (draft-ietf-webtrans-http3-16 Section 4.4)
-    # on_stop_sending(stream_id: int, error_code: int)
     # on_datagram(data: bytes)
 
     async def on_stream_data(stream_id: int, data: bytes) -> None:
@@ -183,7 +184,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`h3.Client.__init__(url, verify_peer=True, origin="", idle_timeout_ns=30_000_000_000, ca_file=None, verify_callback=None)`。`url` は `https://host:port/path` 形式 (ポート省略時 443)。`origin` は Origin ヘッダー値で、空文字なら付与しない。プロパティは `url` / `host` / `port` / `is_connected` / `session_id`。主なメソッド:
+`h3.Client.__init__(url, verify_peer=True, origin="", idle_timeout_ns=30_000_000_000, ca_file=None, verify_callback=None, quic_config=None, close_wait_timeout=3.0)`。`url` は `https://host:port/path` 形式 (ポート省略時 443)。`origin` は Origin ヘッダー値で、空文字なら付与しない。`quic_config` は QUIC 層の設定で、省略時は既定値。`alpn_protocols` / `idle_timeout_ns` / `verify_peer` / `server_name` はコンストラクタ引数の値で上書きされる。`close_wait_timeout` は `close()` で CONNECT ストリームのピア側終了を待つ上限 (秒、0 以下なら待たない)。プロパティは `url` / `host` / `port` / `is_connected` / `session_id`。主なメソッド:
 
 ```python
 async def connect(timeout: float = 10.0) -> None
@@ -199,22 +200,31 @@ async def close() -> None
 
 `migrate()` は接続と上位層の状態を維持したまま送受信のソケットとアドレスを差し替える (`quic.Client.migrate` と同じ手順)。サーバー側は DCID で接続を照合してアドレスキーを張り替える (RFC 9000 Section 9)。
 
-`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。`run()` が受信ループであり、`close()` でセッションと接続を閉じる。
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。`run()` が受信ループであり、`close()` でセッションと接続を閉じる (`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる)。
 
 ### WebTransport over HTTP/2 (`webtransport.h2`)
 
 `h2.Client` / `h2.Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
 
-`h2.Server.__init__(host, port, certfile, keyfile, config=None, allowed_origins=None)` (証明書は必須)。`allowed_origins` は h3.Server と対称で、None と空リストはどちらも全オリジンを受理する (draft-15 Section 3.2 の Origin 検証 MUST。Origin ヘッダー無しは受理する)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
+`h2.Server.__init__(host, port, certfile, keyfile, config=None, allowed_origins=None)` (証明書は必須)。`config` は h2.Config で、省略時は既定値。`allowed_origins` は h3.Server と対称で、None と空リストはどちらも全オリジンを受理する (draft-15 Section 3.2 の Origin 検証 MUST。Origin ヘッダー無しは受理する)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
 
 ```python
+# on_session_request(session_id: int, headers: list[tuple[str, str]], addr: tuple[object, ...]) -> int | None
+#   None または 200-299 で accept、300-599 で reject (指定 status で応答)。
+#   bool / 非 int / 範囲外は ValueError になり接続が閉じる
 # on_session_ready(session_writer: SessionWriter)
 # on_session_closed(session_writer: SessionWriter)
 # on_stream_data(stream_id: int, data: bytes, session_writer: SessionWriter)
 # on_stream_reset(stream_id: int, error_code: int, session_writer: SessionWriter)
 # on_stop_sending(stream_id: int, error_code: int, session_writer: SessionWriter)
 # on_datagram(data: bytes, session_writer: SessionWriter)
+# on_error(error_code: int, error_message: str, session_writer: SessionWriter)
+#   WT_FLOW_CONTROL_ERROR のみを渡す (WtErrorCode の .value と比較する)
+# on_goaway(last_stream_id: int, error_code: int, addr: tuple[object, ...])
+#   接続ごとに初回受信のみ発火する
 ```
+
+`on_session_request` の `addr` は `writer.get_extra_info('peername')` の戻り値で、IPv6 では 4-tuple、IPv4 では 2-tuple になる。peername が取得できない場合は空 tuple で呼ばれる。
 
 `SessionWriter` はセッション単位の送信ハンドルで、`session_id` プロパティと次のメソッドを持つ。
 
@@ -229,7 +239,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 
 `send_stream_data` / `send_datagram` は `SessionWriter` と `h2.Client` のどちらも data が 1 MiB 超なら `ValueError` を送出する (未接続の `h2.Client` は送信しないため例外にならない)。
 
-`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。メソッドとコールバックの形は `h3.Client` と同じ (ただし `close_stream` は無く、リセットは `reset_stream` を使う)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
+`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。メソッドの形は `h3.Client` と同じだが、`close_stream` は無く、リセットは `reset_stream`、送信停止は `stop_sending` を使う。コールバックは `on_session_ready(session_id: int)` / `on_session_closed(session_id: int)` / `on_stream_data(stream_id: int, data: bytes)` / `on_stream_reset(stream_id: int, error_code: int)` / `on_datagram(data: bytes)` / `on_stop_sending(stream_id: int, error_code: int)` / `on_error(error_code: int, error_message: str)` / `on_goaway(last_stream_id: int, error_code: int)` で、`h3.Client` に無い `on_stop_sending` / `on_error` / `on_goaway` を持つ (addr は付かない)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
 
 ### QUIC (`webtransport.quic`)
 
@@ -288,6 +298,7 @@ async def send_datagram(data: bytes) -> None
 async def migrate() -> bool  # Connection Migration
 def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
+async def close() -> int  # 接続を閉じ、close() 中に送出できたパケット数を返す (未接続時は 0)
 def register_early_data(data: bytes, fin: bool = False) -> None  # 0-RTT として送信するデータを登録 (connect() の前のみ。登録ごとに双方向ストリームを 1 本開く)
 def export_session_ticket() -> bytes
 def export_0rtt_transport_params() -> bytes
@@ -317,6 +328,7 @@ def was_early_data_attempted() -> bool
 
 async def submit_response(addr: tuple[str, int], stream_id: int, headers: list[tuple[str, str]]) -> None
 async def send_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
+async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None  # QUIC RESET_STREAM + nghttp3 通知
 def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
 
@@ -334,6 +346,7 @@ def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアン�
 
 async def request(method: str, path: str, headers: list[tuple[str, str]] | None = None) -> int
 async def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
+async def reset_stream(stream_id: int, error_code: int = 0) -> None  # QUIC RESET_STREAM + nghttp3 通知
 async def migrate() -> bool  # Connection Migration (ローカル UDP ソケットを差し替える)
 def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 ```
@@ -352,11 +365,12 @@ def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開�
 # ResponseWriter のメソッド
 async def send_headers(stream_id: int, headers: list[tuple[str, str]]) -> None
 async def send_data(stream_id: int, data: bytes, end_stream: bool = False) -> None
+async def drain() -> None  # 送信待ちフレームを空になるまで送出する
 ```
 
 `on_stream_end` はリクエストボディ終端 (END_STREAM) の受信で通知する。ボディなしのリクエスト (HEADERS に END_STREAM) でも呼ばれる。RESET_STREAM で終了した場合は呼ばれない。
 
-`http2.Client.__init__(host, port=443, verify_peer=True)`。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` の形は http3 と同じで、`send_data(stream_id, data, eof=False)` のみ引数名が異なる。
+`http2.Client.__init__(host, port=443, verify_peer=True)`。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形だが `body: bytes | None = None` を持ち、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
 
 ## Sans I/O API
 
@@ -447,6 +461,7 @@ remote_initial_max_stream_data_uni -> int | None
 remote_initial_max_streams_bidi -> int | None
 remote_initial_max_streams_uni -> int | None
 remote_max_datagram_frame_size -> int | None
+remote_reset_stream_at -> bool | None  # ピアが reset_stream_at transport parameter を送信したか
 local_max_idle_timeout -> int
 local_max_udp_payload_size -> int
 local_initial_max_data -> int
@@ -521,7 +536,8 @@ def open_stream(session_id: int, stream_id: int, is_unidirectional: bool) -> boo
 def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> None
 def send_datagram(session_id: int, data: bytes) -> None
 def close_stream(stream_id: int, error_code: int = 0) -> int  # 戻り値はセッション ID (復元不可なら -1)
-def reset_stream(stream_id: int, error_code: int = 0) -> None
+def reset_stream(stream_id: int, error_code: int = 0) -> None  # エラーコードをリマップしてから close_stream する
+def map_send_error_code(stream_id: int, error_code: int) -> int  # 送信時のエラーコードをワイヤ用に変換 (データストリームは WT_APPLICATION_ERROR へリマップ)
 
 # ストリーム状態 (None はコネクションが無いか閉じている場合。0 / 1 はストリームの状態)
 def stream_writable(stream_id: int) -> int | None  # 1 書き込み可 / 0 書き込み不可
@@ -538,11 +554,11 @@ def set_max_client_streams_bidi(max_streams: int) -> None  # サーバー (リ�
 def next_event() -> Event | None
 ```
 
-`close_stream` は nghttp3 へのストリーム終了通知で、戻り値はリセットされたストリームが属するセッション ID (復元できない場合は -1)。`reset_stream` は `close_stream` を呼ぶだけであり、QUIC RESET_STREAM の送出は asyncio ラッパーの `reset_stream` が QUIC 層への通知と合わせて行う (Sans I/O で直接使う場合は `quic.Connection.reset_stream()` を自分で呼ぶ)。`connect` の `origin` は Origin ヘッダー値で、空文字なら付与しない。
+`close_stream` は nghttp3 へのストリーム終了通知で、戻り値はリセットされたストリームが属するセッション ID (復元できない場合は -1)。`reset_stream` は `map_send_error_code` でワイヤ用のエラーコードに変換してから `close_stream` を呼ぶ (データストリームのアプリコードは WT_APPLICATION_ERROR レンジへ載せ替えられる。draft-ietf-webtrans-http3-16 Section 4.4)。QUIC RESET_STREAM の送出は asyncio ラッパーの `reset_stream` が QUIC 層への通知と合わせて行う (Sans I/O で直接使う場合は `quic.Connection.reset_stream()` を自分で呼ぶ)。`connect` の `origin` は Origin ヘッダー値で、空文字なら付与しない。
 
 `Config` のプロパティは `max_field_section_size` / `qpack_max_dtable_capacity` / `qpack_blocked_streams` / `wt_pre_accept_buffer_limit` / `is_server` / `allowed_origins`。`allowed_origins` は許可オリジンリストで、空リスト (未設定) なら全オリジンを受理する。`wt_pre_accept_buffer_limit` は受理前 WebTransport データストリーム 1 本あたりの累計受信バイト上限 (既定 65536) で、超過したストリームは WT_BUFFERED_STREAM_REJECTED で拒否される。
 
-`Event` のフィールドは `type` / `session_id` / `stream_id` / `data` / `error_code` / `error_message`。`StreamInfo` (セッションに属するストリーム情報) のフィールドは `stream_id` / `session_id` / `is_unidirectional` / `is_incoming` / `is_write_registered`。
+`Event` のフィールドは `type` / `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)。`StreamInfo` (セッションに属するストリーム情報) のフィールドは `stream_id` / `session_id` / `is_unidirectional` / `is_incoming` / `is_write_registered`。
 
 結線パターン: `get_streams_to_send()` の結果を `quic.Connection.send_stream_data()` へ、`get_datagrams_to_send()` を `quic.Connection.send_datagram()` へ流す。逆方向は QUIC の `STREAM_DATA` / `DATAGRAM` イベントを `receive_stream_data()` / `receive_datagram()` へ渡す。
 
@@ -569,6 +585,7 @@ def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
 def reset_stream(stream_id: int, error_code: int = 0) -> None
 def close_stream(stream_id: int, error_code: int = 0x0100) -> None  # QUIC ストリーム終了を nghttp3 に通知 (既定 H3_NO_ERROR)
 def goaway() -> None  # GOAWAY を送信 (GOAWAY ID は nghttp3 が算出する)
+drained -> bool | None  # ドレイン状態か (サーバーのみ。コネクションが無いか閉じている場合は None)
 
 # 送信側拡張
 def submit_trailers(stream_id: int, headers: list[tuple[str, str]]) -> bool  # トレーラ
@@ -635,11 +652,11 @@ def stream_local_close(stream_id: int) -> bool | None  # ローカル側が half
 def stream_remote_close(stream_id: int) -> bool | None
 ```
 
-モジュール関数 `get_version()` は nghttp2 のバージョンを、`select_alpn(protocols: list[str]) -> str | None` は h2 / http/1.1 の優先順で ALPN を選択する。
+モジュール関数 `get_version()` は nghttp2 のバージョンを、`select_alpn(client_protocols: list[str]) -> str | None` は h2 / http/1.1 の優先順で ALPN を選択する。
 
 ### WebTransport over HTTP/2 (`h2.Session`)
 
-`http2.Connection` と同じ TCP バイトストリーム型。`Config` は http2.Config に加えて WebTransport 用の 4 項目を持つ。
+`http2.Connection` と同じ TCP バイトストリーム型。`Config` は http2.Config の `initial_window_size` / `max_concurrent_streams` / `max_frame_size` / `max_header_list_size` / `is_server` を持ち、`no_rfc7540_priorities` は持たない (WebTransport 用の SETTINGS を送るため RFC 7540 優先度は常に無効)。WebTransport 用の項目は `wt_initial_max_data` / `wt_initial_max_stream_data` / `wt_initial_max_streams_bidi` / `wt_initial_max_streams_uni` / `wt_pre_accept_buffer_limit` / `wt_max_capsule_payload_size` / `allowed_origins` の 7 項目。
 
 ```python
 Session.create_client(config: Config) -> Session
@@ -675,11 +692,11 @@ def get_send_credit(session_id: int) -> int  # セッションレベルの送信
 
 Sans I/O API はモジュールごとの `Config` で設定する。主要なもの:
 
-- `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `max_datagram_frame_size=65536` / `enable_early_data=True` / `alpn_protocols=[]` / `server_name=""` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None`
+- `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `max_stream_data_bidi_local=262144` / `max_stream_data_bidi_remote=262144` / `max_stream_data_uni=262144` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `max_datagram_frame_size=65536` / `enable_reset_stream_at=True` / `enable_early_data=True` / `alpn_protocols=[]` / `server_name=""` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None` / `session_ticket=b""` / `early_transport_params=b""`
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
 - `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `wt_pre_accept_buffer_limit=65536` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`
-- `h2.Config`: http2.Config の項目に加えて `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100` / `wt_pre_accept_buffer_limit=65536` / `wt_max_capsule_payload_size=1048576` / `allowed_origins=[]`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)。`allowed_origins` が空なら Origin 検証を行わない
+- `h2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` (`no_rfc7540_priorities` は無い) / `wt_initial_max_data=1048576` / `wt_initial_max_stream_data=262144` / `wt_initial_max_streams_bidi=100` / `wt_initial_max_streams_uni=100` / `wt_pre_accept_buffer_limit=65536` / `wt_max_capsule_payload_size=1048576` / `allowed_origins=[]`。初期フロー制御値に 2^32 以上を設定するとセッション生成時に `ValueError` になる (SETTINGS が uint32 のため)。`allowed_origins` が空なら Origin 検証を行わない
 
 ## イベント型 (EventType)
 
@@ -687,18 +704,19 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 
 - `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
 - `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING` / `INFORMATIONAL` / `TRAILERS` / `ERROR`
-- `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
+- `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE` / `INFORMATIONAL` / `TRAILERS`
-- `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
+- `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR` / `GOAWAY`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空) / `last_stream_id` (GOAWAY でのみ意味を持つ。他イベントでは 0)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
 
 ## 注意点
 
 - `verify_peer` のデフォルトが層で異なる。asyncio の `Client` は `verify_peer=True`、Sans I/O の `quic.Config` は `verify_peer=False`。Sans I/O API を直接使うときは明示的に有効にすること
 - `open_stream()` の引数名とデフォルトが層で異なる。`quic` は `bidirectional: bool = True`、asyncio の `h3.Client` / `h2.Client` / `h2.SessionWriter` は `unidirectional: bool = False` (デフォルトは双方向)、asyncio の `h3.Server` は `unidirectional: bool = True` (デフォルトは単方向。双方向指定は `NotImplementedError`)。Sans I/O の `h3.Session` / `h2.Session` の `open_stream` はデフォルト値を持たず `is_unidirectional` を必ず指定する
 - タイマー API (`get_timeout()` / `handle_timeout()`) があるのは `quic.Connection` のみ。`http3` / `h3` / `http2` / `h2` の Sans I/O クラスには無い
-- 独自の例外クラスは `connect()` 失敗通知に限定して定義する (`WebTransportConnectError` と `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の派生 3 クラス。asyncio の `h3` / `h2` の `Client.connect()` が送出する。`h2.Client.connect()` は Config の上限値を超えた場合に素の `ValueError` も送出する)。`h2.Server.start()` も Config の上限値超えで `ValueError` になる。それ以外の生成系ファクトリの失敗は `RuntimeError` (ただし `h2.Session.create_client` / `create_server` は Config の上限値超えで `ValueError`)、asyncio ラッパーの未接続時操作も `RuntimeError` になる
+- 独自の例外クラスは `connect()` 失敗通知に限定して定義する (`WebTransportConnectError` と `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の派生 3 クラス。asyncio の `h3` / `h2` の `Client.connect()` が送出する。`h2.Client.connect()` は Config の上限値を超えた場合に素の `ValueError` も送出する)。`h2.Server.start()` も Config の上限値超えで `ValueError` になる。それ以外の生成系ファクトリの失敗は `RuntimeError` (ただし `h2.Session.create_client` / `create_server` は Config の上限値超えで `ValueError`)
+- asyncio ラッパーの未接続時操作は `run()` だけが `RuntimeError` になる。`send_stream_data` / `send_datagram` は黙って破棄され、`open_stream` は -1 を返し、`reset_stream` などは何もしない (例外にしない。接続前に呼んでも落ちない)
 - `h2.CapsuleType` (Capsule Protocol の型定数) は再エクスポートされていない。必要なら `from webtransport.webtransport_ext.h2 import CapsuleType` を使う
 
 ## サンプルコード
