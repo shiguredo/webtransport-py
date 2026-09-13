@@ -1051,7 +1051,7 @@ async def test_client_resets_server_stream(test_certificates):
     async def on_stream_reset(
         session_id: int,
         stream_id: int,
-        error_code: int,
+        error_code: int | None,
         addr: tuple[str, int],
     ) -> None:
         reset_info["session_id"] = session_id

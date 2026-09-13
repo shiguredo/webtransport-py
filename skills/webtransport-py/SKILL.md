@@ -76,9 +76,12 @@ async def main() -> None:
     # on_session_ready(session_id: int, addr: tuple[str, int])
     # on_session_closed(session_id: int, addr: tuple[str, int])
     # on_stream_data(session_id: int, stream_id: int, data: bytes, addr: tuple[str, int])
-    # on_stream_reset(session_id: int, stream_id: int, error_code: int, addr: tuple[str, int])
+    # on_stream_reset(session_id: int, stream_id: int, error_code: int | None, addr: tuple[str, int])
     #   on_stream_reset の session_id は WT ヘッダー未受信のままリセットされた
-    #   ストリーム等では -1 になることがある
+    #   ストリーム等では -1 になることがある。error_code はデータストリームでは
+    #   WT_APPLICATION_ERROR レンジのワイヤコードをアプリコードへ逆変換した値、
+    #   レンジ外または予約済みコードポイントでは None (draft-ietf-webtrans-http3-16
+    #   Section 4.4 の「no application error code」)
     # on_datagram(session_id: int, data: bytes, addr: tuple[str, int])
     #   on_datagram の session_id は Quarter Stream ID から復元する
     #   (draft-ietf-webtrans-http3-16 Section 4.5)。仕様逸脱ピアが巨大な
@@ -146,7 +149,9 @@ async def main() -> None:
     # コールバックのシグネチャ (すべて async、サーバーと違い addr は付かない)
     # on_session_ready(session_id: int) / on_session_closed(session_id: int)
     # on_stream_data(stream_id: int, data: bytes)
-    # on_stream_reset(stream_id: int, error_code: int)
+    # on_stream_reset(stream_id: int, error_code: int | None)
+    #   error_code はレンジ外または予約済みコードポイントでは None
+    #   (draft-ietf-webtrans-http3-16 Section 4.4)
     # on_stop_sending(stream_id: int, error_code: int)
     # on_datagram(data: bytes)
 
