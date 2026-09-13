@@ -2,15 +2,17 @@
 
 - CHANGE
   - 後方互換性のない変更
-- UPDATE
-  - 後方互換性がある変更
 - ADD
   - 後方互換性がある追加
+- UPDATE
+  - 後方互換性がある変更
 - FIX
   - バグ修正
 
 ## develop
 
+- [CHANGE] Windows 対応を終了する
+  - @voluntas
 - [CHANGE] `http3.Connection.goaway` の無視されていた `id` 引数を削除する
   - @voluntas
 - [CHANGE] `http3.Connection.close_stream` の既定 `error_code` を H3_NO_ERROR (0x0100) に変更する
@@ -19,319 +21,97 @@
   - @voluntas
 - [CHANGE] WebTransport over HTTP/2 の `h2.Session.reset_stream` から `reliable_size` 引数を廃止し、Reliable Size に送信済みバイト数を載せるようにする
   - @voluntas
-- [CHANGE] WebTransport over HTTP/2 の `h2.Client` は TLS 1.3 以上で接続し、`h2.Server` は TLS 1.2 以下の接続を拒否するようにする (draft-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) も拒否する)
+- [CHANGE] WebTransport over HTTP/2 の `h2.Client` は TLS 1.3 以上で接続し、`h2.Server` は TLS 1.2 以下の接続を拒否するようにする (draft-15 Section 7 準拠)
   - @voluntas
-- [CHANGE] Windows 対応を終了する
-  - @voluntas
-- [CHANGE] HTTP/2 のリクエスト終端を `send_data(..., eof=True)` に変更し、`Client.request` に `body` を追加する
+- [CHANGE] HTTP/2 のリクエスト終端を `send_data(..., eof=True)` に変更し、`http2.Client.request` に `body` を追加する
   - @voluntas
 - [CHANGE] QUIC の `receive` / `send` / `create_client` / `accept` に実アドレスを必須化する
   - @voluntas
 - [CHANGE] WebTransport over HTTP/3 と HTTP/2 の `Client.connect` を例外送出型 (`connect(timeout) -> None`) に変更し、`bool` 戻り値を廃止する
   - @voluntas
-- [ADD] HTTP/3 のプロトコルエラーを `http3.EventType.ERROR` として通知し、`http3.Client` / `http3.Server` に `on_connection_error` を追加する
-  - @voluntas
-- [ADD] WebTransport over HTTP/2 の `h2.Session` に送信可能残量を返す `get_send_credit` を追加する
-  - @voluntas
-- [ADD] WebTransport over HTTP/2 の `h2.Server` に `allowed_origins` を追加し、Origin 検証 (draft-15 Section 3.2) を実装する
-  - @voluntas
-- [ADD] WebTransport over HTTP/2 の `h2.Client` / `h2.Server` に `on_stop_sending` を追加し、`stop_sending` と WT_STOP_SENDING への WT_RESET_STREAM 自動応答を実装する
-  - @voluntas
-- [ADD] `h3.Client` / `http3.Client` に `migrate()` を追加し、`h3.Server` / `http3.Server` が Connection Migration を受け付けるようにする
-  - @voluntas
-- [ADD] `h3.Server` に `on_session_request` コールバックを追加し、`h3.Event` に受信 CONNECT ヘッダー (`headers`) を追加する
-  - @voluntas
-- [ADD] QUIC のピアからの STOP_SENDING を `quic.EventType.STOP_SENDING` として伝播し、`quic.Client` / `quic.Server` に `on_stop_sending` を追加する
-  - @voluntas
-- [ADD] `http2.Event` に PING の `opaque_data` / `ack` と WINDOW_UPDATE の `window_size_increment` を追加し、`http2.Connection.ping` で opaque data を指定できるようにする
-  - @voluntas
-- [ADD] `http2.Server` と `http3.Server` にリクエストボディ終端 (`on_stream_end`) コールバックを追加する
-  - @voluntas
-- [ADD] `webtransport.http2` から `ResponseWriter` を再エクスポートする
-  - @voluntas
-- [ADD] WebTransport over HTTP/3 の `h3.Session` に `is_webtransport_ready()` を追加する
+- [CHANGE] WebTransport over HTTP/3 の `on_stream_reset` の `error_code` を `int | None` に変更する (レンジ外・予約済みコードポイントは `None`)
   - @voluntas
 - [ADD] WebTransport over HTTP/2 を draft-ietf-webtrans-http2-15 に合わせて実装する
   - @voluntas
-- [ADD] QUIC クライアントの証明書検証 (`ca_file` / カスタムコールバック) を実装する
+- [ADD] WebTransport over HTTP/3 を draft-ietf-webtrans-http3-16 に合わせて実装する
   - @voluntas
-- [ADD] QUIC の Session ticket と 0-RTT を実装する
+- [ADD] QUIC (ngtcp2) のバインディングを実装する
   - @voluntas
-- [ADD] QUIC の Connection Migration を実装する
+- [ADD] HTTP/3 (nghttp3) のバインディングを実装する
   - @voluntas
-- [ADD] QUIC の 0-RTT による early data 送受信を実装する
+- [ADD] HTTP/2 (nghttp2) のバインディングを実装する
   - @voluntas
-- [ADD] WebTransport over HTTP/3 クライアントに Origin ヘッダー送信機能を追加する
-  - @voluntas
-- [ADD] WebTransport over HTTP/3 サーバーの Origin ヘッダー検証を実装する
-  - @voluntas
-- [ADD] WebTransport over HTTP/3 サーバーにストリームを開く API を追加する
-  - @voluntas
-- [ADD] WebTransport over HTTP/3 と HTTP/3 のストリーム状態確認 API を公開する
-  - @voluntas
-- [ADD] HTTP/3 の送信側拡張 API (トレーラ / 1xx レスポンス / graceful shutdown の開始通知 / 書き込み側シャットダウン) を追加する
-  - @voluntas
-- [ADD] HTTP/3 の優先度制御 API (RFC 9218) と Priority ヘッダー値のパースを追加する
-  - @voluntas
-- [ADD] QUIC の接続統計 API (RTT / 輻輳ウィンドウ / フロー制御残量 / 送受信量等) を公開する
-  - @voluntas
-- [ADD] QUIC の接続状態・エラー・ピア情報 API (コネクションエラー / TLS エラー / トランスポートパラメータ / バージョン / 接続 ID 等) を公開する
-  - @voluntas
-- [ADD] HTTP/2 のセッション状態確認 API (SETTINGS / ウィンドウサイズ / 送信キュー / half-closed 状態等) を公開する
-  - @voluntas
-- [ADD] HTTP/2 のセッション制御 API (GOAWAY による即時終了 / ローカルウィンドウサイズの動的変更) を公開する
-  - @voluntas
-- [ADD] HTTP/2 のメッセージング拡張 API (トレーラ送信 / RFC 9218 の優先度制御 / Server Push / ALPN 選択) を公開する。`Http2Config` に `no_rfc7540_priorities` (デフォルト true) を追加し、SETTINGS に NO_RFC7540_PRIORITIES を含める
-  - @voluntas
-- [ADD] HTTP/3 と WebTransport over HTTP/3 のストリーム・接続制御 API (QUIC フロー制御ブロック / アンブロック / 同時ストリーム数ヒント) を公開する
-  - @voluntas
-- [ADD] QUIC のストリーム・接続制御 API (ストリーム上限確認 / keep-alive / 鍵更新 / フロー制御の動的拡張) を公開する
-  - @voluntas
-- [ADD] WebTransport データストリームのリセットで RESET_STREAM_AT を送出する
-  - @voluntas
-- [ADD] QUIC の STREAM_DATA イベントにストリームオフセットを追加する
-  - @voluntas
-- [ADD] QUIC クライアントのバックグラウンド受信タスクを導入し、run() を明示起動しなくても受信イベントを処理できるようにする
-  - @voluntas
-- [ADD] QUIC クライアントにストリームデータを FIN まで受信する recv_stream_data を追加する
-  - @voluntas
-- [ADD] QUIC クライアントに shutdown_stream と wait_for_stream_reset を追加する
-  - @voluntas
-- [ADD] QUIC クライアントの connect にタイムアウトと max_datagram_frame_size を追加する
-  - @voluntas
-- [ADD] QUIC クライアントの `close` が送信したパケット数を返すようにする
-  - @voluntas
-- [ADD] WebTransport over HTTP/2 の Client / Server にセッション設定 (`Config`) を渡せるようにする
-  - @voluntas
-- [ADD] WebTransport over HTTP/2 bindings のイベントに SESSION_REJECTED (status_code 付き) と SESSION_READY への受信 HTTP ヘッダーを追加する
-  - @voluntas
-- [ADD] WebTransport over HTTP/2 高レベル Server にセッション拒否 API (on_session_request コールバック) を追加する
-  - @voluntas
-- [ADD] QUIC Config に reset_stream_at の広告制御 (enable_reset_stream_at) とピアの受信確認 API (remote_reset_stream_at) を追加する
-  - @voluntas
-- [ADD] WebTransport over HTTP/3 の高レベル Client / Server に QUIC 設定 (quic_config) を渡せるようにする
-  - @voluntas
-- [ADD] WebTransport over HTTP/3 のデータストリームリセットでアプリケーションエラーコードを WT_APPLICATION_ERROR レンジへリマップする
-  - @voluntas
-- [ADD] 配布 wheel に THIRD_PARTY_LICENSES.md を同梱する
+- [ADD] QUIC / HTTP/2 / HTTP/3 / WebTransport over HTTP/3 / WebTransport over HTTP/2 の高レベル asyncio Client / Server を実装する
   - @voluntas
 - [ADD] WebTransport の `connect()` 失敗を通知する例外階層 (`WebTransportConnectError` / `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を追加する
   - @voluntas
-- [ADD] QUIC クライアントにストリーム受信状態の破棄手段 (`discard_recv_state` と FIN 完了時の自動破棄) を追加する
+- [ADD] QUIC の 0-RTT による early data 送受信と Session ticket を実装する
   - @voluntas
-- [UPDATE] WebTransport over HTTP/3 と HTTP/3 の e2e テストを拡充する
+- [ADD] QUIC の Connection Migration を実装し、`quic.Client` / `h3.Client` / `http3.Client` に `migrate()` を追加する。`h3.Server` / `http3.Server` は Connection Migration を受け付ける
   - @voluntas
-- [UPDATE] WebKit (Safari) を使った WebTransport over HTTP/2 のブラウザ E2E テストを追加する
+- [ADD] QUIC クライアントの証明書検証 (`ca_file` とカスタム検証コールバック) を実装する
+  - @voluntas
+- [ADD] QUIC の接続統計 API (RTT / 輻輳ウィンドウ / フロー制御残量 / 送受信量等) と接続状態・エラー・ピア情報 API (コネクションエラー / TLS エラー / トランスポートパラメータ / バージョン / 接続 ID 等) を公開する
+  - @voluntas
+- [ADD] QUIC のストリーム・接続制御 API (ストリーム上限確認 / keep-alive / 鍵更新 / フロー制御の動的拡張 / 単方向・双方向ストリームの開設) を公開する
+  - @voluntas
+- [ADD] QUIC クライアントに `recv_stream_data` / `shutdown_stream` / `wait_for_stream_reset` / `discard_recv_state` を追加し、バックグラウンド受信タスクで `run()` を明示起動しなくても受信イベントを処理できるようにする
+  - @voluntas
+- [ADD] `quic` / `h3` / `http3` の高レベル Client / Server に `initiate_key_update()` を追加する
+  - @voluntas
+- [ADD] HTTP/2 のメッセージング拡張 API (トレーラ送信 / 1xx 応答 / RFC 9218 の優先度制御 / Server Push / ALPN 選択 / PING の opaque data / WINDOW_UPDATE の増分値) を公開する
+  - @voluntas
+- [ADD] HTTP/2 のセッション状態確認 API (SETTINGS / ウィンドウサイズ / 送信キュー / half-closed 状態等) とセッション制御 API (GOAWAY による即時終了 / ローカルウィンドウサイズの動的変更) を公開する
+  - @voluntas
+- [ADD] HTTP/3 の送信側拡張 API (トレーラ / 1xx レスポンス / graceful shutdown の開始通知 / 書き込み側シャットダウン) と優先度制御 API (RFC 9218) を公開する
+  - @voluntas
+- [ADD] HTTP/3 と WebTransport over HTTP/3 のストリーム・接続制御 API (QUIC フロー制御ブロック / アンブロック / 同時ストリーム数ヒント) を公開する
+  - @voluntas
+- [ADD] WebTransport over HTTP/3 のサーバーにストリームを開く API と Origin ヘッダーの送信・検証を追加する
+  - @voluntas
+- [ADD] WebTransport over HTTP/2 の `h2.Server` に `allowed_origins` とセッション拒否 API (`on_session_request`) を追加し、Origin 検証 (draft-15 Section 3.2) を実装する
+  - @voluntas
+- [ADD] WebTransport over HTTP/2 の `h2.Client` / `h2.Server` に `on_stop_sending` を追加し、`stop_sending` と WT_STOP_SENDING への WT_RESET_STREAM 自動応答を実装する
+  - @voluntas
+- [ADD] `http3.EventType.ERROR` と `h3.EventType` / `http2.EventType` のエラー通知、`on_connection_error` / `on_error` / `on_stop_sending` / `on_stream_reset` コールバックを追加する
+  - @voluntas
+- [ADD] `h2.WtErrorCode` を追加し、WebTransport over HTTP/2 のエラーコード (`WT_FLOW_CONTROL_ERROR` / `WT_STREAM_STATE_ERROR` / `WT_ERROR`) を定数として公開する
+  - @voluntas
+- [ADD] `http2.Server` と `http3.Server` にリクエストボディ終端 (`on_stream_end`) コールバックを追加する
+  - @voluntas
+- [ADD] 配布 wheel に THIRD_PARTY_LICENSES.md を同梱する
+  - @voluntas
+- [UPDATE] UDP 系の高レベル API (`quic` / `h3` / `http3` の Client / Server) の送信を `send()` が空を返すまで drain し、待機を QUIC のタイマー期限ベースに変更して大容量転送のスループットを改善する
+  - @voluntas
+- [UPDATE] `http2.Server` の送信を drain 化し、受信を常時読み待ちにして大容量レスポンスのスループットを改善する
+  - @voluntas
+- [UPDATE] WebTransport over HTTP/2 の受信をアプリの消費に連動させ (`nghttp2_session_consume`)、未完成カプセルの保持バイト数を有界にする
   - @voluntas
 - [UPDATE] CI の対応プラットフォームを Ubuntu 24.04 LTS / macOS 26 に揃える
   - @voluntas
-- [UPDATE] nanobind を 3.0.0 に更新し、`~=3.0.0` に固定する
-  - @voluntas
-- [UPDATE] aws-lc を v5.8.0 に更新する
-  - @voluntas
-- [UPDATE] nghttp3 の webtransport ブランチを最新化する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の reject_session にセッション ID の入力検証を追加し、応答の submit / 送出失敗を ERROR イベントで観測可能にする
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 のサーバーが非 WebTransport リクエストに 405 応答 (Allow: CONNECT) を返し、無応答によるストリーム滞留を解消する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 の受理前データストリームが無制限にバッファリングされる問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のクライアント close() がピア終了を待たずに切断する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の `h2.Session.receive` / `send_stream_data` / `send_datagram` に 1 MiB の入力サイズ上限を追加し、超過は `ValueError` にする
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 のデータストリームリセットで受信したエラーコードを unsigned 32-bit のアプリコードに復元して `on_stream_reset` に配信する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 の `Client.connect` の SETTINGS 受信判定を制御ストリーム ID のヒューリスティックから SETTINGS の直接判定に修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の `reset_stream` / `stop_sending` に `stream_id` の varint 範囲検査と未知ストリームの送出抑止を追加する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の Config の初期フロー制御値が 2^32 以上だと SETTINGS で切り詰められて WebTransport-Init や初期フロー制御カプセルと食い違う問題を修正し、2^32 以上をセッション生成時の `ValueError` にする
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のサーバーが 405 応答に Allow: CONNECT を付与し、非 WebTransport リクエストへの無応答によるストリーム滞留を解消する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の受信マップがピアの未知ストリーム ID で無制限に増えるのを修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 と HTTP/2 の `Client.connect()` の無制限な待機ループを deadline 制御の bounded な待機に修正する
-  - @voluntas
-- [FIX] HTTP/2 で FIN 送出済み・リセット送出済みのストリームへの send_stream_data / reset_stream がカプセルを送出してしまうのを修正する (draft-15 Section 6.2 / 6.4 の MUST 違反)
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のクライアントが 2xx 非 200 応答をセッション確立として扱わない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 で SETTINGS の初期フロー制御値 0 を広告する対向へ自側 config 値にフォールバックして送信できてしまう問題を修正する (draft-15 Section 6.5 / 6.6 / 6.7 の MUST 違反)
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の `close_session` が 1024 バイトでエラーメッセージを切り詰める際に UTF-8 文字境界を無視し、不完全な UTF-8 シーケンスが送出される問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 の `close_session` が 1024 バイト超のエラーメッセージで WT_CLOSE_SESSION を送出せず、UTF-8 文字境界を無視する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 で不正な WT_CLOSE_SESSION (1024 バイト超・不正な UTF-8 の Application Error Message) を受信しても H3_MESSAGE_ERROR (0x010E) で CONNECT ストリームをリセットしない問題を修正する
-  - @voluntas
-- [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループするのを修正する
-  - @voluntas
-- [FIX] QUIC の再送時にストリームデータが破損するのを修正する (送出バッファを受信確認まで保持する)
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 サーバーの STREAM_RESET イベントで誤ったセッション ID が渡されるのを修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 のリセット・セッション終了時に送信バッファが解放されないのを修正する
-  - @voluntas
-- [FIX] QUIC サーバーの RETRY 送出要求時に接続が閉じられた状態にならない問題を修正する
-  - @voluntas
-- [FIX] close() が生成した CONNECTION_CLOSE パケットを送出しない問題を修正する
-  - @voluntas
-- [FIX] close() 後の受信パケットに応答して CONNECTION_CLOSE を再送する
-  - @voluntas
-- [FIX] CONNECTION_CLOSE の再送が CLOSING 期間満了後も無期限に続くのを修正する
-  - @voluntas
-- [FIX] HTTP/3 と WebTransport over HTTP/3 の FIN なしデータ送信で DATA フレームのペイロードが壊れる問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 サーバーが終了ハンドシェイクでピアへ応答を送信しない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のサーバー開始ストリームのデータが WebKit で受信できない問題を修正する
-  - @voluntas
-- [FIX] QUIC の `send()` が ngtcp2 の WRITE_MORE 契約に違反し大容量データ転送でデータが壊れる問題を修正する
-  - @voluntas
-- [FIX] QUIC の受信フロー制御が初期受信ウィンドウを超えて前進しない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 でセッション ID 集合の先頭要素に依存して誤ったセッションへ配送される問題を修正する
-  - @voluntas
-- [FIX] CONNECT ストリームのリセット時にセッション終了の後始末と通知が行われないのを修正する
-  - @voluntas
-- [FIX] CONNECT ストリームのクリーンクローズ (FIN) でセッション終了の後始末が行われないのを修正する
-  - @voluntas
-- [FIX] データグラムの不正なセッション ID 受信時に H3_ID_ERROR で接続を閉じる
-  - @voluntas
-- [FIX] 受信済み単方向ストリームへの書き込み登録で nghttp3 の assert が発火し得るのを修正する
-  - @voluntas
-- [FIX] セッション終了後に send_datagram がデータグラムを送出してしまうのを修正する
-  - @voluntas
-- [FIX] CONNECT ストリームの受理前 FIN でセッション終了が検知されないのを修正する
-  - @voluntas
-- [FIX] セッション終了後に終了したセッション ID 宛のデータストリームが配信されるのを修正する
-  - @voluntas
-- [FIX] セッション終了後に終了したセッション ID 宛の open_stream が成功するのを修正する
-  - @voluntas
-- [FIX] クライアントが非 2xx 応答を受信してもセッション ID が残る問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 でセッション終了後に send_datagram がデータグラムを送出してしまうのを修正する
-  - @voluntas
-- [FIX] QPACK デコードブロック中の受理前 FIN でセッション終了が検知されないのを修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 の接続エラー時に高レベル Client.run / Server.run が終了しない問題を修正する
-  - @voluntas
-- [FIX] HTTP/3 の `on_stream_end` がヘッダーと FIN が同一の QUIC STREAM_DATA で届いたボディなしレスポンスで二重通知される問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 の GOAWAY 受信で接続を閉じてしまい進行中ストリームのレスポンス送出が止まる問題を修正する (RFC 9113 Section 6.8 の graceful shutdown。受信後は既存ストリームの送受信を継続し、新規ストリームの開始のみを抑止する)
-  - @voluntas
-- [CHANGE] WebTransport over HTTP/3 の Client.connect を 2xx 応答待ちに変更し、非 2xx 拒否時に False を返すようにする (低レベル API に SessionRejected イベントと status_code を追加し、SESSION_READY を 2xx 全般で発火させる)
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の reject_session が 200-599 以外の status_code を無検証で送出する問題を修正する (200-599 は ValueError を送出する)
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の高レベル Client の on_session_ready コールバックが発火しない問題を修正する (connect() が消費した SESSION_READY を run() へ引き継ぎ、登録順序に依存せず配信する)
-  - @voluntas
-- [FIX] 高レベル HTTP/3 サーバー (`http3.Server.stop`) が close() 生成の CONNECTION_CLOSE を送出しない問題を修正する
-  - @voluntas
-- [FIX] 高レベル HTTP/3 サーバー (`http3.Server.run`) が未知アドレスからの非 Initial パケットを受信すると `RuntimeError` で停止するのを修正する
-  - @voluntas
-- [FIX] QUIC のピアの max_datagram_frame_size を超えるデータグラムが送信キューを永久に塞ぐ問題を修正する (RFC 9221 Section 3)
-  - @voluntas
-- [FIX] 遅延クローズ保留中に破棄されるべき 2xx レスポンスが送出されてしまうのを修正する
-  - @voluntas
-- [FIX] セッション終了後に終了したセッション ID 宛のデータグラムが配信されるのを修正する
-  - @voluntas
-- [FIX] クライアントの open_stream が失敗時に無効な stream_id を返す問題を修正する
-  - @voluntas
-- [FIX] サーバーが reject_session で拒否した後もセッション ID が残る問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 でクライアントが非 2xx 応答を受信してもセッション ID が残る問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 で WT_CLOSE_SESSION なしの END_STREAM のみによるセッション終了が検知されない問題を修正する
-  - @voluntas
-- [FIX] 受理前の WT_CLOSE_SESSION が accept_session 中に処理されると SessionClosed が二重発火し、未送信の 2xx が送出されてセッション ID が残る問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 サーバーの reject_session が 2xx 応答でもセッション ID を削除する問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 で WT_CLOSE_SESSION 受信時の END_STREAM 応答 (Section 6.12 の受信者 MUST) を実装し、close_session 応答で SessionClosed が二重発火する問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 でセッション終了後に stop_sending / drain_session がカプセルを送出してしまうのを修正する
-  - @voluntas
-- [FIX] reject_session で拒否した後に accept_session を呼ぶと SessionClosed が発火する問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 でローカル close_session 後に send_stream_data / reset_stream がカプセルを送出してしまうのを修正する
-  - @voluntas
-- [FIX] HTTP/2 で close_session を二重に呼ぶと WT_CLOSE_SESSION capsule が二重送出される問題を修正する
-  - @voluntas
-- [FIX] HTTP/2 で不正なストリーム状態への WT_STREAM / WT_RESET_STREAM 受信を検知しない問題を修正する (リセット済みストリームは受信追跡のため保持され、get_stream_ids に含まれるようになる)
-  - @voluntas
-- [FIX] HTTP/2 で終端状態のストリームへの空の WT_STREAM capsule がセッションエラーになる問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のフロー制御カプセルで減少値・ 2^60 超過を検知せずセッションを閉じない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 で同一ストリームへの 2 回目の WT_STOP_SENDING を検知せずセッションを閉じない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の受信フロー制御違反でセッションを閉じずアプリへ通知しない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の WT_CLOSE_SESSION 受信で 1024 バイト超・不正 UTF-8 のメッセージを検知せずセッションエラーにしない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の WT_RESET_STREAM / WT_STOP_SENDING 受信で 0xffffffff 超の error_code を検知せずセッションエラーにしない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の受信ストリーム数が広告した Maximum Streams を超えても検知せずセッションを閉じない問題を修正する
-  - @voluntas
-- [FIX] HTTP/3 のプロトコルエラーで run() が QUIC アイドルタイムアウトまで無限ハングする問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の高レベル Client.connect() が非 2xx 拒否で永久ブロックする問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 の transport parameter 検証が no-op のままな問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 が :protocol "webtransport" トークンの CONNECT をネイティブセッションとして受理する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 の transport parameter 検証で実ブラウザ (Chromium / WebKit) の接続を拒否する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 が "webtransport" トークンの CONNECT を拒否し実ブラウザとセッション確立できない問題を修正する
-  - @voluntas
-- [FIX] 公開 Sans-IO API の引数だけで依存ライブラリの assert に到達しプロセスが異常終了する経路をバインディング側の検証で塞ぐ
-  - @voluntas
-- [FIX] QUIC の検証コールバックが例外を送出するとプロセスが異常終了する問題を修正する
-  - @voluntas
-- [FIX] free-threading 環境で同一接続を複数スレッドから触るとプロセスが異常終了する問題を修正する
-  - @voluntas
-- [FIX] QUIC サーバーが未知アドレスからの short header で既存接続のアドレスキーを張り替える問題を修正する
-  - @voluntas
-- [FIX] UDP 系サーバーが idle timeout 後の接続を回収せずリークする問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 と HTTP/2 のサーバーがクライアント接続中に停止しない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 と HTTP/3 のクライアント接続確立が 1 パケットのロスで失敗する問題を修正する
-  - @voluntas
-- [FIX] UDP 系の高レベルクライアントが localhost 指定で接続できない問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のフロー制御クレジットが初期値の 1 回きりで転送量が固定される問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のサーバーが受理前に届いた楽観的カプセルを破棄する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 の未完成カプセルバッファが無制限に蓄積される問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 のストリーム ID の initiator と方向の検証漏れで状態が壊れる問題を修正する
-  - @voluntas
-- [FIX] UDP 系サーバーが証明書の誤設定を黙殺して無言で接続を捨て続ける問題を修正する
-  - @voluntas
-- [FIX] QUIC バインディングが pacing 契約に違反してバースト送信する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 のクライアント close() がピア終了を待たずに切断する問題を修正する
-  - @voluntas
-- [FIX] HTTP/3 の送信バッファが ACK 通知なしで残留する問題を修正する
-  - @voluntas
-- [FIX] WebTransport over HTTP/2 が GOAWAY 受信で既存セッションを継続できない問題を修正する
-  - @voluntas
-- [FIX] QUIC サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
+- [UPDATE] 依存ライブラリ (ngtcp2 / nghttp3 / nghttp2 / AWS-LC / nanobind) を固定したコミット・タグでビルドする
   - @voluntas
 - [FIX] HTTP/2 の送信バッファで先頭 1 バイトが欠落する問題と、空のボディで END_STREAM が送出されない問題を修正する
   - @voluntas
-- [UPDATE] nghttp2 の deprecated な ssize_t 版 API (`nghttp2_session_mem_send` / `mem_recv` / `submit_request` / `submit_response` / `data_provider` / `data_source_read_callback` / `send_callback`) を `*2` 版へ移行し、`NGHTTP2_NO_SSIZE_T` を定義したビルドを CI で検証する
+- [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループする問題、ngtcp2 の WRITE_MORE 契約違反で大容量データ転送が壊れる問題、再送時にストリームデータが破損する問題を修正する
   - @voluntas
-- [UPDATE] UDP 系の高レベル API (`quic` / `h3` / `http3` の Client / Server) の送信を `send()` が空を返すまで drain し、待機を受信固定間隔から QUIC のタイマー期限ベースに変更する
+- [FIX] QUIC の受信フロー制御が初期受信ウィンドウを超えて前進しない問題と、サーバーが単一ループのため他接続の受信と再送が止まる問題を修正する
   - @voluntas
-- [UPDATE] `http2.Server` の送信を `send()` が空を返すまで drain し、受信を常時読み待ちにして大容量レスポンスのスループットを回復する
+- [FIX] WebTransport over HTTP/3 と HTTP/2 のストリーム終了後の送出・送信バッファ解放・セッション終了の後始末が不正な問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/2 の受信で入力検証・上限・フロー制御違反の検知が漏れていた問題を修正する (カプセルサイズ / 入力サイズ / ストリーム数 / フロー制御値の減少・逆転)
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/2 の `close_session` がエラーメッセージの UTF-8 文字境界を無視して切り詰める問題と、不正なメッセージを受信してもセッションエラーにしない問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 の `Client.connect` が SETTINGS の受信判定を誤りハンドシェイク完了を取りこぼす問題と、`Client.connect()` の待機が無制限になる問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/2 の `Client.connect()` が非 2xx 応答や無応答で永久にブロックする問題を修正する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/2 のサーバーが非 WebTransport リクエストへ無応答のままストリームを滞留させる問題を修正する (405 + Allow: CONNECT)
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 の QPACK デコードブロック中の CONNECT ストリームに DATA フレームが後続するとサーバーが異常終了する問題を修正する
+  - @voluntas
+- [FIX] QUIC の `close()` が生成した CONNECTION_CLOSE パケットを送出しない問題と、close 後の受信パケットへの応答で CONNECTION_CLOSE を再送し続ける問題を修正する
   - @voluntas
 
 ### misc
@@ -339,103 +119,29 @@
 - [UPDATE] 高レベル API と C++ バインディングの重複コードを共通ヘルパーへ集約する (`_common.py` と `header_convert.h` の新設)
   - @voluntas
 
-- [ADD] `quic` / `h3` / `http3` の高レベル Client / Server に `initiate_key_update()` を追加する
-  - @voluntas
-
 - [UPDATE] 全 C コールバックに `noexcept` を付与し、例外境界の方針を CODEBASE.md に明記する
   - @voluntas
 
-- [CHANGE] WebTransport over HTTP/3 の `on_stream_reset` の `error_code` を `int | None` として文書化する (レンジ外・予約済みコードポイントは `None`)
+- [UPDATE] 型スタブをスタブパッケージ化し、高レベル `Client` / `Server` / 例外を型検査に露出する
   - @voluntas
 
-- [ADD] `h2.WtErrorCode` を追加し、WebTransport over HTTP/2 のエラーコード (`WT_FLOW_CONTROL_ERROR` / `WT_STREAM_STATE_ERROR` / `WT_ERROR`) を定数として公開する
+- [UPDATE] ruff の検出ルールを `select` で明示的に固定し、ローカルの ruff を prek.toml と同じバージョンに固定する
   - @voluntas
 
-- [UPDATE] 型スタブをスタブパッケージ化し、高レベル `Client` / `Server` / 例外を型検査に露出する (`[tool.ty.rules] unresolved-import` の抑止を撤去)
+- [UPDATE] print 駆動のデバッグテスト 3 本を削除し、テストのイベント取り出し・接続ペア・ワイヤ組み立てヘルパーを conftest.py に集約する
   - @voluntas
 
-- [UPDATE] deps.json の ngtcp2 / nghttp3 をブランチ参照からコミットハッシュ指定に変え、wheel ビルドを再現可能にする
+- [UPDATE] 確立済みペアへの API 呼び出し系列を検証するステートフル PBT と、テスト専用の観測 API (`_test_force_close` / `_test_stream_buffer_*`) を追加する
   - @voluntas
 
-- [UPDATE] WebTransport over HTTP/2 の受信をアプリの消費に連動させ (`nghttp2_session_consume`)、未完成カプセルの保持バイト数を有界にする
-  - @voluntas
-
-- [UPDATE] THIRD_PARTY_LICENSES.md に nanobind (BSD-3-Clause) と同梱の tsl::robin_map (MIT) のライセンスを追記し、README の第三者ライセンス節を更新する
-  - @voluntas
-
-- [UPDATE] ruff の検出ルールを `select` で明示的に固定し、バージョン更新で既定ルールが変わっても検出結果が変わらないようにする
-  - @voluntas
-
-- [UPDATE] ローカルの ruff を prek.toml と同じ 0.16.6 に固定し、CI との検出結果の食い違いをなくす
-  - @voluntas
-
-- [UPDATE] print 駆動のデバッグテスト `test_debug_quic.py` / `test_debug_quic_handshake.py` / `test_debug_webtransport_h3.py` を削除する
-  - @voluntas
-
-- [UPDATE] README の h3 / h2 クライアント例を例外送出型の `connect()` に合わせる
-  - @voluntas
-
-- [UPDATE] 確立済みペアへの API 呼び出し系列を検証するステートフル PBT を追加する
-  - @voluntas
-
-- [UPDATE] `http3.Connection` にテスト専用の `_test_force_close()` を追加する
-  - @voluntas
-- [UPDATE] `http2.Connection` にテスト専用の `_test_force_close()` を追加する
-  - @voluntas
-- [UPDATE] `http2.Connection` にテスト専用の送信バッファ観測 (`_test_stream_buffer_count` / `_test_stream_buffer_remaining` / `_test_stream_buffer_offset`) を追加する
-  - @voluntas
-
-- [UPDATE] 高レベル h2 Server の 405 拒否 (Allow: CONNECT) を e2e で検証する
-  - @voluntas
-- [UPDATE] PBT にセッション終了後の送信無視の property を追加し、e2e テストの固定 sleep と過大なタイムアウトを解消する
-  - @voluntas
-- [UPDATE] HTTP/2 テストの SETTINGS 交換 / ポンプ / 接続ペアのヘルパーを conftest.py に集約する
-  - @voluntas
-- [UPDATE] 受理前 WT_CLOSE_SESSION 送出テストヘルパーを conftest.py に集約する
-  - @voluntas
 - [UPDATE] テスト用の UDP パケットロス注入リレー LossyRelay とハンドシェイクロスからの回復テストを追加する
   - @voluntas
-- [UPDATE] conftest.py の手書きイベント取り出しループを _drain_events に寄せ替える
+
+- [UPDATE] CI のフレーク (QUIC の pacing 依存 / 接続確立 / 100 並行接続) を修正し、wheel テストでチェックアウトの src が wheel を隠さないようにする
   - @voluntas
-- [FIX] CI でフレークする QUIC テストの pacing 依存を修正する
+
+- [UPDATE] C++ バインディングの死にコード削除・RuntimeError メッセージの英語統一・Windows 対応終了後の残骸削除・依存の deprecated API 移行を行う
   - @voluntas
-- [UPDATE] C++ バインディングの死にコードを削除する
-  - @voluntas
-- [UPDATE] WebTransport over HTTP/3 の低レベル API テストを別ファイルへ分割する
-  - @voluntas
-- [UPDATE] RuntimeError メッセージを英語に統一し、C++ の英語コメントを日本語に直す
-  - @voluntas
-- [UPDATE] Windows 対応終了後に残ったビルド設定とコードの残骸を削除する
-  - @voluntas
-- [UPDATE] wheel ワークフローの外部 action をコミットハッシュ固定に統一する
-  - @voluntas
-- [UPDATE] wheel ワークフローの paths-ignore から tests/ を外し、tests/ のみの変更でも単体テストが CI で実行されるようにする
-  - @voluntas
-- [UPDATE] HTTP/2 クライアントの run() に server と対称な is_closed() チェックを追加する
-  - @voluntas
-- [UPDATE] h2 テストのワイヤ組み立てヘルパーを conftest.py に集約する
-  - @voluntas
-- [UPDATE] HTTP/2 のエラーコード 0x50 が draft 未確定値のプレースホルダである旨を注記する
-  - @voluntas
-- [FIX] QUIC 受信フロー制御テストの ACK 遅延タイマーを確実に満了させるよう修正する
-  - @voluntas
-- [FIX] ブラウザテストの接続確立フレークをリトライで回避する
-  - @voluntas
-- [FIX] CI の wheel テストで `pythonpath=["src"]` が拡張モジュール付き wheel を隠さないようにする
-  - @voluntas
-- [UPDATE] refs/ 配下の IETF draft を最新版に更新する
-  - @voluntas
-- [UPDATE] skills/webtransport-py/SKILL.md の WebTransport over HTTP/3 の記述を最新化する
-  - @voluntas
-- [UPDATE] WebTransport over HTTP/3 テストの接続ヘルパーを conftest.py に集約する
-  - @voluntas
-- [UPDATE] テストのイベント取り出しヘルパー _drain_events を conftest.py に集約する
-  - @voluntas
-- [UPDATE] ruff の lint エラー (I001 / RUF022 / PYI034) を修正する
-  - @voluntas
-- [UPDATE] CI に ruff check / ty check の実行ステップを追加する
-  - @voluntas
-- [FIX] ブラウザテストの conftest.py を ruff format の整形に適合させる
-  - @voluntas
-- [FIX] WebTransport over HTTP/3 で QPACK デコードブロック中の CONNECT ストリームに DATA フレームが後続するとサーバーが異常終了する問題を修正する
+
+- [UPDATE] CI に ruff check / ty check を追加し、wheel ワークフローの外部 action をコミットハッシュ固定に統一する
   - @voluntas

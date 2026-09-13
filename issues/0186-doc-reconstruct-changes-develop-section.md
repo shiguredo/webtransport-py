@@ -1,7 +1,7 @@
 # CHANGES.md の ## develop セクションを shiguredo-changelog 規約に沿って初回リリース向けに再構成する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/doc-reconstruct-changes-develop-section
 - Polished: {YYYY-MM-DD}
 
@@ -44,3 +44,15 @@
 - 記載漏れの機能追加が全て親 [ADD] に包摂されていること
 - README のリリース手順が更新されていること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `CHANGES.md` の凡例を規約どおり CHANGE → ADD → UPDATE → FIX の順に直した
+- `## develop` を 205 エントリから 51 エントリ (misc 10 件を除く) へ再構成した
+  - 中間状態の [FIX] 103 件は、リリース後に利用者が観測し得る不具合の修正 11 件に畳んだ (それ以外は develop 内で入れて直した中間状態のため削除)
+  - 依存バージョン更新・CI 設定・テスト整備・リファクタリング・ドキュメント更新の [UPDATE] は `### misc` の 10 件に集約した
+  - `refs/` 配下の draft 更新と `skills/webtransport-py/SKILL.md` の更新は規約で記載禁止のため削除した
+  - 機能追加 [ADD] 47 件を、主要機能 25 件の [ADD] に統合した (個別 API 追加は親機能のエントリに包摂)
+- 記載内容を実装と照合し、`ca` 引数のように存在しないものを削除した
+- README のリリースビルド節に「`## develop` を `## <バージョン>` に変更し `**リリース日**` を追記する」運用を追記した
+- 既存のテストが通ることを確認した (CHANGES.md / README.md のみの変更)
