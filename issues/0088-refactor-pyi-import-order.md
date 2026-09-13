@@ -1,7 +1,7 @@
 # nanobind 生成の src/webtransport/__init__.pyi の import 順が非ソートのまま残る問題を解消する
 
 - Created: 2026-08-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-pyi-import-order
 - Polished: {YYYY-MM-DD}
 
@@ -28,3 +28,12 @@
 
 - `src/webtransport/__init__.pyi` (および同種の違反がある他の生成 .pyi) が I001 を検出しない状態になる (ソートされるか、lint 対象外として明文化される)
 - `make develop` で再生成しても違反が復活しない
+
+## 解決方法
+
+`issues/closed/0167-refactor-type-stubs-package-layout.md` の対応で根本から解消した。
+
+- 問題の `src/webtransport/__init__.pyi` は nanobind が生成して `make develop` がコピーしていたファイルで、import 順が非ソートのまま追跡対象外 (`*.pyi` は `.gitignore`) だった
+- 0167 でスタブをスタブパッケージ (`src/webtransport/webtransport_ext/*.pyi`) に移し、`scripts/normalize_stubs.py` が生成物へ ruff の整形・ソートをかけてから追跡するようにしたため、`src/webtransport/__init__.pyi` 自体が無くなり、他の生成 `.pyi` も I001 を検出しない
+- `ruff check --select I src/` が 0 件であることを確認した
+- `make develop` は生成結果と追跡ファイルの `diff -r` を取るため、再生成しても違反が復活しない
