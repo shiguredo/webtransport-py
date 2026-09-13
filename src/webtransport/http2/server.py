@@ -33,10 +33,7 @@ class ResponseWriter:
     ) -> None:
         """レスポンスヘッダーを送信する"""
         self._connection.submit_response(stream_id, headers)
-        data = self._connection.send()
-        if data:
-            self._writer.write(data)
-            await self._writer.drain()
+        await self.drain()
 
     async def send_data(
         self,
@@ -46,9 +43,20 @@ class ResponseWriter:
     ) -> None:
         """データを送信する"""
         self._connection.send_data(stream_id, data, end_stream)
-        send_data = self._connection.send()
-        if send_data:
-            self._writer.write(send_data)
+        await self.drain()
+
+    async def drain(self) -> None:
+        """送信待ちのフレームを送出できるだけ送出する
+
+        nghttp2_session_mem_send2 は 1 回の呼び出しで 1 フレームしか返さない
+        ため、空が返るまで繰り返す (nghttp2.h の mem_send2 の説明に従う)。
+        1 回で止めると 1 ループ 1 フレームに律速される。
+        """
+        while True:
+            data = self._connection.send()
+            if not data:
+                return
+            self._writer.write(data)
             await self._writer.drain()
 
 
@@ -200,20 +208,23 @@ class Server:
 
         response_writer = ResponseWriter(writer, connection)
 
-        data = connection.send()
-        if data:
-            writer.write(data)
-            await writer.drain()
+        await response_writer.drain()
+
+        # 受信は常時 1 件だけ読み待ちにする。固定 0.1 秒タイムアウトで
+        # 読むたびに待つ実装では、受信間隔がそのまま転送の律速になる
+        # (フロー制御の更新が遅れて大容量レスポンスが極端に遅くなる)
+        read_task: asyncio.Task[bytes] | None = asyncio.create_task(reader.read(65535))
 
         try:
             while self._running:
-                try:
-                    received = await asyncio.wait_for(reader.read(65535), timeout=0.1)
+                assert read_task is not None
+                done, _ = await asyncio.wait({read_task}, timeout=0.1)
+                if done:
+                    received = read_task.result()
+                    read_task = None
                     if not received:
                         break
                     connection.receive(received)
-                except TimeoutError:
-                    pass
 
                 while True:
                     event = connection.next_event()
@@ -239,17 +250,19 @@ class Server:
                         # 検知する
                         pass
 
-                data = connection.send()
-                if data:
-                    writer.write(data)
-                    await writer.drain()
+                await response_writer.drain()
 
                 if connection.is_closed():
                     break
 
+                if read_task is None:
+                    read_task = asyncio.create_task(reader.read(65535))
+
                 await asyncio.sleep(0.001)
 
         finally:
+            if read_task is not None and not read_task.done():
+                read_task.cancel()
             writer.close()
             await writer.wait_closed()
 
@@ -269,8 +282,10 @@ class Server:
             connection: HTTP/2 接続
         """
         connection.submit_response(stream_id, headers)
-        data = connection.send()
-        if data:
+        while True:
+            data = connection.send()
+            if not data:
+                return
             writer.write(data)
             await writer.drain()
 
@@ -292,8 +307,10 @@ class Server:
             connection: HTTP/2 接続
         """
         connection.send_data(stream_id, data, eof)
-        send_data = connection.send()
-        if send_data:
+        while True:
+            send_data = connection.send()
+            if not send_data:
+                return
             writer.write(send_data)
             await writer.drain()
 

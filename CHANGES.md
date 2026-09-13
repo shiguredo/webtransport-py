@@ -331,6 +331,8 @@
   - @voluntas
 - [UPDATE] UDP 系の高レベル API (`quic` / `h3` / `http3` の Client / Server) の送信を `send()` が空を返すまで drain し、待機を受信固定間隔から QUIC のタイマー期限ベースに変更する
   - @voluntas
+- [UPDATE] `http2.Server` の送信を `send()` が空を返すまで drain し、受信を常時読み待ちにして大容量レスポンスのスループットを回復する
+  - @voluntas
 
 ### misc
 

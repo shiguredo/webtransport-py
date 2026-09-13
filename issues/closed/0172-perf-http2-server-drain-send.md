@@ -1,7 +1,7 @@
 # http2.Server の送信が 1 ループ 1 フレームに律速され応答スループットが 302 KB/s に張り付く
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/perf-http2-server-drain-send
 - Polished: {YYYY-MM-DD}
 
@@ -29,3 +29,11 @@
 - http2.Server から 4 MiB のレスポンスを 1 秒以内に転送できること
 - `tests/test_e2e_http2.py` の大容量レスポンステストが劣化しないこと (現状より速くなる)
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `ResponseWriter` に `drain()` を追加し、`send()` が空を返すまで繰り返すようにした (`nghttp2.h` の `mem_send2` の「call this function repeatedly until it returns 0」に従う)。`send_headers` / `send_data` と `Server._handle_client` の初期送信・ループ末尾の計 4 箇所をこれに寄せた
+- `Server.submit_response` / `Server.send_data` も同じく `send()` が空を返すまで繰り返すようにした
+- `Server._handle_client` の受信を、常時 1 件だけ `reader.read(65535)` を読み待ちにする実装に変更した。固定 0.1 秒タイムアウトで読むたびに待つ実装では受信間隔がそのまま律速になり、フロー制御の更新 (WINDOW_UPDATE) が遅れてサーバーの送信が止まる
+- 実測: 4 MiB のレスポンスが 13.34 秒から 1.03 秒に短縮した
+- 回帰ピンとして `test_server_large_response_throughput` (4 MiB を 5 秒以内) と `test_response_writer_drains_all_pending_frames` (48 KiB の複数フレーム) を追加した

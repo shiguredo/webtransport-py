@@ -690,3 +690,148 @@ async def test_stop_while_client_connected(test_certificates):
             await client.close()
         except OSError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_server_large_response_throughput(test_certificates):
+    """4 MiB のレスポンスがサーバーから短時間で転送されることを確認
+
+    nghttp2_session_mem_send2 は 1 回の呼び出しで 1 フレームしか返さない。
+    Server が send() を 1 回だけ呼ぶ実装だと 1 ループ 1 フレームに律速され、
+    4 MiB の転送に十数秒かかっていた。send() が空を返すまで drain する
+    実装では数秒以内に完了する。
+    """
+    from webtransport.http2 import Client, Server
+
+    size = 4 * 1024 * 1024
+    body = bytes(range(256)) * (size // 256)
+    client_received = 0
+    completed = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, response_writer):
+        await response_writer.send_headers(stream_id, [(":status", "200")])
+        await response_writer.send_data(stream_id, body, end_stream=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_data(stream_id, data):
+        # クライアントのコールバックは await されるため async で定義する
+        nonlocal client_received
+        client_received += len(data)
+        if client_received >= size:
+            completed.set()
+
+    client.on_data(on_client_data)
+
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        stream_id = await client.request("GET", "/large")
+        assert stream_id >= 0
+
+        started = time.monotonic()
+        await asyncio.wait_for(completed.wait(), timeout=10.0)
+        elapsed = time.monotonic() - started
+
+        assert client_received == size
+        # drain 化前は 13 秒以上かかっていた。CI の負荷変動を考慮して 5 秒を
+        # 上限にする (実測は 1 秒未満)
+        assert elapsed < 5.0, f"large response took {elapsed:.2f}s"
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_response_writer_drains_all_pending_frames(test_certificates):
+    """ResponseWriter.drain が送信待ちフレームをすべて送出することを確認
+
+    nghttp2_session_mem_send2 は 1 回の呼び出しで 1 フレームしか返さない。
+    send() を 1 回だけ呼ぶ実装では 2 つ以上のフレームが送信待ちに残る。
+    drain が空を返すまで繰り返すことを、フレーム数が 2 以上になる
+    レスポンスで確認する。
+    """
+    from webtransport.http2 import Client, Server
+
+    # 1 フレーム (max_frame_size 16384) を超えるボディを積む
+    body = b"y" * (48 * 1024)
+    client_received = 0
+    completed = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, response_writer):
+        await response_writer.send_headers(stream_id, [(":status", "200")])
+        await response_writer.send_data(stream_id, body, end_stream=True)
+
+    server.on_request(on_request)
+
+    await server.start()
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_client_data(stream_id, data):
+        nonlocal client_received
+        client_received += len(data)
+        if client_received >= len(body):
+            completed.set()
+
+    client.on_data(on_client_data)
+
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        stream_id = await client.request("GET", "/multi-frame")
+        assert stream_id >= 0
+
+        await asyncio.wait_for(completed.wait(), timeout=10.0)
+        assert client_received == len(body)
+    finally:
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+
+        await client.close()
+        await server.stop()
