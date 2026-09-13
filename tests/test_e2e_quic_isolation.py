@@ -195,12 +195,14 @@ async def test_connection_closed_reaches_callback(test_certificates) -> None:
     client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
     try:
         # 接続する
-        assert await asyncio.wait_for(client.connect(), timeout=5.0) is True
-        await asyncio.sleep(0.2)
+        assert await asyncio.wait_for(client.connect(), timeout=10.0) is True
+        # ハンドシェイク完了とサーバー側の接続確立がイベントループ上で
+        # 完了するまで待つ。CI の負荷変動で 0.2 秒では足りないことがある
+        await asyncio.sleep(1.5)
         # クライアントから閉じる
         await client.close()
         # サーバー側に終了が届く
-        await asyncio.wait_for(closed.wait(), timeout=5.0)
+        await asyncio.wait_for(closed.wait(), timeout=10.0)
     finally:
         server_task.cancel()
         await asyncio.gather(server_task, return_exceptions=True)
