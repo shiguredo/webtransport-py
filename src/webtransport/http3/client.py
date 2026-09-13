@@ -660,6 +660,22 @@ class Client:
 
             await asyncio.sleep(0.01)
 
+    def initiate_key_update(self) -> bool:
+        """TLS 鍵更新 (RFC 9001 Section 6) を開始する
+
+        ハンドシェイク完了前や `HANDSHAKE_CONFIRMED` 未成立の場合は False を
+        返す。鍵更新の確認 (ピアからの応答) 前に連続して呼ぶと 2 回目は
+        False になる (RFC 9001 Section 6.1 の MUST)。実際の鍵の切り替えは
+        以後に送信するパケットで行われる。
+
+        Returns:
+            鍵更新を開始できた場合は True
+        """
+        if self._quic_connection is None:
+            return False
+
+        return self._quic_connection.initiate_key_update()
+
     async def migrate(self) -> bool:
         """ローカル UDP ソケットを差し替えてコネクションマイグレーションを開始する
 

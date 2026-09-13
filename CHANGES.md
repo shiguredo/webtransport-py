@@ -336,6 +336,9 @@
 
 ### misc
 
+- [ADD] `quic` / `h3` / `http3` の高レベル Client / Server に `initiate_key_update()` を追加する
+  - @voluntas
+
 - [UPDATE] 全 C コールバックに `noexcept` を付与し、例外境界の方針を CODEBASE.md に明記する
   - @voluntas
 

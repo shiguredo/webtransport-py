@@ -1924,3 +1924,91 @@ async def test_client_on_connection_error_fires_on_protocol_error(test_certifica
     await asyncio.gather(server_task, return_exceptions=True)
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_high_level_initiate_key_update(test_certificates):
+    """http3.Client / http3.Server から鍵更新を開始できることを確認
+
+    RFC 9001 Section 6 の鍵更新を http3 の高レベル API から開始できる。
+    接続前と未登録アドレスでは False を返し、接続後は True を返す。
+    """
+    from webtransport.http3 import Client, Server
+
+    server_got_request = asyncio.Event()
+    client_addr: list[tuple[str, int]] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        client_addr.append(addr)
+        server_got_request.set()
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        await server.send_data(addr, stream_id, b"ok", fin=True)
+
+    server.on_request(on_request)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+
+    # 接続前は False
+    assert client.initiate_key_update() is False
+
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    stream_id = await client.request("GET", "/")
+    assert stream_id >= 0
+    await asyncio.wait_for(server_got_request.wait(), timeout=10.0)
+
+    # サーバー側から開始できる (post-handshake 状態への遷移を待つ)。
+    # 先にクライアント側で開始すると、確認が済むまでサーバー側は開始できない
+    assert client_addr
+    server_can_update = False
+    for _ in range(200):
+        if server.initiate_key_update(client_addr[0]):
+            server_can_update = True
+            break
+        await asyncio.sleep(0.05)
+    assert server_can_update, "サーバー側から鍵更新を開始できない"
+    # 確認前に連続で呼ぶと 2 回目は False (RFC 9001 Section 6.1)
+    assert server.initiate_key_update(client_addr[0]) is False
+    # 未登録アドレスは False
+    assert server.initiate_key_update(("127.0.0.1", 1)) is False
+
+    # クライアント側からも開始できる (サーバー側の確認が済むまで待つ)
+    client_can_update = False
+    for _ in range(200):
+        if client.initiate_key_update():
+            client_can_update = True
+            break
+        await asyncio.sleep(0.05)
+    assert client_can_update, "クライアント側から鍵更新を開始できない"
+    assert client.initiate_key_update() is False
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
