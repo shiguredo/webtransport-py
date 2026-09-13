@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] deps.json の ngtcp2 / nghttp3 をブランチ参照からコミットハッシュ指定に変え、wheel ビルドを再現可能にする
+  - @voluntas
+
 - [UPDATE] WebTransport over HTTP/2 の受信をアプリの消費に連動させ (`nghttp2_session_consume`)、未完成カプセルの保持バイト数を有界にする
   - @voluntas
 
