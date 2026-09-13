@@ -1,7 +1,7 @@
 # ローカルと CI の ruff バージョンを同期する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/update-sync-ruff-versions
 - Polished: {YYYY-MM-DD}
 
@@ -25,3 +25,10 @@
 ## 完了条件
 
 - ローカルと CI で同一バージョンの ruff が使われ、両者の検出結果が一致すること
+
+## 解決方法
+
+- `pyproject.toml` の dev 依存グループに `ruff==0.16.6` を追加し、`prek.toml` の ruff-pre-commit (`rev = "v0.16.6"`) と同じバージョンに固定した。更新時は両方を同時に上げる旨をコメントに残した
+- `uv lock` で `uv.lock` を更新し、`uv run ruff --version` が 0.16.6 を返すことを確認した
+- ローカルの ruff 0.16.6 で `ruff check src/ tests/ examples/` と `ruff format --check src/ tests/ examples/` が通ることを確認した (CI と同じ検出結果)
+- CI は prek-action 経由で ruff-pre-commit を使うため、これでローカルと CI のバージョンが一致する
