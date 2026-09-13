@@ -336,6 +336,9 @@
 
 ### misc
 
+- [CHANGE] WebTransport over HTTP/3 の `on_stream_reset` の `error_code` を `int | None` として文書化する (レンジ外・予約済みコードポイントは `None`)
+  - @voluntas
+
 - [ADD] `h2.WtErrorCode` を追加し、WebTransport over HTTP/2 のエラーコード (`WT_FLOW_CONTROL_ERROR` / `WT_STREAM_STATE_ERROR` / `WT_ERROR`) を定数として公開する
   - @voluntas
 

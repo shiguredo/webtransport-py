@@ -1,7 +1,7 @@
 # h3 の on_stream_reset の error_code 契約 (int | None) を SKILL.md と tests で揃える
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-align-on-stream-reset-int-or-none-contract
 - Polished: {YYYY-MM-DD}
 
@@ -31,3 +31,11 @@
 - tests のコールバック型注釈が実装と一致すること
 - CHANGES.md に対応する [CHANGE] エントリが追加されていること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `skills/webtransport-py/SKILL.md` の h3 セクション (`h3.Server` / `h3.Client`) の `on_stream_reset` を `error_code: int | None` に更新し、レンジ外・予約済みコードポイントでは `None` になる理由 (draft-ietf-webtrans-http3-16 Section 4.4 の「no application error code」) を明記した
+- `tests/test_e2e_webtransport_h3.py` の型付きコールバックを `error_code: int | None` に修正した
+- `h2` / `http3` の `on_stream_reset` は実装も `int` のため変更していない (SKILL.md の該当記述も現状のままで正しい)
+- `CHANGES.md` の `## develop` の `### misc` に型の文書化エントリを追加した
+- 既存のテストが通ることを確認した
