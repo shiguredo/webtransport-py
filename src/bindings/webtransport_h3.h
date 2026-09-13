@@ -210,6 +210,16 @@ class H3Session {
   /**
    * QUIC コントロールストリーム ID を設定
    */
+  /**
+   * ローカル起点の単方向ストリーム ID として妥当かを返す
+   *
+   * QUIC varint の上限内であり、かつ自側の単方向ストリームのビットパターン
+   * (クライアント %4==2 / サーバー %4==3) であることを確認する。制御
+   * ストリームと QPACK ストリームのバインドで同じ検証を 3 回書いていたため
+   * 1 箇所に集約する
+   */
+  bool is_valid_local_uni_stream_id(int64_t stream_id) const;
+
   void bind_control_stream(int64_t stream_id);
 
   /**
@@ -512,6 +522,15 @@ class H3Session {
    * @param n 同時ストリーム数のヒント
    */
   void max_concurrent_streams(size_t n);
+
+  /**
+   * セッション ID が有効 (確立済みで受理前 FIN の後始末が済んでいない) かを返す
+   *
+   * `session_ids_` にあり、かつ受理前 FIN の保留・受理済み集合のどちらにも
+   * 無い場合のみ true。データグラム受信・ストリーム開設・カプセル送出の
+   * 各経路で同じ 3 条件を判定していたため 1 箇所に集約する
+   */
+  bool is_active_session(int64_t session_id) const;
 
   /**
    * テスト専用: ストリームの送信バッファエントリが存在するか

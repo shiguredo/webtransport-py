@@ -6,6 +6,8 @@
 
 #include "http3.h"
 
+#include "header_convert.h"
+
 #include <cstring>
 #include <stdexcept>
 
@@ -421,20 +423,7 @@ bool Http3Connection::submit_request(
     return false;
   }
 
-  std::vector<nghttp3_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp3_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP3_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp3_nv> nva = bindings::to_nghttp3_nv(headers);
 
   // データリーダーを設定してボディデータを送信可能にする
   nghttp3_data_reader dr;
@@ -463,20 +452,7 @@ bool Http3Connection::submit_response(
     return false;
   }
 
-  std::vector<nghttp3_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp3_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP3_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp3_nv> nva = bindings::to_nghttp3_nv(headers);
 
   // データリーダーを設定してボディデータを送信可能にする
   nghttp3_data_reader dr;
@@ -600,20 +576,7 @@ bool Http3Connection::submit_trailers(
     return false;
   }
 
-  std::vector<nghttp3_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp3_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP3_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp3_nv> nva = bindings::to_nghttp3_nv(headers);
 
   // トレーラはフレームキューに積まれる。flush 済み (WRITE_END_STREAM) の
   // ストリームでは NGHTTP3_ERR_INVALID_STATE になる
@@ -642,20 +605,7 @@ bool Http3Connection::submit_info(
     return false;
   }
 
-  std::vector<nghttp3_nv> nva;
-  nva.reserve(headers.size());
-
-  for (const auto& [name, value] : headers) {
-    nghttp3_nv nv;
-    nv.name =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(name.c_str()));
-    nv.namelen = name.size();
-    nv.value =
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.c_str()));
-    nv.valuelen = value.size();
-    nv.flags = NGHTTP3_NV_FLAG_NONE;
-    nva.push_back(nv);
-  }
+  std::vector<nghttp3_nv> nva = bindings::to_nghttp3_nv(headers);
 
   // 1xx レスポンスはフレームキューに積まれる。最終レスポンス
   // (submit_response) より前に呼ぶこと。クライアントは is_server_

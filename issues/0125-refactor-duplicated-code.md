@@ -1,7 +1,7 @@
 # 重複コードを共通化する
 
 - Created: 2026-08-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-duplicated-code
 - Polished: 2026-09-05
 
@@ -49,3 +49,23 @@ Python 側:
 ## 依存関係
 
 - pending の 0044 と `_parse_url` / `_common.py` が競合する。0044 先行時は本 issue の `_parse_url` を対象外とし、0125 先行時は 0044 側で rebase する
+
+## 解決方法
+
+Python 側は `src/webtransport/_common.py` を新設して集約した。
+
+- `_normalize_addr` 6 箇所 → `normalize_addr` (`self` を使わないため各クラスでは `staticmethod` として束縛)
+- `_destination_for_packet` 3 箇所 → `destination_for_packet` (パケット・解決済みリモート・ホスト・ポートを引数に取る)
+- `_validate_cert_key_files` 3 箇所 → `validate_cert_key_files` (元はモジュール関数だったものを共通化)
+- `_parse_url` (`h2.Client` / `h3.Client`) 2 箇所 → `parse_wt_url` (issue 0044 は pending のため本 issue 側の名前で集約)
+- 制御ストリーム / QPACK ストリームの開設 3 箇所 → `open_http3_uni_streams`、バインド 3 箇所 → `bind_http3_uni_streams` (`http3.Server` は開設ごとに失敗を判定する必要があるため開設は既存のまま、バインドのみ集約)
+
+C++ 側は `src/bindings/header_convert.h` を新設して集約した。
+
+- `nghttp2_nv` 変換 4 箇所 (`http2.cpp`) → `bindings::to_nghttp2_nv`。加えて `webtransport_h2.cpp` の CONNECT ヘッダー構築も同ヘルパーに寄せた (結果として const_cast の重複が消えた)
+- `nghttp3_nv` 変換 4 箇所 (`http3.cpp`) → `bindings::to_nghttp3_nv`
+- URL パース (`webtransport_h2.cpp` / `webtransport_h3.cpp`) → `bindings::parse_authority_path`
+- セッション終了ガード 3 箇所 (`webtransport_h3.cpp`) → `H3Session::is_active_session`
+- 単方向ストリーム ID 検証 3 箇所 (`webtransport_h3.cpp`) → `H3Session::is_valid_local_uni_stream_id`
+
+挙動は変更していない (全 1119 テストが通過)。`webtransport_h3.cpp` の nv 構築 3 箇所は静的な文字列リテラルを `nghttp3_nv` に直接詰める形で、`std::pair` のベクタを経由する `to_nghttp3_nv` とは前提が異なるため対象外とした (issue 本文の方針どおり)。

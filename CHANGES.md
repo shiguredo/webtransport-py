@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] 高レベル API と C++ バインディングの重複コードを共通ヘルパーへ集約する (`_common.py` と `header_convert.h` の新設)
+  - @voluntas
+
 - [ADD] `quic` / `h3` / `http3` の高レベル Client / Server に `initiate_key_update()` を追加する
   - @voluntas
 

@@ -4,6 +4,8 @@
 
 #include "webtransport_h3.h"
 
+#include "header_convert.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cstddef>
@@ -964,11 +966,7 @@ void H3Session::receive_datagram(const std::vector<uint8_t>& data) {
   // サーバー側の reject_session (非 2xx 拒否) は session_ids_ から削除
   // するため、拒否されたセッション ID 宛のデータグラムは破棄される
   // (Origin 検証失敗の内部 403 経路は session_ids_ への挿入前のため同様)
-  if (session_ids_.count(static_cast<int64_t>(session_id)) == 0 ||
-      pending_pre_accept_fin_session_ids_.count(
-          static_cast<int64_t>(session_id)) > 0 ||
-      pre_accept_fin_accepted_session_ids_.count(
-          static_cast<int64_t>(session_id)) > 0) {
+  if (!is_active_session(static_cast<int64_t>(session_id))) {
     return;
   }
 
@@ -1078,25 +1076,22 @@ std::vector<std::vector<uint8_t>> H3Session::get_datagrams_to_send() {
   return result;
 }
 
+bool H3Session::is_valid_local_uni_stream_id(int64_t stream_id) const {
+  // QUIC varint の最大値チェック
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return false;
+  }
+  // 単方向ストリームかチェック (クライアント: %4==2, サーバー: %4==3)
+  return is_server_ ? stream_id % 4 == 3 : stream_id % 4 == 2;
+}
+
 void H3Session::bind_control_stream(int64_t stream_id) {
   if (!conn_) {
     return;
   }
-  // ストリーム ID の検証
-  // QUIC varint の最大値チェック
-  constexpr int64_t max_varint = (1LL << 62) - 1;
-  if (stream_id < 0 || stream_id > max_varint) {
+  if (!is_valid_local_uni_stream_id(stream_id)) {
     return;
-  }
-  // 単方向ストリームかチェック (クライアント: %4==2, サーバー: %4==3)
-  if (is_server_) {
-    if (stream_id % 4 != 3) {
-      return;
-    }
-  } else {
-    if (stream_id % 4 != 2) {
-      return;
-    }
   }
   control_stream_id_ = stream_id;
   nghttp3_conn_bind_control_stream(conn_, stream_id);
@@ -1106,20 +1101,8 @@ void H3Session::bind_qpack_encoder_stream(int64_t stream_id) {
   if (!conn_) {
     return;
   }
-  // ストリーム ID の検証
-  constexpr int64_t max_varint = (1LL << 62) - 1;
-  if (stream_id < 0 || stream_id > max_varint) {
+  if (!is_valid_local_uni_stream_id(stream_id)) {
     return;
-  }
-  // 単方向ストリームかチェック (クライアント: %4==2, サーバー: %4==3)
-  if (is_server_) {
-    if (stream_id % 4 != 3) {
-      return;
-    }
-  } else {
-    if (stream_id % 4 != 2) {
-      return;
-    }
   }
   qpack_encoder_stream_id_ = stream_id;
   // 両方のストリーム ID が有効な場合のみバインドする
@@ -1133,20 +1116,8 @@ void H3Session::bind_qpack_decoder_stream(int64_t stream_id) {
   if (!conn_) {
     return;
   }
-  // ストリーム ID の検証
-  constexpr int64_t max_varint = (1LL << 62) - 1;
-  if (stream_id < 0 || stream_id > max_varint) {
+  if (!is_valid_local_uni_stream_id(stream_id)) {
     return;
-  }
-  // 単方向ストリームかチェック (クライアント: %4==2, サーバー: %4==3)
-  if (is_server_) {
-    if (stream_id % 4 != 3) {
-      return;
-    }
-  } else {
-    if (stream_id % 4 != 2) {
-      return;
-    }
   }
   qpack_decoder_stream_id_ = stream_id;
   if (qpack_encoder_stream_id_ >= 0) {
@@ -1173,23 +1144,10 @@ bool H3Session::connect(int64_t stream_id,
     return false;
   }
 
-  // URL をパース
+  // URL をパース (`://` を含まない URL は失敗)
   std::string authority;
   std::string path;
-
-  // 簡易的な URL パース
-  size_t scheme_end = url.find("://");
-  if (scheme_end != std::string::npos) {
-    size_t host_start = scheme_end + 3;
-    size_t path_start = url.find('/', host_start);
-    if (path_start != std::string::npos) {
-      authority = url.substr(host_start, path_start - host_start);
-      path = url.substr(path_start);
-    } else {
-      authority = url.substr(host_start);
-      path = "/";
-    }
-  } else {
+  if (!bindings::parse_authority_path(url, &authority, &path)) {
     return false;
   }
 
@@ -1532,9 +1490,7 @@ bool H3Session::open_stream(int64_t session_id,
   // open_wt_data_stream が失敗する。楽観的オープン
   // (draft-ietf-webtrans-http3-16 Section 4) は妨げない: クライアントは
   // connect 直後に session_ids_ へ挿入されるため
-  if (session_ids_.count(session_id) == 0 ||
-      pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
-      pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
+  if (!is_active_session(session_id)) {
     return false;
   }
 
@@ -1716,9 +1672,7 @@ void H3Session::send_datagram(int64_t session_id,
   // 後始末前) も同様に無視する。楽観的送信 (draft-ietf-webtrans-http3-16
   // Section 4) は妨げない: クライアントは connect 直後に、サーバーは
   // CONNECT リクエスト受信時 (end_headers_cb) に session_ids_ へ挿入される
-  if (session_ids_.count(session_id) == 0 ||
-      pending_pre_accept_fin_session_ids_.count(session_id) > 0 ||
-      pre_accept_fin_accepted_session_ids_.count(session_id) > 0) {
+  if (!is_active_session(session_id)) {
     return;
   }
 
@@ -1993,6 +1947,12 @@ std::vector<std::pair<std::string, bool>> H3Session::get_required_streams()
 
 bool H3Session::is_closed() const {
   return closed_;
+}
+
+bool H3Session::is_active_session(int64_t session_id) const {
+  return session_ids_.count(session_id) > 0 &&
+         pending_pre_accept_fin_session_ids_.count(session_id) == 0 &&
+         pre_accept_fin_accepted_session_ids_.count(session_id) == 0;
 }
 
 bool H3Session::is_webtransport_ready() const {
