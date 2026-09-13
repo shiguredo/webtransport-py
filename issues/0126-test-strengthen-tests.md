@@ -43,4 +43,10 @@ PBT (Property-Based Testing) で検証できるプロトコル不変条件のう
 未対応の項目:
 
 - 「フロー制御超過のエラー送出」の property。H3 のセッションフロー制御自体が未実装 (`src/bindings/webtransport_h3.cpp` にフロー制御カプセルの処理が無く、`H3Session::open_stream` にセッション内ストリーム数制限が無い) であり、`issues/pending/0092-add-h3-session-flow-control.md` が nghttp3 ライブラリ側の追加実装を前提に保留されている。0092 の完了後に着手する
-- この項目が残るため本 issue は open のままとする
+
+## pending にした理由
+
+- 残る完了条件「フロー制御超過のエラー送出の property 化」は H3 のセッションフロー制御 (issue 0092) の実装を前提とし、0092 は nghttp3 上流の対応待ちで pending である。本 issue も着手できないため pending にする
+- nghttp3 側が未対応であることを現時点の同梱ソースで再確認した (`_deps/nghttp3/webtransport/source/lib/nghttp3_conn.c` に `/* TODO Check session flow control */` が残り、`nghttp3_settings` に SETTINGS_WT_INITIAL_MAX_STREAMS_UNI / BIDI / MAX_DATA に相当する項目が無い)
+- PBT の property 追加と flaky 解消は完了済みで、残りは 0092 の再開待ちのみである
+- 再開条件: 0092 が reopened になり H3 のセッションフロー制御が実装されたら reopened にする
