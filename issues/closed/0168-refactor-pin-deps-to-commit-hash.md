@@ -1,7 +1,7 @@
 # deps.json の ngtcp2 / nghttp3 をブランチ参照からコミットハッシュ (ref) 指定に変えて wheel の再現性を確保する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/refactor-pin-deps-to-commit-hash
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,12 @@
 - fresh clone から `make wheel` で同じバイナリが再現できること
 - CI キャッシュが `ref` 更新時に確実に無効化されること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `deps.json` の ngtcp2 を `"ref": "1e4399d428ddcf510eca55b0f11306e333aa5194"`、nghttp3 を `"ref": "ffc6cdb93eb3ddb9a8f10abbd032255c5f320e1c"` に変更した (`git ls-remote` で確認した上流ブランチの HEAD)
+- `CMakeLists.txt` の `parse_deps_git_ref` は `ref` 指定に既に対応しており変更していない。`ref` のときは `USE_SHALLOW FALSE` になり、依存のパスが `_deps/<name>/<hash>/` になってパスが内容を一意に表す
+- `_build/build.ninja` のインクルードパスが `_deps/ngtcp2/1e4399d428ddcf510eca55b0f11306e333aa5194/install/include` と `_deps/nghttp3/ffc6cdb93eb3ddb9a8f10abbd032255c5f320e1c/install/include` に変わり、固定したコミットでビルドされることを確認した
+- CI のキャッシュキーは `hashFiles('deps.json')` を含むため、`ref` を更新すればキャッシュも更新される
+- README に「依存ライブラリは deps.json で特定のタグ / コミットに固定する」旨を追記した
+- QUIC / HTTP/3 / HTTP/2 の全テスト 890 件が通ることを確認した
