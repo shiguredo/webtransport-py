@@ -1,7 +1,7 @@
 # print 駆動のデバッグテスト test_debug_*.py 3 本を削除する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/remove-test-debug-print-driven-scripts
 - Polished: {YYYY-MM-DD}
 
@@ -33,3 +33,10 @@
 - pytest 収集が対応する 3 ファイル分減ること
 - カバレッジが劣化しないこと (削除前後で pytest 全件通過を維持)
 - 既存のテスト全 819 件 (削除で -3 の可能性) が引き続き通過すること
+
+## 解決方法
+
+- `tests/test_debug_quic.py` / `tests/test_debug_quic_handshake.py` / `tests/test_debug_webtransport_h3.py` の 3 ファイル (計 578 行) を削除した
+- 削除前後で pytest 全件が通ることを確認した (1121 件から 1114 件へ、削除した 7 テスト分のみ減少)
+- tests/ 配下に残る `print` は各テストの先頭でライブラリのバージョンを出す 3 箇所のみになった (本 issue の範囲外)
+- `tests/` のカバレッジは `test_quic.py` / `conftest.perform_handshake` / `test_e2e_webtransport_h3.py` が維持している
