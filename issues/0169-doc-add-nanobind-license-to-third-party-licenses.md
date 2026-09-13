@@ -1,7 +1,7 @@
 # THIRD_PARTY_LICENSES.md に nanobind のライセンスを追記する
 
 - Created: 2026-09-07
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/doc-add-nanobind-license-to-third-party-licenses
 - Polished: {YYYY-MM-DD}
 
@@ -32,3 +32,10 @@
 - wheel に含まれる `webtransport_py-*.dist-info/licenses/THIRD_PARTY_LICENSES.md` に上記が反映されていること
 - `README.md` の第三者ライセンス節が更新されていること
 - 既存のテスト全 822 件が引き続き通過すること
+
+## 解決方法
+
+- `THIRD_PARTY_LICENSES.md` に `## nanobind` (BSD-3-Clause 全文) と `## tsl::robin_map` (MIT 全文) のセクションを追加した。nanobind 同梱の `nanobind/ext/robin_map` からライセンス文を転記している
+- `README.md` の第三者ライセンス節を「ngtcp2 / nghttp3 / nghttp2 / AWS-LC / nanobind (同梱の tsl::robin_map を含む)」に更新した
+- `uv build --wheel` で wheel を作成し、`webtransport_py-*.dist-info/licenses/THIRD_PARTY_LICENSES.md` に両セクションが含まれることを確認した
+- AWS-LC 節は既に全文転記済みのため変更していない
