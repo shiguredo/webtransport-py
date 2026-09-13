@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] ruff の検出ルールを `select` で明示的に固定し、バージョン更新で既定ルールが変わっても検出結果が変わらないようにする
+  - @voluntas
+
 - [UPDATE] ローカルの ruff を prek.toml と同じ 0.16.6 に固定し、CI との検出結果の食い違いをなくす
   - @voluntas
 
