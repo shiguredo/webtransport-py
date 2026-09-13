@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 と HTTP/3 の高レベル API が 1 ループ 1 パケットと固定 sleep で大容量転送を律速する
 
 - Created: 2026-09-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/update-h3-large-transfer-throughput
 - Polished: {YYYY-MM-DD}
 
@@ -47,4 +47,25 @@ sora-moq のテストでは WebTransport over HTTP/3 でメディアを送るた
 
 ## 解決方法
 
-どのように対応するのかを明確にすること (例: どのようなコードを追加・修正するのか、どのようなテストを追加するのかなど)
+`quic` で効果があった形 (issue 0206) を各層へ展開した。
+
+- `src/webtransport/h3/client.py` の `Client._receive` と `src/webtransport/http3/client.py` の `Client._receive` を、最初の 1 パケットは期限まで待ち、続きは non-blocking で読めるだけ読む形に変更した。`run()` は `_timeout_seconds()` が返す次の QUIC タイマー期限を待ち時間に使い、固定 sleep (`0.01` 秒) を削除した。待機は受信側に任せ、受信も送信も無く即座に戻ったときだけ `asyncio.sleep(0)` で他のタスクへ譲る
+- `src/webtransport/h3/server.py` の `Server.run` と `src/webtransport/http3/server.py` の `Server.run` を、1 データグラムの処理を `_handle_datagram` に切り出したうえで「期限まで待つ 1 回 + 読めるだけまとめて読む」に変更し、固定 sleep (`0.001` 秒) を削除した。待ち時間は `_timeout_seconds()` が全クライアントの `get_timeout()` の最小値から算出し 0.001〜0.1 秒に clamp する。per-client ループの `_send_to` はタイマー満了時だけでなく毎周回呼ぶようにした
+- `src/webtransport/h2/client.py` / `h2/server.py` / `http2/client.py` / `http2/server.py` の受信ループ末尾の固定 sleep (`0.001` / `0.01` 秒) を `asyncio.sleep(0)` に置き換えた。TCP の受信待ちは `reader.read()` / `read_task` が担っており、固定 sleep は 1 チャンクあたりの遅延を積み上げるだけだった
+- 性能テストを追加した (`tests/test_e2e_webtransport_h3_throughput.py` / `tests/test_e2e_webtransport_h2_throughput.py` / `tests/test_e2e_http3_throughput.py`)
+
+副次的に見つかった不具合も修正した。`src/webtransport/h3/server.py` の `Server.run` はタイマーが遠い (idle timeout のみ) 状態では `_send_to` を呼ばないため、`Server.open_stream` が登録失敗時に積む RESET_STREAM が次にパケットが届くまで送出されなかった。per-client ループで毎周回 `_send_to` を呼ぶようにして解消した (既存テスト `test_server_open_stream_invalid_session_id` が受信ループの高速化でタイミングが変わり検出した)。
+
+実測 (macOS 26 arm64、loopback、64 KiB チャンク):
+
+| 経路 | 変更前 | 変更後 |
+|---|---|---|
+| `h3` client → server | 4 MiB に 63.85 秒 (0.06 MiB/s) | 32 MiB に 0.57 秒 (56 MiB/s) |
+| `h3` server → client | 2 MiB に 32.81 秒 (0.06 MiB/s) | 32 MiB に 0.39 秒 (83 MiB/s) |
+| `h2` client → server | 32 MiB に 8.67 秒 (3.69 MiB/s) | 32 MiB に 0.86 秒 (37 MiB/s) |
+| `quic` client → server (参考) | 32 MiB に 107.48 秒 | 32 MiB に 0.45 秒 |
+
+検証:
+
+- 追加した性能テストがすべて変更前の実装で失敗すること (h3 / http3 は 60 秒待っても完了せず TimeoutError、h2 は 17.2 秒で閾値超過) を確認した
+- `uv run pytest tests/ -q --timeout=60` で 1126 件すべて通過することを確認した
