@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] THIRD_PARTY_LICENSES.md に nanobind (BSD-3-Clause) と同梱の tsl::robin_map (MIT) のライセンスを追記し、README の第三者ライセンス節を更新する
+  - @voluntas
+
 - [UPDATE] ruff の検出ルールを `select` で明示的に固定し、バージョン更新で既定ルールが変わっても検出結果が変わらないようにする
   - @voluntas
 

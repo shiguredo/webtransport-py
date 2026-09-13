@@ -378,7 +378,7 @@ make test
 
 ## 第三者ライセンス
 
-本プロジェクトは ngtcp2 / nghttp3 / nghttp2 / AWS-LC を静的リンクしています。各ライセンス全文は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) を参照してください。
+本プロジェクトは ngtcp2 / nghttp3 / nghttp2 / AWS-LC / nanobind (同梱の tsl::robin_map を含む) を静的リンクしています。各ライセンス全文は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) を参照してください。
 
 ## ライセンス
 
