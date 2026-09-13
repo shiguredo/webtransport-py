@@ -570,7 +570,10 @@ class Server:
                 if session.is_closed():
                     break
 
-                await asyncio.sleep(0.001)
+                # 受信のたびに固定 sleep を挟むと 1 チャンクあたりの遅延が
+                # 積み上がり、大容量転送のスループット上限になる。待機は
+                # reader.read() に任せ、ここでは 1 回譲るだけにする
+                await asyncio.sleep(0)
 
         finally:
             writer.close()

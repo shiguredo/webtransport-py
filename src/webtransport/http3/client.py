@@ -93,6 +93,8 @@ class Client:
         self._h3_error_code: int = H3_GENERAL_PROTOCOL_ERROR
         self._h3_error_message: str = "http3 protocol error"
         self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
+        # 受信待ちの上限 (秒)。run() が QUIC のタイマー期限に合わせて更新する
+        self._wait = 0.1
 
     @property
     def host(self) -> str:
@@ -251,24 +253,59 @@ class Client:
         self._running = False
         self._connected = False
 
-    async def _receive(self) -> None:
-        """データを受信する"""
+    async def _receive(self, timeout: float = 0.1) -> int:
+        """データを受信する
+
+        timeout は最初の 1 パケットを待つ上限。呼び出し側は QUIC の次の
+        タイムアウト期限に合わせて渡す。
+
+        ソケットに溜まっている分は non-blocking で読み切る。1 回の
+        ウェイクアップで 1 パケットしか読まないと、ループ 1 周あたりの
+        待機とイベント処理がそのままスループット上限になる。受信した
+        パケットの処理時刻は ngtcp2 の RTT 計測にも使われるため、読むのが
+        遅れると RTT が過大に見積もられ pacing と PTO も過大になる。
+
+        Returns:
+            受信したパケット数
+        """
         if self._quic_connection is None or self._socket is None:
-            return
+            return 0
         if self._local_addr is None:
-            return
+            return 0
 
         loop = asyncio.get_running_loop()
         try:
             data, raw_remote = await asyncio.wait_for(
                 loop.sock_recvfrom(self._socket, 65535),
-                timeout=0.1,
+                timeout=timeout,
             )
         except TimeoutError:
-            return
+            return 0
 
-        remote = self._normalize_addr(raw_remote)
-        self._quic_connection.receive(data, self._local_addr, remote)
+        received = 0
+        while True:
+            remote = self._normalize_addr(raw_remote)
+            self._quic_connection.receive(data, self._local_addr, remote)
+            received += 1
+            try:
+                data, raw_remote = self._socket.recvfrom(65535)
+            except BlockingIOError, InterruptedError:
+                return received
+
+    def _timeout_seconds(self) -> float:
+        """QUIC の次のタイムアウトまでの秒数を返す
+
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
+        0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
+        ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
+        送り出せない。
+        """
+        if self._quic_connection is None:
+            return 0.1
+        timeout_ns = self._quic_connection.get_timeout()
+        if timeout_ns is None:
+            return 0.1
+        return min(max(timeout_ns / 1e9, 0.001), 0.1)
 
     def _setup_http3_streams(self) -> None:
         """HTTP/3 制御ストリームを設定する"""
@@ -559,7 +596,7 @@ class Client:
             raise RuntimeError("client is not connected")
 
         while self._running:
-            await self._receive()
+            received = await self._receive(self._wait)
 
             # 受信 FIN が立った双方向ストリーム (STREAM_END 通知用)
             finished_streams: list[int] = []
@@ -642,11 +679,17 @@ class Client:
                 for stream_id in finished_streams:
                     await self._on_stream_end(stream_id)
 
-            await self._send_pending()
+            sent = await self._send_pending()
 
             timeout = self._quic_connection.get_timeout()
             if timeout is not None and timeout <= 0:
                 self._quic_connection.handle_timeout()
+                # タイマー処理で再送や ACK が積まれた可能性があるため
+                # もう一度送信待ちを掃く
+                sent += await self._send_pending()
+            # 受信待ちは次のタイマー期限に合わせる。期限までに受信が
+            # 無ければ戻ってタイマーを処理する
+            self._wait = self._timeout_seconds()
 
             # HTTP/3 層のプロトコルエラーで低レベルが自主クローズしたとき、
             # QUIC の CONNECTION_CLOSED イベントは発火しないため、
@@ -656,7 +699,12 @@ class Client:
             if self._http3_connection.is_closed():
                 await self._close_on_h3_error()
 
-            await asyncio.sleep(0.01)
+            # 待機は _receive 側の受信待ちに任せる。ここで重ねて sleep
+            # すると、受信のたびに期限ぶんの遅延が積み上がり、RTT の
+            # 過大評価 (pacing / PTO の過大化) を招く。受信も送信も無く
+            # 即座に戻ってきた場合だけ他のタスクへ 1 回譲る
+            if received == 0 and sent == 0:
+                await asyncio.sleep(0)
 
     def initiate_key_update(self) -> bool:
         """TLS 鍵更新 (RFC 9001 Section 6) を開始する

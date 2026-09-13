@@ -258,7 +258,10 @@ class Server:
                 if read_task is None:
                     read_task = asyncio.create_task(reader.read(65535))
 
-                await asyncio.sleep(0.001)
+                # 受信のたびに固定 sleep を挟むと 1 チャンクあたりの遅延が
+                # 積み上がり、大容量転送のスループット上限になる。待機は
+                # read_task 側に任せ、ここでは 1 回譲るだけにする
+                await asyncio.sleep(0)
 
         finally:
             if read_task is not None and not read_task.done():

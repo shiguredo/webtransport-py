@@ -93,6 +93,12 @@
   - @voluntas
 - [UPDATE] QUIC の高レベル API (`quic` の Client / Server) の受信を 1 回の待機で複数パケットまとめて取り込み、待機を次の QUIC タイマー期限に委ねて大容量転送のスループットを改善する
   - @voluntas
+- [UPDATE] WebTransport over HTTP/3 / HTTP/3 の高レベル API (`h3` / `http3` の Client / Server) で、受信のたびに挟んでいた固定 sleep を廃止し、複数パケットのまとめ取りとタイマー期限ベースの待機に揃えて大容量転送のスループットを改善する
+  - @voluntas
+- [UPDATE] WebTransport over HTTP/2 / HTTP/2 の高レベル API (`h2` / `http2` の Client / Server) で、受信のたびに挟んでいた固定 sleep を廃止して大容量転送のスループットを改善する
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 と HTTP/3 のサーバーが、QUIC タイマーが遠い状態でアプリが積んだ送信 (ストリーム解放の RESET_STREAM 等) を次にパケットが届くまで送出しない問題を修正する
+  - @voluntas
 - [FIX] HTTP/2 の送信バッファで先頭 1 バイトが欠落する問題と、空のボディで END_STREAM が送出されない問題を修正する
   - @voluntas
 - [FIX] QUIC の `send()` が輻輳ウィンドウ枯渇時に無限ループする問題、ngtcp2 の WRITE_MORE 契約違反で大容量データ転送が壊れる問題、再送時にストリームデータが破損する問題を修正する
