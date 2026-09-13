@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] print 駆動のデバッグテスト `test_debug_quic.py` / `test_debug_quic_handshake.py` / `test_debug_webtransport_h3.py` を削除する
+  - @voluntas
+
 - [UPDATE] README の h3 / h2 クライアント例を例外送出型の `connect()` に合わせる
   - @voluntas
 
