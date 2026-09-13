@@ -668,7 +668,11 @@ class Client:
                 if self._session.is_closed():
                     self._running = False
 
-                await asyncio.sleep(0.01)
+                # 受信のたびに固定 sleep を挟むと 1 チャンクあたりの遅延が
+                # 積み上がり、大容量転送のスループット上限になる。待機は
+                # _receive の reader.read() に任せ、ここでは 1 回譲るだけに
+                # する
+                await asyncio.sleep(0)
         finally:
             self._run_active = False
 

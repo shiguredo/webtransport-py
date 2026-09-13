@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from webtransport._common import normalize_addr, validate_cert_key_files
 from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
@@ -118,6 +118,8 @@ class Server:
         self._conn_dcids: dict[ClientConnection, set[bytes]] = {}
         self._running = False
         self._actual_port = 0
+        # 受信待ちの上限 (秒)。接続の QUIC タイマー期限に合わせて更新する
+        self._wait = 0.1
 
         self._on_request: (
             Callable[[int, list[tuple[str, str]], tuple[str, int]], Awaitable[None]] | None
@@ -541,163 +543,42 @@ class Server:
         loop = asyncio.get_running_loop()
 
         while self._running:
+            # 受信は「次の QUIC タイマー期限まで待つ 1 回」+「読めるだけ
+            # まとめて読む」で行う。1 ループ 1 パケットに固定すると、1
+            # パケットあたりのループ オーバーヘッドがそのままスループット
+            # 上限になる (まとめて受信してから ACK と MAX_STREAM_DATA を
+            # 送出することで送出間隔も詰まる)
             try:
                 data, raw_addr = await asyncio.wait_for(
                     loop.sock_recvfrom(self._socket, 65535),
-                    timeout=0.1,
+                    timeout=self._wait,
                 )
-                addr = self._normalize_addr(raw_addr)
-
-                client = self._clients.get(addr)
-                if client is None:
-                    # Connection Migration 後は送信元アドレスが変わる。
-                    # Short header は DCID 索引で既存接続を引く (RFC 9000
-                    # Section 5.2 に従う DCID 照合)。Long header (Initial 等)
-                    # は新規 accept する
-                    is_long_header = bool(data) and (data[0] & 0x80) != 0
-                    if not is_long_header and len(data) >= 9:
-                        candidate = self._dcid_index.get(bytes(data[1:9]))
-                        if candidate is not None and candidate.quic_connection is not None:
-                            result = candidate.quic_connection.receive(
-                                data,
-                                self._local_addr,
-                                addr,
-                            )
-                            if result == quic_low.ReceiveResult.ACCEPTED:
-                                # 正当な Migration としてアドレスキーを張り替える
-                                old_addr = self._addr_of(candidate)
-                                if old_addr != addr:
-                                    if old_addr is not None:
-                                        del self._clients[old_addr]
-                                    self._clients[addr] = candidate
-                                self._refresh_dcid_index(candidate)
-                                client = candidate
-                            elif result == quic_low.ReceiveResult.CLOSED:
-                                # 移行先からの終了通知は移行先アドレスで処理する
-                                client = candidate
-                    if client is None:
-                        if not self._running:
-                            break
-                        try:
-                            client = self._accept_connection(addr, data)
-                        except ValueError as exc:
-                            # 設定不正は黙殺せず再 raise して run() を止める
-                            logger.warning(
-                                "failed to accept QUIC connection from %s:%d size %d first_byte %s: %s",
-                                addr[0],
-                                addr[1],
-                                len(data),
-                                data[:1].hex() if data else "none",
-                                exc,
-                            )
-                            raise
-                        except RuntimeError as exc:
-                            # パケット不正のみ破棄して継続する
-                            logger.warning(
-                                "discarding invalid QUIC packet from %s:%d size %d first_byte %s: %s",
-                                addr[0],
-                                addr[1],
-                                len(data),
-                                data[:1].hex() if data else "none",
-                                exc,
-                            )
-                            continue
-                elif client.quic_connection is not None:
-                    client.quic_connection.receive(data, self._local_addr, addr)
-                    # CID ローテーションに追従するため接触のたびに最新化する
-                    self._refresh_dcid_index(client)
-
-                if client.quic_connection is None or client.http3_connection is None:
-                    continue
-
-                await self._drain_quic_events(addr, client)
-
-                while True:
-                    http3_event = client.http3_connection.next_event()
-                    if http3_event is None:
-                        break
-
-                    if http3_event.type == http3_low.EventType.HEADERS:
-                        if self._on_request is not None:
-                            await self._on_request(
-                                http3_event.stream_id,
-                                http3_event.headers,
-                                addr,
-                            )
-
-                    elif http3_event.type == http3_low.EventType.DATA:
-                        if self._on_data is not None:
-                            await self._on_data(
-                                http3_event.stream_id,
-                                http3_event.data,
-                                addr,
-                            )
-
-                    # STREAM_END イベント (ヘッダー終端などで低レベルが発火する
-                    # 終端検知) はここでは消費しない: on_stream_end は受信した
-                    # QUIC FIN (finished_streams) の単一経路で通知する。ヘッダー
-                    # と FIN が同一の QUIC STREAM_DATA として届くと両経路で
-                    # 通知され 2 回呼ばれるため (RFC 9114 Section 4.1 の
-                    # メッセージフレーミングと Section 6 のフレーム境界と
-                    # QUIC STREAM_DATA 境界の独立性により、1 チャンクで
-                    # 届くのは正当なワイヤパターン。実ブラウザ等が送り得る)。
-                    # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
-                    # 低レベル API の契約としてそのまま維持される
-
-                    elif http3_event.type == http3_low.EventType.ERROR:
-                        # HTTP/3 プロトコルエラー。CONNECTION_CLOSE に載せる
-                        # error_code を後段の回収経路で使うため記録する
-                        client.h3_error_code = http3_event.error_code
-                        client.h3_error_message = http3_event.error_message
-                        if self._on_connection_error is not None:
-                            await self._on_connection_error(
-                                http3_event.error_code,
-                                http3_event.error_message,
-                                addr,
-                            )
-
-                    elif http3_event.type == http3_low.EventType.RESET_STREAM:
-                        client.quic_connection.reset_stream(
-                            http3_event.stream_id,
-                            http3_event.error_code,
-                        )
-
-                    elif http3_event.type == http3_low.EventType.STOP_SENDING:
-                        client.quic_connection.stop_sending(
-                            http3_event.stream_id,
-                            http3_event.error_code,
-                        )
-
-                # HTTP/3 の DATA を処理したあとに STREAM_END を通知する。
-                # コールバック未設定でも滞留させないよう必ず取り出す
-                finished_streams = client.finished_streams
-                client.finished_streams = []
-                if self._on_stream_end is not None:
-                    for stream_id in finished_streams:
-                        await self._on_stream_end(stream_id, addr)
-
-                await self._send_to(addr, client)
-
-                # 受信成功後の分岐: HTTP/3 プロトコルエラーで低レベルが
-                # 自主クローズしていたら CONNECTION_CLOSE を送出して回収する
-                if client.http3_connection is not None and client.http3_connection.is_closed():
-                    await self._close_client_connection_on_h3_error(addr, client)
-
             except TimeoutError:
                 pass
+            else:
+                if not await self._handle_datagram(data, raw_addr):
+                    break
+                # 続きは non-blocking で読めるだけ読む。読み切ったら送信と
+                # タイマー処理へ進む
+                while True:
+                    try:
+                        data, raw_addr = self._socket.recvfrom(65535)
+                    except BlockingIOError, InterruptedError:
+                        break
+                    if not await self._handle_datagram(data, raw_addr):
+                        return
 
             # タイムアウト分岐でも通る per-client タイマー処理ループ。
             # ピアが黙り込んで受信成功後分岐に入らないケースを回収する。
-            # ループ変数は try 節の addr とシャドウさせないため client_addr を使う
+            # ループ変数は受信処理の addr とシャドウさせないため client_addr を使う
             for client_addr, client in list(self._clients.items()):
                 if client.quic_connection is not None:
                     timeout = client.quic_connection.get_timeout()
                     if timeout is not None and timeout <= 0:
                         client.quic_connection.handle_timeout()
-                        await self._send_to(client_addr, client)
                         # 受信経路と同様に QUIC イベントを処理し、終了時は
                         # 登録を外す (イベント滞留によるリークを防ぐ)。
-                        # タイムアウト発火で HTTP/3 層の新規イベントは生じ
+                        # タイマー発火で HTTP/3 層の新規イベントは生じ
                         # ないため、HTTP/3 層の drain は受信経路に委ねる
                         if client.http3_connection is not None:
                             await self._drain_quic_events(client_addr, client)
@@ -707,5 +588,184 @@ class Server:
                 if client.http3_connection is not None and client.http3_connection.is_closed():
                     await self._send_to(client_addr, client)
                     await self._close_client_connection_on_h3_error(client_addr, client)
+                    continue
+                # 受信もタイマーも無い周でも送信待ちを掃く。タイマーが遠い
+                # (idle timeout のみ等) 状態でアプリが送信を積むと、次に
+                # パケットが届くまで送信されなくなってしまう
+                await self._send_to(client_addr, client)
 
-            await asyncio.sleep(0.001)
+            # 受信待ちは次の QUIC タイマー期限に合わせる。固定の sleep を
+            # 挟むと受信したパケット数だけ遅延が積み上がるため、待機は
+            # ソケット読み取り側に任せ、ここでは他のタスクへ 1 回譲るだけに
+            # する (タイマーが期限切れの場合は次の周回で即座に処理される)
+            self._wait = self._timeout_seconds()
+            await asyncio.sleep(0)
+
+    def _timeout_seconds(self) -> float:
+        """全クライアントのうち最も早い QUIC タイマー期限までの秒数を返す
+
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
+        0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
+        ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
+        送り出せない。
+        """
+        deadline: float | None = None
+        for client in self._clients.values():
+            if client.quic_connection is None:
+                continue
+            timeout_ns = client.quic_connection.get_timeout()
+            if timeout_ns is None:
+                continue
+            seconds = timeout_ns / 1e9
+            if deadline is None or seconds < deadline:
+                deadline = seconds
+        if deadline is None:
+            return 0.1
+        return min(max(deadline, 0.001), 0.1)
+
+    async def _handle_datagram(self, data: bytes, raw_addr: tuple[Any, ...]) -> bool:
+        """受信した 1 データグラムを接続へ振り分けて処理する
+
+        Returns:
+            受信ループを継続する場合は True、停止する場合は False
+        """
+        if self._local_addr is None:
+            return False
+
+        addr = self._normalize_addr(raw_addr)
+
+        client = self._clients.get(addr)
+        if client is None:
+            # Connection Migration 後は送信元アドレスが変わる。
+            # Short header は DCID 索引で既存接続を引く (RFC 9000
+            # Section 5.2 に従う DCID 照合)。Long header (Initial 等)
+            # は新規 accept する
+            is_long_header = bool(data) and (data[0] & 0x80) != 0
+            if not is_long_header and len(data) >= 9:
+                candidate = self._dcid_index.get(bytes(data[1:9]))
+                if candidate is not None and candidate.quic_connection is not None:
+                    result = candidate.quic_connection.receive(
+                        data,
+                        self._local_addr,
+                        addr,
+                    )
+                    if result == quic_low.ReceiveResult.ACCEPTED:
+                        # 正当な Migration としてアドレスキーを張り替える
+                        old_addr = self._addr_of(candidate)
+                        if old_addr != addr:
+                            if old_addr is not None:
+                                del self._clients[old_addr]
+                            self._clients[addr] = candidate
+                        self._refresh_dcid_index(candidate)
+                        client = candidate
+                    elif result == quic_low.ReceiveResult.CLOSED:
+                        # 移行先からの終了通知は移行先アドレスで処理する
+                        client = candidate
+            if client is None:
+                if not self._running:
+                    return False
+                try:
+                    client = self._accept_connection(addr, data)
+                except ValueError as exc:
+                    # 設定不正は黙殺せず再 raise して run() を止める
+                    logger.warning(
+                        "failed to accept QUIC connection from %s:%d size %d first_byte %s: %s",
+                        addr[0],
+                        addr[1],
+                        len(data),
+                        data[:1].hex() if data else "none",
+                        exc,
+                    )
+                    raise
+                except RuntimeError as exc:
+                    # パケット不正のみ破棄して継続する
+                    logger.warning(
+                        "discarding invalid QUIC packet from %s:%d size %d first_byte %s: %s",
+                        addr[0],
+                        addr[1],
+                        len(data),
+                        data[:1].hex() if data else "none",
+                        exc,
+                    )
+                    return True
+        elif client.quic_connection is not None:
+            client.quic_connection.receive(data, self._local_addr, addr)
+            # CID ローテーションに追従するため接触のたびに最新化する
+            self._refresh_dcid_index(client)
+
+        if client.quic_connection is None or client.http3_connection is None:
+            return True
+
+        await self._drain_quic_events(addr, client)
+
+        while True:
+            http3_event = client.http3_connection.next_event()
+            if http3_event is None:
+                break
+
+            if http3_event.type == http3_low.EventType.HEADERS:
+                if self._on_request is not None:
+                    await self._on_request(
+                        http3_event.stream_id,
+                        http3_event.headers,
+                        addr,
+                    )
+
+            elif http3_event.type == http3_low.EventType.DATA:
+                if self._on_data is not None:
+                    await self._on_data(
+                        http3_event.stream_id,
+                        http3_event.data,
+                        addr,
+                    )
+
+            # STREAM_END イベント (ヘッダー終端などで低レベルが発火する
+            # 終端検知) はここでは消費しない: on_stream_end は受信した
+            # QUIC FIN (finished_streams) の単一経路で通知する。ヘッダー
+            # と FIN が同一の QUIC STREAM_DATA として届くと両経路で
+            # 通知され 2 回呼ばれるため (RFC 9114 Section 4.1 の
+            # メッセージフレーミングと Section 6 のフレーム境界と
+            # QUIC STREAM_DATA 境界の独立性により、1 チャンクで
+            # 届くのは正当なワイヤパターン。実ブラウザ等が送り得る)。
+            # 低レベルの STREAM_END イベント (ヘッダー終端の終端検知) は
+            # 低レベル API の契約としてそのまま維持される
+
+            elif http3_event.type == http3_low.EventType.ERROR:
+                # HTTP/3 プロトコルエラー。CONNECTION_CLOSE に載せる
+                # error_code を後段の回収経路で使うため記録する
+                client.h3_error_code = http3_event.error_code
+                client.h3_error_message = http3_event.error_message
+                if self._on_connection_error is not None:
+                    await self._on_connection_error(
+                        http3_event.error_code,
+                        http3_event.error_message,
+                        addr,
+                    )
+
+            elif http3_event.type == http3_low.EventType.RESET_STREAM:
+                client.quic_connection.reset_stream(
+                    http3_event.stream_id,
+                    http3_event.error_code,
+                )
+
+            elif http3_event.type == http3_low.EventType.STOP_SENDING:
+                client.quic_connection.stop_sending(
+                    http3_event.stream_id,
+                    http3_event.error_code,
+                )
+
+        # HTTP/3 の DATA を処理したあとに STREAM_END を通知する。
+        # コールバック未設定でも滞留させないよう必ず取り出す
+        finished_streams = client.finished_streams
+        client.finished_streams = []
+        if self._on_stream_end is not None:
+            for stream_id in finished_streams:
+                await self._on_stream_end(stream_id, addr)
+
+        await self._send_to(addr, client)
+
+        # 受信成功後の分岐: HTTP/3 プロトコルエラーで低レベルが
+        # 自主クローズしていたら CONNECTION_CLOSE を送出して回収する
+        if client.http3_connection is not None and client.http3_connection.is_closed():
+            await self._close_client_connection_on_h3_error(addr, client)
+        return True
