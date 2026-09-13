@@ -1649,7 +1649,7 @@ void H3Session::send_stream_data(int64_t stream_id,
 nghttp3_ssize H3Session::read_data_callback(int64_t stream_id,
                                             nghttp3_vec* vec,
                                             size_t veccnt,
-                                            uint32_t* pflags) {
+                                            uint32_t* pflags) noexcept {
   if (veccnt == 0) {
     return 0;
   }
@@ -2106,7 +2106,7 @@ int H3Session::acked_stream_data_cb(nghttp3_conn* /*conn*/,
                                     int64_t stream_id,
                                     uint64_t datalen,
                                     void* conn_user_data,
-                                    void* /*stream_user_data*/) {
+                                    void* /*stream_user_data*/) noexcept {
   auto* session = static_cast<H3Session*>(conn_user_data);
   if (!session) {
     return 0;
@@ -2148,7 +2148,7 @@ int H3Session::stream_close_cb(nghttp3_conn* conn,
                                int64_t stream_id,
                                uint64_t app_error_code,
                                void* conn_user_data,
-                               void* stream_user_data) {
+                               void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2180,7 +2180,7 @@ int H3Session::recv_data_cb(nghttp3_conn* conn,
                             const uint8_t* data,
                             size_t datalen,
                             void* conn_user_data,
-                            void* stream_user_data) {
+                            void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2205,7 +2205,7 @@ int H3Session::deferred_consume_cb(nghttp3_conn* conn,
                                    int64_t stream_id,
                                    size_t consumed,
                                    void* conn_user_data,
-                                   void* stream_user_data) {
+                                   void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_id;
   (void)consumed;
@@ -2217,7 +2217,7 @@ int H3Session::deferred_consume_cb(nghttp3_conn* conn,
 int H3Session::begin_headers_cb(nghttp3_conn* conn,
                                 int64_t stream_id,
                                 void* conn_user_data,
-                                void* stream_user_data) {
+                                void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2233,7 +2233,7 @@ int H3Session::recv_header_cb(nghttp3_conn* conn,
                               nghttp3_rcbuf* value,
                               uint8_t flags,
                               void* conn_user_data,
-                              void* stream_user_data) {
+                              void* stream_user_data) noexcept {
   (void)conn;
   (void)flags;
   (void)stream_user_data;
@@ -2257,7 +2257,7 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
                               int64_t stream_id,
                               int fin,
                               void* conn_user_data,
-                              void* stream_user_data) {
+                              void* stream_user_data) noexcept {
   (void)conn;
   (void)fin;
   (void)stream_user_data;
@@ -2407,7 +2407,7 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
 int H3Session::end_stream_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              void* conn_user_data,
-                             void* stream_user_data) {
+                             void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2433,7 +2433,7 @@ int H3Session::stop_sending_cb(nghttp3_conn* conn,
                                int64_t stream_id,
                                uint64_t app_error_code,
                                void* conn_user_data,
-                               void* stream_user_data) {
+                               void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2458,7 +2458,7 @@ int H3Session::reset_stream_cb(nghttp3_conn* conn,
                                int64_t stream_id,
                                uint64_t app_error_code,
                                void* conn_user_data,
-                               void* stream_user_data) {
+                               void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2481,7 +2481,7 @@ int H3Session::reset_stream_cb(nghttp3_conn* conn,
 
 int H3Session::shutdown_cb(nghttp3_conn* conn,
                            int64_t id,
-                           void* conn_user_data) {
+                           void* conn_user_data) noexcept {
   (void)conn;
   (void)id;
 
@@ -2492,7 +2492,7 @@ int H3Session::shutdown_cb(nghttp3_conn* conn,
 
 int H3Session::recv_settings2_cb(nghttp3_conn* conn,
                                  const nghttp3_proto_settings* settings,
-                                 void* conn_user_data) {
+                                 void* conn_user_data) noexcept {
   (void)conn;
 
   auto* session = static_cast<H3Session*>(conn_user_data);
@@ -2516,7 +2516,7 @@ int H3Session::recv_wt_data_cb(nghttp3_conn* conn,
                                const uint8_t* data,
                                size_t datalen,
                                void* conn_user_data,
-                               void* stream_user_data) {
+                               void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 
@@ -2578,7 +2578,7 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
                                         const uint8_t* msg,
                                         size_t msglen,
                                         void* conn_user_data,
-                                        void* stream_user_data) {
+                                        void* stream_user_data) noexcept {
   (void)conn;
   (void)stream_user_data;
 

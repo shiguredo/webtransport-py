@@ -586,7 +586,7 @@ class H3Session {
   nghttp3_ssize read_data_callback(int64_t stream_id,
                                    nghttp3_vec* vec,
                                    size_t veccnt,
-                                   uint32_t* pflags);
+                                   uint32_t* pflags) noexcept;
 
  private:
   H3Session(bool is_server, const H3SessionConfig& config);
@@ -598,27 +598,27 @@ class H3Session {
                                   int64_t stream_id,
                                   uint64_t datalen,
                                   void* conn_user_data,
-                                  void* stream_user_data);
+                                  void* stream_user_data) noexcept;
   static int stream_close_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int recv_data_cb(nghttp3_conn* conn,
                           int64_t stream_id,
                           const uint8_t* data,
                           size_t datalen,
                           void* conn_user_data,
-                          void* stream_user_data);
+                          void* stream_user_data) noexcept;
   static int deferred_consume_cb(nghttp3_conn* conn,
                                  int64_t stream_id,
                                  size_t consumed,
                                  void* conn_user_data,
-                                 void* stream_user_data);
+                                 void* stream_user_data) noexcept;
   static int begin_headers_cb(nghttp3_conn* conn,
                               int64_t stream_id,
                               void* conn_user_data,
-                              void* stream_user_data);
+                              void* stream_user_data) noexcept;
   static int recv_header_cb(nghttp3_conn* conn,
                             int64_t stream_id,
                             int32_t token,
@@ -626,37 +626,39 @@ class H3Session {
                             nghttp3_rcbuf* value,
                             uint8_t flags,
                             void* conn_user_data,
-                            void* stream_user_data);
+                            void* stream_user_data) noexcept;
   static int end_headers_cb(nghttp3_conn* conn,
                             int64_t stream_id,
                             int fin,
                             void* conn_user_data,
-                            void* stream_user_data);
+                            void* stream_user_data) noexcept;
   static int end_stream_cb(nghttp3_conn* conn,
                            int64_t stream_id,
                            void* conn_user_data,
-                           void* stream_user_data);
+                           void* stream_user_data) noexcept;
   static int stop_sending_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   static int reset_stream_cb(nghttp3_conn* conn,
                              int64_t stream_id,
                              uint64_t app_error_code,
                              void* conn_user_data,
-                             void* stream_user_data);
-  static int shutdown_cb(nghttp3_conn* conn, int64_t id, void* conn_user_data);
+                             void* stream_user_data) noexcept;
+  static int shutdown_cb(nghttp3_conn* conn,
+                         int64_t id,
+                         void* conn_user_data) noexcept;
   static int recv_settings2_cb(nghttp3_conn* conn,
                                const nghttp3_proto_settings* settings,
-                               void* conn_user_data);
+                               void* conn_user_data) noexcept;
   static int recv_wt_data_cb(nghttp3_conn* conn,
                              int64_t session_id,
                              int64_t stream_id,
                              const uint8_t* data,
                              size_t datalen,
                              void* conn_user_data,
-                             void* stream_user_data);
+                             void* stream_user_data) noexcept;
   // 対向からの WT_CLOSE_SESSION カプセル受信
   static int recv_wt_close_session_cb(nghttp3_conn* conn,
                                       int64_t session_id,
@@ -664,7 +666,7 @@ class H3Session {
                                       const uint8_t* msg,
                                       size_t msglen,
                                       void* conn_user_data,
-                                      void* stream_user_data);
+                                      void* stream_user_data) noexcept;
 
   // ヘルパー
   void push_event(H3Event event);

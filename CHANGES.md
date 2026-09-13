@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] 全 C コールバックに `noexcept` を付与し、例外境界の方針を CODEBASE.md に明記する
+  - @voluntas
+
 - [CHANGE] WebTransport over HTTP/3 の `on_stream_reset` の `error_code` を `int | None` として文書化する (レンジ外・予約済みコードポイントは `None`)
   - @voluntas
 
