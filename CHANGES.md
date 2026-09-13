@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] README の h3 / h2 クライアント例を例外送出型の `connect()` に合わせる
+  - @voluntas
+
 - [UPDATE] 確立済みペアへの API 呼び出し系列を検証するステートフル PBT を追加する
   - @voluntas
 
