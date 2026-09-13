@@ -120,6 +120,7 @@ if __name__ == "__main__":
 import asyncio
 
 from webtransport import h3
+from webtransport.exceptions import WebTransportConnectError
 
 
 async def main() -> None:
@@ -137,8 +138,10 @@ async def main() -> None:
     client.on_stream_data(on_stream_data)
     client.on_datagram(on_datagram)
 
-    if not await client.connect():
-        print("接続失敗")
+    try:
+        await client.connect()
+    except WebTransportConnectError as exc:
+        print(f"接続失敗: {exc}")
         return
 
     # ストリームでデータ送信
@@ -216,6 +219,7 @@ if __name__ == "__main__":
 import asyncio
 
 from webtransport import h2
+from webtransport.exceptions import WebTransportConnectError
 
 
 async def main() -> None:
@@ -233,8 +237,10 @@ async def main() -> None:
     client.on_stream_data(on_stream_data)
     client.on_datagram(on_datagram)
 
-    if not await client.connect():
-        print("接続失敗")
+    try:
+        await client.connect()
+    except WebTransportConnectError as exc:
+        print(f"接続失敗: {exc}")
         return
 
     # ストリームでデータ送信
