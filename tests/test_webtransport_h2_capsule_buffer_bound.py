@@ -20,10 +20,17 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
+
 
 _WT_STREAM = 0x190B4D3C
 _WT_CLOSE_SESSION = 0x2843
-_WT_ERROR = 0x52
 
 
 def _drain_wire(source: h2.Session) -> bytes:
@@ -53,13 +60,13 @@ def test_huge_length_header_closes_with_wt_error() -> None:
     # Error イベント (0x52) が発火し、セッションが閉じる
     error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert server.get_session_ids() == []
 
     # WT_CLOSE_SESSION (0x52) がワイヤへ送出される
     wire = _drain_wire(server)
     expected = _encode_capsule(
-        _WT_CLOSE_SESSION, (0x52).to_bytes(4, "big") + b"capsule payload exceeds limit"
+        _WT_CLOSE_SESSION, (WT_ERROR).to_bytes(4, "big") + b"capsule payload exceeds limit"
     )
     assert expected in wire
 
@@ -131,7 +138,7 @@ def test_custom_limit_applies() -> None:
     server.receive(_encode_data_frame(session_id, evil))
     error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
     assert server.get_session_ids() == []
 
 
@@ -214,7 +221,7 @@ def test_pre_accept_huge_length_errors_on_drain() -> None:
     assert server.accept_session(session_id) is True
     error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == _WT_ERROR
+    assert error_events[0].error_code == WT_ERROR
 
 
 def test_trailing_capsule_blocked_in_same_receive() -> None:

@@ -337,9 +337,9 @@ class Server:
     ) -> None:
         """受信フロー制御違反のコールバックを設定する
 
-        WT_FLOW_CONTROL_ERROR (error_code 0x50) のみを渡す。0x50 は
-        draft-15 Section 3.4 の 0xTBD のプレースホルダであり、draft で値が
-        確定したら更新する。WT_STREAM_STATE_ERROR (0x51) や nghttp2 /
+        `WtErrorCode.WT_FLOW_CONTROL_ERROR` のみを渡す。draft-15 Section 3.4
+        では 0x50 / 0x51 / 0x52 が 0xTBD のプレースホルダであり、値が確定
+        したら `WtErrorCode` を更新する。WT_STREAM_STATE_ERROR や nghttp2 /
         SETTINGS 違反の Error イベントは対象外。セッションエラーは HTTP/2
         接続を終了しない (draft-15 Section 3.4)。
 
@@ -538,10 +538,10 @@ class Server:
                             await self._on_datagram(event.data, session_writer)
 
                     elif event.type == h2_low.EventType.ERROR:
-                        # 0x50 (WT_FLOW_CONTROL_ERROR) のみ on_error へ渡す
+                        # WT_FLOW_CONTROL_ERROR のみ on_error へ渡す
                         session_writer = session_writers.get(event.session_id)
                         if (
-                            event.error_code == 0x50
+                            event.error_code == h2_low.WtErrorCode.WT_FLOW_CONTROL_ERROR.value
                             and session_writer is not None
                             and self._on_error is not None
                         ):

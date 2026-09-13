@@ -657,7 +657,9 @@ def get_stream_ids(session_id: int) -> list[int]  # セッションに属する�
 def get_send_credit(session_id: int) -> int  # セッションレベルの送信可能残量 (観測専用。未知 ID は 0)
 ```
 
-`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。`receive` / `send_stream_data` / `send_datagram` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。`reject_session` は `session_id` が 0 以下なら `ValueError` を送出する (クライアントセッションでは no-op)。応答の submit / 送出に失敗した場合は ERROR イベントを発火する (送出失敗は次に `send()` / `receive()` を呼んだ時に観測される。低レベル `next_event()` のみ。高レベル `Server` / `Client` は 0x50 以外の ERROR を `on_error` に渡さない)。
+`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。`receive` / `send_stream_data` / `send_datagram` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。`reject_session` は `session_id` が 0 以下なら `ValueError` を送出する (クライアントセッションでは no-op)。応答の submit / 送出に失敗した場合は ERROR イベントを発火する (送出失敗は次に `send()` / `receive()` を呼んだ時に観測される。低レベル `next_event()` のみ。高レベル `Server` / `Client` は `WtErrorCode.WT_FLOW_CONTROL_ERROR` 以外の ERROR を `on_error` に渡さない)。
+
+`h2.WtErrorCode` は WebTransport over HTTP/2 のエラーコード (draft-ietf-webtrans-http2-15 Section 3.4) を公開する。`WT_FLOW_CONTROL_ERROR = 0x50` / `WT_STREAM_STATE_ERROR = 0x51` / `WT_ERROR = 0x52` で、draft-15 ではいずれも 0xTBD のプレースホルダである (値が確定したら定数を更新する)。`h2.Event.error_code` は plain int で届くため、比較は `h2.WtErrorCode.WT_ERROR.value` のように `.value` を取る。`h2.Server.on_error` / `h2.Client.on_error` に渡るのは `WT_FLOW_CONTROL_ERROR` のみで、`WT_STREAM_STATE_ERROR` はセッション終了 (`on_session_closed`) として観測する。
 
 ## Config の主要デフォルト値
 

@@ -336,6 +336,9 @@
 
 ### misc
 
+- [ADD] `h2.WtErrorCode` を追加し、WebTransport over HTTP/2 のエラーコード (`WT_FLOW_CONTROL_ERROR` / `WT_STREAM_STATE_ERROR` / `WT_ERROR`) を定数として公開する
+  - @voluntas
+
 - [UPDATE] 型スタブをスタブパッケージ化し、高レベル `Client` / `Server` / 例外を型検査に露出する (`[tool.ty.rules] unresolved-import` の抑止を撤去)
   - @voluntas
 

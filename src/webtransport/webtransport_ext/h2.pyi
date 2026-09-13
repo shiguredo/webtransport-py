@@ -3,6 +3,15 @@
 import enum
 from collections.abc import Sequence
 
+class WtErrorCode(enum.Enum):
+    """WebTransport over HTTP/2 のエラーコード"""
+
+    WT_FLOW_CONTROL_ERROR = 80
+
+    WT_STREAM_STATE_ERROR = 81
+
+    WT_ERROR = 82
+
 class CapsuleType(enum.Enum):
     """Capsule 種別"""
 

@@ -6,8 +6,8 @@ WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
 MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ注入で再現する
 (公開 API では非コンプライアントなカプセルを送出する手段が存在しないため)。
 エラー送出は close_session 経由の WT_CLOSE_SESSION (error code 0x51) で
-実現され、ワイヤ部分列チェックで検証する。0x51 は WT_STREAM_STATE_ERROR
-(0xTBD) のプレースホルダ (draft-15 Section 3.4)。
+実現され、ワイヤ部分列チェックで検証する。WT_STREAM_STATE_ERROR (0x51) は 0xTBD の
+プレースホルダ (draft-15 Section 3.4)。
 """
 
 from __future__ import annotations
@@ -22,6 +22,13 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
 def _encode_wt_stream_capsule(stream_id: int, data: bytes, fin: bool = False) -> bytes:
@@ -91,7 +98,7 @@ def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
     """
     wire = server.send()
     assert wire is not None
-    assert _encode_wt_close_session_capsule(0x51, error_message) in wire
+    assert _encode_wt_close_session_capsule(WT_STREAM_STATE_ERROR, error_message) in wire
 
 
 def _assert_no_state_error_sent(server: h2.Session) -> None:
@@ -159,7 +166,7 @@ def test_wt_stream_after_fin_sends_state_error() -> None:
     # (受信フロー制御違反 0x50 と同じ方式)
     error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x51
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
 
 
 def test_empty_wt_stream_fin_after_fin_ignored() -> None:
@@ -447,7 +454,7 @@ def test_after_state_error_following_capsules_in_same_receive_ignored() -> None:
 
 
 def test_peer_receives_session_closed_with_state_error() -> None:
-    """エラー通知の WT_CLOSE_SESSION がピアに届いて SessionClosed (0x51) になることを確認
+    """エラー通知の WT_CLOSE_SESSION がピアに届いて SessionClosed (WT_STREAM_STATE_ERROR) になることを確認
 
     エラー検知は close_session (WT_CLOSE_SESSION 送出 + END_STREAM) で実現
     される (draft-15 Section 3.4)。ピアは受信して SessionClosed イベント
@@ -472,7 +479,7 @@ def test_peer_receives_session_closed_with_state_error() -> None:
     ]
     assert len(closed_events) == 1
     assert closed_events[0].session_id == session_id
-    assert closed_events[0].error_code == 0x51
+    assert closed_events[0].error_code == WT_STREAM_STATE_ERROR
 
 
 def test_wt_stream_after_matching_reset_sends_state_error() -> None:
@@ -544,10 +551,10 @@ def test_wt_stream_flow_control_excess_on_terminal_stream_sends_state_error() ->
     """終端状態のストリームへのフロー制御超過データでも WT_STREAM_STATE_ERROR (0x51) が優先されることを確認
 
     状態検知はフロー制御チェックより前に置く (フロー制御違反の error code
-    0x50 と区別するため)。終端状態のストリームに受信上限を超えるデータを
-    注入しても、0x50 の Error イベントではなく 0x51 の WT_CLOSE_SESSION が
-    送出される。順序が入れ替わると 0x50 の Error イベントが push されて
-    0x51 は送出されないため、このテストが回帰を検出する。
+    WT_FLOW_CONTROL_ERROR と区別するため)。終端状態のストリームに受信上限を超えるデータを
+    注入しても、WT_FLOW_CONTROL_ERROR の Error イベントではなく WT_STREAM_STATE_ERROR の WT_CLOSE_SESSION が
+    送出される。順序が入れ替わると WT_FLOW_CONTROL_ERROR の Error イベントが push されて
+    WT_STREAM_STATE_ERROR は送出されないため、このテストが回帰を検出する。
     """
     client, server = _create_h2_session_pair_with_server_recv_limit(4)
     session_id = _connect_h2_session(client, server)
@@ -567,7 +574,7 @@ def test_wt_stream_flow_control_excess_on_terminal_stream_sends_state_error() ->
     # 0x50 の Error イベントが push されて 0x51 は送出されない)
     error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x51
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
 
 
 def test_wt_stop_sending_first_delivers_event() -> None:
@@ -615,7 +622,7 @@ def test_wt_stop_sending_second_sends_state_error() -> None:
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert stop_events == []
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x51
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
     assert error_events[0].stream_id == 0
     _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
 
@@ -638,7 +645,7 @@ def test_wt_stop_sending_duplicate_in_same_receive_sends_state_error() -> None:
     assert len(stop_events) == 1
     assert stop_events[0].error_code == 1
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x51
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
     assert error_events[0].stream_id == 0
     _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
 
@@ -676,7 +683,7 @@ def test_wt_stop_sending_unknown_stream_second_sends_state_error() -> None:
     error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert stop_events == []
     assert len(error_events) == 1
-    assert error_events[0].error_code == 0x51
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
     assert error_events[0].stream_id == unknown_stream_id
     _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
 

@@ -33,6 +33,13 @@ from conftest import (
 )
 
 from webtransport import h2
+from webtransport.webtransport_ext.h2 import WtErrorCode
+
+# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
+WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
+WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str = "") -> bytes:
@@ -195,7 +202,10 @@ def test_close_session_flow_control_violation_internal_call_delivered() -> None:
     wire = client.send()
     assert wire is not None
     # WT_CLOSE_SESSION (0x50) は送出されない
-    assert _encode_wt_close_session_capsule(0x50, "flow control limit exceeded") not in wire
+    assert (
+        _encode_wt_close_session_capsule(WT_FLOW_CONTROL_ERROR, "flow control limit exceeded")
+        not in wire
+    )
     # WT_STREAM_DATA_BLOCKED が送出される
     assert _encode_capsule(0x190B4D42, _encode_varint(stream_id) + _encode_varint(4)) in wire
 

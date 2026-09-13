@@ -69,14 +69,6 @@ void check_python_input_size(const char* name, size_t size) {
   }
 }
 
-// 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
-// プレースホルダ。draft で値が確定したら更新する
-constexpr uint32_t kWtFlowControlError = 0x50;
-
-// 0x52 は WT_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
-// draft で値が確定したら更新する
-constexpr uint32_t kWtError = 0x52;
-
 // draft-15 Section 6.12 の Application Error Message 上限 (バイト)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 
@@ -679,9 +671,6 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
 void H2Session::report_stream_state_error(int32_t session_id,
                                           uint64_t stream_id,
                                           const std::string& error_message) {
-  // 0x51 は WT_STREAM_STATE_ERROR (draft-15 Section 3.4 の 0xTBD) の
-  // プレースホルダ。draft で値が確定したら更新する
-  constexpr uint32_t kWtStreamStateError = 0x51;
   // 検知した WT_STREAM_STATE_ERROR をアプリに通知してからセッションを閉じる。
   // close_session は送信をキューするのみで nghttp2_session_send を呼ばないため
   // mem_recv2 コールバック中でも安全であり、即座に is_terminated を立てて同一
@@ -3183,6 +3172,13 @@ nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
 
 void bind_webtransport_h2(nb::module_& m) {
   auto h2_mod = m.def_submodule("h2", "WebTransport over HTTP/2");
+
+  // WtErrorCode (draft-15 Section 3.4)
+  nb::enum_<WtErrorCode>(h2_mod, "WtErrorCode",
+                         "WebTransport over HTTP/2 のエラーコード")
+      .value("WT_FLOW_CONTROL_ERROR", WtErrorCode::kWtFlowControlError)
+      .value("WT_STREAM_STATE_ERROR", WtErrorCode::kWtStreamStateError)
+      .value("WT_ERROR", WtErrorCode::kWtError);
 
   // CapsuleType
   nb::enum_<CapsuleType>(h2_mod, "CapsuleType", "Capsule 種別")
