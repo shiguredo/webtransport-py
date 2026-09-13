@@ -336,6 +336,9 @@
 
 ### misc
 
+- [UPDATE] WebTransport over HTTP/2 の受信をアプリの消費に連動させ (`nghttp2_session_consume`)、未完成カプセルの保持バイト数を有界にする
+  - @voluntas
+
 - [UPDATE] THIRD_PARTY_LICENSES.md に nanobind (BSD-3-Clause) と同梱の tsl::robin_map (MIT) のライセンスを追記し、README の第三者ライセンス節を更新する
   - @voluntas
 

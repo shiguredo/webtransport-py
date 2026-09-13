@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from conftest import (
     _connect_h2_session,
+    _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
@@ -226,3 +227,70 @@ def test_peer_cannot_continue_sending_after_recv_flow_control_error() -> None:
         event for event in _drain_events(server) if event.type == h2.EventType.STREAM_DATA
     ]
     assert stream_events == []
+
+
+def test_h2_receive_backpressure_bounds_unconsumed_bytes() -> None:
+    """アプリが消費しない間、未完成カプセルの保持バイト数が有界であることを確認
+
+    自動 WINDOW_UPDATE を無効化し、アプリがイベントを消費した分だけ
+    ウィンドウを開く。アプリが読まない状態で大量に送っても、受信側が保持する
+    未完成バイト数は上限 (1 フレーム強) に留まる。イベントを読まずに観測
+    できる `_test_unfinished_capsule_bytes` で白箱確認する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # コネクション初期ウィンドウ (65535) を大きく超える 256 KiB を積む
+    chunk = b"x" * 32768
+    for _ in range(8):
+        client.send_stream_data(session_id, stream_id, chunk, False)
+
+    peak = 0
+    delivered = 0
+    for _ in range(30):
+        _h2_pump(client, server)
+        _h2_pump(server, client)
+        current = server._test_unfinished_capsule_bytes(session_id)
+        assert current is not None
+        peak = max(peak, current)
+        delivered += sum(
+            len(event.data)
+            for event in _drain_events(server)
+            if event.type == h2.EventType.STREAM_DATA
+        )
+
+    # アプリは結局すべて消費するため全量が届く
+    assert delivered == len(chunk) * 8
+    # 保持バイト数は 1 フレーム強に有界 (256 KiB を丸ごと保持しない)
+    assert peak <= 65536, f"未完成カプセルの保持が有界でない: {peak}"
+
+
+def test_unfinished_capsule_larger_than_window_does_not_deadlock() -> None:
+    """受信ウィンドウより大きいカプセルでもデッドロックしないことを確認
+
+    完成したカプセルだけを消費すると、1 つのカプセルが受信ウィンドウより
+    大きい場合にウィンドウが戻らず永久に完成しない。未完成バイトの超過分を
+    消費してウィンドウを開けることで最後まで受信できる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # コネクション初期ウィンドウ (65535) より大きい 256 KiB を送る
+    payload = b"z" * (256 * 1024)
+    client.send_stream_data(session_id, stream_id, payload, False)
+
+    received = bytearray()
+    for _ in range(200):
+        _h2_pump(client, server)
+        for event in _drain_events(server):
+            if event.type == h2.EventType.STREAM_DATA:
+                received.extend(event.data)
+        _h2_pump(server, client)
+        if len(received) == len(payload):
+            break
+
+    assert bytes(received) == payload

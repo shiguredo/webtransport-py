@@ -553,6 +553,13 @@ class H2Session {
   bool is_closed() const;
 
   /**
+   * テスト専用: 未完成の受信カプセルとして保持しているバイト数を返す
+   * (production からは呼ばない。背圧の回帰ピン)
+   */
+  std::optional<int64_t> test_unfinished_capsule_bytes(
+      int32_t session_id) const;
+
+  /**
    * セッションレベルの送信可能残量を返す (観測専用)
    *
    * `max_data_local` と `bytes_sent` の差 (負値は 0) を返す。フロー制御の
@@ -587,14 +594,20 @@ class H2Session {
 
   std::vector<uint8_t> encode_capsule(CapsuleType type,
                                       const std::vector<uint8_t>& payload);
-  void process_capsules(int32_t session_id, const uint8_t* data, size_t length);
+  void process_capsules(int32_t session_id,
+                        int32_t h2_stream_id,
+                        const uint8_t* data,
+                        size_t length);
   void process_capsule(int32_t session_id,
+                       int32_t h2_stream_id,
                        CapsuleType type,
                        const uint8_t* payload,
-                       size_t length);
+                       size_t length,
+                       size_t capsule_wire_len);
 
   // Capsule ハンドラー
   void handle_wt_stream(int32_t session_id,
+                        int32_t h2_stream_id,
                         bool fin,
                         const uint8_t* payload,
                         size_t length);
@@ -686,6 +699,15 @@ class H2Session {
 
   // ヘルパー
   void push_event(H2Event event);
+
+  /**
+   * アプリへ渡した受信 DATA のバイト数を消費済みとして記録する
+   *
+   * 自動 WINDOW_UPDATE を無効化しているため、ここで消費した分だけ
+   * nghttp2_session_consume が WINDOW_UPDATE を積む。アプリの消費が
+   * 止まれば受信ウィンドウが開かず、ピアの送信が止まる (背圧)
+   */
+  void consume_recv_bytes(int32_t stream_id, size_t size);
   WtSessionInfo* get_wt_session(int32_t session_id);
 
   // draft-15 Section 4.3: 対向 SETTINGS / WebTransport-Init から初期 FC を設定
@@ -769,6 +791,9 @@ class H2Session {
 
   // HTTP/2 ストリームデータ (送信待ち)
   std::map<int32_t, std::deque<std::vector<uint8_t>>> http2_stream_buffers_;
+
+  // ストリームごとの未消費受信バイト数 (自動 WINDOW_UPDATE 無効時の背圧用)
+  std::map<int32_t, size_t> unconsumed_recv_bytes_;
 
   // 現在受信中のヘッダー
   std::map<int32_t, std::vector<std::pair<std::string, std::string>>>

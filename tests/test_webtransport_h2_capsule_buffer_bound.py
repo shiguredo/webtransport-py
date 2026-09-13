@@ -85,16 +85,30 @@ def test_huge_length_then_more_data_stays_closed() -> None:
 
 
 def test_boundary_payload_accepted() -> None:
-    """上限ちょうどのペイロードは受理されることを確認"""
-    client, server = _create_h2_session_pair()
+    """上限ちょうどのペイロードは受理されることを確認
+
+    受信ウィンドウはアプリの消費に連動して開くため、断片を送るたびに
+    受信側のイベントを消費し、WINDOW_UPDATE を対向へ届ける必要がある。
+    ここでは HTTP/2 のコネクション初期ウィンドウ (65535) に収まる範囲で
+    断片再構成を検証する (上限値そのものは別テストで検証する)。
+    """
+    # 上限ちょうどのペイロードが受理されることを、断片再構成を挟んで確認する。
+    # 1 回の転送を HTTP/2 のコネクション初期ウィンドウ (65535) に収めるため、
+    # 上限を 32 KiB に設定する
+    client_config = h2.Config()
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_max_capsule_payload_size = 32768
+    client = h2.Session.create_client(client_config)
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
     session_id = _connect_h2_session(client, server)
 
-    # ちょうど 1 MiB の DATAGRAM ペイロードは受理される (HTTP/2 の
-    # フレーム上限に合わせて 16 KiB ずつ分割配送し、断片再構成させる)
-    payload = b"y" * 1048576
+    payload = b"y" * 32768
     capsule = _encode_capsule(0x00, payload)
-    for offset in range(0, len(capsule), 16384):
-        server.receive(_encode_data_frame(session_id, capsule[offset : offset + 16384]))
+    for offset in range(0, len(capsule), 4096):
+        server.receive(_encode_data_frame(session_id, capsule[offset : offset + 4096]))
     datagram_events = [e for e in _drain_events(server) if e.type == h2.EventType.DATAGRAM]
     assert len(datagram_events) == 1
     assert datagram_events[0].data == payload

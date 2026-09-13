@@ -44,9 +44,29 @@ def _received_stream_bytes(session: h2.Session) -> int:
     )
 
 
+def _create_wide_window_h2_session_pair() -> tuple[h2.Session, h2.Session]:
+    """HTTP/2 の受信ウィンドウを広げた h2.Session ペアを作成する
+
+    本テストは WebTransport (draft-15 Section 4.4) のクレジット補充を対象と
+    する。HTTP/2 レベルの受信ウィンドウはアプリ消費に連動して開く実装に
+    なったため、既定の 65535 では 64 KiB のカプセルが 1 フレームに収まらず
+    先頭で止まる。WT 層の検証に集中するため HTTP/2 側は広げておく。
+    """
+    client = h2.Session.create_client(h2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.initial_window_size = 4 * 1024 * 1024
+    server = h2.Session.create_server(server_config)
+
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    return client, server
+
+
 def test_session_transfer_beyond_1mib() -> None:
     """1 MiB を超えるセッション転送が自己クローズせずに完了する"""
-    client, server = _create_h2_session_pair()
+    client, server = _create_wide_window_h2_session_pair()
     session_id = _connect_h2_session(client, server)
     stream_id = client.open_stream(session_id, False)
     assert stream_id >= 0
@@ -63,7 +83,7 @@ def test_session_transfer_beyond_1mib() -> None:
 
 def test_single_stream_transfer_beyond_256kib() -> None:
     """256 KiB を超える単一ストリーム転送が自己クローズせずに完了する"""
-    client, server = _create_h2_session_pair()
+    client, server = _create_wide_window_h2_session_pair()
     session_id = _connect_h2_session(client, server)
     stream_id = client.open_stream(session_id, False)
     assert stream_id >= 0
