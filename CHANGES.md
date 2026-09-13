@@ -153,3 +153,6 @@
 
 - [UPDATE] CI に ruff check / ty check を追加し、wheel ワークフローの外部 action をコミットハッシュ固定に統一する
   - @voluntas
+
+- [UPDATE] SKILL.md に載っている API 名を実装と機械的に照合するテストを追加し、存在しない API の案内を検出できるようにする
+  - @voluntas
