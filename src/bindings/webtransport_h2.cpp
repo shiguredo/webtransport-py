@@ -17,6 +17,22 @@ namespace webtransport {
 namespace h2 {
 
 namespace {
+// 未完成カプセルを残したまま消費を開始するしきい値の下限 (バイト)。
+// 受信ウィンドウは完成したカプセルの消費でしか開かないため、1 つの
+// カプセルが受信ウィンドウより大きいとデッドロックする。未完成バイトが
+// しきい値を超えたら超過分を消費してウィンドウを開ける。残すバイト数を
+// 小さくしすぎると 1 回の消費でウィンドウがほぼ全開になり、続くフレームを
+// 受けるたびに WINDOW_UPDATE を送ることになるため、フレーム数個分を残す
+constexpr size_t kMinUnfinishedCapsuleBytes = 32768;
+
+// 未完成カプセルを残してよい上限を返す。ピアが広告した最大フレームサイズに
+// よらず、1 フレーム分の余裕を常に残す
+size_t max_unfinished_capsule_bytes(nghttp2_session* session) {
+  uint32_t peer_max_frame_size = nghttp2_session_get_local_settings(
+      session, NGHTTP2_SETTINGS_MAX_FRAME_SIZE);
+  size_t headroom = peer_max_frame_size > 0 ? peer_max_frame_size : 16384;
+  return std::max(kMinUnfinishedCapsuleBytes, headroom);
+}
 
 // 対向から受信した上限を記録する。未受信ならそのまま格納し、受信済みなら
 // 大きい方を残す (SETTINGS と WebTransport-Init の大きい方を採用する)
@@ -255,6 +271,7 @@ std::vector<uint8_t> H2Session::encode_capsule(
 }
 
 void H2Session::process_capsules(int32_t session_id,
+                                 int32_t h2_stream_id,
                                  const uint8_t* data,
                                  size_t length) {
   auto* wt_session = get_wt_session(session_id);
@@ -337,21 +354,30 @@ void H2Session::process_capsules(int32_t session_id,
         wt_session->capsule_buffer.begin() +
             static_cast<std::ptrdiff_t>(header_len + payload_len));
 
-    process_capsule(session_id, capsule_type, payload_copy.data(),
-                    payload_copy.size());
+    process_capsule(session_id, h2_stream_id, capsule_type, payload_copy.data(),
+                    payload_copy.size(), header_len + payload_len);
   }
 }
 
 void H2Session::process_capsule(int32_t session_id,
+                                int32_t h2_stream_id,
                                 CapsuleType type,
                                 const uint8_t* payload,
-                                size_t length) {
+                                size_t length,
+                                size_t capsule_wire_len) {
+  // アプリへ渡すイベントを組み立てた時点で、このカプセルが占めていた
+  // HTTP/2 DATA のバイト数 (Type と Length の varint を含むワイヤ長) を
+  // 消費済みとして扱う。アプリがイベントを読まなければイベントキューが
+  // 伸び、いずれ受信ウィンドウも埋まる。終端カプセル (WT_CLOSE_SESSION 等) も
+  // 消費対象に含める (含めないとウィンドウが戻らない)
+  consume_recv_bytes(h2_stream_id, capsule_wire_len);
+
   switch (type) {
     case CapsuleType::WtStream:
     case CapsuleType::WtStreamFin: {
       // draft-15 Section 6.4: Type の最下位ビットが FIN
       bool fin = (static_cast<uint64_t>(type) & 0x01ULL) != 0;
-      handle_wt_stream(session_id, fin, payload, length);
+      handle_wt_stream(session_id, h2_stream_id, fin, payload, length);
       break;
     }
     case CapsuleType::WtResetStream:
@@ -396,6 +422,7 @@ void H2Session::process_capsule(int32_t session_id,
 // ========== Capsule ハンドラー ==========
 
 void H2Session::handle_wt_stream(int32_t session_id,
+                                 int32_t h2_stream_id,
                                  bool fin,
                                  const uint8_t* payload,
                                  size_t length) {
@@ -1133,6 +1160,34 @@ void H2Session::push_event(H2Event event) {
   events_.push_back(std::move(event));
 }
 
+void H2Session::consume_recv_bytes(int32_t stream_id, size_t size) {
+  if (!session_ || size == 0) {
+    return;
+  }
+
+  auto it = unconsumed_recv_bytes_.find(stream_id);
+  if (it == unconsumed_recv_bytes_.end()) {
+    return;
+  }
+
+  // 記録済みの未消費バイトを超えて消費しない (カプセルのフレーミング分を
+  // 二重に数えないため)
+  size_t consume_size = std::min(size, it->second);
+  if (consume_size == 0) {
+    return;
+  }
+
+  // nghttp2_session_consume はコネクションとストリームの両方の
+  // WINDOW_UPDATE を積む (nghttp2.h の説明に従う)。実際の送出は次の
+  // nghttp2_session_send が行う
+  if (nghttp2_session_consume(session_, stream_id, consume_size) == 0) {
+    it->second -= consume_size;
+    if (it->second == 0) {
+      unconsumed_recv_bytes_.erase(it);
+    }
+  }
+}
+
 WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
   auto it = wt_sessions_.find(session_id);
   if (it == wt_sessions_.end()) {
@@ -1699,12 +1754,24 @@ bool H2Session::initialize() {
   nghttp2_session_callbacks_set_on_begin_headers_callback(
       callbacks, on_begin_headers_callback);
 
+  // 受信ウィンドウの自動更新を無効にする。アプリが消費した分だけ
+  // nghttp2_session_consume で WINDOW_UPDATE を返すため、アプリの消費速度が
+  // 受信レートの上限になる (背圧)。
+  nghttp2_option* option = nullptr;
+  rv = nghttp2_option_new(&option);
+  if (rv != 0) {
+    nghttp2_session_callbacks_del(callbacks);
+    return false;
+  }
+  nghttp2_option_set_no_auto_window_update(option, 1);
+
   if (is_server_) {
-    rv = nghttp2_session_server_new(&session_, callbacks, this);
+    rv = nghttp2_session_server_new2(&session_, callbacks, this, option);
   } else {
-    rv = nghttp2_session_client_new(&session_, callbacks, this);
+    rv = nghttp2_session_client_new2(&session_, callbacks, this, option);
   }
 
+  nghttp2_option_del(option);
   nghttp2_session_callbacks_del(callbacks);
 
   if (rv != 0) {
@@ -1938,7 +2005,7 @@ bool H2Session::accept_session(int32_t session_id) {
   // 追記なしの排出専用呼び出しのため空入力で呼ぶ
   if (get_wt_session(session_id)) {
     const uint8_t kEmptyByte = 0;
-    process_capsules(session_id, &kEmptyByte, 0);
+    process_capsules(session_id, session_id, &kEmptyByte, 0);
   }
 
   // 蓄積の遅延処理で WT_CLOSE_SESSION を受けて閉じた場合と、蓄積中の
@@ -2525,6 +2592,15 @@ bool H2Session::want_write() const {
   return nghttp2_session_want_write(session_) != 0 || !send_buffer_.empty();
 }
 
+std::optional<int64_t> H2Session::test_unfinished_capsule_bytes(
+    int32_t session_id) const {
+  auto it = wt_sessions_.find(session_id);
+  if (it == wt_sessions_.end()) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(it->second.capsule_buffer.size());
+}
+
 bool H2Session::is_closed() const {
   return closed_;
 }
@@ -2930,8 +3006,25 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
   if (len == 0) {
     return 0;
   }
+
+  // 自動 WINDOW_UPDATE を無効化しているため、アプリへ届けた DATA の
+  // バイト数をストリームごとに記録し、イベント化した時点で消費する
+  h2_session->unconsumed_recv_bytes_[stream_id] += len;
   if (wt_session->is_established) {
-    h2_session->process_capsules(stream_id, data, len);
+    h2_session->process_capsules(stream_id, stream_id, data, len);
+
+    // 自動 WINDOW_UPDATE を無効化しているため、完成したカプセルだけを
+    // 消費すると「1 カプセルが受信ウィンドウより大きい」場合にウィンドウが
+    // 戻らずデッドロックする。未完成のまま残ったバイトのうち上限を超える分を
+    // 先に消費してウィンドウを開け、残りを受け取れるようにする
+    auto* after = h2_session->get_wt_session(stream_id);
+    if (after != nullptr && !after->is_terminated) {
+      size_t limit = max_unfinished_capsule_bytes(h2_session->session_);
+      if (after->capsule_buffer.size() > limit) {
+        h2_session->consume_recv_bytes(stream_id,
+                                       after->capsule_buffer.size() - limit);
+      }
+    }
     return 0;
   }
   if (!h2_session->is_server_) {
@@ -3231,6 +3324,12 @@ void bind_webtransport_h2(nb::module_& m) {
       .def("is_webtransport_ready", &H2Session::is_webtransport_ready,
            nb::lock_self(), nb::sig("def is_webtransport_ready(self) -> bool"),
            "対向 SETTINGS で WebTransport over HTTP/2 が有効か")
+      .def("_test_unfinished_capsule_bytes",
+           &H2Session::test_unfinished_capsule_bytes, nb::lock_self(),
+           nb::arg("session_id"),
+           nb::sig("def _test_unfinished_capsule_bytes(self, session_id: int) "
+                   "-> int | None"),
+           "テスト専用: 未完成カプセルとして保持中のバイト数")
       .def("accept_session", &H2Session::accept_session, nb::lock_self(),
            nb::arg("session_id"),
            nb::sig("def accept_session(self, session_id: int) -> bool"),
