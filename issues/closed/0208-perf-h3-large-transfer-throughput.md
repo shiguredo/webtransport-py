@@ -7,7 +7,7 @@
 
 ## 目的
 
-sora-moq のテストでは WebTransport over HTTP/3 でメディアを送るため、数 MiB〜数十 MiB の転送が現実的な時間で完了する必要がある。ところが `h3` (WebTransport over HTTP/3) の高レベル API は 4 MiB の転送に 60 秒以上かかり、実用にならない。`quic` 側は issue 0206 で解消済みだが、`h3` / `http3` / `h2` / `http2` はそれぞれ独自の受信ループを持ち、同じ律速が残っている。
+WebTransport over HTTP/3 でメディアを送るアプリケーションでは、数 MiB〜数十 MiB の転送が現実的な時間で完了する必要がある。ところが `h3` (WebTransport over HTTP/3) の高レベル API は 4 MiB の転送に 60 秒以上かかり、実用にならない。`quic` 側は issue 0206 で解消済みだが、`h3` / `http3` / `h2` / `http2` はそれぞれ独自の受信ループを持ち、同じ律速が残っている。
 
 ## 現状
 
