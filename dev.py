@@ -44,10 +44,16 @@ def update_version(file_path: str, dry_run: bool) -> str | None:
 # uv sync を実行し、uv.lock を git に追加
 def run_uv_sync(dry_run: bool) -> None:
     if dry_run:
-        print("Dry-run: Would run 'uv sync' and add 'uv.lock' to git")
+        print("Dry-run: Would run 'uv sync --inexact' and add 'uv.lock' to git")
     else:
         # uv sync の実行
-        result = subprocess.run(["uv", "sync"], check=True, capture_output=True, text=True)
+        # --inexact: pyproject.toml の package = false でも make develop が入れた
+        # editable インストールを prune しない。prune すると型検査から
+        # webtransport_ext が見えなくなり、pre-commit の ty が高レベル API を
+        # 解決できずに失敗する
+        result = subprocess.run(
+            ["uv", "sync", "--inexact"], check=True, capture_output=True, text=True
+        )
         print(result.stdout)
 
         # uv.lock ファイルを git に追加

@@ -124,6 +124,9 @@
 
 ### misc
 
+- [FIX] `dev.py` の `uv sync` が `make develop` の editable インストールを prune し、pre-commit の型検査が高レベル API を解決できずに失敗する問題を修正する
+  - @voluntas
+
 - [UPDATE] 高レベル API と C++ バインディングの重複コードを共通ヘルパーへ集約する (`_common.py` と `header_convert.h` の新設)
   - @voluntas
 
