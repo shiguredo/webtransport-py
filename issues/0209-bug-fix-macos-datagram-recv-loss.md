@@ -1,7 +1,7 @@
 # macOS で高レベル API の受信パケットが取りこぼされるのを修正する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-macos-udp-recv-loss
 - Polished: {YYYY-MM-DD}
 
@@ -45,7 +45,14 @@ CI では `wheel` ワークフローの macOS ジョブが断続的に失敗し�
 
 ## 解決方法
 
-- `src/webtransport/_common.py` に `wait_socket_readable` と `recv_datagram` を追加する
-- `src/webtransport/quic/client.py` / `src/webtransport/quic/server.py` / `src/webtransport/h3/client.py` / `src/webtransport/h3/server.py` / `src/webtransport/http3/client.py` / `src/webtransport/http3/server.py` の受信待ちを `recv_datagram` に置き換える
+- `src/webtransport/_common.py` に `wait_socket_readable` と `recv_datagram` を追加した
+- `src/webtransport/quic/client.py` / `src/webtransport/quic/server.py` / `src/webtransport/h3/client.py` / `src/webtransport/h3/server.py` / `src/webtransport/http3/client.py` / `src/webtransport/http3/server.py` の受信待ちを `recv_datagram` に置き換えた
 - `tests/test_common.py` を新設し、`wait_socket_readable` と `recv_datagram` の基本動作と、タイムアウトをまたいでもパケットを取りこぼさないことを検証する
-- `tests/test_e2e_webtransport_h3_low_level.py` の `_LowLevelClient._receive` も同じヘルパーを使うようにする
+- `tests/test_e2e_webtransport_h3_low_level.py` の `_LowLevelClient._receive` も同じヘルパーを使うようにした
+
+### 検証結果
+
+- 追加した回帰テストは、`asyncio.wait_for` で `loop.sock_recvfrom` を包む旧実装では 3 回中 3 回失敗し、修正後は 5 回連続して通過した
+- 全テスト (1137 件) が通過した
+- `prek run --all-files` の全フックが通過した
+- スループット系テスト (`tests/test_e2e_http3_throughput.py` / `tests/test_e2e_quic_throughput.py` / `tests/test_e2e_webtransport_h3_throughput.py` / `tests/test_e2e_webtransport_h2_throughput.py`) が通過し、性能劣化が無いことを確認した
