@@ -11,7 +11,11 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
-from webtransport._common import destination_for_packet, normalize_addr
+from webtransport._common import (
+    destination_for_packet,
+    normalize_addr,
+    recv_datagram,
+)
 from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
@@ -354,6 +358,11 @@ class Client:
         パケットの処理時刻は ngtcp2 の RTT 計測にも使われるため、読むのが
         遅れると RTT が過大に見積もられ pacing と PTO も過大になる。
 
+        待機には `recv_datagram` を使う。`asyncio.wait_for` で
+        `loop.sock_recvfrom` を包むと、macOS の kqueue セレクタでタイム
+        アウト時にパケットの読み取り可能通知が失われる
+        (src/webtransport/_common.py の `wait_socket_readable` 参照)。
+
         Returns:
             受信したパケット数
         """
@@ -362,14 +371,10 @@ class Client:
         if self._local_addr is None:
             return 0
 
-        loop = asyncio.get_running_loop()
-        try:
-            data, raw_remote = await asyncio.wait_for(
-                loop.sock_recvfrom(self._socket, 65535),
-                timeout=timeout,
-            )
-        except TimeoutError:
+        result = await recv_datagram(self._socket, timeout)
+        if result is None:
             return 0
+        data, raw_remote = result
 
         received = 0
         while True:

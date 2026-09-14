@@ -16,6 +16,7 @@ from webtransport._common import (
     bind_http3_uni_streams,
     normalize_addr,
     open_http3_uni_streams,
+    recv_datagram,
     validate_cert_key_files,
 )
 from webtransport.h3._error_codes import deliver_stream_reset_error_code
@@ -786,22 +787,20 @@ class Server:
         if self._socket is None or self._local_addr is None:
             raise RuntimeError("server is not started")
 
-        loop = asyncio.get_running_loop()
-
         while self._running:
             # 受信は「次の QUIC タイマー期限まで待つ 1 回」+「読めるだけ
             # まとめて読む」で行う。1 ループ 1 パケットに固定すると、1
             # パケットあたりのループ オーバーヘッドがそのままスループット
             # 上限になる (まとめて受信してから ACK と MAX_STREAM_DATA を
             # 送出することで送出間隔も詰まる)
-            try:
-                data, raw_addr = await asyncio.wait_for(
-                    loop.sock_recvfrom(self._socket, 65535),
-                    timeout=self._wait,
-                )
-            except TimeoutError:
-                pass
-            else:
+            #
+            # 待機には recv_datagram を使う。asyncio.wait_for で
+            # loop.sock_recvfrom を包むと、macOS の kqueue セレクタで
+            # タイムアウト時にパケットの読み取り可能通知が失われる
+            # (src/webtransport/_common.py の wait_socket_readable 参照)
+            result = await recv_datagram(self._socket, self._wait)
+            if result is not None:
+                data, raw_addr = result
                 if not await self._handle_datagram(data, raw_addr):
                     break
                 # 続きは non-blocking で読めるだけ読む。読み切ったら送信と

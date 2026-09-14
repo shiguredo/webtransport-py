@@ -121,6 +121,8 @@
   - @voluntas
 - [FIX] QUIC の `close()` が生成した CONNECTION_CLOSE パケットを送出しない問題と、close 後の受信パケットへの応答で CONNECTION_CLOSE を再送し続ける問題を修正する
   - @voluntas
+- [FIX] `quic` / `h3` / `http3` の高レベル API が macOS の kqueue セレクタで受信パケットを取りこぼし、再送 (PTO) まで処理が止まる問題を修正する
+  - @voluntas
 
 ### misc
 
