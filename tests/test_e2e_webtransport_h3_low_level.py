@@ -14,6 +14,7 @@ from conftest import _encode_wt_datagram
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport._common import recv_datagram
 from webtransport.h3 import Server
 
 
@@ -88,15 +89,17 @@ class _LowLevelClient:
         await self._send_packet()
 
     async def _receive(self) -> None:
-        """QUIC パケットを 1 件受信して処理する (タイムアウト時は何もしない)"""
-        loop = asyncio.get_running_loop()
-        try:
-            data, raw_remote = await asyncio.wait_for(
-                loop.sock_recvfrom(self._socket, 65535),
-                timeout=0.1,
-            )
-        except TimeoutError:
+        """QUIC パケットを 1 件受信して処理する (タイムアウト時は何もしない)
+
+        待機にはライブラリ本体と同じ recv_datagram を使う。
+        asyncio.wait_for で loop.sock_recvfrom を包むと macOS の kqueue
+        セレクタでパケットの読み取り可能通知が失われる
+        (src/webtransport/_common.py の wait_socket_readable 参照)。
+        """
+        result = await recv_datagram(self._socket, 0.1)
+        if result is None:
             return
+        data, raw_remote = result
         remote = (str(raw_remote[0]), raw_remote[1])
         self._quic_connection.receive(data, self._local_addr, remote)
 
