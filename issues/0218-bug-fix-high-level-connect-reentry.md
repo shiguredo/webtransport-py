@@ -7,7 +7,7 @@
 
 ## 目的
 
-`close()` を呼ばずに `connect()` を再度呼ぶと、前回のソケットまたは `StreamWriter` を閉じないまま上書きする。ファイルディスクリプタとストリームが解放されないため、接続の作り直しを繰り返す用途で漏れる。あわせて `Client._connect_one` の失敗経路が `Client._abandon_attempt` を通らず、ソケットが開いたまま残る経路がある。
+`close()` を呼ばずに `connect()` を再度呼ぶと、前回のソケットまたは `StreamWriter` を閉じないまま上書きする。ファイルディスクリプタとストリームが解放されないため、接続の作り直しを繰り返す用途で漏れる。あわせて `src/webtransport/h3/client.py` と `src/webtransport/http3/client.py` の `Client._connect_one` の失敗経路が `Client._abandon_attempt` を通らず、ソケットが開いたまま残る経路がある。
 
 ## 現状
 
