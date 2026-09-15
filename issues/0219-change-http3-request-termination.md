@@ -26,7 +26,7 @@
 - 終端後の追加送信は送出されない (fin 送出後に nghttp3 の送信キューから外れるため)。http2 と同じくエラーにはせず、docstring で不活性を明示する
 - 後方互換は `CODEBASE.md` の「下位互換を維持しないこと」に従い維持しない。`CHANGES.md` に `[CHANGE]` として追記する
 - 失敗の伝播は別 issue (0213) が扱う。0213 を先に実装し、その失敗分岐 (`Client._quic_connection.open_stream` の負値と `Http3Connection.submit_request` の false で `-1` を返し、開設済みストリームを `Client._quic_connection.reset_stream` でリセットする) を維持したまま `body` と終端を追加する
-- `examples/http3/client.py` と `examples/http3/server.py` は本 issue では変更しない。接続先の整合と組としての動作確認は 0225 が担当する
+- `examples/http3/client.py` と `examples/http3/server.py` は本 issue では変更しない。接続先の整合と組としての動作確認は 0225 が担当する。0225 が 0219 の完了前に暫定の終端呼び出し (`Client.send_data(stream_id, b"", fin=True)`) を `examples/http3/client.py` へ追加した場合は、本 issue でその呼び出しを削除する (終端が `Client.request` に入ると不活性になり、残すと読み手を誤解させる)
 
 ## 完了条件
 
@@ -36,6 +36,7 @@
 - docstring (クラスの Usage と `Client.request` / `Client.send_data`) が新しい契約に一致し、終端後の追加送信が送出されないことと、分割送りは Sans-IO の `http3.Connection.submit_request` / `http3.Connection.send_data` を使うことが書かれている
 - `skills/webtransport-py/SKILL.md` の `http3.Client` の `request()` の記載 (引数と終端契約) と、HTTP/2 節にある http3 との比較文が新しい契約に一致する
 - 既存テストが新しい契約に移行され、全テストが通過する
+- 0225 が暫定追加した `examples/http3/client.py` の終端呼び出しが削除されている (0225 が先に完了している場合)
 
 ## 解決方法
 
