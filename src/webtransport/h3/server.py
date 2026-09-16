@@ -634,6 +634,9 @@ class Server:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: addr が登録済みで data が 1 MiB 超の場合
         """
         client = self._clients.get(addr)
         if client is None or client.webtransport_session is None:
@@ -709,6 +712,9 @@ class Server:
             addr: クライアントアドレス
             session_id: セッション ID
             data: 送信データ
+
+        Raises:
+            ValueError: addr が登録済みで data が 1 MiB 超の場合
         """
         client = self._clients.get(addr)
         if client is None or client.webtransport_session is None:
