@@ -1,7 +1,7 @@
 # h3 の Python 境界入力にサイズ上限が無い
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-16
 - Branch: feature/fix-h3-python-input-size-limit
 - Polished: 2026-09-16
 
@@ -33,8 +33,8 @@
 
 ## 解決方法
 
-- `src/bindings/webtransport_h3.cpp` に上限値の定数と検査関数を追加し、4 つのバインディングで呼ぶ。あわせて 4 つの `.def` の docstring に「data が 1 MiB 超の場合は ValueError」を追記する (docstring の正本は C++ 側であり、`src/webtransport/webtransport_ext/h3.pyi` は `make develop` で再生成して追跡分を更新する)
-- `src/webtransport/h3/client.py` / `server.py` の `send_stream_data` / `send_datagram` に `Raises: ValueError` を追記する (h2 の 0195 と同じ形。`h3.pyi` は生成物であり高レベル層の docstring を含まない)
-- `tests/test_webtransport_h3_input_limit.py` を追加し、4 経路それぞれで 1 MiB と 1 MiB + 1 を検証する
-- `skills/webtransport-py/SKILL.md` の `h3.Session` の節に、4 経路が 1 MiB 超で `ValueError` を送出することを追記する
-- `CHANGES.md` の `## develop` には新しいエントリを追加しない。h2 の Python 境界入力上限 (0195) の単独エントリは 0186 で「WebTransport over HTTP/3 と HTTP/2 の受信で入力検証・上限・フロー制御違反の検知が漏れていた問題を修正する (カプセルサイズ / 入力サイズ / ストリーム数 / フロー制御値の減少・逆転)」へ畳まれており、その「入力サイズ」が該当する。h3 は同じ変更の非対称を埋めるもので、利用者から見た最終差分はこの行に含まれる
+- `src/bindings/webtransport_h3.cpp` の匿名 namespace に `kMaxPythonInputBytes` (1 MiB = 1048576 バイト) と `check_python_input_size(name, size)` を追加し、`receive_stream_data` / `receive_datagram` / `send_stream_data` / `send_datagram` の 4 バインディングで `nb::bytes` から `std::vector` へコピーする前に検査した。超過は `std::invalid_argument` (nanobind の既定翻訳で `ValueError`)、判定は `>` のため 1 MiB ちょうどは通す。h2 と式・文言テンプレートを揃えた。あわせて 4 つの `.def` の docstring に「data が 1 MiB 超の場合は ValueError」を追記し、`make develop` で `src/webtransport/webtransport_ext/h3.pyi` を再生成して追跡分を更新した
+- `src/webtransport/h3/client.py` / `server.py` の `send_stream_data` / `send_datagram` に `Raises: ValueError` を追記した。実際のガードに合わせ、client は「h3 セッション生成済みで」、server は「addr が登録済みで」という条件を付けた
+- `tests/test_webtransport_h3_input_limit.py` を追加し、4 経路それぞれで 1 MiB 超が `ValueError` になり入力を C++ 側へ渡さないこと、1 MiB ちょうどが受理されることを検証した。受信 2 経路は正の表明 (戻り値、DATAGRAM イベント) も取る。あわせて終了済みセッションでも入力検査が先に走ることを固定した
+- `skills/webtransport-py/SKILL.md` の `h3.Session` の節に 4 経路の上限を追記し、受信側は Quarter Stream ID (データグラム) やストリーム種別とセッション ID (ストリーム) を含むワイヤ長で判定するため送信側より厳しくなることを明記した。高レベル `h3.Client` / `h3.Server` の送信 2 経路にも上限を記載した
+- `CHANGES.md` の `## develop` には新しいエントリを追加していない。h2 の Python 境界入力上限 (0195) の単独エントリは 0186 で「WebTransport over HTTP/3 と HTTP/2 の受信で入力検証・上限・フロー制御違反の検知が漏れていた問題を修正する (カプセルサイズ / 入力サイズ / ストリーム数 / フロー制御値の減少・逆転)」へ畳まれており、その「入力サイズ」が該当する。h3 は同じ変更の非対称を埋めるもので、利用者から見た最終差分はこの行に含まれる
