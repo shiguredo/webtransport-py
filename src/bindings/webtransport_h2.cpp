@@ -7,8 +7,7 @@
 #include "webtransport_h2.h"
 
 #include "header_convert.h"
-
-#include "header_convert.h"
+#include "python_input.h"
 
 #include <algorithm>
 #include <cctype>
@@ -56,22 +55,9 @@ constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
 // 初期フロー制御値の上限 (2^32 - 1) として使う
 constexpr uint64_t kMaxSettingsValue = (1ULL << 32) - 1;
 
-// Python から渡される単回入力の上限 (バイト)。nb::bytes から std::vector へ
-// コピーする前に検査する。Config の wt_max_capsule_payload_size とは独立の
-// 固定値で、これを超える単回入力はアプリ側で分割する前提とする
-constexpr size_t kMaxPythonInputBytes = 1024 * 1024;
-
 // 1 MiB が既定のカプセルペイロード上限と同値であることを機械的に保証する
-static_assert(kMaxPythonInputBytes ==
+static_assert(bindings::kMaxPythonInputBytes ==
               H2SessionConfig{}.wt_max_capsule_payload_size);
-
-void check_python_input_size(const char* name, size_t size) {
-  if (size > kMaxPythonInputBytes) {
-    throw std::invalid_argument(std::string(name) + " must be at most " +
-                                std::to_string(kMaxPythonInputBytes) +
-                                " bytes: got " + std::to_string(size));
-  }
-}
 
 // draft-15 Section 6.12 の Application Error Message 上限 (バイト)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
@@ -3261,7 +3247,7 @@ void bind_webtransport_h2(nb::module_& m) {
       .def(
           "receive",
           [](H2Session& s, nb::bytes data) {
-            check_python_input_size("receive data", data.size());
+            bindings::check_python_input_size("receive data", data.size());
             return s.receive(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
@@ -3316,7 +3302,8 @@ void bind_webtransport_h2(nb::module_& m) {
           "send_stream_data",
           [](H2Session& s, int32_t session_id, uint64_t stream_id,
              nb::bytes data, bool fin) {
-            check_python_input_size("send_stream_data data", data.size());
+            bindings::check_python_input_size("send_stream_data data",
+                                              data.size());
             s.send_stream_data(
                 session_id, stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -3342,7 +3329,8 @@ void bind_webtransport_h2(nb::module_& m) {
       .def(
           "send_datagram",
           [](H2Session& s, int32_t session_id, nb::bytes data) {
-            check_python_input_size("send_datagram data", data.size());
+            bindings::check_python_input_size("send_datagram data",
+                                              data.size());
             s.send_datagram(
                 session_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));

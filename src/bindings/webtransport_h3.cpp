@@ -5,6 +5,7 @@
 #include "webtransport_h3.h"
 
 #include "header_convert.h"
+#include "python_input.h"
 
 #include <algorithm>
 #include <charconv>
@@ -81,21 +82,6 @@ bool is_valid_utf8(const uint8_t* data, size_t length) {
 // WT_CLOSE_SESSION の Application Error Message の最大長 (draft-16 Section 6
 // の「its length MUST NOT exceed 1024 bytes」)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
-
-// Python から渡される単回入力の上限 (バイト)。nb::bytes から std::vector へ
-// コピーする前に検査する。h3 のアプリケーションデータはネイティブ QUIC
-// ストリームと QUIC DATAGRAM で運ぶため、h2 の既定カプセルペイロード上限の
-// ように同値の担保対象になる設定が H3SessionConfig に無い。層ごとに Python
-// 側の防御が食い違わないよう h2 の同名定数と同値に揃える
-constexpr size_t kMaxPythonInputBytes = 1024 * 1024;
-
-void check_python_input_size(const char* name, size_t size) {
-  if (size > kMaxPythonInputBytes) {
-    throw std::invalid_argument(std::string(name) + " must be at most " +
-                                std::to_string(kMaxPythonInputBytes) +
-                                " bytes: got " + std::to_string(size));
-  }
-}
 
 // 受信側の H3_MESSAGE_ERROR リセット (handle_wt_close_session_error) で使う
 // H3_MESSAGE_ERROR (nghttp3.h の公開定数)。WT_CLOSE_SESSION の Application
@@ -2726,7 +2712,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .def(
           "receive_stream_data",
           [](H3Session& s, int64_t stream_id, nb::bytes data, bool fin) {
-            check_python_input_size("receive_stream_data data", data.size());
+            bindings::check_python_input_size("receive_stream_data data",
+                                              data.size());
             return s.receive_stream_data(
                 stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -2741,7 +2728,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .def(
           "receive_datagram",
           [](H3Session& s, nb::bytes data) {
-            check_python_input_size("receive_datagram data", data.size());
+            bindings::check_python_input_size("receive_datagram data",
+                                              data.size());
             s.receive_datagram(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
@@ -2821,7 +2809,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .def(
           "send_stream_data",
           [](H3Session& s, int64_t stream_id, nb::bytes data, bool fin) {
-            check_python_input_size("send_stream_data data", data.size());
+            bindings::check_python_input_size("send_stream_data data",
+                                              data.size());
             s.send_stream_data(
                 stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -2836,7 +2825,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .def(
           "send_datagram",
           [](H3Session& s, int64_t session_id, nb::bytes data) {
-            check_python_input_size("send_datagram data", data.size());
+            bindings::check_python_input_size("send_datagram data",
+                                              data.size());
             s.send_datagram(
                 session_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));

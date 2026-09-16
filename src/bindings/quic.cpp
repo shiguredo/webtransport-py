@@ -6,6 +6,8 @@
 
 #include "quic.h"
 
+#include "python_input.h"
+
 #include <openssl/err.h>
 #include <openssl/pool.h>
 #include <openssl/rand.h>
@@ -3151,10 +3153,12 @@ void bind_quic(nb::module_& m) {
                 config.session_ticket.size());
           },
           [](QuicConfig& config, nb::bytes value) {
+            bindings::check_python_input_size("session_ticket value",
+                                              value.size());
             config.session_ticket.assign(value.c_str(),
                                          value.c_str() + value.size());
           },
-          "セッションチケット (DER bytes)")
+          "セッションチケット (DER bytes。1 MiB 超の場合は ValueError)")
       .def_prop_rw(
           "early_transport_params",
           [](const QuicConfig& config) {
@@ -3163,10 +3167,13 @@ void bind_quic(nb::module_& m) {
                              config.early_transport_params.size());
           },
           [](QuicConfig& config, nb::bytes value) {
+            bindings::check_python_input_size("early_transport_params value",
+                                              value.size());
             config.early_transport_params.assign(value.c_str(),
                                                  value.c_str() + value.size());
           },
-          "0-RTT トランスポートパラメータ (bytes)");
+          "0-RTT トランスポートパラメータ (bytes。1 MiB 超の場合は "
+          "ValueError)");
 
   // QuicEventType
   nb::enum_<QuicEventType>(quic_m, "EventType", "QUIC イベント種別")
@@ -3263,6 +3270,8 @@ void bind_quic(nb::module_& m) {
           [](const QuicConfig& config, nb::bytes initial_packet,
              std::pair<std::string, uint16_t> local_addr,
              std::pair<std::string, uint16_t> remote_addr) {
+            bindings::check_python_input_size("accept initial_packet",
+                                              initial_packet.size());
             auto conn = QuicConnection::accept(
                 config,
                 std::vector<uint8_t>(
@@ -3281,12 +3290,15 @@ void bind_quic(nb::module_& m) {
           nb::sig("def accept(config: Config, initial_packet: bytes, "
                   "local_addr: tuple[str, int], "
                   "remote_addr: tuple[str, int]) -> Connection"),
-          "初期パケットからサーバー接続を作成")
+          "初期パケットからサーバー接続を作成 (initial_packet が 1 MiB "
+          "超の場合は "
+          "ValueError)")
       .def(
           "receive",
           [](QuicConnection& self, nb::bytes data,
              std::pair<std::string, uint16_t> local_addr,
              std::pair<std::string, uint16_t> remote_addr) {
+            bindings::check_python_input_size("receive data", data.size());
             return self.receive(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
                 local_addr.first, local_addr.second, remote_addr.first,
@@ -3296,7 +3308,7 @@ void bind_quic(nb::module_& m) {
           nb::arg("remote_addr"),
           nb::sig("def receive(self, data: bytes, local_addr: tuple[str, int], "
                   "remote_addr: tuple[str, int]) -> ReceiveResult"),
-          "受信したデータを処理")
+          "受信したデータを処理 (data が 1 MiB 超の場合は ValueError)")
       .def(
           "send",
           [](QuicConnection& self) -> nb::object {
@@ -3392,6 +3404,8 @@ void bind_quic(nb::module_& m) {
           "send_stream_data",
           [](QuicConnection& self, int64_t stream_id, nb::bytes data,
              bool fin) {
+            bindings::check_python_input_size("send_stream_data data",
+                                              data.size());
             self.send_stream_data(
                 stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -3401,7 +3415,23 @@ void bind_quic(nb::module_& m) {
           nb::arg("fin") = false,
           nb::sig("def send_stream_data(self, stream_id: int, data: bytes, "
                   "fin: bool = False) -> None"),
-          "ストリームにデータを送信")
+          "ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)")
+      .def(
+          "_send_stream_data_unchecked",
+          [](QuicConnection& self, int64_t stream_id, nb::bytes data,
+             bool fin) {
+            self.send_stream_data(
+                stream_id,
+                std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
+                fin);
+          },
+          nb::lock_self(), nb::arg("stream_id"), nb::arg("data"),
+          nb::arg("fin") = false,
+          nb::sig("def _send_stream_data_unchecked(self, stream_id: int, "
+                  "data: bytes, fin: bool = False) -> None"),
+          "内部専用: 上位層が組み立てた送信データを入力サイズの検査なしで"
+          "送る (アプリ入力の上限は上位層で検査済み。nghttp3 が付けるフレーム"
+          "ヘッダの分だけアプリ入力より大きくなるため、この検査を通せない)")
       .def("close_stream", &QuicConnection::close_stream, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
@@ -3420,12 +3450,25 @@ void bind_quic(nb::module_& m) {
       .def(
           "send_datagram",
           [](QuicConnection& self, nb::bytes data) {
+            bindings::check_python_input_size("send_datagram data",
+                                              data.size());
             self.send_datagram(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
           nb::lock_self(), nb::arg("data"),
           nb::sig("def send_datagram(self, data: bytes) -> None"),
-          "Datagram を送信")
+          "Datagram を送信 (data が 1 MiB 超の場合は ValueError)")
+      .def(
+          "_send_datagram_unchecked",
+          [](QuicConnection& self, nb::bytes data) {
+            self.send_datagram(
+                std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
+          },
+          nb::lock_self(), nb::arg("data"),
+          nb::sig("def _send_datagram_unchecked(self, data: bytes) -> None"),
+          "内部専用: 上位層が組み立てたデータグラムを入力サイズの検査なしで"
+          "送る (Quarter Stream ID の分だけアプリ入力より大きくなるため、"
+          "この検査を通せない)")
       .def(
           "close", &QuicConnection::close, nb::lock_self(),
           nb::arg("error_code") = 0, nb::arg("reason") = "",

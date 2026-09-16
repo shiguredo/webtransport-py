@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport.webtransport_ext import http2 as http2_low
 
+# 低レベル API の入力上限の写し (C++ 側は bindings/python_input.h の
+# kMaxPythonInputBytes)。リクエストボディをヘッダー送出前に検査するために
+# 持つ。C++ 側の値を変える場合はここも合わせて更新すること
+_MAX_PYTHON_INPUT_BYTES = 1024 * 1024
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -189,7 +194,18 @@ class Client:
 
         Returns:
             ストリーム ID
+
+        Raises:
+            ValueError: body が 1 MiB 超の場合
         """
+        # ヘッダー送出後にボディで失敗するとストリームが未終端で残るため、
+        # 送信前に長さを検査する (低レベル API の入力上限と同値)。検査は
+        # 接続状態によらず入力の長さだけで決まる
+        if body is not None and len(body) > _MAX_PYTHON_INPUT_BYTES:
+            raise ValueError(
+                f"request body must be at most {_MAX_PYTHON_INPUT_BYTES} bytes: got {len(body)}"
+            )
+
         if self._connection is None:
             return -1
 
@@ -221,6 +237,9 @@ class Client:
             stream_id: ストリーム ID
             data: 送信データ
             eof: ストリームを終了するか
+
+        Raises:
+            ValueError: 接続済みで data が 1 MiB 超の場合
         """
         if self._connection is None:
             return

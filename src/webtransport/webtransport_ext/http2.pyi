@@ -130,7 +130,7 @@ class Connection:
         """サーバーとして接続を作成"""
 
     def receive(self, data: bytes) -> int:
-        """受信したデータを処理"""
+        """受信したデータを処理 (data が 1 MiB 超の場合は ValueError)"""
 
     def send(self) -> bytes | None:
         """送信すべきデータを取得"""
@@ -142,7 +142,7 @@ class Connection:
         """レスポンスを送信"""
 
     def send_data(self, stream_id: int, data: bytes, eof: bool = False) -> None:
-        """ストリームにデータを送信"""
+        """ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)"""
 
     def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームをリセット"""
@@ -163,7 +163,7 @@ class Connection:
         """テスト専用: 送信バッファ先頭の送信済みオフセットを返す"""
 
     def ping(self, opaque_data: bytes = b"") -> None:
-        """PING を送信 (opaque_data は 8 バイト固定)"""
+        """PING を送信 (opaque_data は 8 バイト固定。1 MiB 超の場合は ValueError)"""
 
     def terminate_session(self, error_code: int = 0, last_stream_id: int = 0) -> bool:
         """GOAWAY を送信してセッションを即時終了"""

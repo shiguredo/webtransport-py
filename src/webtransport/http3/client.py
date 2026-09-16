@@ -200,7 +200,8 @@ class Client:
             return 0
 
         for stream_id, stream_data, fin in self._http3_connection.get_streams_to_send():
-            self._quic_connection.send_stream_data(stream_id, stream_data, fin)
+            # 上位層が組み立てたワイヤデータは入力サイズの検査対象外
+            self._quic_connection._send_stream_data_unchecked(stream_id, stream_data, fin)
 
         loop = asyncio.get_running_loop()
         sent = 0
@@ -569,6 +570,9 @@ class Client:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: 接続済みで data が 1 MiB 超の場合
         """
         if self._http3_connection is None:
             return

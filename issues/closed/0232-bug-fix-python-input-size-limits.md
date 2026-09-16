@@ -1,7 +1,7 @@
 # Python 境界入力のサイズ上限が quic / http2 / http3 のバインディングに無い
 
 - Created: 2026-09-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-17
 - Branch: feature/fix-python-input-size-limits
 - Polished: 2026-09-16
 
@@ -44,5 +44,16 @@
 
 ## 解決方法
 
-- `CHANGES.md` の `## develop` にはエントリを追加しない。`## develop` は現在空で、`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
-- 共通ヘッダの新設は `0221-refactor-consolidate-duplicated-code.md` が扱う C++ 側の共通化 (`is_valid_utf8` 等) と同じ受け皿を作る作業であり、`check_python_input_size` は 0221 の対象一覧に含まれていない。どちらを先に実装しても名前空間の取り合いになるため、0221 の着手時には本 issue で作ったヘッダを拡張先として使う
+- `src/bindings/python_input.h` を新設し、`kMaxPythonInputBytes` (1 MiB) と `check_python_input_size` を `webtransport::bindings` に置いた。h2 / h3 の重複実装をここへ移し、quic 6 箇所 (`receive` / `send_stream_data` / `send_datagram` / `accept` / `session_ticket` setter / `early_transport_params` setter)、http2 3 箇所 (`receive` / `send_data` / `ping`)、http3 2 箇所 (`receive_stream_data` / `send_data`) に適用した。計 18 箇所すべてが同じ検査を通る。h2 の `static_assert` は `webtransport_h2.cpp` に残した
+- 検査は `nb::bytes` から `std::vector` へコピーする前・セッション状態のガードより前に置いた。超過は `std::invalid_argument` (Python の `ValueError`)、判定は `>` のため 1 MiB ちょうどは通す。`Http2Connection::ping` の 8 バイト固定検証 (RFC 9113 Section 6.7) は変更していない
+- h3 / http3 の内部リレー経路が壊れる問題を解消した。上位層が `nghttp3` で組み立てたワイヤ表現はフレームヘッダや Quarter Stream ID の分だけアプリ入力より大きいため、`QuicConnection::_send_stream_data_unchecked` / `_send_datagram_unchecked` (検査なし) を追加し、`http3` / `h3` の client / server の 7 箇所を切り替えた。アプリ入力の検査は上位層 (`webtransport_h3` / `http3` バインディング) が担う
+- `quic.Client.register_early_data` は登録時に長さを検査するようにした。送出は `connect()` 中の `_flush_early_data` で行われるため、登録時に検査しないと接続確立処理の途中で未文書の `ValueError` になっていた
+- `http2.Client.request` の `body` も、ヘッダーを送出する前に長さを検査するようにした。ヘッダー送出後に失敗するとストリームが未終端で残るため
+- docstring を追記した。低レベル API の 4 経路 (quic) / 3 経路 (http2) / 2 経路 (http3) と `accept` / Config setter、高レベル `quic.Client` / `quic.Server` / `http2.Client` / `http2.Server` / `ResponseWriter` / `http3.Client` / `http3.Server` の送信系、`quic.Client.register_early_data` / `http2.Client.request`。型スタブ (`quic.pyi` / `http2.pyi` / `http3.pyi`) を `make develop` で再生成した
+- `tests/test_python_input_size_limits.py` を追加した。11 箇所の拒否側、`ping` 以外の 10 箇所の受理側、`ping` の 8 バイト、状態ガードより先に検査が走ること、`accept` の 1 MiB ちょうどの Initial パケット、`http2.Client.request` の body、`register_early_data` を検証する。加えて内部リレーの退行を検出するため、`http3.Client` / `http3.Server` / `h3.Client` で 1 MiB ちょうどを実ソケット越しに送って相手が全量を受信することを検証するテストを入れた
+- `tests/test_quic_recv_flow_control.py` と `tests/test_e2e_http2.py` は 1 回の送信で 1 MiB を超えていたため、上限未満のチャンクに分割する形へ変更した (`test_e2e_http2.py` は END_STREAM の到達も表明するようにした)
+- `skills/webtransport-py/SKILL.md` に、Sans I/O の quic / http2 / http3 節、Config 節、高レベル quic / http2 / http3 節の上限を追記した
+- `src/bindings/webtransport_h2.cpp` の `#include "header_convert.h"` の重複を解消した
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`## develop` は現在空で、`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 全 1175 テストが通過することを確認した
+- `src/bindings/python_input.h` は `0221-refactor-consolidate-duplicated-code.md` が扱う C++ 側の共通化 (`is_valid_utf8` 等) と同じ受け皿である。`check_python_input_size` は 0221 の対象一覧に含まれていないため、0221 の着手時には本 issue で作ったヘッダを拡張先として使う

@@ -245,6 +245,8 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 
 `quic.Server.__init__(host, port, certfile=None, keyfile=None, alpn_protocols=None, idle_timeout_ns=30_000_000_000)`。`alpn_protocols` の既定は `["h3"]`。
 
+`quic.Client` / `quic.Server` の `send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。
+
 ```python
 # サーバーコールバック
 # on_handshake_completed(addr: tuple[str, int])
@@ -299,7 +301,7 @@ async def migrate() -> bool  # Connection Migration
 def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
 async def close() -> int  # 接続を閉じ、close() 中に送出できたパケット数を返す (未接続時は 0)
-def register_early_data(data: bytes, fin: bool = False) -> None  # 0-RTT として送信するデータを登録 (connect() の前のみ。登録ごとに双方向ストリームを 1 本開く)
+def register_early_data(data: bytes, fin: bool = False) -> None  # 0-RTT として送信するデータを登録 (connect() の前のみ。1 MiB 超は ValueError。登録ごとに双方向ストリームを 1 本開く)
 def export_session_ticket() -> bytes
 def export_0rtt_transport_params() -> bytes
 def is_early_data_accepted() -> bool
@@ -352,6 +354,7 @@ def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開�
 ```
 
 `request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。
+`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。
 
 ### HTTP/2 (`webtransport.http2`)
 
@@ -372,11 +375,15 @@ async def drain() -> None  # 送信待ちフレームを空になるまで送出
 
 `http2.Client.__init__(host, port=443, verify_peer=True)`。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形だが `body: bytes | None = None` を持ち、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
 
+`http2.Client` / `http2.Server` / `ResponseWriter` の `send_data` は data が 1 MiB 超なら `ValueError` を送出する (`http2.Client` は接続が未確立のときは送信しないため例外にならない)。`http2.Client.request` の `body` も 1 MiB 超なら、ヘッダーを送出する前に `ValueError` を送出する。
+
 ## Sans I/O API
 
 I/O を一切行わず、「受信バイト列を入れる → イベントを取り出す → 送信バイト列を取り出す」の 3 段で回す。asyncio 以外のイベントループ (スレッド、trio、独自ループなど) と組み合わせるときに使う。
 
 ### QUIC (`quic.Connection`)
+
+`receive` / `send_stream_data` / `send_datagram` / `accept` は、生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。`Config` の `session_ticket` / `early_transport_params` も同じ上限を持つ。
 
 ```python
 # 生成
@@ -568,6 +575,8 @@ def next_event() -> Event | None
 
 `h3.Session` と同様に QUIC 層と `receive_stream_data()` / `get_streams_to_send()` で結線する。
 
+`receive_stream_data` / `send_data` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。
+
 ```python
 Connection.create_client(config: Config) -> Connection
 Connection.create_server(config: Config) -> Connection
@@ -616,6 +625,8 @@ def next_event() -> Event | None
 ### HTTP/2 (`http2.Connection`)
 
 `receive(data: bytes) -> int` / `send() -> bytes | None` / `want_write() -> bool` の TCP バイトストリーム型。
+
+`receive` / `send_data` / `ping` は生の入力が 1 MiB 超なら `ValueError` を送出する (`ping` の `opaque_data` は 8 バイト固定という別の検証も持つ)。
 
 ```python
 Connection.create_client(config: Config) -> Connection
@@ -694,7 +705,7 @@ def get_send_credit(session_id: int) -> int  # セッションレベルの送信
 
 Sans I/O API はモジュールごとの `Config` で設定する。主要なもの:
 
-- `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `max_stream_data_bidi_local=262144` / `max_stream_data_bidi_remote=262144` / `max_stream_data_uni=262144` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `max_datagram_frame_size=65536` / `enable_reset_stream_at=True` / `enable_early_data=True` / `alpn_protocols=[]` / `server_name=""` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None` / `session_ticket=b""` / `early_transport_params=b""`
+- `quic.Config`: `max_streams_bidi=100` / `max_streams_uni=100` / `max_data=1048576` / `max_stream_data_bidi_local=262144` / `max_stream_data_bidi_remote=262144` / `max_stream_data_uni=262144` / `idle_timeout_ns=30_000_000_000` / `verify_peer=False` / `enable_datagram=True` / `max_datagram_frame_size=65536` / `enable_reset_stream_at=True` / `enable_early_data=True` / `alpn_protocols=[]` / `server_name=""` / `cert_file=""` / `key_file=""` / `ca_file=""` / `verify_callback=None` / `session_ticket=b""` / `early_transport_params=b""` (`session_ticket` / `early_transport_params` は 1 MiB 超を設定すると `ValueError`)
 - `http3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `enable_webtransport=False` / `enable_h3_datagram=False` / `is_server=False`
 - `h3.Config`: `max_field_section_size=65536` / `qpack_max_dtable_capacity=4096` / `qpack_blocked_streams=100` / `wt_pre_accept_buffer_limit=65536` / `is_server=False` / `allowed_origins=[]`
 - `http2.Config`: `initial_window_size=65535` / `max_concurrent_streams=100` / `max_frame_size=16384` / `max_header_list_size=65536` / `is_server=False` / `no_rfc7540_priorities=True`

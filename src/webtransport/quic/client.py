@@ -18,6 +18,11 @@ from webtransport._common import (
 )
 from webtransport.webtransport_ext import quic as quic_low
 
+# 低レベル API の入力上限の写し (C++ 側は bindings/python_input.h の
+# kMaxPythonInputBytes)。early data を connect() 前に検査するために持つ。
+# C++ 側の値を変える場合はここも合わせて更新すること
+_MAX_PYTHON_INPUT_BYTES = 1024 * 1024
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -271,8 +276,15 @@ class Client:
             fin: ストリームを終了するか
 
         Raises:
+            ValueError: data が 1 MiB 超の場合
             RuntimeError: connect() の呼び出し後に登録しようとした場合
         """
+        # 送出は connect() 中の _flush_early_data で行われるため、登録時に
+        # 検査しないと接続確立処理の途中で失敗する
+        if len(data) > _MAX_PYTHON_INPUT_BYTES:
+            raise ValueError(
+                f"early data must be at most {_MAX_PYTHON_INPUT_BYTES} bytes: got {len(data)}"
+            )
         if self._recv_task is not None or self._connecting:
             raise RuntimeError("early data must be registered before connect()")
         self._early_data_queue.append((data, fin))
@@ -908,6 +920,9 @@ class Client:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: 接続済みで data が 1 MiB 超の場合
         """
         if self._connection is None:
             return
@@ -920,6 +935,9 @@ class Client:
 
         Args:
             data: 送信データ
+
+        Raises:
+            ValueError: 接続済みで data が 1 MiB 超の場合
         """
         if self._connection is None:
             return

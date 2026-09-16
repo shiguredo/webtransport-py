@@ -526,6 +526,9 @@ class Server:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: addr が登録済みで data が 1 MiB 超の場合
         """
         connection = self._connections.get(addr)
         if connection is None:
@@ -540,6 +543,9 @@ class Server:
         Args:
             addr: クライアントアドレス
             data: 送信データ
+
+        Raises:
+            ValueError: addr が登録済みで data が 1 MiB 超の場合
         """
         connection = self._connections.get(addr)
         if connection is None:
