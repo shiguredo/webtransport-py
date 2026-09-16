@@ -112,10 +112,10 @@ class Session:
         """サーバーセッションを作成"""
 
     def receive_stream_data(self, stream_id: int, data: bytes, fin: bool = False) -> int:
-        """QUIC ストリームからデータを受信"""
+        """QUIC ストリームからデータを受信 (data が 1 MiB 超の場合は ValueError)"""
 
     def receive_datagram(self, data: bytes) -> None:
-        """QUIC データグラムを受信"""
+        """QUIC データグラムを受信 (data が 1 MiB 超の場合は ValueError)"""
 
     def get_streams_to_send(self) -> list[tuple[int, bytes, bool]]:
         """送信すべきストリームデータを取得"""
@@ -147,10 +147,10 @@ class Session:
         """WebTransport ストリームを開く"""
 
     def send_stream_data(self, stream_id: int, data: bytes, fin: bool = False) -> None:
-        """WebTransport ストリームにデータを送信"""
+        """WebTransport ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)"""
 
     def send_datagram(self, session_id: int, data: bytes) -> None:
-        """WebTransport データグラムを送信"""
+        """WebTransport データグラムを送信 (data が 1 MiB 超の場合は ValueError)"""
 
     def close_stream(self, stream_id: int, error_code: int = 0) -> int:
         """

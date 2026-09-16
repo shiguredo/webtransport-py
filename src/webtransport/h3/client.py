@@ -756,6 +756,9 @@ class Client:
             stream_id: ストリーム ID
             data: 送信データ
             fin: ストリームを終了するか
+
+        Raises:
+            ValueError: h3 セッション生成済みで data が 1 MiB 超の場合
         """
         if self._webtransport_session is None:
             return
@@ -771,6 +774,9 @@ class Client:
 
         Args:
             data: 送信データ
+
+        Raises:
+            ValueError: h3 セッション生成済みで data が 1 MiB 超の場合
         """
         if self._webtransport_session is None:
             return
