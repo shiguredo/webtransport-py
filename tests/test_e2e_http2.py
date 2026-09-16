@@ -706,6 +706,7 @@ async def test_server_large_response_throughput(test_certificates):
     size = 4 * 1024 * 1024
     body = bytes(range(256)) * (size // 256)
     client_received = 0
+    stream_ended = False
     completed = asyncio.Event()
 
     server = Server(
@@ -717,7 +718,13 @@ async def test_server_large_response_throughput(test_certificates):
 
     async def on_request(stream_id, headers, response_writer):
         await response_writer.send_headers(stream_id, [(":status", "200")])
-        await response_writer.send_data(stream_id, body, end_stream=True)
+        # 単回の送信には 1 MiB の入力上限があるため、上限未満のチャンクに
+        # 分けて送る (最後のチャンクで end_stream を立てる)
+        chunk_size = 256 * 1024
+        for offset in range(0, len(body), chunk_size):
+            chunk = body[offset : offset + chunk_size]
+            is_last = offset + chunk_size >= len(body)
+            await response_writer.send_data(stream_id, chunk, end_stream=is_last)
 
     server.on_request(on_request)
 
@@ -736,7 +743,13 @@ async def test_server_large_response_throughput(test_certificates):
         if client_received >= size:
             completed.set()
 
+    async def on_client_stream_end(stream_id):
+        # 全チャンクを送った後に END_STREAM が届いたことを記録する
+        nonlocal stream_ended
+        stream_ended = True
+
     client.on_data(on_client_data)
+    client.on_stream_end(on_client_stream_end)
 
     await client.connect()
 
@@ -757,6 +770,8 @@ async def test_server_large_response_throughput(test_certificates):
         elapsed = time.monotonic() - started
 
         assert client_received == size
+        # 最後のチャンクの END_STREAM が届いたことまで表明する
+        assert stream_ended is True
         # drain 化前は 13 秒以上かかっていた。CI の負荷変動を考慮して 5 秒を
         # 上限にする (実測は 1 秒未満)
         assert elapsed < 5.0, f"large response took {elapsed:.2f}s"

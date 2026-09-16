@@ -7,6 +7,7 @@
 #include "http2.h"
 
 #include "header_convert.h"
+#include "python_input.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -1098,12 +1099,13 @@ void bind_http2(nb::module_& m) {
       .def(
           "receive",
           [](Http2Connection& self, nb::bytes data) {
+            bindings::check_python_input_size("receive data", data.size());
             return self.receive(
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
           },
           nb::lock_self(), nb::arg("data"),
           nb::sig("def receive(self, data: bytes) -> int"),
-          "受信したデータを処理")
+          "受信したデータを処理 (data が 1 MiB 超の場合は ValueError)")
       .def(
           "send",
           [](Http2Connection& self) -> nb::object {
@@ -1130,6 +1132,7 @@ void bind_http2(nb::module_& m) {
           "send_data",
           [](Http2Connection& self, int32_t stream_id, nb::bytes data,
              bool eof) {
+            bindings::check_python_input_size("send_data data", data.size());
             self.send_data(
                 stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -1139,7 +1142,7 @@ void bind_http2(nb::module_& m) {
           nb::arg("eof") = false,
           nb::sig("def send_data(self, stream_id: int, data: bytes, eof: bool "
                   "= False) -> None"),
-          "ストリームにデータを送信")
+          "ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)")
       .def("reset_stream", &Http2Connection::reset_stream, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
@@ -1174,6 +1177,8 @@ void bind_http2(nb::module_& m) {
       .def(
           "ping",
           [](Http2Connection& self, nb::bytes opaque_data) {
+            bindings::check_python_input_size("ping opaque_data",
+                                              opaque_data.size());
             // bytes は std::vector<uint8_t> の型キャスト対象外 (nanobind は
             // bytes / str をシーケンスとして受け付けない) ため明示変換する
             self.ping(std::vector<uint8_t>(
@@ -1181,7 +1186,8 @@ void bind_http2(nb::module_& m) {
           },
           nb::lock_self(), nb::arg("opaque_data") = nb::bytes("", 0),
           nb::sig("def ping(self, opaque_data: bytes = b'') -> None"),
-          "PING を送信 (opaque_data は 8 バイト固定)")
+          "PING を送信 (opaque_data は 8 バイト固定。1 MiB 超の場合は "
+          "ValueError)")
       .def("terminate_session", &Http2Connection::terminate_session,
            nb::lock_self(), nb::arg("error_code") = 0,
            nb::arg("last_stream_id") = 0,

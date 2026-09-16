@@ -379,10 +379,12 @@ class Server:
             return
 
         for stream_id, stream_data, fin in client.webtransport_session.get_streams_to_send():
-            client.quic_connection.send_stream_data(stream_id, stream_data, fin)
+            # 上位層が組み立てたワイヤデータは入力サイズの検査対象外
+            client.quic_connection._send_stream_data_unchecked(stream_id, stream_data, fin)
 
         for datagram in client.webtransport_session.get_datagrams_to_send():
-            client.quic_connection.send_datagram(datagram)
+            # 上位層が組み立てたワイヤデータは入力サイズの検査対象外
+            client.quic_connection._send_datagram_unchecked(datagram)
 
         loop = asyncio.get_running_loop()
         while True:
@@ -555,7 +557,7 @@ class Server:
                 # ハンドシェイクを完了させる。応答しないとピア側はストリームの
                 # クローズが完了せず、接続終了 (browser.close 等) がハングする
                 if client.quic_connection is not None:
-                    client.quic_connection.send_stream_data(
+                    client.quic_connection._send_stream_data_unchecked(
                         webtransport_event.session_id,
                         b"",
                         fin=True,

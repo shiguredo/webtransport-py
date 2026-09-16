@@ -119,13 +119,13 @@ class Config:
     def enable_early_data(self, arg: bool, /) -> None: ...
     @property
     def session_ticket(self) -> bytes:
-        """セッションチケット (DER bytes)"""
+        """セッションチケット (DER bytes。1 MiB 超の場合は ValueError)"""
 
     @session_ticket.setter
     def session_ticket(self, arg: bytes, /) -> None: ...
     @property
     def early_transport_params(self) -> bytes:
-        """0-RTT トランスポートパラメータ (bytes)"""
+        """0-RTT トランスポートパラメータ (bytes。1 MiB 超の場合は ValueError)"""
 
     @early_transport_params.setter
     def early_transport_params(self, arg: bytes, /) -> None: ...
@@ -242,12 +242,12 @@ class Connection:
         local_addr: tuple[str, int],
         remote_addr: tuple[str, int],
     ) -> Connection:
-        """初期パケットからサーバー接続を作成"""
+        """初期パケットからサーバー接続を作成 (initial_packet が 1 MiB 超の場合は ValueError)"""
 
     def receive(
         self, data: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]
     ) -> ReceiveResult:
-        """受信したデータを処理"""
+        """受信したデータを処理 (data が 1 MiB 超の場合は ValueError)"""
 
     def send(self) -> Packet | None:
         """送信すべきデータを取得"""
@@ -303,7 +303,12 @@ class Connection:
         """単方向ストリーム上限を拡張"""
 
     def send_stream_data(self, stream_id: int, data: bytes, fin: bool = False) -> None:
-        """ストリームにデータを送信"""
+        """ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)"""
+
+    def _send_stream_data_unchecked(self, stream_id: int, data: bytes, fin: bool = False) -> None:
+        """
+        内部専用: 上位層が組み立てた送信データを入力サイズの検査なしで送る (アプリ入力の上限は上位層で検査済み。nghttp3 が付けるフレームヘッダの分だけアプリ入力より大きくなるため、この検査を通せない)
+        """
 
     def close_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームを閉じる (RESET_STREAM + STOP_SENDING)"""
@@ -315,7 +320,12 @@ class Connection:
         """RESET_STREAM を送出する"""
 
     def send_datagram(self, data: bytes) -> None:
-        """Datagram を送信"""
+        """Datagram を送信 (data が 1 MiB 超の場合は ValueError)"""
+
+    def _send_datagram_unchecked(self, data: bytes) -> None:
+        """
+        内部専用: 上位層が組み立てたデータグラムを入力サイズの検査なしで送る (Quarter Stream ID の分だけアプリ入力より大きくなるため、この検査を通せない)
+        """
 
     def close(self, error_code: int = 0, reason: str = "") -> None:
         """接続を閉じる"""

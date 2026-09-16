@@ -129,8 +129,11 @@ def test_recv_flow_control_reopens_stream_and_connection():
     # ストリーム (256 KiB) とコネクション (1 MiB) の初期受信ウィンドウを
     # 両方超える 1.2 MiB を送信する
     # (MAX_STREAM_DATA / MAX_DATA の送出閾値 (window/4) も超える)
+    # 単回の送信には 1 MiB の入力上限があるため、上限未満のチャンクに分ける
     payload = b"a" * (1200 * 1024)
-    client.send_stream_data(stream_id, payload)
+    chunk_size = 256 * 1024
+    for offset in range(0, len(payload), chunk_size):
+        client.send_stream_data(stream_id, payload[offset : offset + chunk_size])
 
     server_received = exchange_until_all_received(client, server, len(payload))
 

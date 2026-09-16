@@ -108,7 +108,7 @@ class Connection:
         """サーバーとして接続を作成"""
 
     def receive_stream_data(self, stream_id: int, data: bytes, fin: bool = False) -> int:
-        """QUIC ストリームからデータを受信"""
+        """QUIC ストリームからデータを受信 (data が 1 MiB 超の場合は ValueError)"""
 
     def get_streams_to_send(self) -> list[tuple[int, bytes, bool]]:
         """送信すべきストリームデータを取得"""
@@ -129,7 +129,7 @@ class Connection:
         """レスポンスを送信"""
 
     def send_data(self, stream_id: int, data: bytes, fin: bool = False) -> None:
-        """ストリームにデータを送信"""
+        """ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)"""
 
     def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームをリセット"""

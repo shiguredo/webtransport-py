@@ -41,7 +41,11 @@ class ResponseWriter:
         data: bytes,
         end_stream: bool = False,
     ) -> None:
-        """データを送信する"""
+        """データを送信する
+
+        Raises:
+            ValueError: data が 1 MiB 超の場合
+        """
         self._connection.send_data(stream_id, data, end_stream)
         await self.drain()
 
@@ -308,6 +312,9 @@ class Server:
             data: 送信データ
             eof: ストリームを終了するか
             connection: HTTP/2 接続
+
+        Raises:
+            ValueError: data が 1 MiB 超の場合
         """
         connection.send_data(stream_id, data, eof)
         while True:

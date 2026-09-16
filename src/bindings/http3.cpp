@@ -7,6 +7,7 @@
 #include "http3.h"
 
 #include "header_convert.h"
+#include "python_input.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -1294,6 +1295,8 @@ void bind_http3(nb::module_& m) {
           "receive_stream_data",
           [](Http3Connection& self, int64_t stream_id, nb::bytes data,
              bool fin) {
+            bindings::check_python_input_size("receive_stream_data data",
+                                              data.size());
             return self.receive_stream_data(
                 stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -1303,7 +1306,8 @@ void bind_http3(nb::module_& m) {
           nb::arg("fin") = false,
           nb::sig("def receive_stream_data(self, stream_id: int, data: bytes, "
                   "fin: bool = False) -> int"),
-          "QUIC ストリームからデータを受信")
+          "QUIC ストリームからデータを受信 (data が 1 MiB 超の場合は "
+          "ValueError)")
       .def(
           "get_streams_to_send",
           [](Http3Connection& self) {
@@ -1352,6 +1356,7 @@ void bind_http3(nb::module_& m) {
           "send_data",
           [](Http3Connection& self, int64_t stream_id, nb::bytes data,
              bool fin) {
+            bindings::check_python_input_size("send_data data", data.size());
             self.send_data(
                 stream_id,
                 std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()),
@@ -1361,7 +1366,7 @@ void bind_http3(nb::module_& m) {
           nb::arg("fin") = false,
           nb::sig("def send_data(self, stream_id: int, data: bytes, fin: bool "
                   "= False) -> None"),
-          "ストリームにデータを送信")
+          "ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)")
       .def("reset_stream", &Http3Connection::reset_stream, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "

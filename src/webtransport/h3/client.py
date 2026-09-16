@@ -241,10 +241,12 @@ class Client:
             return 0
 
         for stream_id, stream_data, fin in self._webtransport_session.get_streams_to_send():
-            self._quic_connection.send_stream_data(stream_id, stream_data, fin)
+            # 上位層が組み立てたワイヤデータは入力サイズの検査対象外
+            self._quic_connection._send_stream_data_unchecked(stream_id, stream_data, fin)
 
         for datagram in self._webtransport_session.get_datagrams_to_send():
-            self._quic_connection.send_datagram(datagram)
+            # 上位層が組み立てたワイヤデータは入力サイズの検査対象外
+            self._quic_connection._send_datagram_unchecked(datagram)
 
         loop = asyncio.get_running_loop()
         sent = 0
