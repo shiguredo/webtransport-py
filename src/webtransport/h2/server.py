@@ -116,7 +116,8 @@ class SessionWriter:
 
         受信側の停止を要求し、送信側が Ready / Send 状態ならピアが
         WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-15 Section 6.3 /
-        RFC 9000 Section 3.5)。
+        RFC 9000 Section 3.5)。本メソッドの送出後は同じストリームへ
+        WT_MAX_STREAM_DATA を送出しない (Section 6.6 の MUST NOT)。
 
         Args:
             stream_id: ストリーム ID

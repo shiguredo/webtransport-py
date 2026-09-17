@@ -309,6 +309,15 @@ def _encode_wt_stream_data(session_id: int, payload: bytes) -> bytes:
     return b"\x40\x41" + _encode_varint(session_id) + payload
 
 
+def _encode_wt_max_stream_data_capsule(stream_id: int, max_stream_data: int) -> bytes:
+    """WebTransport over HTTP/2 の WT_MAX_STREAM_DATA カプセルを組み立てる
+
+    形式は Type 0x190B4D3E (draft-ietf-webtrans-http2-15 Section 6.6) +
+    Length + Stream ID (可変長整数) + Maximum Stream Data (可変長整数)。
+    """
+    return _encode_capsule(0x190B4D3E, _encode_varint(stream_id) + _encode_varint(max_stream_data))
+
+
 def _setup_connect(
     client: h3.Session,
     server: h3.Session,

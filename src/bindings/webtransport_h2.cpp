@@ -109,10 +109,14 @@ constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
 // received_stop_sending_stream_ids) の固定上限。ピアが送る stream_id
 // ごとにコンテナが無制限に増えるメモリ DoS を防ぐ安全弁。上限超過の
 // 新規 ID は保持しない (既知の制約: 上限超過 ID では、未作成ストリーム
-// への WT_MAX_STREAM_DATA の事前クレジット広告と、未作成ストリームへの
-// 二重 WT_STOP_SENDING 検出が対象外になる)。実在ストリームへの
-// イベント通知・クレジット反映・二重受信検出は上限に関係なく維持する
-// (二重受信検出は WtStreamInfo のフラグで実現する)
+// への WT_MAX_STREAM_DATA の事前クレジット広告、未作成ストリームへの
+// 二重 WT_STOP_SENDING 検出、未作成ストリームへの WT_STOP_SENDING 後の
+// WT_MAX_STREAM_DATA 検出が対象外になる)。実在ストリームへの
+// イベント通知・クレジット反映・二重受信検出はエントリが存在する間は
+// 上限に関係なく維持する (二重受信検出は WtStreamInfo のフラグで実現する)。
+// ただし WtStreamInfo はストリームエントリの解放で消えるため、上限超過
+// かつ解放後は二重受信検出と WT_STOP_SENDING 後の WT_MAX_STREAM_DATA 検出が
+// どちらも失われる
 constexpr size_t kMaxReceivedMapEntries = 4096;
 
 // draft-15 Section 6.7: 同一タイプ・方向のより低い ID も暗黙オープン。
@@ -124,6 +128,21 @@ bool incoming_stream_exceeds_limit(const WtSessionInfo& wt_session,
                                    ? wt_session.max_streams_uni_remote
                                    : wt_session.max_streams_bidi_remote;
   return (stream_id >> 2) + 1 > max_streams;
+}
+
+// WT_STOP_SENDING を受信済みか (draft-15 Section 6.3 / 6.6)。セッション単位の
+// 集合が未作成・解放後のストリームを担い、実在ストリームのフラグが集合の
+// 安全弁上限に達した場合のストリームを担う (上限超過の未作成 ID は集合に
+// 残らないため対象外)。二重受信検出と停止状態の判定で同じ条件を使うため
+// 1 箇所に集約する
+bool has_received_stop_sending(const WtSessionInfo& wt_session,
+                               uint64_t stream_id) {
+  if (wt_session.received_stop_sending_stream_ids.contains(stream_id)) {
+    return true;
+  }
+  auto stream_it = wt_session.streams.find(stream_id);
+  return stream_it != wt_session.streams.end() &&
+         stream_it->second.stop_sending_received;
 }
 
 // draft-15 Section 6.12 の "valid UTF-8" を RFC 3629 の well-formed UTF-8
@@ -717,12 +736,10 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   }
 
   // draft-15 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING は
-  // WT_STREAM_STATE_ERROR。実在ストリームは WtStreamInfo のフラグでも
-  // 記録し、セッション集合の安全弁上限に達しても検出を維持する
+  // WT_STREAM_STATE_ERROR (判定条件の内訳は has_received_stop_sending 参照)
   auto stream_it = wt_session->streams.find(stream_id);
   const bool known_stream = stream_it != wt_session->streams.end();
-  if (wt_session->received_stop_sending_stream_ids.contains(stream_id) ||
-      (known_stream && stream_it->second.stop_sending_received)) {
+  if (has_received_stop_sending(*wt_session, stream_id)) {
     report_stream_state_error(session_id, stream_id,
                               "WT_STOP_SENDING received twice");
     return;
@@ -823,11 +840,28 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   }
 
   auto stream_it = wt_session->streams.find(stream_id);
+  const bool known_stream = stream_it != wt_session->streams.end();
+
+  // draft-15 Section 6.6: WT_STOP_SENDING の後に同じストリームへ届いた
+  // WT_MAX_STREAM_DATA は WT_STREAM_STATE_ERROR。判定条件は
+  // handle_wt_stop_sending の二重受信検出と同じ (has_received_stop_sending)。
+  // 未作成・解放後のストリームもセッション単位の集合で検出する。減少値
+  // 検査より前に置いて WT_STREAM_STATE_ERROR を報告する: draft は減少値の
+  // MUST (同 Section の
+  // WT_FLOW_CONTROL_ERROR) と本 MUST が同時に成立する場合の優先を定めて
+  // おらず、本判定を先に置くのは実装の選択である
+  if (has_received_stop_sending(*wt_session, stream_id)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_MAX_STREAM_DATA received after WT_STOP_SENDING");
+    return;
+  }
+
   std::optional<uint64_t> previous;
   auto capsule_it = wt_session->received_max_stream_data_by_id.find(stream_id);
   if (capsule_it != wt_session->received_max_stream_data_by_id.end()) {
     previous = capsule_it->second;
-  } else if (stream_it != wt_session->streams.end()) {
+  } else if (known_stream) {
     // 実在ストリームは直前のクレジットを前回値とし、コンテナの安全弁
     // 上限で保持しなかった場合も減少検出 (draft-15 Section 6.6) を維持する
     previous = stream_it->second.max_stream_data_local;
@@ -855,7 +889,7 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
           kMaxReceivedMapEntries) {
     wt_session->received_max_stream_data_by_id[stream_id] = max_data;
   }
-  if (stream_it != wt_session->streams.end()) {
+  if (known_stream) {
     if (max_data > stream_it->second.max_stream_data_local) {
       stream_it->second.max_stream_data_local = max_data;
       // 制限が増えたら BLOCKED 抑止を戻し、保留送信を送出する
@@ -1433,6 +1467,12 @@ void H2Session::maybe_send_max_stream_data(int32_t session_id,
                                            uint64_t stream_id) {
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+  // draft-15 Section 6.6: WT_STOP_SENDING を送出したストリームへは
+  // WT_MAX_STREAM_DATA を送出しない (MUST NOT)。記録の寿命は
+  // WtSessionInfo::sent_stop_sending_stream_ids の宣言コメントを参照
+  if (wt_session->sent_stop_sending_stream_ids.contains(stream_id)) {
     return;
   }
   auto stream_it = wt_session->streams.find(stream_id);
@@ -2375,6 +2415,11 @@ void H2Session::stop_sending(int32_t session_id,
   if (wt_session->streams.find(stream_id) == wt_session->streams.end()) {
     return;
   }
+
+  // draft-15 Section 6.6: WT_STOP_SENDING を送出したストリームへは以後
+  // WT_MAX_STREAM_DATA を送出しない (MUST NOT)。送出済みを記録して
+  // maybe_send_max_stream_data で抑止する
+  wt_session->sent_stop_sending_stream_ids.insert(stream_id);
 
   // WT_STOP_SENDING capsule: Stream ID + Error Code
   std::vector<uint8_t> payload;

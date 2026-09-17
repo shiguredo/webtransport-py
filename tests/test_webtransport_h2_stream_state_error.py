@@ -1,7 +1,8 @@
 """WebTransport over HTTP/2 のストリーム状態検証テスト
 
 不正な状態のストリームへの WT_STREAM / WT_RESET_STREAM capsule 受信と、
-同一ストリームへの 2 回目の WT_STOP_SENDING 受信を検知して
+同一ストリームへの 2 回目の WT_STOP_SENDING 受信、および WT_STOP_SENDING
+受信後に同じストリームへ届いた WT_MAX_STREAM_DATA の受信を検知して
 WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
 MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ注入で再現する
 (公開 API では非コンプライアントなカプセルを送出する手段が存在しないため)。
@@ -18,6 +19,7 @@ from conftest import (
     _drain_events,
     _encode_data_frame,
     _encode_varint,
+    _encode_wt_max_stream_data_capsule,
     _h2_pump,
 )
 
@@ -86,6 +88,7 @@ _WT_RESET_TERMINAL = "WT_RESET_STREAM received for stream in terminal state"
 _WT_RESET_MISMATCH = "WT_RESET_STREAM reliable size mismatch"
 _WT_RESET_UNKNOWN = "WT_RESET_STREAM non-zero reliable size, unknown stream"
 _WT_STOP_SENDING_DUPLICATE = "WT_STOP_SENDING received twice"
+_WT_MAX_STREAM_DATA_AFTER_STOP_SENDING = "WT_MAX_STREAM_DATA received after WT_STOP_SENDING"
 
 
 def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
@@ -706,4 +709,157 @@ def test_wt_stop_sending_different_streams_each_deliver_once() -> None:
         event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
     ]
     assert [(event.stream_id, event.error_code) for event in stop_events] == [(0, 1), (4, 2)]
+    _assert_no_state_error_sent(server)
+
+
+def test_wt_max_stream_data_after_stop_sending_sends_state_error() -> None:
+    """WT_STOP_SENDING 受信後の WT_MAX_STREAM_DATA 受信で WT_STREAM_STATE_ERROR が送出されることを確認
+
+    draft-15 Section 6.6 の MUST「A stream error (Section 3.4) of type
+    WT_STREAM_STATE_ERROR MUST be sent if a WT_MAX_STREAM_DATA capsule is
+    received after a WT_STOP_SENDING capsule for the same stream」を検証する。
+    修正前は停止状態を参照していなかったため、停止後のクレジットがそのまま
+    受理されていた。注入する値 1024 は初期広告値 (既定 256 KiB) より小さい
+    ため減少値検査にも掛かるが、停止状態の判定を先に置くため
+    WT_STREAM_STATE_ERROR が優先されることも同時に確認する (draft は 2 つの
+    MUST が同時に成立する場合の優先を定めておらず、これは実装の選択である)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピアが WT_STREAM を送ってストリームを作る
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"abc")))
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # ピアが WT_STOP_SENDING を送る (1 回目は StopSending イベントのみ)
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 42)))
+    assert ret > 0, "WT_STOP_SENDING カプセルの注入に失敗しました"
+    stop_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
+    ]
+    assert len(stop_events) == 1
+
+    # 停止済みストリームへの WT_MAX_STREAM_DATA は stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 1024))
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_MAX_STREAM_DATA_AFTER_STOP_SENDING)
+
+    # エラー検知側に Error イベント (0x51) が通知される
+    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
+    assert error_events[0].stream_id == 0
+
+
+def test_wt_max_stream_data_after_stop_sending_unknown_stream_sends_state_error() -> None:
+    """未作成ストリームへの WT_STOP_SENDING 受信後の WT_MAX_STREAM_DATA でも検出することを確認
+
+    停止状態はセッション単位の集合でも保持するため、ストリームエントリが
+    無い Stream ID (ピアが任意に選べる) への WT_MAX_STREAM_DATA でも検出
+    できる。あわせて、この経路がストリームを暗黙作成しないことも確認する
+    (get_stream_ids に偽のストリームを露出させない)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    unknown_stream_id = 99
+
+    # 未作成ストリームへの WT_STOP_SENDING (1 回目はイベントのみ)
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stop_sending_capsule(unknown_stream_id, 1))
+    )
+    assert ret > 0, "WT_STOP_SENDING カプセルの注入に失敗しました"
+    stop_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.STOP_SENDING
+    ]
+    assert len(stop_events) == 1
+
+    # 停止済み (未作成) ストリームへの WT_MAX_STREAM_DATA も stream error になる
+    # (初期広告値より大きい増加値を使い、減少値検査とは独立に検出する)
+    ret = server.receive(
+        _encode_data_frame(
+            session_id, _encode_wt_max_stream_data_capsule(unknown_stream_id, 524288)
+        )
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_MAX_STREAM_DATA_AFTER_STOP_SENDING)
+    assert server.get_stream_ids(session_id) == []
+
+
+def test_wt_max_stream_data_after_stop_sending_released_stream_sends_state_error() -> None:
+    """エントリ解放後の Stream ID への WT_MAX_STREAM_DATA でも検出することを確認
+
+    停止状態はセッション単位の集合でも保持するため、ストリームエントリが
+    解放された後も検出できる。両方向の終端でエントリを解放させた後、同じ
+    Stream ID へ WT_MAX_STREAM_DATA を注入して WT_STREAM_STATE_ERROR が
+    送出されることを確認する。解放後はピアが同じ Stream ID へ WT_STREAM を
+    送っても暗黙作成されるだけなので、エントリ単位の記録では検出できない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピアが WT_STREAM を送ってストリームを作る
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"ab")))
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # ピアが WT_STOP_SENDING を送る (受信側は自動で reset_stream して送信側を終端する)
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 42)))
+    assert ret > 0, "WT_STOP_SENDING カプセルの注入に失敗しました"
+    _drain_events(server)
+
+    # ピアの FIN で受信側も終端し、両ハーフ終端でエントリが解放される
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"", fin=True))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == [], "ストリームエントリが解放されていません"
+
+    # 解放後の Stream ID への WT_MAX_STREAM_DATA も stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 524288))
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_MAX_STREAM_DATA_AFTER_STOP_SENDING)
+    assert server.get_stream_ids(session_id) == []
+
+
+def test_wt_max_stream_data_other_stream_after_stop_sending_accepted() -> None:
+    """WT_STOP_SENDING を受けていない別ストリームの WT_MAX_STREAM_DATA が受理されることを確認
+
+    停止状態の判定は Stream ID 単位である。ストリーム 0 に WT_STOP_SENDING を
+    受けていても、ストリーム 4 のクレジットは従来どおり受理される (回帰ピン)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 42)))
+    assert ret > 0, "WT_STOP_SENDING カプセルの注入に失敗しました"
+    _drain_events(server)
+
+    # 初期広告値 (既定 256 KiB) より大きい増加値は通常どおり受理される
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(4, 524288))
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
+    _assert_no_state_error_sent(server)
+
+
+def test_wt_max_stream_data_without_stop_sending_accepted() -> None:
+    """WT_STOP_SENDING を受けていないストリームの WT_MAX_STREAM_DATA が受理されることを確認
+
+    停止状態の判定を追加しても通常のクレジット受信が壊れないことの回帰ピン。
+    初期広告値 (既定 256 KiB) より大きい増加値を 2 回送ってもエラーにならない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 524288))
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 1048576))
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
     _assert_no_state_error_sent(server)
