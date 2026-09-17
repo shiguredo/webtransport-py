@@ -352,6 +352,8 @@ if __name__ == "__main__":
 
 ## プラットフォーム
 
+- Ubuntu 26.04 LTS x86_64
+- Ubuntu 26.04 LTS arm64
 - Ubuntu 24.04 LTS x86_64
 - Ubuntu 24.04 LTS arm64
 - macOS 26 arm64
