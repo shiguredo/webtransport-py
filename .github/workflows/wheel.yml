@@ -16,10 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - name: ubuntu-26.04_x86_64
-            runs_on: ubuntu-26.04
-          - name: ubuntu-26.04_arm64
-            runs_on: ubuntu-26.04-arm
           - name: ubuntu-24.04_x86_64
             runs_on: ubuntu-24.04
           - name: ubuntu-24.04_arm64
@@ -117,8 +113,6 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - name: ubuntu-26.04_x86_64
-          - name: ubuntu-26.04_arm64
           - name: ubuntu-24.04_x86_64
           - name: ubuntu-24.04_arm64
           - name: macos-26_arm64
