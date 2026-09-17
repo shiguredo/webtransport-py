@@ -1,7 +1,7 @@
 # ubuntu-26.04 と ubuntu-26.04-arm をテスト対象プラットフォームに追加する
 
 - Created: 2026-09-17
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-17
 - Branch: feature/add-ubuntu-2604-runners
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,4 @@ Ubuntu 26.04 LTS (x86_64 / arm64) を対応プラットフォームに加える�
 - `.github/workflows/test.yml` の `test_ubuntu` の `platform` に `ubuntu-26.04_x86_64` / `ubuntu-26.04_arm64` を追加し、`artifact` で `ubuntu-24.04_x86_64` / `ubuntu-24.04_arm64` を指す。wheel をダウンロードする 2 ステップは `matrix.platform.artifact` を使う
 - `.github/workflows/test.yml` の `test_macos` の `platform` にも `artifact: macos-26_arm64` を追加し、ダウンロード手順を全ジョブで同じ形に揃える
 - `README.md` の「プラットフォーム」に Ubuntu 26.04 LTS x86_64 / arm64 を追加する
+- CI を実行し、26.04 x86_64 / arm64 の 3.14 / 3.14t の 4 ジョブが 24.04 ビルドの wheel を導入して成功することを確認する
