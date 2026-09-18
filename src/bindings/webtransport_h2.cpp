@@ -2415,9 +2415,18 @@ void H2Session::stop_sending(int32_t session_id,
     return;
   }
 
+  // draft-15 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING 送出は
+  // 禁止されている。2 回目以降は送出済みの記録で判定して黙って無視する
+  // (存在しないストリーム ID への送出と同じ扱いで、セッションは閉じない)。
+  // 判定は記録の挿入より前に置く: 挿入後に判定すると常に真になり、1 回目の
+  // 送出まで抑止してしまう
+  if (wt_session->sent_stop_sending_stream_ids.contains(stream_id)) {
+    return;
+  }
+
   // draft-15 Section 6.6: WT_STOP_SENDING を送出したストリームへは以後
   // WT_MAX_STREAM_DATA を送出しない (MUST NOT)。送出済みを記録して
-  // maybe_send_max_stream_data で抑止する
+  // maybe_send_max_stream_data で抑止する (Section 6.3 の判定にも使う)
   wt_session->sent_stop_sending_stream_ids.insert(stream_id);
 
   // WT_STOP_SENDING capsule: Stream ID + Error Code

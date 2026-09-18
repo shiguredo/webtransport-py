@@ -192,6 +192,25 @@ def test_reset_stream_and_stop_sending_over_varint_range_on_closed_session_raise
         client.stop_sending(session_id, 2**62, 0)
 
 
+def test_stop_sending_over_varint_range_raises_after_first_send() -> None:
+    """1 回目の送出後でも 2^62 以上の入力検証が先に走ることを確認
+
+    入力検証は送出済みの判定より先に行うため、同じストリームへ 2 回目を
+    呼んでも 2^62 以上なら ValueError になる (判定順序の退行を検出する)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # 1 回目は範囲内なので成功し、送出済みとして記録される
+    client.stop_sending(session_id, stream_id, 0)
+
+    # 2 回目が範囲外なら、送出済みの判定より入力検証が先に働く
+    with pytest.raises(ValueError, match=r"stop_sending stream_id"):
+        client.stop_sending(session_id, 2**62, 0)
+
+
 @pytest.mark.parametrize(
     "unknown_stream_id",
     [1, 3, 8, 10, 2**62 - 1],
