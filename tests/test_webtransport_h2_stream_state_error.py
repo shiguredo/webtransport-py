@@ -1,9 +1,10 @@
 """WebTransport over HTTP/2 のストリーム状態検証テスト
 
 不正な状態のストリームへの WT_STREAM / WT_RESET_STREAM capsule 受信と、
-同一ストリームへの 2 回目の WT_STOP_SENDING 受信、および WT_STOP_SENDING
-受信後に同じストリームへ届いた WT_MAX_STREAM_DATA の受信を検知して
-WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
+同一ストリームへの 2 回目の WT_STOP_SENDING 受信、 WT_STOP_SENDING
+受信後に同じストリームへ届いた WT_MAX_STREAM_DATA の受信、および不正な
+状態のストリームへ届いた WT_STREAM_DATA_BLOCKED の受信 (Section 6.9) を
+検知して WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
 MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ注入で再現する
 (公開 API では非コンプライアントなカプセルを送出する手段が存在しないため)。
 エラー送出は close_session 経由の WT_CLOSE_SESSION (error code 0x51) で
@@ -21,6 +22,7 @@ from conftest import (
     _encode_data_frame,
     _encode_varint,
     _encode_wt_max_stream_data_capsule,
+    _encode_wt_stream_data_blocked_capsule,
     _h2_pump,
 )
 
@@ -90,6 +92,7 @@ _WT_RESET_MISMATCH = "WT_RESET_STREAM reliable size mismatch"
 _WT_RESET_UNKNOWN = "WT_RESET_STREAM non-zero reliable size, unknown stream"
 _WT_STOP_SENDING_DUPLICATE = "WT_STOP_SENDING received twice"
 _WT_MAX_STREAM_DATA_AFTER_STOP_SENDING = "WT_MAX_STREAM_DATA received after WT_STOP_SENDING"
+_WT_STREAM_DATA_BLOCKED_TERMINAL = "WT_STREAM_DATA_BLOCKED received for terminal stream"
 
 
 def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
@@ -899,3 +902,73 @@ def test_wt_max_stream_data_without_stop_sending_accepted() -> None:
     wire = server.send()
     assert wire is not None
     assert _encode_wt_stream_capsule(stream_id, b"0123456789") in wire
+
+
+def test_wt_stream_data_blocked_for_terminal_stream_sends_state_error() -> None:
+    """受信側が終端したストリームへの WT_STREAM_DATA_BLOCKED で WT_STREAM_STATE_ERROR が送出されることを確認
+
+    draft-15 Section 6.9 の MUST「A stream error (Section 3.4) of type
+    WT_STREAM_STATE_ERROR MUST be sent if a WT_STREAM_DATA_BLOCKED capsule is
+    received for a stream that is not in a valid state」を検証する。修正前は
+    カプセルを読み捨てていたため検知できなかった。ピアの FIN で受信側が
+    終端したストリームへの申告は、閉じたストリームへの送出として不正になる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピアが WT_STREAM を送ってストリームを作る
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"abc")))
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # ピアの FIN で受信側が DataRecvd へ遷移する
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"", fin=True))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+    _drain_events(server)
+
+    # 終端済みストリームへの WT_STREAM_DATA_BLOCKED は stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_data_blocked_capsule(0, 1024))
+    )
+    assert ret > 0, "WT_STREAM_DATA_BLOCKED カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_STREAM_DATA_BLOCKED_TERMINAL)
+
+    # エラー検知側に Error イベント (0x51) が通知される
+    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
+    assert error_events[0].stream_id == 0
+
+
+def test_wt_stream_data_blocked_after_reset_sends_state_error() -> None:
+    """WT_RESET_STREAM で終端したストリームへの WT_STREAM_DATA_BLOCKED でも検出することを確認
+
+    受信側の終端は FIN (DataRecvd) だけでなく WT_RESET_STREAM (ResetRecvd)
+    でも成立する。どちらも Section 6.9 の「not in a valid state」に当たる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # ピアが WT_STREAM を送ってストリームを作る
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"abc")))
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # ピアが WT_RESET_STREAM を送り、受信側が ResetRecvd へ遷移する
+    # (Reliable Size は受信済みバイト数と一致させる)
+    ret = server.receive(_encode_data_frame(session_id, _encode_wt_reset_stream_capsule(0, 42, 3)))
+    assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
+    _drain_events(server)
+
+    # リセット済みストリームへの WT_STREAM_DATA_BLOCKED は stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_data_blocked_capsule(0, 1024))
+    )
+    assert ret > 0, "WT_STREAM_DATA_BLOCKED カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_STREAM_DATA_BLOCKED_TERMINAL)
+
+    # エラー検知側に Error イベント (0x51) が通知される
+    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
+    assert error_events[0].stream_id == 0

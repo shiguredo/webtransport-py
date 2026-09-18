@@ -3,7 +3,9 @@
 draft-15 Section 6.5 / 6.6 / 6.7 の MUST 「前回受信値より小さい
 WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS は
 WT_FLOW_CONTROL_ERROR」と、 Section 6.7 / 6.10 の MUST 「Maximum Streams が
-2^60 を超える値は WT_FLOW_CONTROL_ERROR」を検証する。不正カプセルは
+2^60 を超える値は WT_FLOW_CONTROL_ERROR」を検証する。あわせて Section 6.9 の
+WT_STREAM_DATA_BLOCKED が、有効な状態のストリームと未使用の Stream ID では
+受理されセッションが維持されることも検証する。不正カプセルは
 ワイヤ注入で再現する (公開 API では非コンプライアントな値を送出する
 手段が存在しないため)。セッション閉鎖は close_session 経由の
 WT_CLOSE_SESSION (error code 0x50) で実現され、ワイヤ部分列チェックで
@@ -38,6 +40,8 @@ _WT_MAX_DATA = 0x190B4D3D
 _WT_MAX_STREAM_DATA = 0x190B4D3E
 _WT_MAX_STREAMS_BIDI = 0x190B4D3F
 _WT_MAX_STREAMS_UNI = 0x190B4D40
+_WT_STREAM_DATA_BLOCKED = 0x190B4D42
+_WT_STREAM_FIN = 0x190B4D3B
 _WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
 _WT_STREAMS_BLOCKED_UNI = 0x190B4D44
 
@@ -417,3 +421,101 @@ def test_get_send_credit_reaches_zero_when_exhausted() -> None:
     _h2_pump(client, server)
 
     assert client.get_send_credit(session_id) == 0
+
+
+def test_wt_stream_data_blocked_accepted_for_open_stream() -> None:
+    """recv_state が終端でないストリームへの WT_STREAM_DATA_BLOCKED が受理されることを確認
+
+    draft-15 Section 6.9 の MUST は「not in a valid state」への受信だけを
+    対象とする。開いたままのストリームへの申告は受理し、セッションを閉じない
+    (ピアの申告であり自側のフロー制御状態も変えない)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # ピアがデータを送ってサーバー側にストリームエントリを作る
+    client.send_stream_data(session_id, stream_id, b"ab", False)
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    _inject_capsule(
+        server,
+        session_id,
+        _WT_STREAM_DATA_BLOCKED,
+        _encode_varint(stream_id) + _encode_varint(1024),
+    )
+
+    _assert_no_flow_control_error_sent(server)
+    assert not [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert server.get_session_ids() == [session_id]
+    assert server.get_stream_ids(session_id) == [stream_id]
+
+
+def test_wt_stream_data_blocked_accepted_for_unknown_stream() -> None:
+    """未使用の Stream ID への WT_STREAM_DATA_BLOCKED が受理されエントリを作らないことを確認
+
+    エントリが無い場合は検証対象の状態が無いため受理する。ストリームを
+    暗黙作成しないこと (get_stream_ids が変化しないこと) も確認する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    _inject_capsule(
+        server,
+        session_id,
+        _WT_STREAM_DATA_BLOCKED,
+        _encode_varint(0) + _encode_varint(1024),
+    )
+
+    _assert_no_flow_control_error_sent(server)
+    assert not [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert server.get_session_ids() == [session_id]
+    assert server.get_stream_ids(session_id) == []
+
+
+def test_wt_stream_data_blocked_accepted_after_local_fin() -> None:
+    """自側が FIN を送出しただけのストリームへの WT_STREAM_DATA_BLOCKED が受理されることを確認
+
+    自側の FIN は自側の送信方向だけを閉じるため、ピアの送信方向 (自側の
+    受信方向) は継続する。状態検証に send_state を含めず recv_state の終端
+    だけを見ることの回帰ピン (send_state を条件に加えると誤って拒否する)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # ピアがデータを送ってサーバー側にストリームエントリを作る
+    client.send_stream_data(session_id, stream_id, b"ab", False)
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    # 自側 (サーバー) が FIN を送出して送信側だけを終端する
+    # (send_state が実際に DataSent になったことをワイヤで確認する。
+    # クレジット不足で保留になるとこのテストの前提が崩れるため)
+    server.send_stream_data(session_id, stream_id, b"xy", True)
+    wire = server.send()
+    assert wire is not None, "自側の FIN が送出されていません"
+    assert _encode_capsule(_WT_STREAM_FIN, _encode_varint(stream_id) + b"xy") in wire
+    client.receive(wire)
+    _drain_events(client)
+
+    _inject_capsule(
+        server,
+        session_id,
+        _WT_STREAM_DATA_BLOCKED,
+        _encode_varint(stream_id) + _encode_varint(1024),
+    )
+
+    _assert_no_flow_control_error_sent(server)
+    assert not [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert server.get_session_ids() == [session_id]
+    assert server.get_stream_ids(session_id) == [stream_id]

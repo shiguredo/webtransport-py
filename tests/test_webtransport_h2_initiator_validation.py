@@ -17,6 +17,7 @@ from conftest import (
     _encode_capsule,
     _encode_data_frame,
     _encode_varint,
+    _encode_wt_stream_data_blocked_capsule,
     _h2_pump,
 )
 
@@ -263,3 +264,39 @@ def test_client_flow_direction_mirror() -> None:
     )
     assert len(_stream_state_errors(client)) == 1
     assert client.get_session_ids() == []
+
+
+def test_stream_data_blocked_to_send_only_stream_rejected() -> None:
+    """自側送信専用の Stream ID への WT_STREAM_DATA_BLOCKED 受信が拒否されることを確認
+
+    サーバー視点の ID 3 (サーバー起点単方向) は自側送信専用である。
+    WT_STREAM_DATA_BLOCKED はデータ送信者→受信者の方向であり、WT_STREAM /
+    WT_RESET_STREAM と同じ群のため、受信すると WT_STREAM_STATE_ERROR になる
+    (draft-15 Section 6.9)。逆方向の is_receivable_flow_capsule を使うと
+    この拒否が起きないため、その回帰ピンになる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject(server, session_id, _encode_wt_stream_data_blocked_capsule(3, 1024))
+
+    assert len(_stream_state_errors(server)) == 1
+    assert server.get_session_ids() == []
+
+
+def test_stream_data_blocked_to_peer_uni_accepted() -> None:
+    """ピア起点単方向の Stream ID への WT_STREAM_DATA_BLOCKED 受信が受理されることを確認
+
+    サーバー視点の ID 2 (クライアント起点単方向) はピアがデータを送る
+    ストリームであり、WT_STREAM_DATA_BLOCKED を受理する。フロー制御群の
+    is_receivable_flow_capsule を使うと正当な申告を誤って拒否するため、
+    その回帰ピンになる。エントリが無いため暗黙作成もしない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject(server, session_id, _encode_wt_stream_data_blocked_capsule(2, 1024))
+
+    assert not _stream_state_errors(server)
+    assert server.get_session_ids() == [session_id]
+    assert server.get_stream_ids(session_id) == []

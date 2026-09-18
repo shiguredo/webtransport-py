@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 で不正な状態のストリームへの WT_STREAM_DATA_BLOCKED 受信を検知しない
 
 - Created: 2026-09-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-h2-stream-data-blocked-state-error
 - Polished: 2026-09-18
 
@@ -39,10 +39,14 @@ draft-ietf-webtrans-http2-15 Section 6.9 の MUST「A stream error (Section 3.4)
 
 ## 解決方法
 
-- `H2Session::handle_wt_stream_data_blocked` を追加し、Stream ID と Maximum Stream Data を `decode_varint` で読む。デコード失敗時は他のハンドラと同じく何もせず return する
-- `is_receivable_data_capsule` で方向検証し、違反時は `H2Session::report_stream_state_error` を `"WT_STREAM_DATA_BLOCKED received for local send-only stream"` で呼ぶ (データ群の `"WT_STREAM received for local send-only stream"` / `"WT_RESET_STREAM received for local send-only stream"` と同じ形)
-- `H2Session::streams` のエントリが存在し `recv_state` が終端なら、`H2Session::report_stream_state_error` を `"WT_STREAM_DATA_BLOCKED received for terminal stream"` で呼ぶ。メッセージは 4 バイトの Application Error Code と合わせて 64 バイト未満に収める (`tests/test_webtransport_h2_stream_state_error.py` と `tests/test_webtransport_h2_flow_control_capsule.py` の `_encode_wt_close_session_capsule` が Length を 1 バイト varint で組み立てるため)。収まらない長さにする場合は `tests/test_webtransport_h2_close_session.py` の `_encode_wt_close_session_capsule_bytes` と同じ多バイト varint 対応のヘルパを用意する
-- エントリが無い場合は暗黙作成せず受理する (`H2Session::handle_wt_max_stream_data` が未作成ストリームを暗黙作成しないのと同じ扱い)。解放済み ID の検出は 0236 が導入する記録に委ね、0236 の実装時に本ハンドラも同じ記録を参照する
-- `tests/test_webtransport_h2_stream_state_error.py` に、FIN 受信済みのストリームと WT_RESET_STREAM 受信済みのストリームへの注入で WT_CLOSE_SESSION (0x51) が送出されること、および Error イベント (0x51) が届くことを検証するテストを追加する。メッセージ定数は既存の `_WT_*` 群と同じ形で置く
-- `tests/test_webtransport_h2_initiator_validation.py` に、自側送信専用の Stream ID への注入で拒否されることと、ピア起点単方向の Stream ID への注入で受理されることを検証するテストを追加する (既存の `test_data_to_send_only_stream_rejected` / `test_stop_sending_to_receive_only_rejected` と同じ形)
-- `tests/test_webtransport_h2_flow_control_capsule.py` に、`recv_state` が終端でないストリームと未使用の Stream ID への注入でエラーが出ずセッションが維持されることを検証するテストを追加する。注入先はクライアント起点双方向の ID 0 のように `is_receivable_data_capsule` を通る ID を選ぶ。同ファイルの module docstring が対象節を列挙しているため Section 6.9 を追記する
+- `src/bindings/webtransport_h2.cpp` に `H2Session::handle_wt_stream_data_blocked` を追加した。Stream ID と Maximum Stream Data を `decode_varint` で完全にデコードし (値は受信側の状態を変えないため読み捨てる)、`is_receivable_data_capsule` で方向検証し、`WtStreamInfo::recv_state` が終端 (`StreamState::DataRecvd` / `StreamState::ResetRecvd`) なら `H2Session::report_stream_state_error` を呼ぶ。送信側の終端 (`send_state`) は含めない (自側の FIN は自側の送信方向だけを閉じるため)
+- 方向はデータ送信者→受信者であるため、フロー制御群の `is_receivable_flow_capsule` ではなくデータ群と同じ `is_receivable_data_capsule` を使う。違反時のメッセージは `"WT_STREAM_DATA_BLOCKED received for local send-only stream"`、終端時は `"WT_STREAM_DATA_BLOCKED received for terminal stream"`。後者は Application Error Code 4 バイトと合わせて 64 バイト未満に収める必要があるため (テストの WT_CLOSE_SESSION 検証が Length を 1 バイト varint で組み立てる)、既存の `"WT_STREAM received for stream in terminal state"` とは語順を変えている
+- エントリが無い場合は暗黙作成せず受理する。解放済み ID は記録が無いため未作成 ID と同じ経路で受理される既知の制約があり、検出は 0236 が導入する記録に委ねる
+- `H2Session::process_capsule` の `CapsuleType::WtStreamDataBlocked` を no-op 分岐から専用ハンドラの呼び出しへ移し、`src/bindings/webtransport_h2.h` に宣言を追加した
+- `tests/conftest.py` に `_encode_wt_stream_data_blocked_capsule` を追加した (既存の `_encode_wt_max_stream_data_capsule` と同じ形)
+- `tests/test_webtransport_h2_stream_state_error.py` に 2 件追加した。`test_wt_stream_data_blocked_for_terminal_stream_sends_state_error` はピアの FIN で受信側が終端したストリームへの注入で、`test_wt_stream_data_blocked_after_reset_sends_state_error` は WT_RESET_STREAM で終端したストリームへの注入で、いずれも WT_CLOSE_SESSION (Type 0x2843, Application Error Code 0x51) の送出と Error イベント (0x51) の通知を検証する
+- `tests/test_webtransport_h2_initiator_validation.py` に 2 件追加した。`test_stream_data_blocked_to_send_only_stream_rejected` は自側送信専用の ID 3 への注入が拒否されること (データ群の方向検証を使うことの回帰ピン)、`test_stream_data_blocked_to_peer_uni_accepted` はピア起点単方向の ID 2 への注入が受理されエントリも作成されないことを検証する
+- `tests/test_webtransport_h2_flow_control_capsule.py` に 3 件追加した。`test_wt_stream_data_blocked_accepted_for_open_stream` (有効な状態)、`test_wt_stream_data_blocked_accepted_for_unknown_stream` (未使用の Stream ID でエントリ非作成)、`test_wt_stream_data_blocked_accepted_after_local_fin` (自側 FIN 送出後 = send_state 終端 / recv_state 非終端でも受理することの回帰ピン)。同ファイルの module docstring に Section 6.9 を追記した
+- `tests/test_webtransport_h2_stream_state_error.py` の module docstring にも WT_STREAM_DATA_BLOCKED (Section 6.9) を追記した
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 全テスト (1193 本) が通ることを確認した

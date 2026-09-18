@@ -662,6 +662,9 @@ class H2Session {
                              bool is_bidi,
                              const uint8_t* payload,
                              size_t length);
+  void handle_wt_stream_data_blocked(int32_t session_id,
+                                     const uint8_t* payload,
+                                     size_t length);
   void handle_wt_streams_blocked(int32_t session_id,
                                  const uint8_t* payload,
                                  size_t length);
