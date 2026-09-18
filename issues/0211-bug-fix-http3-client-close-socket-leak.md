@@ -3,7 +3,7 @@
 - Created: 2026-09-15
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-http3-client-close-socket-leak
-- Polished: 2026-09-15
+- Polished: 2026-09-18
 
 ## 目的
 
@@ -25,11 +25,13 @@
 
 ## 完了条件
 
-- ソケットを先に閉じた状態で `Client.close` を呼び、`await self._send_pending()` が `OSError` で失敗しても `self._socket` が閉じられ `None` になる
+- 接続確立後に `client._socket.close()` でソケットオブジェクトだけを閉じ (`client._socket` 属性は `None` にしない)、`await client.close()` を呼ぶと、`Client._send_pending` の送出失敗が warning ログに落ちて `OSError` が伝播せず、`client._socket` が閉じられ `None` になる
+  - `client._socket = None` にすると `Client._send_pending` 冒頭の `if self._socket is None: return 0` で早期 return し、送出を試みないまま `close()` が完了する。この手順では未修正の実装でも `self._socket is None` が成立してしまうため、ソケットオブジェクトを閉じる操作で `OSError` を発生させること
+- 送出失敗の warning ログ (`"failed to send connection close: %s"`) が `webtransport.http3.client` ロガーへ出力されることを `caplog` で検証する
 - 上記を検証するテストが追加され、全テストが通過する
 
 ## 解決方法
 
 - `src/webtransport/http3/client.py` の `Client.close` の本体を `try` / `except OSError` / `finally` で構成し直す。`Client._send_pending` の `OSError` は内側の `try` で捕捉して warning に落とし、`_quic_connection.close()` 由来の予期しない例外は伝播させたまま `finally` でソケットを閉じる (`src/webtransport/quic/client.py` の `Client.close` と同じ形)
 - `logger` を追加して送出失敗を記録する (`logging.getLogger(__name__)` と `"failed to send connection close: %s"` の書式)
-- `tests/test_e2e_http3.py` にテストを追加する。接続確立後に `client._socket` を先に閉じてから `await client.close()` を呼び、`OSError` が伝播せず `client._socket is None` になることを検証する (OSError の発生は `caplog` でも確認する)。`tests/test_e2e_quic.py` の `test_client_close_returns_zero_when_send_fails` が同じ手順の先例である
+- `tests/test_e2e_http3.py` にテストを追加する。接続確立後に `client._socket.close()` でソケットオブジェクトだけを閉じ (`client._socket` 属性は残す)、`await client.close()` を呼ぶ。`OSError` が伝播せず `client._socket is None` になることと、`caplog` に `webtransport.http3.client` ロガーの `"failed to send connection close"` warning が記録されることを検証する。`tests/test_e2e_quic.py` の `test_client_close_returns_zero_when_send_fails` が同じ手順の先例であり、`tests/test_e2e_quic_advanced.py` の `test_early_data_not_sent_without_session_ticket` が `caplog.at_level` の先例である
