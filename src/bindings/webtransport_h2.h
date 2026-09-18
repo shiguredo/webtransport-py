@@ -319,15 +319,24 @@ struct WtSessionInfo {
   // 送出済み WT_STOP_SENDING の Stream ID。draft-15 Section 6.3 の
   // 「同じストリームへ 2 回送出しない」の判定と、Section 6.6 の「送出後に
   // 同じストリームへ WT_MAX_STREAM_DATA を送らない」の抑止に使う。
-  // ストリームエントリの解放後も抑止する必要があるため
-  // WtStreamInfo ではなくセッション単位で持つ (解放後にピアが同じ Stream ID
-  // へ WT_STREAM を送ると handle_wt_stream が暗黙作成するため、エントリ単位
-  // の記録では抑止できない)。要素は自側が stop_sending を呼んだ実在
+  // ストリームエントリの解放後も抑止する必要があるため WtStreamInfo では
+  // なくセッション単位で持つ (released_stream_ids の上限超過で解放済み ID の
+  // 検出を諦めた場合は handle_wt_stream の再作成経路が残るため、エントリ単位
+  // の記録ではその経路を抑止できない)。要素は自側が stop_sending を呼んだ実在
   // ストリームの ID に限られ、ピアは追加できない。有界化するとその分だけ
   // Section 6.3 の判定と Section 6.6 の MUST NOT を満たせなくなるため上限は
   // 設けず、要素数はセッション生存中に停止を要求した実在ストリーム数に
-  // 比例して増える (受信側の集合がメモリ DoS 対策で有界なのとは前提が異なる)
+  // 比例して増える (受信側と解放済みの集合がメモリ DoS 対策で有界なのとは
+  // 前提が異なる)
   std::set<uint64_t> sent_stop_sending_stream_ids;
+  // 解放済み (H2Session::maybe_release_stream が streams から消した)
+  // Stream ID。解放後にピアが同じ ID へ WT_STREAM / WT_RESET_STREAM /
+  // WT_STREAM_DATA_BLOCKED を送ったときの draft-15 Section 6.4 / 6.2 / 6.9 の
+  // 検出に使う。解放のたびに増えるため、受信系コンテナと同じ固定上限
+  // kMaxReceivedMapEntries で有界にし、超過した ID は保持しない (上限超過後は
+  // 再作成が起こり得るという既知の制約になる)。自側送信専用 (自側 initiator
+  // + 単方向) の解放は方向検証で先に拒否されるため記録しない
+  std::set<uint64_t> released_stream_ids;
 
   // 同一制限値での BLOCKED 系カプセルの重複送出を抑止する印。対向の
   // MAX 受信で制限が増えたら戻す。送出自体は draft-15 Section 6.8 / 6.9 /

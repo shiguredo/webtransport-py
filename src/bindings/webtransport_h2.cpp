@@ -105,13 +105,16 @@ uint64_t build_stream_id(bool is_server,
 // [WEBTRANSPORT-H3] Section 4.4 の unsigned 32-bit 範囲
 constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
 
-// 受信系コンテナ (received_max_stream_data_by_id /
-// received_stop_sending_stream_ids) の固定上限。ピアが送る stream_id
-// ごとにコンテナが無制限に増えるメモリ DoS を防ぐ安全弁。上限超過の
-// 新規 ID は保持しない (既知の制約: 上限超過 ID では、未作成ストリーム
-// への WT_MAX_STREAM_DATA の事前クレジット広告、未作成ストリームへの
-// 二重 WT_STOP_SENDING 検出、未作成ストリームへの WT_STOP_SENDING 後の
-// WT_MAX_STREAM_DATA 検出が対象外になる)。実在ストリームへの
+// ピアが選べる stream_id を鍵にするコンテナ (received_max_stream_data_by_id /
+// received_stop_sending_stream_ids) と、解放のたびに増える
+// released_stream_ids の固定上限。stream_id ごとにコンテナが無制限に増える
+// メモリ DoS を防ぐ安全弁。上限超過の新規 ID は保持しない (既知の制約:
+// 上限超過 ID では、未作成ストリームへの WT_MAX_STREAM_DATA の事前
+// クレジット広告、未作成ストリームへの二重 WT_STOP_SENDING 検出、未作成
+// ストリームへの WT_STOP_SENDING 後の WT_MAX_STREAM_DATA 検出、解放済み
+// ストリームへの WT_STREAM / WT_RESET_STREAM / WT_STREAM_DATA_BLOCKED の
+// 検出、上限超過中に解放されたストリームへの二重 WT_STOP_SENDING 検出が
+// 対象外になる)。実在ストリームへの
 // イベント通知・クレジット反映・二重受信検出はエントリが存在する間は
 // 上限に関係なく維持する (二重受信検出は WtStreamInfo のフラグで実現する)。
 // ただし WtStreamInfo はストリームエントリの解放で消えるため、上限超過
@@ -440,6 +443,9 @@ void H2Session::handle_wt_stream(int32_t session_id,
   }
   auto [stream_id, stream_id_len] = *stream_id_result;
 
+  // データ部分 (ストリームを開くだけ・閉じるだけの空カプセルもあり得る)
+  size_t data_len = length - stream_id_len;
+
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
     return;
@@ -452,9 +458,23 @@ void H2Session::handle_wt_stream(int32_t session_id,
     return;
   }
 
-  // ストリームが存在しない場合は作成 (draft-15 Section 6.4 の暗黙作成)
+  // エントリが無い場合の処理 (解放済みの判定と Section 6.4 の暗黙作成)
   auto stream_it = wt_session->streams.find(stream_id);
   if (stream_it == wt_session->streams.end()) {
+    // draft-15 Section 6.4: 解放済みストリームへの WT_STREAM は
+    // WT_STREAM_STATE_ERROR。データを含まない WT_STREAM は「ストリームを
+    // 開くか閉じる」操作として許容されるため、終端状態への受信と同じく
+    // 無視する (Section 6.4 の「an endpoint MAY treat an empty WT_STREAM
+    // capsule that neither starts nor ends a stream as a session error」)。
+    // エントリも作成しない
+    if (wt_session->released_stream_ids.contains(stream_id)) {
+      if (data_len == 0) {
+        return;
+      }
+      report_stream_state_error(session_id, stream_id,
+                                "WT_STREAM received for released stream");
+      return;
+    }
     // draft-15 Section 6.7: 広告した Maximum Streams を超える受信は
     // WT_FLOW_CONTROL_ERROR。同一タイプ・方向の低い ID も累積カウントする
     if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
@@ -476,9 +496,7 @@ void H2Session::handle_wt_stream(int32_t session_id,
 
   auto& stream_info = stream_it->second;
 
-  // データ部分
   const uint8_t* stream_data = payload + stream_id_len;
-  size_t data_len = length - stream_id_len;
 
   // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへのデータ付き
   // WT_STREAM 受信は stream error (draft-15 Section 6.4 の「A WT_STREAM
@@ -596,6 +614,14 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
 
   auto stream_it = wt_session->streams.find(stream_id);
   if (stream_it == wt_session->streams.end()) {
+    // draft-15 Section 6.2: 解放済みストリームへの WT_RESET_STREAM は
+    // WT_STREAM_STATE_ERROR。Reliable Size の検証より前に置き、解放済みで
+    // あることを優先して報告する
+    if (wt_session->released_stream_ids.contains(stream_id)) {
+      report_stream_state_error(session_id, stream_id,
+                                "WT_RESET_STREAM received for released stream");
+      return;
+    }
     // 真に未知のストリームへの WT_RESET_STREAM。受信済みバイト数は 0 として
     // Reliable Size と比較する (draft-15 Section 6.2 の MUST)。> 0 は
     // 届かないはずのデータを約束するため session error でセッションを閉じる。
@@ -1002,15 +1028,20 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
     return;
   }
 
-  // 有効な状態のストリーム、またはエントリが無い Stream ID は受理する。
-  // ピアの申告を伝える advisory な通知であり、エントリの作成も自側の
-  // フロー制御状態の更新も行わない (Section 6.10 の
-  // H2Session::handle_wt_streams_blocked と同じ扱い)。エントリが無い ID に
-  // は、まだ開かれていない ID のほかに H2Session::maybe_release_stream が
-  // 解放した ID も含まれる。解放済み ID は記録が無いため未作成 ID と同じ
-  // 経路で受理される (既知の制約。H2Session::handle_wt_max_stream_data は
-  // 解放後も検出できるようセッション単位の記録を残しているが、本カプセルは
-  // その記録を持たない)
+  // 解放済みストリームも Section 6.9 の「not in a valid state」に当たる。
+  // エントリが無いため上の終端判定では捉えられず、セッション単位の記録を
+  // 参照する
+  if (wt_session->released_stream_ids.contains(stream_id)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_STREAM_DATA_BLOCKED received for released stream");
+    return;
+  }
+
+  // 有効な状態のストリーム、または未作成の Stream ID は受理する。ピアの
+  // 申告を伝える advisory な通知であり、エントリの作成も自側のフロー制御
+  // 状態の更新も行わない (Section 6.10 の
+  // H2Session::handle_wt_streams_blocked と同じ扱い)
 }
 
 void H2Session::handle_wt_streams_blocked(int32_t session_id,
@@ -1603,6 +1634,16 @@ void H2Session::maybe_release_stream(int32_t session_id, uint64_t stream_id) {
   }
   bool peer_initiated = !stream_info.is_local;
   bool is_uni = stream_info.is_unidirectional;
+  // 解放済み ID を記録し、以後の WT_STREAM / WT_RESET_STREAM /
+  // WT_STREAM_DATA_BLOCKED を Section 6.4 / 6.2 / 6.9 の MUST として検出
+  // できるようにする。記録の範囲と上限の根拠は
+  // WtSessionInfo::released_stream_ids の宣言コメントを参照。自側送信専用は
+  // 記録しない (自側の通常利用で集合が埋まるのを防ぐ)
+  const bool send_only = stream_info.is_local && is_uni;
+  if (!send_only &&
+      wt_session->released_stream_ids.size() < kMaxReceivedMapEntries) {
+    wt_session->released_stream_ids.insert(stream_id);
+  }
   wt_session->streams.erase(stream_it);
   // 対向開始分のみ広告値を補充する (累積値のため現広告値 + 1)。
   // 自起点分は対向が補充する。上限 2^60 到達後は送出しない

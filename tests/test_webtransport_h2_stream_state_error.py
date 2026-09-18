@@ -2,9 +2,11 @@
 
 不正な状態のストリームへの WT_STREAM / WT_RESET_STREAM capsule 受信と、
 同一ストリームへの 2 回目の WT_STOP_SENDING 受信、 WT_STOP_SENDING
-受信後に同じストリームへ届いた WT_MAX_STREAM_DATA の受信、および不正な
-状態のストリームへ届いた WT_STREAM_DATA_BLOCKED の受信 (Section 6.9) を
-検知して WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
+受信後に同じストリームへ届いた WT_MAX_STREAM_DATA の受信、不正な
+状態のストリームへ届いた WT_STREAM_DATA_BLOCKED の受信 (Section 6.9)、
+および解放済みストリームへ届いた WT_STREAM / WT_RESET_STREAM /
+WT_STREAM_DATA_BLOCKED の受信 (Section 6.4 / 6.2 / 6.9) を検知して
+WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
 MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ注入で再現する
 (公開 API では非コンプライアントなカプセルを送出する手段が存在しないため)。
 エラー送出は close_session 経由の WT_CLOSE_SESSION (error code 0x51) で
@@ -93,6 +95,9 @@ _WT_RESET_UNKNOWN = "WT_RESET_STREAM non-zero reliable size, unknown stream"
 _WT_STOP_SENDING_DUPLICATE = "WT_STOP_SENDING received twice"
 _WT_MAX_STREAM_DATA_AFTER_STOP_SENDING = "WT_MAX_STREAM_DATA received after WT_STOP_SENDING"
 _WT_STREAM_DATA_BLOCKED_TERMINAL = "WT_STREAM_DATA_BLOCKED received for terminal stream"
+_WT_STREAM_RELEASED = "WT_STREAM received for released stream"
+_WT_RESET_RELEASED = "WT_RESET_STREAM received for released stream"
+_WT_STREAM_DATA_BLOCKED_RELEASED = "WT_STREAM_DATA_BLOCKED received for released stream"
 
 
 def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
@@ -797,8 +802,9 @@ def test_wt_max_stream_data_after_stop_sending_released_stream_sends_state_error
     停止状態はセッション単位の集合でも保持するため、ストリームエントリが
     解放された後も検出できる。両方向の終端でエントリを解放させた後、同じ
     Stream ID へ WT_MAX_STREAM_DATA を注入して WT_STREAM_STATE_ERROR が
-    送出されることを確認する。解放後はピアが同じ Stream ID へ WT_STREAM を
-    送っても暗黙作成されるだけなので、エントリ単位の記録では検出できない。
+    送出されることを確認する。解放済み ID の集合は固定上限で有界なため、
+    上限に達した後に解放されたストリームでは再作成が起こり得る。エントリ単位
+    の記録ではその経路を抑止できないため、セッション単位の集合が必要になる。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -972,3 +978,154 @@ def test_wt_stream_data_blocked_after_reset_sends_state_error() -> None:
     assert len(error_events) == 1
     assert error_events[0].error_code == WT_STREAM_STATE_ERROR
     assert error_events[0].stream_id == 0
+
+
+def _release_peer_uni_stream(server: h2.Session, session_id: int, stream_id: int) -> None:
+    """ピア起点の単方向ストリームを FIN で終端させて解放する
+
+    単方向ストリームは使う方向 (ここでは受信側) の終端だけで解放されるため、
+    FIN を 1 つ送れば WtSessionInfo::released_stream_ids に記録される。
+    """
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"ab"))
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"", fin=True))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == [], "ストリームエントリが解放されていません"
+    _drain_events(server)
+
+
+def _assert_error_event(server: h2.Session, stream_id: int) -> None:
+    """WT_STREAM_STATE_ERROR (0x51) の Error イベントが 1 件通知されることを確認する"""
+    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
+    assert error_events[0].stream_id == stream_id
+
+
+def test_wt_stream_after_release_sends_state_error() -> None:
+    """解放済みストリームへのデータ付き WT_STREAM で WT_STREAM_STATE_ERROR が送出されることを確認
+
+    draft-15 Section 6.4 の MUST NOT / MUST を検証する。ピア起点単方向の
+    ストリームは FIN 受信だけで解放されるため、同じ Stream ID への WT_STREAM
+    は終端済みストリームへの送信になる。修正前は暗黙作成されてデータが
+    再配送されていた。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    # ピア起点の単方向ストリーム ID (Bit 0 = 0 / Bit 1 = 1)
+    stream_id = 2
+
+    _release_peer_uni_stream(server, session_id, stream_id)
+
+    # 解放済み Stream ID へのデータ付き WT_STREAM は stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"cd"))
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_STREAM_RELEASED)
+    _assert_error_event(server, stream_id)
+    assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
+
+
+def test_wt_reset_stream_after_release_sends_state_error() -> None:
+    """解放済みストリームへの Reliable Size 0 の WT_RESET_STREAM で WT_STREAM_STATE_ERROR が送出されることを確認
+
+    draft-15 Section 6.2 の MUST NOT / MUST を検証する。Reliable Size 0 は
+    修正前なら未知ストリームとして受理され、エントリが再作成されて
+    StreamReset イベントが再通知されていた。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = 2
+
+    # ピアが WT_STREAM を送り、WT_RESET_STREAM で受信側を終端させて解放する
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"ab"))
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_reset_stream_capsule(stream_id, 42, 2))
+    )
+    assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == [], "ストリームエントリが解放されていません"
+    _drain_events(server)
+
+    # 解放済み Stream ID への Reliable Size 0 の WT_RESET_STREAM は
+    # stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_reset_stream_capsule(stream_id, 0, 0))
+    )
+    assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_RESET_RELEASED)
+    _assert_error_event(server, stream_id)
+    assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
+
+
+def test_wt_stream_fin_after_release_ignored() -> None:
+    """解放済みストリームへのデータを含まない WT_STREAM が無視され再作成もされないことを確認
+
+    データを含まない WT_STREAM (FIN のみ) は終端状態への受信と同じく WebKit
+    相互運用のため無視する。解放済みでも同じ扱いとし、エントリも作成しない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = 2
+
+    _release_peer_uni_stream(server, session_id, stream_id)
+
+    # 解放済み Stream ID へのデータを含まない WT_STREAM は無視される
+    # (暗黙作成されていれば STREAM_DATA イベントが 1 件届く)
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"", fin=True))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+    _assert_no_state_error_sent(server)
+    assert _drain_events(server) == [], "無視されたカプセルでイベントが発生しました"
+    assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
+
+
+def test_wt_stream_data_blocked_after_release_sends_state_error() -> None:
+    """解放済みストリームへの WT_STREAM_DATA_BLOCKED で WT_STREAM_STATE_ERROR が送出されることを確認
+
+    draft-15 Section 6.9 の MUST を検証する。エントリが無いため終端状態の
+    判定では捉えられず、解放済み ID の記録を参照して検出する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = 2
+
+    _release_peer_uni_stream(server, session_id, stream_id)
+
+    # 解放済み Stream ID への WT_STREAM_DATA_BLOCKED は stream error になる
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_data_blocked_capsule(stream_id, 1024))
+    )
+    assert ret > 0, "WT_STREAM_DATA_BLOCKED カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_STREAM_DATA_BLOCKED_RELEASED)
+    _assert_error_event(server, stream_id)
+    assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
+
+
+def test_wt_reset_stream_after_release_prefers_released_over_reliable_size() -> None:
+    """解放済みストリームへの Reliable Size 0 以外の WT_RESET_STREAM でも解放済みとして報告されることを確認
+
+    解放済みかどうかの判定は Reliable Size の検証より前に置く。Reliable Size を
+    0 以外にすると、順序が逆なら "WT_RESET_STREAM non-zero reliable size,
+    unknown stream" になり、このテストが落ちる。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+    stream_id = 2
+
+    _release_peer_uni_stream(server, session_id, stream_id)
+
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_reset_stream_capsule(stream_id, 0, 9))
+    )
+    assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
+    _assert_state_error_sent(server, _WT_RESET_RELEASED)
+    _assert_error_event(server, stream_id)

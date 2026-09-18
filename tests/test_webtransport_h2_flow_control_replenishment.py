@@ -7,6 +7,8 @@ WT_MAX_STREAMS をストリーム終了時に補充することを検証する�
 MAX 受信で送出を再開する。WT_STOP_SENDING を送出したストリームへの
 WT_MAX_STREAM_DATA の送出抑止 (Section 6.6 の MUST NOT) と、同じストリームへ
 WT_STOP_SENDING を複数回送出しないこと (Section 6.3 の MUST NOT) も検証する。
+解放済みストリーム ID の記録が固定上限に達した後も抑止が維持されることも
+検証する。
 両ハーフ終端したストリームエントリの解放も検証する
 (実セッションを使う。モックなし)。
 """
@@ -35,6 +37,9 @@ _WT_STOP_SENDING_TYPE_BYTES = _encode_varint(_WT_STOP_SENDING)
 _WT_STREAM = 0x190B4D3C
 _WT_STREAM_FIN = 0x190B4D3B
 _WT_STREAM_DATA_BLOCKED = 0x190B4D42
+# 解放済み ID の記録の固定上限 (src/bindings/webtransport_h2.cpp の
+# kMaxReceivedMapEntries)。上限を超えた解放は記録されない
+_RELEASED_MAP_LIMIT = 4096
 _WT_DATA_BLOCKED = 0x190B4D41
 
 
@@ -593,42 +598,61 @@ def test_stop_sending_sent_once_per_stream() -> None:
     )
 
 
-def test_max_stream_data_not_sent_after_stop_sending_released_stream() -> None:
-    """エントリ解放後にピアが同じ Stream ID へ WT_STREAM を送っても抑止が維持されることを確認
+def test_max_stream_data_not_sent_after_released_map_full() -> None:
+    """解放済み ID の記録が上限に達しても WT_MAX_STREAM_DATA の抑止が維持されることを確認
 
-    抑止の記録はストリームエントリの解放後も必要である (解放後にピアが同じ
-    Stream ID へ WT_STREAM を送ると handle_wt_stream が暗黙作成するため、
-    エントリ単位の記録では抑止できない)。ピア起点の単方向ストリームで
-    「WT_STREAM → stop_sending → FIN で解放 → 同じ ID へ WT_STREAM 再注入」を
-    再現し、暗黙作成されたストリームへ WT_MAX_STREAM_DATA が送出されない
-    ことを確認する。
+    解放済み ID の集合はメモリ DoS 防止のため固定上限で有界にしてあり、上限を
+    超えた解放は記録されない。その場合にピアが同じ Stream ID へ WT_STREAM を
+    送ると暗黙作成が起きるが、「WT_STOP_SENDING を送出したストリームへ
+    WT_MAX_STREAM_DATA を送らない」(Section 6.6 の MUST NOT) は上限の無い別の
+    記録で抑止するため維持される。抑止の記録をセッション単位に置いた根拠
+    そのものである。
     """
     client, server = _create_small_stream_limit_h2_session_pair(8)
     session_id = _connect_h2_session(client, server)
-    # クライアント起点の単方向ストリーム ID (Bit 0 = 0 / Bit 1 = 1)
-    stream_id = 2
 
-    # ピアが WT_STREAM を送ってストリームを作る
+    # ピア起点の単方向ストリームを上限数だけ作り、FIN で解放して解放済み ID の
+    # 記録を埋める (カプセルをまとめて注入する)。1 件でも少ないと対象
+    # ストリームの解放が記録されて検出経路に入る
+    filler_count = _RELEASED_MAP_LIMIT
+    batch: list[bytes] = []
+    for index in range(filler_count):
+        filler_id = 2 + 4 * index
+        batch.append(_encode_capsule(_WT_STREAM, _encode_varint(filler_id) + b"ab"))
+        batch.append(_encode_capsule(_WT_STREAM_FIN, _encode_varint(filler_id)))
+        if len(batch) >= 128:
+            ret = server.receive(_encode_data_frame(session_id, b"".join(batch)))
+            assert ret > 0, "充填用カプセルの注入に失敗しました"
+            batch = []
+    if batch:
+        ret = server.receive(_encode_data_frame(session_id, b"".join(batch)))
+        assert ret > 0, "充填用カプセルの注入に失敗しました"
+    _drain_events(server)
+    assert server.get_session_ids() == [session_id], "充填中にセッションが閉じられました"
+    assert server.get_stream_ids(session_id) == [], "充填したストリームが解放されていません"
+
+    # 上限到達後に解放されるストリームを作り、WT_STOP_SENDING を送出する
+    stream_id = 2 + 4 * filler_count
     ret = server.receive(
         _encode_data_frame(
             session_id, _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + b"ab")
         )
     )
     assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
-
-    # サーバーが WT_STOP_SENDING を送出する
     server.stop_sending(session_id, stream_id, 42)
-    wire = server.send()
-    assert wire is not None
-    assert _encode_capsule(_WT_STOP_SENDING, _encode_varint(stream_id) + _encode_varint(42)) in wire
 
-    # ピアの FIN で受信側が終端し、単方向ストリームのエントリが解放される
+    # ピアの FIN で解放するが、記録は上限超過のため残らない
     ret = server.receive(
         _encode_data_frame(session_id, _encode_capsule(_WT_STREAM_FIN, _encode_varint(stream_id)))
     )
     assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
     assert server.get_stream_ids(session_id) == [], "ストリームエントリが解放されていません"
     _drain_events(server)
+
+    # 解放のたびにキューした WT_MAX_STREAMS をピアへ掃き出しておく。残すと
+    # 送信ウィンドウを消費し、抑止の否定表明が空振りし得る
+    _h2_pump(server, client)
+    _drain_events(client)
 
     # 解放後に同じ Stream ID へ 5 バイト送ると暗黙作成されるが、抑止は維持される
     ret = server.receive(
