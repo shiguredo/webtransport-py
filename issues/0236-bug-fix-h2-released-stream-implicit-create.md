@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 で解放済みストリーム ID への WT_STREAM / WT_RESET_STREAM が再作成され終端検出を免れる
 
 - Created: 2026-09-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-h2-released-stream-implicit-create
 - Polished: 2026-09-18
 
@@ -47,10 +47,14 @@ draft-ietf-webtrans-http2-15 Section 6.4 は「A WT_STREAM capsule MUST NOT be s
 
 ## 解決方法
 
-- `WtSessionInfo` に解放済み Stream ID の集合を追加し、`H2Session::maybe_release_stream` の `wt_session->streams.erase` の直前で、自側送信専用でない場合に限って挿入する。上限判定は `kMaxReceivedMapEntries` と同じ形にし、超過時は挿入せず検出を諦める。その場合に Section 6.4 / 6.2 の検出が失われることをコメントに明記する
-- `H2Session::handle_wt_stream` のエントリ不在時、最大ストリーム数検査の前に解放済み集合を確認する。含まれ、かつ `data_len > 0` なら `H2Session::report_stream_state_error` を `"WT_STREAM received for released stream"` で呼んで return する。含まれ、かつ `data_len == 0` ならエントリを作成せずに return する
-- `H2Session::handle_wt_reset_stream` のエントリ不在時も同じ集合を確認し、含まれる場合は `H2Session::report_stream_state_error` を `"WT_RESET_STREAM received for released stream"` で呼んで return する (Reliable Size の検証より前に置き、解放済みであることを優先して報告する)
-- `src/bindings/webtransport_h2.h` の `WtSessionInfo::sent_stop_sending_stream_ids` の宣言コメントを、解放済み ID の検出を上限で放棄した場合は再作成が起こり得るためセッション単位の記録が必要である旨に書き換える。`src/bindings/webtransport_h2.cpp` の `H2Session::maybe_send_max_stream_data` のコメントはこの宣言コメントを参照しているだけなので参照先の書き換えで整合する。`tests/test_webtransport_h2_stream_state_error.py` の `test_wt_max_stream_data_after_stop_sending_released_stream_sends_state_error` の docstring は同じ前提を独立に書いているため同時に更新する
-- `tests/test_webtransport_h2_stream_state_error.py` に、解放済み Stream ID へのデータ付き WT_STREAM と Reliable Size 0 の WT_RESET_STREAM の注入で WT_CLOSE_SESSION (Type 0x2843, Application Error Code 0x51) が送出され `get_stream_ids` が変化しないこと、およびデータを含まない WT_STREAM ではエラーも再作成も起きないことを検証するテストを追加する。メッセージ定数は既存の `_WT_*` 群と同じ形で置く
-- `tests/test_webtransport_h2_flow_control_replenishment.py` の `test_max_stream_data_not_sent_after_stop_sending_released_stream` を新しい契約に合わせて更新する。解放後の注入では WT_STREAM_STATE_ERROR で終わるため、抑止の検証は (a) 解放前の停止状態での抑止、および (b) 解放済み集合が上限に達して検出を諦めた場合でも抑止が維持されること、の 2 点を残す。(b) は 0210 がセッション単位の記録を置いた根拠そのものであり、`_assert_no_max_stream_data_sent` で表明する
-- 0234 の `H2Session::stop_sending` の送出済み判定と 0235 の `H2Session::handle_wt_stream_data_blocked` が、本 issue の解放済み集合と `sent_stop_sending_stream_ids` をどう参照するかを、本 issue の実装時に両 issue と突き合わせて揃える。0235 を先に実装した場合、`H2Session::handle_wt_stream_data_blocked` が解放済み集合を参照する変更は本 issue で行う
+- `src/bindings/webtransport_h2.h` の `WtSessionInfo` に `released_stream_ids` を追加し、`H2Session::maybe_release_stream` の `wt_session->streams.erase` の直前で挿入するようにした。自側送信専用 (自側 initiator + 単方向) は方向検証で先に拒否されるため記録せず、上限は受信系コンテナと同じ固定上限 `kMaxReceivedMapEntries` とした (上限超過後は再作成が起こり得るという既知の制約)
+- `H2Session::handle_wt_stream` のエントリ不在時に解放済み判定を追加し、最大ストリーム数検査より前に置いた。データを含む WT_STREAM は `"WT_STREAM received for released stream"` で WT_STREAM_STATE_ERROR にし、データを含まない WT_STREAM は終端状態への受信と同じく無視してエントリも作成しない (Section 6.4 の空カプセルの扱い)
+- `H2Session::handle_wt_reset_stream` のエントリ不在時に解放済み判定を追加し、Reliable Size の検証より前に置いた。`"WT_RESET_STREAM received for released stream"` で WT_STREAM_STATE_ERROR にする
+- 0235 から申し送られた `H2Session::handle_wt_stream_data_blocked` にも同じ判定を追加し、`"WT_STREAM_DATA_BLOCKED received for released stream"` で WT_STREAM_STATE_ERROR にする (Section 6.9)
+- `kMaxReceivedMapEntries` のコメントに `released_stream_ids` と、上限超過で対象外になる 5 つの検出を追記した。`WtSessionInfo::sent_stop_sending_stream_ids` の宣言コメントは、解放済み ID の検出を上限超過で諦めた場合は `H2Session::handle_wt_stream` の再作成経路が残るためセッション単位の記録が必要である旨に書き換えた (`H2Session::maybe_send_max_stream_data` のコメントは宣言コメントを参照しているだけなので変更なし)
+- `tests/test_webtransport_h2_stream_state_error.py` に 5 件追加した。`test_wt_stream_after_release_sends_state_error` (解放済み ID へのデータ付き WT_STREAM)、`test_wt_reset_stream_after_release_sends_state_error` (Reliable Size 0 の WT_RESET_STREAM)、`test_wt_reset_stream_after_release_prefers_released_over_reliable_size` (Reliable Size 0 以外でも解放済みとして報告されることの順序ピン)、`test_wt_stream_fin_after_release_ignored` (データを含まない WT_STREAM はエラーもイベントもエントリ作成も起きない)、`test_wt_stream_data_blocked_after_release_sends_state_error`。共通の解放手順は `_release_peer_uni_stream`、Error イベントの表明は `_assert_error_event` に集約し、module docstring に Section 6.4 / 6.2 / 6.9 の解放済み検出を追記した
+- `tests/test_webtransport_h2_flow_control_replenishment.py` の `test_max_stream_data_not_sent_after_stop_sending_released_stream` を `test_max_stream_data_not_sent_after_released_map_full` に改名し、契約を「解放済み ID の記録が固定上限に達した後も Section 6.6 の抑止が維持される」に変更した (解放前の停止状態での抑止は `test_max_stream_data_not_sent_after_stop_sending` が引き続き担う)。充填数は `_RELEASED_MAP_LIMIT` として定数化し、抑止の確認前にキュー済みカプセルをピアへ掃き出して送信ウィンドウの残量で表明が空振りしないようにした。module docstring にも上限到達時の抑止を追記した
+- `tests/test_webtransport_h2_stream_state_error.py` の `test_wt_max_stream_data_after_stop_sending_released_stream_sends_state_error` の docstring を、上限超過時に再作成が起こり得るためセッション単位の記録が必要である旨に更新した
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 完了条件には Section 6.9 (WT_STREAM_DATA_BLOCKED) の項目を挙げていなかったが、0235 からの申し送りにより実装とテストに含めている
+- 全テスト (1198 本) が通ることを確認した
