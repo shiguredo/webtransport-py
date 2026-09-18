@@ -399,6 +399,9 @@ void H2Session::process_capsule(int32_t session_id,
     case CapsuleType::WtMaxStreamsUni:
       handle_wt_max_streams(session_id, false, payload, length);
       break;
+    case CapsuleType::WtStreamDataBlocked:
+      handle_wt_stream_data_blocked(session_id, payload, length);
+      break;
     case CapsuleType::Datagram:
       handle_datagram(session_id, payload, length);
       break;
@@ -414,7 +417,6 @@ void H2Session::process_capsule(int32_t session_id,
       break;
     case CapsuleType::Padding:
     case CapsuleType::WtDataBlocked:
-    case CapsuleType::WtStreamDataBlocked:
       // フロー制御通知・PADDING は現時点では状態更新のみ不要
       break;
   }
@@ -583,7 +585,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   }
 
   // 自側送信専用 (自側 initiator + uni) への受信は拒否する。完全
-  // デコードと存在確認の後に行い、4 ハンドラで順序を統一する
+  // デコードと存在確認の後に行う (WT_STOP_SENDING を除く方向検証ハンドラと
+  // 同じ順序)
   if (!is_receivable_data_capsule(stream_id, is_server_)) {
     report_stream_state_error(
         session_id, stream_id,
@@ -831,7 +834,8 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   }
 
   // 自側受信専用 (ピア initiator + uni) への受信は拒否する。完全
-  // デコードと存在確認の後に行い、4 ハンドラで順序を統一する
+  // デコードと存在確認の後に行う (WT_STOP_SENDING を除く方向検証ハンドラと
+  // 同じ順序)
   if (!is_receivable_flow_capsule(stream_id, is_server_)) {
     report_stream_state_error(
         session_id, stream_id,
@@ -939,6 +943,74 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
       wt_session->streams_blocked_uni_sent = false;
     }
   }
+}
+
+void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
+                                              const uint8_t* payload,
+                                              size_t length) {
+  size_t offset = 0;
+
+  // Stream ID
+  auto stream_id_result = decode_varint(payload + offset, length - offset);
+  if (!stream_id_result) {
+    return;
+  }
+  auto [stream_id, stream_id_len] = *stream_id_result;
+  offset += stream_id_len;
+
+  // Maximum Stream Data。受信側の状態を変える値ではないため読み捨てる
+  // (draft-15 Section 6.9 の "the offset of the stream at which the blocking
+  // occurred" であり、自側のフロー制御上限ではない)。完全デコードは他の
+  // ハンドラと同じく行う
+  if (!decode_varint(payload + offset, length - offset)) {
+    return;
+  }
+
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session) {
+    return;
+  }
+
+  // 自側送信専用 (自側 initiator + 単方向) への受信は拒否する。
+  // WT_STREAM_DATA_BLOCKED はデータ送信者が送るため、WT_STREAM /
+  // WT_RESET_STREAM と同じ送信者→受信者方向であり is_receivable_data_capsule
+  // を使う (受信者→送信者方向の WT_STOP_SENDING / WT_MAX_STREAM_DATA とは
+  // 逆)
+  if (!is_receivable_data_capsule(stream_id, is_server_)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_STREAM_DATA_BLOCKED received for local send-only stream");
+    return;
+  }
+
+  // draft-15 Section 6.9: 閉じた・リセット済みのストリームへの
+  // WT_STREAM_DATA_BLOCKED 受信は WT_STREAM_STATE_ERROR。判定は受信側の
+  // 終端 (recv_state) で行う: 本カプセルはピアの送信方向 (自側の受信方向)
+  // の申告であり、自側の FIN は自側の送信方向だけを閉じるため send_state は
+  // 含めない (Section 5.2 の QUIC 状態ミラー)。メッセージは Application
+  // Error Code 4 バイトと合わせて 64 バイト未満に収める必要があるため
+  // (テストの WT_CLOSE_SESSION 検証が Length を 1 バイト varint で組み立て
+  // る)、既存の "WT_STREAM received for stream in terminal state" とは語順を
+  // 変えて "for terminal stream" としている
+  auto stream_it = wt_session->streams.find(stream_id);
+  if (stream_it != wt_session->streams.end() &&
+      (stream_it->second.recv_state == StreamState::DataRecvd ||
+       stream_it->second.recv_state == StreamState::ResetRecvd)) {
+    report_stream_state_error(
+        session_id, stream_id,
+        "WT_STREAM_DATA_BLOCKED received for terminal stream");
+    return;
+  }
+
+  // 有効な状態のストリーム、またはエントリが無い Stream ID は受理する。
+  // ピアの申告を伝える advisory な通知であり、エントリの作成も自側の
+  // フロー制御状態の更新も行わない (Section 6.10 の
+  // H2Session::handle_wt_streams_blocked と同じ扱い)。エントリが無い ID に
+  // は、まだ開かれていない ID のほかに H2Session::maybe_release_stream が
+  // 解放した ID も含まれる。解放済み ID は記録が無いため未作成 ID と同じ
+  // 経路で受理される (既知の制約。H2Session::handle_wt_max_stream_data は
+  // 解放後も検出できるようセッション単位の記録を残しているが、本カプセルは
+  // その記録を持たない)
 }
 
 void H2Session::handle_wt_streams_blocked(int32_t session_id,
