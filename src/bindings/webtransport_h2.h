@@ -316,16 +316,17 @@ struct WtSessionInfo {
   // メモリ DoS 防止のため kMaxReceivedMapEntries を超える新規 ID は
   // 保持しない
   std::set<uint64_t> received_stop_sending_stream_ids;
-  // 送出済み WT_STOP_SENDING の Stream ID (draft-15 Section 6.6)。
-  // 送出後に同じストリームへ WT_MAX_STREAM_DATA を送ってはならないため
-  // 抑止に使う。ストリームエントリの解放後も抑止する必要があるため
+  // 送出済み WT_STOP_SENDING の Stream ID。draft-15 Section 6.3 の
+  // 「同じストリームへ 2 回送出しない」の判定と、Section 6.6 の「送出後に
+  // 同じストリームへ WT_MAX_STREAM_DATA を送らない」の抑止に使う。
+  // ストリームエントリの解放後も抑止する必要があるため
   // WtStreamInfo ではなくセッション単位で持つ (解放後にピアが同じ Stream ID
   // へ WT_STREAM を送ると handle_wt_stream が暗黙作成するため、エントリ単位
   // の記録では抑止できない)。要素は自側が stop_sending を呼んだ実在
   // ストリームの ID に限られ、ピアは追加できない。有界化するとその分だけ
-  // MUST NOT を満たせなくなるため上限は設けず、要素数はセッション生存中に
-  // 停止を要求した実在ストリーム数に比例して増える (受信側の集合がメモリ
-  // DoS 対策で有界なのとは前提が異なる)
+  // Section 6.3 の判定と Section 6.6 の MUST NOT を満たせなくなるため上限は
+  // 設けず、要素数はセッション生存中に停止を要求した実在ストリーム数に
+  // 比例して増える (受信側の集合がメモリ DoS 対策で有界なのとは前提が異なる)
   std::set<uint64_t> sent_stop_sending_stream_ids;
 
   // 同一制限値での BLOCKED 系カプセルの重複送出を抑止する印。対向の

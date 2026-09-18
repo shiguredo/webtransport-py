@@ -5,7 +5,8 @@ WT_MAX_DATA / WT_MAX_STREAM_DATA を受信量の 1/2 到達で補充し、
 WT_MAX_STREAMS をストリーム終了時に補充することを検証する。送信側は
 超過時にセッションを閉じず BLOCKED 送出と保留キューで待ち、対向の
 MAX 受信で送出を再開する。WT_STOP_SENDING を送出したストリームへの
-WT_MAX_STREAM_DATA の送出抑止 (Section 6.6 の MUST NOT) も検証する。
+WT_MAX_STREAM_DATA の送出抑止 (Section 6.6 の MUST NOT) と、同じストリームへ
+WT_STOP_SENDING を複数回送出しないこと (Section 6.3 の MUST NOT) も検証する。
 両ハーフ終端したストリームエントリの解放も検証する
 (実セッションを使う。モックなし)。
 """
@@ -28,6 +29,9 @@ from webtransport import h2
 
 _WT_MAX_DATA = 0x190B4D3D
 _WT_STOP_SENDING = 0x190B4D3A
+# WT_STOP_SENDING (Type 0x190B4D3A) の 4 バイト可変長整数表現。Error Code の
+# 値に依存せずカプセル種別だけで判定するために使う
+_WT_STOP_SENDING_TYPE_BYTES = _encode_varint(_WT_STOP_SENDING)
 _WT_STREAM = 0x190B4D3C
 _WT_STREAM_FIN = 0x190B4D3B
 _WT_STREAM_DATA_BLOCKED = 0x190B4D42
@@ -408,6 +412,16 @@ def test_partial_fin_resume() -> None:
     assert stream_events[-1].fin is True
 
 
+def _assert_no_stop_sending_sent(session: h2.Session) -> None:
+    """WT_STOP_SENDING がワイヤへ送出されていないことを確認する
+
+    カプセル種別 (0x190B4D3A) の 4 バイト可変長整数表現で判定する。Error Code
+    の値に依存しないため、抑止する Error Code が変わっても表明が空振りしない。
+    """
+    wire = session.send()
+    assert wire is None or _WT_STOP_SENDING_TYPE_BYTES not in wire
+
+
 def test_max_stream_data_on_wire_without_stop_sending() -> None:
     """WT_STOP_SENDING を送出していないストリームでは補充が従来どおり送出されることを確認
 
@@ -509,6 +523,74 @@ def test_max_stream_data_accepted_after_local_stop_sending() -> None:
     wire = server.send()
     assert wire is not None
     assert _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + b"0123456789") in wire
+
+
+def test_stop_sending_sent_once_per_stream() -> None:
+    """同じストリームへ stop_sending を複数回呼んでも WT_STOP_SENDING が 1 個だけであることを確認
+
+    draft-15 Section 6.3 の MUST NOT「A WT_STOP_SENDING capsule MUST NOT be
+    sent multiple times for the same stream」を検証する。2 回目以降は存在
+    しないストリーム ID への送出と同じく黙って無視され、ワイヤへの送出・
+    イベント・セッション終了のいずれも引き起こさない。あわせて Section 6.6 の
+    WT_MAX_STREAM_DATA の抑止が維持されることも確認する。
+    """
+    client, server = _create_small_stream_limit_h2_session_pair(8)
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # ピアがデータを送ってサーバー側にストリームエントリを作る
+    # (2 バイトでは上限 8 の 1/2 を超えないため補充も起きない)
+    client.send_stream_data(session_id, stream_id, b"ab", False)
+    _h2_pump(client, server)
+    assert _received_stream_bytes(server) == 2, "停止前の受信データが届いていません"
+
+    stop_capsule = _encode_capsule(_WT_STOP_SENDING, _encode_varint(stream_id) + _encode_varint(42))
+
+    # 1 回目の送出で WT_STOP_SENDING が 1 個だけワイヤに現れる
+    server.stop_sending(session_id, stream_id, 42)
+    wire = server.send()
+    assert wire is not None
+    assert wire.count(_WT_STOP_SENDING_TYPE_BYTES) == 1, (
+        "1 回目の WT_STOP_SENDING が 1 個ではありません"
+    )
+    assert stop_capsule in wire
+
+    # 2 回目以降は Error Code が異なっても黙って無視される
+    server.stop_sending(session_id, stream_id, 42)
+    server.stop_sending(session_id, stream_id, 7)
+    _assert_no_stop_sending_sent(server)
+    assert _drain_events(server) == [], "無視された呼び出しでイベントが発生しました"
+    assert server.get_session_ids() == [session_id], "セッションが閉じられました"
+
+    # Section 6.6 の抑止 (停止後は WT_MAX_STREAM_DATA を送出しない) が維持される。
+    # 停止後もデータは届き続ける (停止前の 2 バイトは上で確認済み)
+    client.send_stream_data(session_id, stream_id, b"cde", False)
+    _h2_pump(client, server)
+    received = b"".join(
+        event.data for event in _drain_events(server) if event.type == h2.EventType.STREAM_DATA
+    )
+    assert received == b"cde", "停止後の受信データが届いていません"
+    _assert_no_max_stream_data_sent(server)
+
+    # ピアが受け取った WT_STOP_SENDING は 1 個だけなので、ピア側でも
+    # WT_STREAM_STATE_ERROR (0x51) によるセッション終了は起きない
+    client.receive(wire)
+    _drain_events(client)
+    assert client.get_session_ids() == [session_id], "ピアのセッションが閉じられました"
+
+    # 判定はストリーム単位である: 停止していない別のストリームへは送出される
+    other_stream_id = client.open_stream(session_id, False)
+    assert other_stream_id >= 0
+    client.send_stream_data(session_id, other_stream_id, b"ab", False)
+    _h2_pump(client, server)
+    _drain_events(server)
+    server.stop_sending(session_id, other_stream_id, 0)
+    wire = server.send()
+    assert wire is not None
+    assert wire.count(_WT_STOP_SENDING_TYPE_BYTES) == 1, (
+        "停止していない別ストリームへ WT_STOP_SENDING が送出されていません"
+    )
 
 
 def test_max_stream_data_not_sent_after_stop_sending_released_stream() -> None:

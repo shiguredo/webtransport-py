@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 で同じストリームへの stop_sending が WT_STOP_SENDING を複数回送出する
 
 - Created: 2026-09-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-h2-stop-sending-duplicate-send
 - Polished: 2026-09-18
 
@@ -35,8 +35,12 @@ draft-ietf-webtrans-http2-15 Section 6.3 は「A WT_STOP_SENDING capsule MUST NO
 
 ## 解決方法
 
-- `H2Session::stop_sending` に送出済み判定を追加し、`WtSessionInfo::sent_stop_sending_stream_ids` に含まれる場合は `send_capsule` を呼ばずに return する。判定を挿入位置より前に置く理由をコメントに残す
-- `src/bindings/webtransport_h2.h` の `WtSessionInfo::sent_stop_sending_stream_ids` の宣言コメントに、抑止だけでなく送出済み判定にも使うことを追記する (0210 は抑止の用途しか書いていない)
-- `src/webtransport/h2/client.py` と `src/webtransport/h2/server.py` の `stop_sending` の docstring、および `skills/webtransport-py/SKILL.md` に、同じストリームへ複数回呼んでも WT_STOP_SENDING は 1 回だけ送出される旨を追記する
-- `tests/conftest.py` の `_create_small_stream_limit_h2_session_pair` を使い、同じストリームへ `stop_sending` を 2 回呼んでもワイヤ上の WT_STOP_SENDING (Type 0x190B4D3A) が 1 個であることを部分列チェックで検証する。0210 の抑止テスト (`_assert_no_max_stream_data_sent`) と同じくカプセル種別で判定し、値に依存しない表明にする。テストは `tests/test_webtransport_h2_flow_control_replenishment.py` の `stop_sending` を扱うテストの並びに置く
-- あわせて、2 回目の呼び出し後も WT_MAX_STREAM_DATA の抑止 (Section 6.6 の MUST NOT) が維持されることを確認する
+- `H2Session::stop_sending` に送出済み判定を追加した。入力検証・セッション終了確認・ストリーム存在確認の後、`WtSessionInfo::sent_stop_sending_stream_ids` に含まれる場合は `send_capsule` を呼ばずに return する。判定は記録の挿入より前に置いた (挿入後に置くと常に真になり 1 回目の送出まで抑止されるため、その理由をコメントに残した)
+- `src/bindings/webtransport_h2.h` の `WtSessionInfo::sent_stop_sending_stream_ids` の宣言コメントを、Section 6.6 の抑止に加えて Section 6.3 の送出済み判定にも使うことを明記する形に更新した。有界化しない理由も両 MUST を満たせなくなることとして書き直した
+- `src/webtransport/h2/client.py` と `src/webtransport/h2/server.py` の `stop_sending` の docstring、および `skills/webtransport-py/SKILL.md` に、同じストリームへ複数回呼んでも WT_STOP_SENDING は 1 回だけ送出されること (2 回目以降は存在しないストリーム ID への送出と同じく黙って無視する) と、2^62 以上の stream_id は 2 回目以降も `ValueError` になることを追記した
+- `tests/test_webtransport_h2_flow_control_replenishment.py` に `test_stop_sending_sent_once_per_stream` を追加した。小さい上限のセッションペアで、1 回目の送出がカプセル種別 1 個であること、2 回目以降は Error Code を変えても送出もイベントも起きないこと、ピアが受け取るカプセルが 1 個だけなのでピア側のセッションも閉じないこと、停止していない別ストリームへは従来どおり送出されること、Section 6.6 の WT_MAX_STREAM_DATA の抑止が維持されることを検証する。カプセル種別の判定は `_WT_STOP_SENDING_TYPE_BYTES` と `_assert_no_stop_sending_sent` に集約し、Error Code の値に依存しない表明にした
+- `tests/test_webtransport_h2_reset_validation.py` に `test_stop_sending_over_varint_range_raises_after_first_send` を追加した。1 回目を範囲内の Stream ID で成功させた後に 2^62 以上を渡すと `ValueError` になること (入力検証が送出済み判定より先であること) を固定する
+- `tests/test_webtransport_h2_flow_control_replenishment.py` の module docstring に Section 6.3 の検証を追記した
+- 本 issue の Section 6.3 判定は「そのストリームへ WT_STOP_SENDING を送出済みか」だけを見る形で、記録の置き場所に依存しない。0236 が `WtSessionInfo::sent_stop_sending_stream_ids` の宣言コメントを書き換える際は、本 issue が追記した Section 6.3 の用途記述を残したうえで判定式とコメントの整合を取る
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 全テスト (1186 本) が通ることを確認した
