@@ -323,9 +323,9 @@ struct WtSessionInfo {
   // へ WT_STREAM を送ると handle_wt_stream が暗黙作成するため、エントリ単位
   // の記録では抑止できない)。要素は自側が stop_sending を呼んだ実在
   // ストリームの ID に限られ、ピアは追加できない。有界化するとその分だけ
-  // MUST NOT を満たせなくなるため上限は設けず、要素数はセッション生存中の
-  // stop_sending 呼び出し回数に比例して増える (受信側の集合がメモリ DoS
-  // 対策で有界なのとは前提が異なる)
+  // MUST NOT を満たせなくなるため上限は設けず、要素数はセッション生存中に
+  // 停止を要求した実在ストリーム数に比例して増える (受信側の集合がメモリ
+  // DoS 対策で有界なのとは前提が異なる)
   std::set<uint64_t> sent_stop_sending_stream_ids;
 
   // 同一制限値での BLOCKED 系カプセルの重複送出を抑止する印。対向の
@@ -505,6 +505,8 @@ class H2Session {
    * セッション・未知ストリームの検査より先に行い、stream_id が 2^62 以上の
    * 場合は std::invalid_argument を投げる (nanobind の既定翻訳で ValueError。
    * 終了済みセッションでも例外になる)。
+   * 送出したストリームへは以後 WT_MAX_STREAM_DATA を送出しない (draft-15
+   * Section 6.6 の MUST NOT)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param error_code エラーコード

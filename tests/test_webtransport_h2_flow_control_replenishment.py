@@ -15,6 +15,7 @@ from __future__ import annotations
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
+    _create_small_stream_limit_h2_session_pair,
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
@@ -26,7 +27,6 @@ from conftest import (
 from webtransport import h2
 
 _WT_MAX_DATA = 0x190B4D3D
-_WT_MAX_STREAM_DATA = 0x190B4D3E
 _WT_STOP_SENDING = 0x190B4D3A
 _WT_STREAM = 0x190B4D3C
 _WT_STREAM_FIN = 0x190B4D3B
@@ -67,29 +67,6 @@ def _create_wide_window_h2_session_pair() -> tuple[h2.Session, h2.Session]:
     _h2_pump(client, server)
     _h2_pump(server, client)
 
-    return client, server
-
-
-def _create_small_stream_limit_h2_session_pair(
-    wt_initial_max_stream_data: int,
-) -> tuple[h2.Session, h2.Session]:
-    """両側の wt_initial_max_stream_data を縮小したペアを作成する
-
-    受信量が上限の 1/2 を超えた時点で WT_MAX_STREAM_DATA の補充が走るため、
-    小さい上限にすると少ないバイト数で補充経路を再現できる。ストリームの
-    送信クレジットは対向が広告した値で決まるため、送信側のクレジットを
-    縮めるには対向側の config を縮める必要がある (送信側自身の config を
-    縮めても自分の送信クレジットは変わらない)。
-    """
-    client_config = h2.Config()
-    client_config.wt_initial_max_stream_data = wt_initial_max_stream_data
-    client = h2.Session.create_client(client_config)
-    server_config = h2.Config()
-    server_config.is_server = True
-    server_config.wt_initial_max_stream_data = wt_initial_max_stream_data
-    server = h2.Session.create_server(server_config)
-    _h2_pump(client, server)
-    _h2_pump(server, client)
     return client, server
 
 
@@ -212,7 +189,7 @@ def test_blocked_sent_once_and_resume() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_wt_max_stream_data_capsule(stream_id, 1024),
         )
     )
     _h2_pump(client, server)
@@ -265,7 +242,7 @@ def test_reset_discards_pending() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_wt_max_stream_data_capsule(stream_id, 1024),
         )
     )
     _h2_pump(client, server)
@@ -422,7 +399,7 @@ def test_partial_fin_resume() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_wt_max_stream_data_capsule(stream_id, 1024),
         )
     )
     _h2_pump(client, server)
@@ -492,11 +469,12 @@ def test_max_stream_data_not_sent_after_stop_sending() -> None:
 def test_max_stream_data_accepted_after_local_stop_sending() -> None:
     """自側が WT_STOP_SENDING を送出したストリームの WT_MAX_STREAM_DATA が受理されることを確認
 
-    draft-15 Section 6.6 の 2 文はどちらも WT_STOP_SENDING の送出側を拘束する。
-    自側が停止を要求した後にピアが送る WT_MAX_STREAM_DATA は合法であり、
-    拒否してはならない (受信側の判定に自側の送出記録を使わないことの回帰ピン)。
-    受理したクレジットが実際に反映されることも、初期上限 8 を超える 10 バイトの
-    送出で確認する。
+    draft-15 Section 6.6 の 1 文目は WT_STOP_SENDING の送出側に WT_MAX_STREAM_DATA
+    の送出を禁じ、2 文目は WT_STOP_SENDING を受信した側にストリームエラーの送出を
+    課す。自側は受信側ではないため、停止を要求した後にピアが送る
+    WT_MAX_STREAM_DATA は合法であり、拒否してはならない (受信側の判定に自側の
+    送出記録を使わないことの回帰ピン)。受理したクレジットが実際に反映される
+    ことも、初期上限 8 を超える 10 バイトの送出で確認する。
     """
     client, server = _create_small_stream_limit_h2_session_pair(8)
     session_id = _connect_h2_session(client, server)

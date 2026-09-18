@@ -16,6 +16,7 @@ from __future__ import annotations
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
+    _create_small_stream_limit_h2_session_pair,
     _drain_events,
     _encode_data_frame,
     _encode_varint,
@@ -828,38 +829,73 @@ def test_wt_max_stream_data_other_stream_after_stop_sending_accepted() -> None:
     """WT_STOP_SENDING を受けていない別ストリームの WT_MAX_STREAM_DATA が受理されることを確認
 
     停止状態の判定は Stream ID 単位である。ストリーム 0 に WT_STOP_SENDING を
-    受けていても、ストリーム 4 のクレジットは従来どおり受理される (回帰ピン)。
+    受けていても、ストリーム 4 のクレジットは従来どおり受理される。受理した
+    クレジットが実際に反映されることも、初期上限 8 を超える 10 バイトの送出で
+    確認する (回帰ピン)。
     """
-    client, server = _create_h2_session_pair()
+    client, server = _create_small_stream_limit_h2_session_pair(8)
     session_id = _connect_h2_session(client, server)
+    stopped_stream_id = 0
+    stream_id = 4
 
-    ret = server.receive(_encode_data_frame(session_id, _encode_wt_stop_sending_capsule(0, 42)))
+    # ピアが WT_STREAM を送ってストリーム 4 を作る
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"ab"))
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # 別ストリームへの WT_STOP_SENDING はストリーム 4 の受理に影響しない
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_stop_sending_capsule(stopped_stream_id, 42))
+    )
     assert ret > 0, "WT_STOP_SENDING カプセルの注入に失敗しました"
     _drain_events(server)
 
-    # 初期広告値 (既定 256 KiB) より大きい増加値は通常どおり受理される
+    # 初期広告値 (8) より大きい増加値は通常どおり受理される
     ret = server.receive(
-        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(4, 524288))
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(stream_id, 524288))
     )
     assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
     _assert_no_state_error_sent(server)
+
+    # クレジットが反映され、初期上限 8 を超える 10 バイトを送出できる
+    server.send_stream_data(session_id, stream_id, b"0123456789", False)
+    wire = server.send()
+    assert wire is not None
+    assert _encode_wt_stream_capsule(stream_id, b"0123456789") in wire
 
 
 def test_wt_max_stream_data_without_stop_sending_accepted() -> None:
     """WT_STOP_SENDING を受けていないストリームの WT_MAX_STREAM_DATA が受理されることを確認
 
     停止状態の判定を追加しても通常のクレジット受信が壊れないことの回帰ピン。
-    初期広告値 (既定 256 KiB) より大きい増加値を 2 回送ってもエラーにならない。
+    初期広告値 (8) より大きい増加値を 2 回受けてもエラーにならず、受理した
+    クレジットが実際に反映されて初期上限を超えるデータを送出できることまで
+    確認する。
     """
-    client, server = _create_h2_session_pair()
+    client, server = _create_small_stream_limit_h2_session_pair(8)
     session_id = _connect_h2_session(client, server)
+    stream_id = 0
 
+    # ピアが WT_STREAM を送ってストリームを作る
     ret = server.receive(
-        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 524288))
+        _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"ab"))
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # 初期広告値 (8) より大きい増加値を 2 回受けてもエラーにならない
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(stream_id, 524288))
     )
     assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
     ret = server.receive(
-        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 1048576))
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(stream_id, 1048576))
     )
     assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
     _assert_no_state_error_sent(server)
+
+    # クレジットが反映され、初期上限 8 を超える 10 バイトを送出できる
+    server.send_stream_data(session_id, stream_id, b"0123456789", False)
+    wire = server.send()
+    assert wire is not None
+    assert _encode_wt_stream_capsule(stream_id, b"0123456789") in wire

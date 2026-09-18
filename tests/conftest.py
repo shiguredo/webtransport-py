@@ -662,6 +662,31 @@ def _create_h2_session_pair() -> tuple[h2.Session, h2.Session]:
     return client, server
 
 
+def _create_small_stream_limit_h2_session_pair(
+    wt_initial_max_stream_data: int,
+) -> tuple[h2.Session, h2.Session]:
+    """両側の wt_initial_max_stream_data を縮小した h2.Session ペアを作成する
+
+    受信量が上限の 1/2 を超えた時点で WT_MAX_STREAM_DATA の補充が走るため、
+    小さい上限にすると少ないバイト数で補充経路を再現できる。ストリームの
+    送信クレジットは対向が広告した値で決まるため、送信側のクレジットを
+    縮めるには対向側の config を縮める必要がある (送信側自身の config を
+    縮めても自分の送信クレジットは変わらない)。
+
+    @return (クライアント Session, サーバー Session)
+    """
+    client_config = h2.Config()
+    client_config.wt_initial_max_stream_data = wt_initial_max_stream_data
+    client = h2.Session.create_client(client_config)
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_initial_max_stream_data = wt_initial_max_stream_data
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+    return client, server
+
+
 def _connect_h2_session(
     client: h2.Session,
     server: h2.Session,

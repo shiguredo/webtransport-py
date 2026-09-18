@@ -847,9 +847,8 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   // handle_wt_stop_sending の二重受信検出と同じ (has_received_stop_sending)。
   // 未作成・解放後のストリームもセッション単位の集合で検出する。減少値
   // 検査より前に置いて WT_STREAM_STATE_ERROR を報告する: draft は減少値の
-  // MUST (同 Section の
-  // WT_FLOW_CONTROL_ERROR) と本 MUST が同時に成立する場合の優先を定めて
-  // おらず、本判定を先に置くのは実装の選択である
+  // MUST (同 Section の WT_FLOW_CONTROL_ERROR) と本 MUST が同時に成立する
+  // 場合の優先を定めておらず、本判定を先に置くのは実装の選択である
   if (has_received_stop_sending(*wt_session, stream_id)) {
     report_stream_state_error(
         session_id, stream_id,
