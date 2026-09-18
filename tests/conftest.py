@@ -309,6 +309,15 @@ def _encode_wt_stream_data(session_id: int, payload: bytes) -> bytes:
     return b"\x40\x41" + _encode_varint(session_id) + payload
 
 
+def _encode_wt_max_stream_data_capsule(stream_id: int, max_stream_data: int) -> bytes:
+    """WebTransport over HTTP/2 の WT_MAX_STREAM_DATA カプセルを組み立てる
+
+    形式は Type 0x190B4D3E (draft-ietf-webtrans-http2-15 Section 6.6) +
+    Length + Stream ID (可変長整数) + Maximum Stream Data (可変長整数)。
+    """
+    return _encode_capsule(0x190B4D3E, _encode_varint(stream_id) + _encode_varint(max_stream_data))
+
+
 def _setup_connect(
     client: h3.Session,
     server: h3.Session,
@@ -650,6 +659,31 @@ def _create_h2_session_pair() -> tuple[h2.Session, h2.Session]:
     # サーバーの SETTINGS をクライアントへ
     _h2_pump(server, client)
 
+    return client, server
+
+
+def _create_small_stream_limit_h2_session_pair(
+    wt_initial_max_stream_data: int,
+) -> tuple[h2.Session, h2.Session]:
+    """両側の wt_initial_max_stream_data を縮小した h2.Session ペアを作成する
+
+    受信量が上限の 1/2 を超えた時点で WT_MAX_STREAM_DATA の補充が走るため、
+    小さい上限にすると少ないバイト数で補充経路を再現できる。ストリームの
+    送信クレジットは対向が広告した値で決まるため、送信側のクレジットを
+    縮めるには対向側の config を縮める必要がある (送信側自身の config を
+    縮めても自分の送信クレジットは変わらない)。
+
+    @return (クライアント Session, サーバー Session)
+    """
+    client_config = h2.Config()
+    client_config.wt_initial_max_stream_data = wt_initial_max_stream_data
+    client = h2.Session.create_client(client_config)
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_initial_max_stream_data = wt_initial_max_stream_data
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
     return client, server
 
 

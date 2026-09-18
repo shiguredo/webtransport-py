@@ -16,6 +16,7 @@ from conftest import (
     _encode_capsule,
     _encode_data_frame,
     _encode_varint,
+    _encode_wt_max_stream_data_capsule,
     _h2_pump,
 )
 
@@ -31,7 +32,6 @@ WT_ERROR = WtErrorCode.WT_ERROR.value
 
 _WT_STREAM = 0x190B4D3C
 _WT_STOP_SENDING = 0x190B4D3A
-_WT_MAX_STREAM_DATA = 0x190B4D3E
 
 # 1 つの DATA フレームにまとめるカプセル数。カプセルごとに receive を
 # 呼ぶと Python → C++ 呼び出しが増えて遅いためバッチ注入する
@@ -45,13 +45,6 @@ _MAP_LIMIT = 4096
 def _inject_batch(server: h2.Session, session_id: int, capsules: list[bytes]) -> None:
     """複数カプセルを 1 つの DATA フレームにまとめてワイヤ注入する"""
     assert server.receive(_encode_data_frame(session_id, b"".join(capsules))) > 0
-
-
-def _max_stream_data_capsule(stream_id: int, max_data: int) -> bytes:
-    """WT_MAX_STREAM_DATA カプセルを構築する"""
-    return _encode_capsule(
-        _WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(max_data)
-    )
 
 
 def _stop_sending_capsule(stream_id: int) -> bytes:
@@ -86,7 +79,7 @@ def _fill_unknown_max_stream_data(
     for batch_start in range(0, count, _BATCH_SIZE):
         batch_count = min(_BATCH_SIZE, count - batch_start)
         capsules = [
-            _max_stream_data_capsule((first_index + batch_start + offset) * 4, 1 << 20)
+            _encode_wt_max_stream_data_capsule((first_index + batch_start + offset) * 4, 1 << 20)
             for offset in range(batch_count)
         ]
         _inject_batch(server, session_id, capsules)
@@ -125,7 +118,7 @@ def test_bulk_unknown_max_stream_data_keeps_session_alive() -> None:
     for batch_start in range(0, _BULK_IDS, _BATCH_SIZE):
         count = min(_BATCH_SIZE, _BULK_IDS - batch_start)
         capsules = [
-            _max_stream_data_capsule((batch_start + offset + 1) * 4, 1 << 20)
+            _encode_wt_max_stream_data_capsule((batch_start + offset + 1) * 4, 1 << 20)
             for offset in range(count)
         ]
         _inject_batch(server, session_id, capsules)
@@ -136,7 +129,7 @@ def test_bulk_unknown_max_stream_data_keeps_session_alive() -> None:
     assert not _error_events(server)
 
     # 上限到達後も既存ストリームへの WT_MAX_STREAM_DATA は受け付ける
-    _inject_batch(server, session_id, [_max_stream_data_capsule(stream_id, 1 << 21)])
+    _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(stream_id, 1 << 21)])
     assert not _error_events(server)
     assert server.get_session_ids() == [session_id]
 
@@ -159,8 +152,8 @@ def test_max_stream_data_over_limit_new_id_not_retained() -> None:
     # 上限超過の新規 ID は保持されず、減少値を送っても
     # WT_FLOW_CONTROL_ERROR の WT_CLOSE_SESSION (Type 0x2843) は送出されない
     over_id = (_MAP_LIMIT + 100) * 4
-    _inject_batch(server, session_id, [_max_stream_data_capsule(over_id, 1 << 20)])
-    _inject_batch(server, session_id, [_max_stream_data_capsule(over_id, 1 << 19)])
+    _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(over_id, 1 << 20)])
+    _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(over_id, 1 << 19)])
     assert not _error_events(server)
     wire = server.send()
     assert wire is None or b"\x68\x43" not in wire
@@ -190,9 +183,9 @@ def test_max_stream_data_existing_stream_decrease_detected_after_limit() -> None
 
     # 実在ストリームへ増加値を送り、その後減少値を送ると
     # WT_FLOW_CONTROL_ERROR の WT_CLOSE_SESSION (Type 0x2843) が送出される
-    _inject_batch(server, session_id, [_max_stream_data_capsule(stream_id, 1 << 20)])
+    _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(stream_id, 1 << 20)])
     assert not _error_events(server)
-    _inject_batch(server, session_id, [_max_stream_data_capsule(stream_id, 1 << 19)])
+    _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(stream_id, 1 << 19)])
     wire = server.send()
     assert wire is not None
     assert b"\x68\x43" in wire

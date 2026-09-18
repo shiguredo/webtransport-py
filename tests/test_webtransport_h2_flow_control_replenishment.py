@@ -4,8 +4,10 @@ draft-15 Section 4.4 の SHOULD「受信消費に応じたクレジット送出�
 WT_MAX_DATA / WT_MAX_STREAM_DATA を受信量の 1/2 到達で補充し、
 WT_MAX_STREAMS をストリーム終了時に補充することを検証する。送信側は
 超過時にセッションを閉じず BLOCKED 送出と保留キューで待ち、対向の
-MAX 受信で送出を再開する。両ハーフ終端したストリームエントリの解放も
-検証する (実セッションを使う。モックなし)。
+MAX 受信で送出を再開する。WT_STOP_SENDING を送出したストリームへの
+WT_MAX_STREAM_DATA の送出抑止 (Section 6.6 の MUST NOT) も検証する。
+両ハーフ終端したストリームエントリの解放も検証する
+(実セッションを使う。モックなし)。
 """
 
 from __future__ import annotations
@@ -13,17 +15,21 @@ from __future__ import annotations
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
+    _create_small_stream_limit_h2_session_pair,
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
     _encode_varint,
+    _encode_wt_max_stream_data_capsule,
     _h2_pump,
 )
 
 from webtransport import h2
 
 _WT_MAX_DATA = 0x190B4D3D
-_WT_MAX_STREAM_DATA = 0x190B4D3E
+_WT_STOP_SENDING = 0x190B4D3A
+_WT_STREAM = 0x190B4D3C
+_WT_STREAM_FIN = 0x190B4D3B
 _WT_STREAM_DATA_BLOCKED = 0x190B4D42
 _WT_DATA_BLOCKED = 0x190B4D41
 
@@ -62,6 +68,18 @@ def _create_wide_window_h2_session_pair() -> tuple[h2.Session, h2.Session]:
     _h2_pump(server, client)
 
     return client, server
+
+
+def _assert_no_max_stream_data_sent(session: h2.Session) -> None:
+    """WT_MAX_STREAM_DATA がワイヤへ送出されていないことを確認する
+
+    カプセル種別 (0x190B4D3E) の 4 バイト可変長整数表現で判定する。補充量の
+    値に依存しないため、補充の算出式が変わっても表明が空振りしない。値その
+    ものの固定は対照テスト test_max_stream_data_on_wire_without_stop_sending
+    が担う。
+    """
+    wire = session.send()
+    assert wire is None or b"\x99\x0b\x4d\x3e" not in wire
 
 
 def test_session_transfer_beyond_1mib() -> None:
@@ -171,7 +189,7 @@ def test_blocked_sent_once_and_resume() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_wt_max_stream_data_capsule(stream_id, 1024),
         )
     )
     _h2_pump(client, server)
@@ -224,7 +242,7 @@ def test_reset_discards_pending() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_wt_max_stream_data_capsule(stream_id, 1024),
         )
     )
     _h2_pump(client, server)
@@ -381,10 +399,165 @@ def test_partial_fin_resume() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_wt_max_stream_data_capsule(stream_id, 1024),
         )
     )
     _h2_pump(client, server)
     stream_events = [e for e in _drain_events(server) if e.type == h2.EventType.STREAM_DATA]
     assert b"".join(e.data for e in stream_events) == b"012345"
     assert stream_events[-1].fin is True
+
+
+def test_max_stream_data_on_wire_without_stop_sending() -> None:
+    """WT_STOP_SENDING を送出していないストリームでは補充が従来どおり送出されることを確認
+
+    上限 8 のストリームで 5 バイト受信すると 1/2 を超えるため、5 + 8 = 13 の
+    WT_MAX_STREAM_DATA が送出される (対照。抑止の判定が入っても通常の補充が
+    壊れていないことを示す)。
+    """
+    client, server = _create_small_stream_limit_h2_session_pair(8)
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    client.send_stream_data(session_id, stream_id, b"abcde", False)
+    # サーバーの送出を確認するため、クライアント → サーバーの一方向だけを進める
+    _h2_pump(client, server)
+
+    wire = server.send()
+    assert wire is not None
+    assert _encode_wt_max_stream_data_capsule(stream_id, 13) in wire
+
+
+def test_max_stream_data_not_sent_after_stop_sending() -> None:
+    """WT_STOP_SENDING 送出後の WT_MAX_STREAM_DATA 送出が抑止されることを確認
+
+    draft-15 Section 6.6 の MUST NOT「A WT_MAX_STREAM_DATA capsule MUST NOT
+    be sent after a sender requests that a stream be closed with
+    WT_STOP_SENDING」を検証する。修正前は送出済みを記録していなかったため、
+    停止後も受信量に応じた補充の WT_MAX_STREAM_DATA が送出されていた。
+    対照 (test_max_stream_data_on_wire_without_stop_sending) と同じ受信量で
+    比較するため、停止後も 5 バイト受信させる。
+    """
+    client, server = _create_small_stream_limit_h2_session_pair(8)
+    session_id = _connect_h2_session(client, server)
+    stream_id = client.open_stream(session_id, False)
+    assert stream_id >= 0
+
+    # 上限の 1/2 以下 (2 バイト) の受信では補充されない
+    client.send_stream_data(session_id, stream_id, b"ab", False)
+    # サーバーの送出を確認するため、クライアント → サーバーの一方向だけを進める
+    _h2_pump(client, server)
+    _assert_no_max_stream_data_sent(server)
+
+    # サーバーが WT_STOP_SENDING を送出する
+    server.stop_sending(session_id, stream_id, 42)
+    wire = server.send()
+    assert wire is not None
+    assert _encode_capsule(_WT_STOP_SENDING, _encode_varint(stream_id) + _encode_varint(42)) in wire
+
+    # 1/2 を超える受信でも WT_MAX_STREAM_DATA は送出されない
+    client.send_stream_data(session_id, stream_id, b"cde", False)
+    _h2_pump(client, server)
+    received = b"".join(
+        event.data for event in _drain_events(server) if event.type == h2.EventType.STREAM_DATA
+    )
+    assert received == b"abcde", "停止後の受信データが届いていません"
+    _assert_no_max_stream_data_sent(server)
+
+
+def test_max_stream_data_accepted_after_local_stop_sending() -> None:
+    """自側が WT_STOP_SENDING を送出したストリームの WT_MAX_STREAM_DATA が受理されることを確認
+
+    draft-15 Section 6.6 の 1 文目は WT_STOP_SENDING の送出側に WT_MAX_STREAM_DATA
+    の送出を禁じ、2 文目は WT_STOP_SENDING を受信した側にストリームエラーの送出を
+    課す。自側は受信側ではないため、停止を要求した後にピアが送る
+    WT_MAX_STREAM_DATA は合法であり、拒否してはならない (受信側の判定に自側の
+    送出記録を使わないことの回帰ピン)。受理したクレジットが実際に反映される
+    ことも、初期上限 8 を超える 10 バイトの送出で確認する。
+    """
+    client, server = _create_small_stream_limit_h2_session_pair(8)
+    session_id = _connect_h2_session(client, server)
+    # クライアント起点の双方向ストリーム ID
+    stream_id = 0
+
+    # ピアが WT_STREAM を送ってストリームを作る
+    ret = server.receive(
+        _encode_data_frame(
+            session_id, _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + b"ab")
+        )
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # サーバーが WT_STOP_SENDING を送出する
+    server.stop_sending(session_id, stream_id, 42)
+    wire = server.send()
+    assert wire is not None
+    assert _encode_capsule(_WT_STOP_SENDING, _encode_varint(stream_id) + _encode_varint(42)) in wire
+
+    # ピアが同じストリームへ WT_MAX_STREAM_DATA を送る (合法。拒否されない)
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(stream_id, 1 << 20))
+    )
+    assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
+    wire = server.send()
+    assert wire is None or b"\x68\x43" not in wire, "セッションが閉じられました"
+    assert server.get_session_ids() == [session_id]
+
+    # クレジットが反映され、初期上限 8 を超える 10 バイトを送出できる
+    server.send_stream_data(session_id, stream_id, b"0123456789", False)
+    wire = server.send()
+    assert wire is not None
+    assert _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + b"0123456789") in wire
+
+
+def test_max_stream_data_not_sent_after_stop_sending_released_stream() -> None:
+    """エントリ解放後にピアが同じ Stream ID へ WT_STREAM を送っても抑止が維持されることを確認
+
+    抑止の記録はストリームエントリの解放後も必要である (解放後にピアが同じ
+    Stream ID へ WT_STREAM を送ると handle_wt_stream が暗黙作成するため、
+    エントリ単位の記録では抑止できない)。ピア起点の単方向ストリームで
+    「WT_STREAM → stop_sending → FIN で解放 → 同じ ID へ WT_STREAM 再注入」を
+    再現し、暗黙作成されたストリームへ WT_MAX_STREAM_DATA が送出されない
+    ことを確認する。
+    """
+    client, server = _create_small_stream_limit_h2_session_pair(8)
+    session_id = _connect_h2_session(client, server)
+    # クライアント起点の単方向ストリーム ID (Bit 0 = 0 / Bit 1 = 1)
+    stream_id = 2
+
+    # ピアが WT_STREAM を送ってストリームを作る
+    ret = server.receive(
+        _encode_data_frame(
+            session_id, _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + b"ab")
+        )
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+
+    # サーバーが WT_STOP_SENDING を送出する
+    server.stop_sending(session_id, stream_id, 42)
+    wire = server.send()
+    assert wire is not None
+    assert _encode_capsule(_WT_STOP_SENDING, _encode_varint(stream_id) + _encode_varint(42)) in wire
+
+    # ピアの FIN で受信側が終端し、単方向ストリームのエントリが解放される
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_capsule(_WT_STREAM_FIN, _encode_varint(stream_id)))
+    )
+    assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == [], "ストリームエントリが解放されていません"
+    _drain_events(server)
+
+    # 解放後に同じ Stream ID へ 5 バイト送ると暗黙作成されるが、抑止は維持される
+    ret = server.receive(
+        _encode_data_frame(
+            session_id, _encode_capsule(_WT_STREAM, _encode_varint(stream_id) + b"abcde")
+        )
+    )
+    assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
+    assert server.get_stream_ids(session_id) == [stream_id], "ストリームが暗黙作成されていません"
+    received = b"".join(
+        event.data for event in _drain_events(server) if event.type == h2.EventType.STREAM_DATA
+    )
+    assert received == b"abcde", "解放後の受信データが届いていません"
+    _assert_no_max_stream_data_sent(server)

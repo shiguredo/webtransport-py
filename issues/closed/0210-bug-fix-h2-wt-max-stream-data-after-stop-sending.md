@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 で WT_STOP_SENDING 後の WT_MAX_STREAM_DATA を検出・抑止する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-h2-wt-max-stream-data-after-stop-sending
 - Polished: 2026-09-15
 
@@ -27,7 +27,7 @@
 
 - `H2Session::stop_sending` は WT_STOP_SENDING カプセルを送出するだけで、送出済みを記録しない
 - 記録が無いため `H2Session::maybe_send_max_stream_data` を抑止できず、WT_STOP_SENDING 送出後に同じストリームへ WT_MAX_STREAM_DATA を送出し得る
-- 記録を `WtStreamInfo` に持つと、両ハーフ終端で `H2Session::maybe_release_stream` がエントリを解放した時点で失われる。解放後にピアが同じ Stream ID へ WT_STREAM を送ると `H2Session::handle_wt_stream` が暗黙作成するため、記録無しで `H2Session::maybe_send_max_stream_data` に到達し得る
+- 記録を `WtStreamInfo` に持つと、`H2Session::maybe_release_stream` がエントリを解放した時点で失われる (双方向は両ハーフ終端、単方向は使う方向の終端で解放される)。解放後にピアが同じ Stream ID へ WT_STREAM を送ると `H2Session::handle_wt_stream` が暗黙作成するため、記録無しで `H2Session::maybe_send_max_stream_data` に到達し得る
 
 テスト:
 
@@ -50,6 +50,12 @@
 
 ## 解決方法
 
-- `src/bindings/webtransport_h2.cpp` の `H2Session::handle_wt_max_stream_data` に停止状態の確認と `H2Session::report_stream_state_error` の呼び出しを追加する。判定条件は `H2Session::handle_wt_stop_sending` の二重受信検出と同じにする
-- `src/bindings/webtransport_h2.h` の `WtSessionInfo` に WT_STOP_SENDING 送出済み Stream ID の集合を追加し、`H2Session::stop_sending` で挿入、`H2Session::maybe_send_max_stream_data` で照合して抑止する
-- `tests/test_webtransport_h2_stream_state_error.py` に受信側の検出テスト (未作成ストリームと解放後のストリームを含む) を追加し、`tests/test_webtransport_h2_flow_control_replenishment.py` に送信側の抑止テストを追加する
+- `src/bindings/webtransport_h2.cpp` の `H2Session::handle_wt_max_stream_data` に停止状態の確認を追加し、WT_STOP_SENDING を受信済みのストリームへ WT_MAX_STREAM_DATA が届いた場合は `H2Session::report_stream_state_error` で WT_STREAM_STATE_ERROR を通知するようにした。判定は方向検証の後・減少値検査の前に置いた (draft は 2 つの MUST が同時に成立する場合の優先を定めていないため、本判定を先に置くのは実装の選択である)
+- 停止状態の判定は匿名 namespace の `has_received_stop_sending` に集約した。セッション単位の集合 `WtSessionInfo::received_stop_sending_stream_ids` が未作成・エントリ解放後のストリームを担い、`WtStreamInfo::stop_sending_received` が集合の安全弁上限に達した場合の実在ストリームを担う (従来は `H2Session::handle_wt_stop_sending` の二重受信検出だけが同じ条件を使っていた)
+- `src/bindings/webtransport_h2.h` の `WtSessionInfo` に `sent_stop_sending_stream_ids` を追加し、`H2Session::stop_sending` が送出済みを記録、`H2Session::maybe_send_max_stream_data` の先頭で照合して抑止するようにした。記録はストリームエントリの解放後も保持する (解放後にピアが同じ Stream ID へ WT_STREAM を送ると `H2Session::handle_wt_stream` が暗黙作成するため、エントリ単位の記録では抑止できない)。有界化するとその分だけ MUST NOT を満たせなくなるため上限は設けず、要素数はセッション生存中に停止を要求した実在ストリーム数に比例して増える (受信側の集合がメモリ DoS 対策で有界なのとは前提が異なる)
+- `tests/test_webtransport_h2_stream_state_error.py` に 5 件追加した。停止済みストリームへの WT_MAX_STREAM_DATA の検出 (減少値と同時に成立する場合は WT_STREAM_STATE_ERROR を優先)、未作成ストリームでの検出、エントリ解放後の検出、停止状態でないストリームでの受理 (別ストリームと停止なしの 2 件)
+- `tests/test_webtransport_h2_flow_control_replenishment.py` に 4 件追加した。停止後の抑止 (対照として停止なしでは 13 の WT_MAX_STREAM_DATA が送出されることも固定)、エントリ解放後に暗黙作成されたストリームでの抑止、自側が WT_STOP_SENDING を送出したストリームの WT_MAX_STREAM_DATA は受理されクレジットが反映されることの回帰ピン。抑止の否定表明はカプセル種別 (0x190B4D3E) で判定し、補充量の式が変わっても空振りしないようにした
+- `src/webtransport/h2/client.py` と `src/webtransport/h2/server.py` の `stop_sending` の docstring に送出後の WT_MAX_STREAM_DATA 抑止 (Section 6.6 の MUST NOT) を、`skills/webtransport-py/SKILL.md` に同じ抑止と停止要求後もピアが WT_RESET_STREAM を返すまでデータが届き続けることを追記した
+- `tests/conftest.py` に `_encode_wt_max_stream_data_capsule` を追加し、`tests/test_webtransport_h2_received_map_bound.py` にあった同一実装の重複を解消した
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 本対応のスコープ外: 同じストリームへ `H2Session::stop_sending` を 2 回呼ぶと WT_STOP_SENDING が 2 回送出される既存挙動 (Section 6.3 の MUST NOT) は変更していない
