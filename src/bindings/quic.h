@@ -856,6 +856,10 @@ class QuicConnection {
   static int tls_early_data_rejected_cb(ngtcp2_conn* conn,
                                         void* user_data) noexcept;
 
+  // ngtcp2_crypto が参照する関数ポインタ
+  static ngtcp2_conn* conn_ref_get_conn_cb(
+      ngtcp2_crypto_conn_ref* ref) noexcept;
+
   // BoringSSL セッションチケット受信コールバック
   static int new_session_cb(SSL* ssl, SSL_SESSION* session) noexcept;
 

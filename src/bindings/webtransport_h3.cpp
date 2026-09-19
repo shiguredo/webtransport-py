@@ -1444,13 +1444,14 @@ bool H3Session::verify_origin(
 
 // WebTransport データストリーム用の read_data コールバック
 // stream_buffers_ からデータを取得して返す
-static nghttp3_ssize wt_data_read_callback(nghttp3_conn* /*conn*/,
-                                           int64_t stream_id,
-                                           nghttp3_vec* vec,
-                                           size_t veccnt,
-                                           uint32_t* pflags,
-                                           void* conn_user_data,
-                                           void* /*stream_user_data*/) {
+static nghttp3_ssize wt_data_read_callback(
+    nghttp3_conn* /*conn*/,
+    int64_t stream_id,
+    nghttp3_vec* vec,
+    size_t veccnt,
+    uint32_t* pflags,
+    void* conn_user_data,
+    void* /*stream_user_data*/) noexcept {
   if (veccnt == 0 || !conn_user_data) {
     return NGHTTP3_ERR_WOULDBLOCK;
   }
