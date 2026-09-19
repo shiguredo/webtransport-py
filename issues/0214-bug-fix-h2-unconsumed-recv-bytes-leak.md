@@ -1,7 +1,7 @@
 # h2 の未消費受信バイト記録がストリーム終了で解放されない
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-20
 - Branch: feature/fix-h2-unconsumed-recv-bytes-leak
 - Polished: 2026-09-18
 
@@ -44,8 +44,19 @@
 
 ## 解決方法
 
-- `src/bindings/webtransport_h2.cpp` の `H2Session` に、エントリ削除とコネクションレベル返却をまとめて行うヘルパーを追加し、`H2Session::on_stream_close_callback`、`H2Session::handle_end_stream`、`H2Session::handle_wt_close_session`、`H2Session::reject_session`、`H2Session::close_session`、非 2xx 応答の受信分岐から呼ぶ
-- `H2Session::on_data_chunk_recv_callback` の早期 return 経路 (エントリ不在・`is_terminated`) でも、破棄するバイトを `nghttp2_session_consume_connection` で返す
-- `H2Session` にテスト専用 API を追加してエントリの残留を観測できるようにする (`_test_*` の既存例に倣う)。あわせて未返却のコネクションレベル受信バイト数を観測する API を追加する (`src/bindings/http2.cpp` の `Http2Connection::effective_recv_data_length` と同じ形。拒否を重ねても上限に張り付かないことを直接表明するために使う。`WINDOW_UPDATE` の有無は完了条件のとおり `Session.send()` の生フレームで確認する)
-- `src/webtransport/webtransport_ext/h2.pyi` を再生成して追跡分を更新する
-- `tests/test_webtransport_h2_recv_flow_control.py` にエントリ残留の検証を、`413` 拒否の経路は `tests/test_webtransport_h2_datagram.py` の既存 413 テストに倣って追加する
+- `src/bindings/webtransport_h2.cpp` の `H2Session` に `H2Session::discard_stream_recv_bytes` (記録の削除とコネクションレベル返却) と `H2Session::consume_connection_recv_bytes` (`nghttp2_session_consume_connection` による返却) を追加した
+- `H2Session::discard_stream_recv_bytes` は `unconsumed_recv_bytes_` の該当キーを削除し、残量をコネクションレベル受信ウィンドウへ返す。終了するストリームに `nghttp2_session_consume` は使わない (ストリームの `WINDOW_UPDATE` まで積まれ、受信を継続しないストリームのウィンドウを開いてしまうため)
+- 次の経路から `H2Session::discard_stream_recv_bytes` を呼ぶ
+  - `H2Session::on_stream_close_callback`
+  - `H2Session::handle_end_stream` (ピアの END_STREAM のみでのセッション終了)
+  - `H2Session::handle_wt_close_session`
+  - `H2Session::close_session`
+  - `H2Session::reject_session` の非 2xx 分岐 (413 拒否) と 2xx 分岐
+  - 非 2xx 応答を受信する分岐 (`H2Session::on_frame_recv_callback`)
+- `H2Session::reject_session` の 2xx 分岐も対象にした。受理前に蓄積したカプセルを破棄して `is_terminated` を立てるため、ピアの END_STREAM を待つ間も記録が残る (破棄したバイトを残す点で他の経路と同じ)
+- 非 2xx 応答を受信する分岐は、2xx 応答前の DATA を nghttp2 がアプリへ配送せず自身でコネクションレベル消費するため実際には記録が空である。エントリを削除する他の経路と揃えて呼ぶ
+- `H2Session::on_data_chunk_recv_callback` の早期 return 経路 (エントリ不在・`is_terminated`) でも、破棄するチャンクを `nghttp2_session_consume_connection` で返す (返さないと拒否後に届いた DATA の分だけウィンドウが消費されたままになる)
+- 観測用にテスト専用 API `H2Session::test_unconsumed_recv_bytes` (未消費記録の残量) と `H2Session::test_effective_recv_data_length` (`nghttp2_session_get_effective_recv_data_length` の値) を追加し、`_test_unconsumed_recv_bytes` / `_test_effective_recv_data_length` として公開した
+- `src/webtransport/webtransport_ext/h2.pyi` を再生成して追跡分を更新した
+- 一次資料との対応: 接続の受信ウィンドウの既定値 65535 と、接続ウィンドウが `WINDOW_UPDATE` でしか変更できないこと (`SETTINGS_INITIAL_WINDOW_SIZE` はストリーム単位) は RFC 9113 Section 6.9.2 / 6.5.2。セッションの終了が CONNECT ストリームのクローズであることと、WT_CLOSE_SESSION なしのクローズも終了として扱うことは draft-ietf-webtrans-http2-15 Section 3.4。消費やストリームのクローズに応じてフロー制御クレジットを送る SHOULD は同 Section 4.4。`WINDOW_UPDATE` を積む閾値 (受信ウィンドウの半分) は RFC ではなく nghttp2 の実装 (`nghttp2_should_send_window_update`)
+- `tests/test_webtransport_h2_recv_flow_control.py` に 7 件のテストを追加した。413 拒否は記録の解放に加えて、`Session.send()` の生フレームに `WINDOW_UPDATE` (Stream ID 0) が現れることと未返却バイト数が `WINDOW_UPDATE` の閾値 (32767) 未満に留まることを確認する。ピアの END_STREAM / ピアの WT_CLOSE_SESSION / ローカル `close_session` / 2xx 応答 (`reject_session` の 2xx 分岐) / HTTP/2 ストリームのリセット (`RST_STREAM` 注入) の各経路と、同一コネクションで 20 セッションを終了させても記録が残らないことも確認する。7 件とも解放と返却を行わない実装で失敗することを確認した (ピアの WT_CLOSE_SESSION は終了時に破棄される後続カプセルの分、413 拒否は閾値を超える拒否量で記録が残ることを再現している)
