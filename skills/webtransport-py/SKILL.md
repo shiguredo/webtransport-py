@@ -353,7 +353,7 @@ async def migrate() -> bool  # Connection Migration (ローカル UDP ソケッ�
 def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 ```
 
-`request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。
+`request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。未接続の場合、ストリームを開けなかった場合 (同時ストリーム数の上限到達・ハンドシェイク未完了・接続クローズ直後)、リクエストの登録に失敗した場合は -1 を返す (登録に失敗した場合は開設済みの QUIC ストリームをリセットしてから返す)。
 `http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。
 
 ### HTTP/2 (`webtransport.http2`)
