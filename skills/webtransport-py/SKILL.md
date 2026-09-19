@@ -49,7 +49,8 @@ uv add webtransport-py
 - サーバー: コンストラクタ → `on_*()` でコールバック登録 → `async with server:` → `await server.run()`
 - クライアント: コンストラクタ → `on_*()` でコールバック登録 → `await client.connect()` → 送信 → `await client.run()` → `await client.close()`
   - `h3.Client` / `h2.Client` の `connect()` は `-> None` で、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する
-  - `quic.Client` / `http2.Client` の `connect()` は `-> bool` で例外を送出しない。`http2.Client` は成功時に `True` を返す (TCP + TLS の確立のみを見る)
+  - `quic.Client` / `http2.Client` の `connect()` は `-> bool` で接続失敗を例外にしない (誤用である再入は `RuntimeError` になる)。`http2.Client` は成功時に `True` を返す (TCP + TLS の確立のみを見る)
+  - `close()` を挟まずに `connect()` を再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する)。`close()` の後は `quic.Client` 以外の 4 層で再度 `connect()` できる (`quic.Client` は 1 インスタンス 1 回の契約で、再接続には新しい `Client` が必要)
 - コールバックはすべて async 関数を渡す
 - `run()` は受信ループなので、クライアントでは `asyncio.wait_for(client.run(), timeout=...)` や `asyncio.create_task()` と組み合わせる。例外は `quic.Client` で、`connect()` がバックグラウンド受信タスクを起動するため `run()` は接続終了を待つだけの完了待ちになる (起動しなくても受信イベントは処理される。`asyncio.create_task(client.run())` で接続終了まで待てる)
 
@@ -200,7 +201,7 @@ async def close() -> None
 
 `migrate()` は接続と上位層の状態を維持したまま送受信のソケットとアドレスを差し替える (`quic.Client.migrate` と同じ手順)。サーバー側は DCID で接続を照合してアドレスキーを張り替える (RFC 9000 Section 9)。
 
-`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。`run()` が受信ループであり、`close()` でセッションと接続を閉じる (`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる)。`send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (h3 セッション未生成の `h3.Client` は送信しないため例外にならない)。
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、`close()` を挟まずに再度呼ぶと `RuntimeError` になる (`close()` の後は再度接続できる)。対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。`run()` が受信ループであり、`close()` でセッションと接続を閉じる (`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる)。`send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (h3 セッション未生成の `h3.Client` は送信しないため例外にならない)。
 
 ### WebTransport over HTTP/2 (`webtransport.h2`)
 
@@ -239,7 +240,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 
 `send_stream_data` / `send_datagram` は `SessionWriter` と `h2.Client` のどちらも data が 1 MiB 超なら `ValueError` を送出する (未接続の `h2.Client` は送信しないため例外にならない)。
 
-`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。メソッドの形は `h3.Client` と同じだが、`close_stream` は無く、リセットは `reset_stream`、送信停止は `stop_sending` を使う。コールバックは `on_session_ready(session_id: int)` / `on_session_closed(session_id: int)` / `on_stream_data(stream_id: int, data: bytes)` / `on_stream_reset(stream_id: int, error_code: int)` / `on_datagram(data: bytes)` / `on_stop_sending(stream_id: int, error_code: int)` / `on_error(error_code: int, error_message: str)` / `on_goaway(last_stream_id: int, error_code: int)` で、`h3.Client` に無い `on_stop_sending` / `on_error` / `on_goaway` を持つ (addr は付かない)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
+`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。メソッドの形は `h3.Client` と同じだが、`close_stream` は無く、リセットは `reset_stream`、送信停止は `stop_sending` を使う。コールバックは `on_session_ready(session_id: int)` / `on_session_closed(session_id: int)` / `on_stream_data(stream_id: int, data: bytes)` / `on_stream_reset(stream_id: int, error_code: int)` / `on_datagram(data: bytes)` / `on_stop_sending(stream_id: int, error_code: int)` / `on_error(error_code: int, error_message: str)` / `on_goaway(last_stream_id: int, error_code: int)` で、`h3.Client` に無い `on_stop_sending` / `on_error` / `on_goaway` を持つ (addr は付かない)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
 
 ### QUIC (`webtransport.quic`)
 
@@ -310,7 +311,7 @@ def was_early_data_attempted() -> bool
 
 0-RTT / Session Resumption は「初回接続で `on_session_ticket` (または `export_session_ticket()` / `export_0rtt_transport_params()`) を保存 → 再接続時に `session_ticket` と `early_transport_params` をコンストラクタへ渡す」という流れで使う。0-RTT で送るデータは `register_early_data()` で `connect()` の前に登録する (登録ごとに双方向ストリームを 1 本開いて送出する。0-RTT を試行しない接続ではストリームを開けないため送出されずに破棄され、警告ログが出る)。early data がピアに拒否された場合は `on_early_data_rejected()` が発火し、拒否されたデータと紐づくストリームの状態は破棄される (再送は呼び出し側でストリームを開き直す)。証明書のカスタム検証は `verify_callback` に DER 形式の証明書チェーン (`list[bytes]`) を受け取って `bool` を返す関数を渡す。
 
-`connect()` はバックグラウンド受信タスクを起動し、ハンドシェイク完了を `timeout` (既定 10.0 秒) で打ち切る。期限までに確立できない場合は接続を維持したまま `False` を返す (ハンドシェイクが後で完了する可能性がある。後始末は `close()` が担う)。`timeout <= 0` では接続を開始せず即座に `False` を返す。タイムアウト後は `_recv_task` が存続するため、同じ `Client` で `connect()` を再呼び出しすると `RuntimeError` になる (再試行には新規 `Client` が必要)。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。`max_datagram_frame_size` は DATAGRAM の受信サポート広告 (RFC 9221 Section 3) で、0 なら広告しない (既定 65536)。0 を指定すると低レベル設定の `enable_datagram` が False になり、受信広告だけでなくローカルの `send_datagram()` も無効化される (RFC 9221 は単方向利用を認めるが、本実装では受信と送信が連動する)。
+`connect()` はバックグラウンド受信タスクを起動し、ハンドシェイク完了を `timeout` (既定 10.0 秒) で打ち切る。期限までに確立できない場合は接続を維持したまま `False` を返す (ハンドシェイクが後で完了する可能性がある。後始末は `close()` が担う)。`timeout <= 0` では接続を開始せず即座に `False` を返す。タイムアウト後は `_recv_task` が存続するため、同じ `Client` で `connect()` を再呼び出しすると `RuntimeError` になる (再試行には新規 `Client` が必要。受信タスクを起動する前の失敗では再度 `connect()` できる)。`run()` はバックグラウンド受信タスクの完了 (接続終了) を待つだけの役割で、`asyncio.create_task(client.run())` で接続終了まで待つ用途に使う。`max_datagram_frame_size` は DATAGRAM の受信サポート広告 (RFC 9221 Section 3) で、0 なら広告しない (既定 65536)。0 を指定すると低レベル設定の `enable_datagram` が False になり、受信広告だけでなくローカルの `send_datagram()` も無効化される (RFC 9221 は単方向利用を認めるが、本実装では受信と送信が連動する)。
 
 `recv_stream_data()` は呼び出し時点で FIN 完了済みなら即時 return する。タイムアウトは idle deadline (`timeout`) と absolute deadline (`overall_timeout`。None なら `max(timeout * 6, 30)`) の 2 段構えで、どちらかに達すると `TimeoutError` を raise する。接続終了 (CONNECTION_CLOSED) を受信した場合も `TimeoutError` を raise して待機を終了する。STREAM_RESET 受信時は進捗として idle deadline が 1 回延長され、その後は idle timeout になる。コールバック内からは呼べない (`RuntimeError`)。`on_stream_data` コールバックと併用してもデータは両方に配信される。受信データはストリームごとに保持され、FIN 完了済みの即時 return ができる。FIN で正常 return したストリームの受信状態は自動破棄される (1 回限り。再呼び出しは `TimeoutError` のため避けること)。`recv_stream_data` を呼ばない使い方は `discard_recv_state(stream_id)` で明示的に解放する。
 
@@ -336,7 +337,7 @@ def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアン�
 
 `on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。
 
-`http3.Client.__init__(host, port=443, idle_timeout_ns=30_000_000_000, verify_peer=True, ca_file=None, verify_callback=None)`。
+`http3.Client.__init__(host, port=443, idle_timeout_ns=30_000_000_000, verify_peer=True, ca_file=None, verify_callback=None)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。
 
 ```python
 # クライアントコールバック
@@ -373,7 +374,7 @@ async def drain() -> None  # 送信待ちフレームを空になるまで送出
 
 `on_stream_end` はリクエストボディ終端 (END_STREAM) の受信で通知する。ボディなしのリクエスト (HEADERS に END_STREAM) でも呼ばれる。RESET_STREAM で終了した場合は呼ばれない。
 
-`http2.Client.__init__(host, port=443, verify_peer=True)`。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形だが `body: bytes | None = None` を持ち、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
+`http2.Client.__init__(host, port=443, verify_peer=True)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形だが `body: bytes | None = None` を持ち、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
 
 `http2.Client` / `http2.Server` / `ResponseWriter` の `send_data` は data が 1 MiB 超なら `ValueError` を送出する (`http2.Client` は接続が未確立のときは送信しないため例外にならない)。`http2.Client.request` の `body` も 1 MiB 超なら、ヘッダーを送出する前に `ValueError` を送出する。
 

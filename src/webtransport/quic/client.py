@@ -722,28 +722,36 @@ class Client:
         Returns:
             接続に成功した場合は True。期限までに確立できない場合・接続
             失敗時は False
+
+        Raises:
+            RuntimeError: 受信タスクを起動した後 (接続試行に入った後) に
+                connect() を再度呼んだ場合。1 インスタンス 1 回の契約であり、
+                再接続には新しい Client を作る。受信タスクを起動する前の
+                失敗 (timeout 0 以下・名前解決失敗・候補なし) では再度呼べる
         """
         if self._recv_task is not None or self._connecting:
             raise RuntimeError("connect() has already been called")
 
-        # timeout <= 0 のときは接続を開始せずに即座に False を返す
-        # (ngtcp2-py と同じ挙動)
-        if timeout <= 0:
-            return False
-
-        # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
-        # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
-        try:
-            candidates = await self._resolve_remote(self._host, self._port)
-        except OSError:
-            return False
-        if not candidates:
-            return False
-
-        # connect() 実行中は early data 登録を拒否する (実行中に登録されても
-        # _flush_early_data() は走り終えているため黙って破棄される)
+        # connect() 実行中フラグ (再入拒否と early data 登録の拒否に使う)。
+        # 名前解決中も立てて、解決中の再入を拒否する
         self._connecting = True
         try:
+            # timeout <= 0 のときは接続を開始せずに即座に False を返す
+            # (ngtcp2-py と同じ挙動)
+            if timeout <= 0:
+                return False
+
+            # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
+            # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
+            try:
+                candidates = await self._resolve_remote(self._host, self._port)
+            except OSError:
+                return False
+            if not candidates:
+                return False
+
+            # connect() 実行中は early data 登録を拒否する (実行中に登録されても
+            # _flush_early_data() は走り終えているため黙って破棄される)
             saved_early_data = list(self._early_data_queue)
             for index, (family, ip) in enumerate(candidates):
                 # 試行ごとに登録内容を復元する (失敗試行の flush で空になるため)
