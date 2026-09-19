@@ -6,6 +6,7 @@ asyncio と UDP を使用した高レベル HTTP/3 クライアント実装。
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
@@ -28,6 +29,8 @@ from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 class Client:
@@ -771,17 +774,31 @@ class Client:
         return True
 
     async def close(self) -> None:
-        """接続を閉じる"""
+        """接続を閉じる
+
+        CONNECTION_CLOSE の送出に失敗してもソケットのクローズは必ず実行する
+        (ファイルディスクリプタの解放を GC に委ねない)。送出失敗は warning
+        ログに落とし、OSError 以外の例外 (キャンセル等) は伝播させたまま
+        ソケットだけは閉じる。
+        """
         self._running = False
         self._connected = False
 
-        if self._quic_connection is not None:
-            self._quic_connection.close()
-            await self._send_pending()
-
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        try:
+            if self._quic_connection is not None:
+                self._quic_connection.close()
+                try:
+                    await self._send_pending()
+                except OSError as exc:
+                    logger.warning("failed to send connection close: %s", exc)
+        finally:
+            # 予期しない例外が発生しても socket クローズは必ず実行する
+            # (FD リークを防ぐ)。ここへ届くのは、_send_pending() の OSError
+            # 以外の例外 (await 中のキャンセル等) と _quic_connection.close()
+            # の例外である
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""

@@ -1,6 +1,7 @@
 """webtransport.http3 高レベル API テスト"""
 
 import asyncio
+import logging
 import socket
 import time
 
@@ -2011,4 +2012,69 @@ async def test_high_level_initiate_key_update(test_certificates):
     await asyncio.gather(client_task, server_task, return_exceptions=True)
 
     await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_close_closes_socket_when_send_fails(test_certificates, caplog):
+    """CONNECTION_CLOSE の送出に失敗してもソケットが閉じられることを確認する
+
+    接続確立済みのクライアントでソケットオブジェクトだけを先に閉じ
+    (`client._socket` 属性は残す)、close() を呼ぶ。_send_pending() 内の
+    sock_sendto が OSError を送出するが warning ログに落ちて伝播せず、
+    ソケットのクローズは finally で実行されて `client._socket` が None になる。
+    未修正の実装では OSError が close() から伝播し、ソケットの参照が
+    `client._socket` に残る (finally によるクローズと解放が実行されない)。
+
+    検出限界: OSError 経路だけを通るため、キャンセル等の非 OSError 例外で
+    finally が走ることは検証しない (モック無しでは決定的に発火させられない)。
+    検証するのは例外が伝播しないことと `client._socket` が None になることで
+    あり、finally の構造そのものではない。
+    """
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+    await client.connect()
+
+    # ソケットオブジェクトだけを閉じる (_socket 属性は None にしない)。
+    # 属性を None にすると _send_pending() が冒頭で早期 return し、送出を
+    # 試みないまま close() が完了するため失敗経路を再現できない
+    client._socket.close()
+
+    with caplog.at_level(logging.WARNING, logger="webtransport.http3.client"):
+        await client.close()
+
+    # 送出失敗は webtransport.http3.client の warning ログに落ち、OSError は伝播しない
+    # (同じ文面のログは他層にもあるため、ロガー名とレベルまで確認する)
+    assert any(
+        record.name == "webtransport.http3.client"
+        and record.levelno == logging.WARNING
+        and "failed to send connection close" in record.message
+        for record in caplog.records
+    ), "CONNECTION_CLOSE の送出失敗が webtransport.http3.client の警告ログに記録されていない"
+    # ソケットは finally で閉じられ、属性も None になる
+    assert client._socket is None, "close() 後にソケットが解放されていない"
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
     await server.stop()
