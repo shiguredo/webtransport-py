@@ -1139,6 +1139,8 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   // (handle_end_stream の経路は自側が END_STREAM を送らない点が異なる)
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
+  // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
+  discard_stream_recv_bytes(session_id);
   end_stream_pending_.insert(session_id);
   nghttp2_session_resume_data(session_, session_id);
 }
@@ -1190,6 +1192,8 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // END_STREAM のみの受信には該当しない)
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
+  // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
+  discard_stream_recv_bytes(session_id);
 }
 
 // ========== Capsule 送信 ==========
@@ -1301,6 +1305,50 @@ void H2Session::consume_recv_bytes(int32_t stream_id, size_t size) {
       unconsumed_recv_bytes_.erase(it);
     }
   }
+}
+
+void H2Session::discard_stream_recv_bytes(int32_t stream_id) {
+  auto it = unconsumed_recv_bytes_.find(stream_id);
+  if (it == unconsumed_recv_bytes_.end()) {
+    return;
+  }
+  size_t remaining = it->second;
+  unconsumed_recv_bytes_.erase(it);
+  // 終了するストリームへ nghttp2_session_consume を使うとストリームの
+  // WINDOW_UPDATE まで積まれ、受信を継続しないストリームのウィンドウを
+  // 開いてしまう。コネクションレベルだけを返す
+  consume_connection_recv_bytes(remaining);
+}
+
+void H2Session::consume_connection_recv_bytes(size_t size) {
+  if (!session_ || size == 0) {
+    return;
+  }
+  // 破棄したバイトの分だけコネクションレベル受信ウィンドウを返す
+  // (返却量が受信ウィンドウの半分以上なら nghttp2 が WINDOW_UPDATE を積む。
+  // 実際の送出は次の nghttp2_session_send が行う)
+  //
+  // 戻り値は NOMEM と INVALID_STATE でのみ失敗する。INVALID_STATE は
+  // H2Session::initialize で NGHTTP2_OPTMASK_NO_AUTO_WINDOW_UPDATE を設定済み
+  // のため発生しない。NOMEM はプロセス全体のメモリ枯渇であり、記録は呼び出し
+  // 元で削除済みのため再試行の余地が無い (返却できない分は失われる)
+  (void)nghttp2_session_consume_connection(session_, size);
+}
+
+std::optional<int64_t> H2Session::test_unconsumed_recv_bytes(
+    int32_t session_id) const {
+  auto it = unconsumed_recv_bytes_.find(session_id);
+  if (it == unconsumed_recv_bytes_.end()) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(it->second);
+}
+
+std::optional<int32_t> H2Session::test_effective_recv_data_length() const {
+  if (!session_) {
+    return std::nullopt;
+  }
+  return nghttp2_session_get_effective_recv_data_length(session_);
 }
 
 WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
@@ -2210,12 +2258,20 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   // accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)
   if (status_code / 100 != 2) {
     wt_sessions_.erase(session_id);
+    // エントリ削除で consume_recv_bytes の経路が塞がるため、受理前に受信した
+    // 記録を解放する
+    discard_stream_recv_bytes(session_id);
   } else {
     auto* wt_session = get_wt_session(session_id);
     if (wt_session) {
       wt_session->is_terminated = true;
       // 蓄積も破棄する (以後処理しない)
       wt_session->capsule_buffer.clear();
+      // 破棄した蓄積分はアプリへ配送されないため、未消費の受信バイト記録も
+      // 解放してコネクションレベル受信ウィンドウを返す (is_terminated により
+      // 以後の DATA は早期 return で破棄される。ピアの END_STREAM を待つ間も
+      // 記録が残らないようにする)
+      discard_stream_recv_bytes(session_id);
     }
   }
   // mem_recv2 コールバック中でも安全なよう、ここでは session_send しない
@@ -2609,6 +2665,11 @@ void H2Session::close_session(int32_t session_id,
   if (!wt_session || wt_session->is_terminated) {
     return;
   }
+
+  // ローカル終了では is_terminated が立ち、on_data_chunk_recv_callback の
+  // 早期 return により consume_recv_bytes の経路が塞がる。以後に届く DATA は
+  // 破棄されるため、ここで記録を解放する
+  discard_stream_recv_bytes(session_id);
 
   // WT_CLOSE_SESSION capsule: Error Code (32bit) + Message
   // draft-15 Section 6.12: Application Error Message は最大 1024 バイト
@@ -3051,6 +3112,11 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             rejected_event.status_code = code;
             h2_session->push_event(std::move(rejected_event));
             h2_session->wt_sessions_.erase(stream_id);
+            // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を
+            // 解放する。2xx 応答前の DATA は nghttp2 がアプリへ配送せず自身で
+            // コネクションレベル消費するためここでは常に空だが、エントリを
+            // 削除する他の経路と揃えて呼ぶ (防御)
+            h2_session->discard_stream_recv_bytes(stream_id);
           }
           h2_session->pending_headers_.erase(it);
         }
@@ -3109,6 +3175,10 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
   // 受理前 (2xx 応答前) は排出契機がないため従来どおり破棄する
   auto* wt_session = h2_session->get_wt_session(stream_id);
   if (!wt_session || wt_session->is_terminated) {
+    // アプリへ配送せず破棄する DATA は消費する機会が無いため、ここで
+    // コネクションレベル受信ウィンドウを返す (返さないと破棄した分だけ
+    // ウィンドウが消費されたままになる)
+    h2_session->consume_connection_recv_bytes(len);
     return 0;
   }
   if (len == 0) {
@@ -3136,6 +3206,11 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
     return 0;
   }
   if (!h2_session->is_server_) {
+    // クライアント側の受理前 (2xx 応答前) に届く DATA はアプリへ配送せず
+    // 破棄する。nghttp2 は 2xx 前の DATA を配送せず自身でコネクションレベル
+    // 消費するため通常ここには来ない (防御)。記録が残った場合はセッション
+    // 終了 (非 2xx 応答の受信・ローカル close_session・ストリームのクローズ)
+    // で discard_stream_recv_bytes が解放する
     return 0;
   }
   // 受理前蓄積の上限超過時は非 2xx (413) で拒否しバッファを破棄する
@@ -3173,6 +3248,8 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
   h2_session->http2_stream_buffers_.erase(stream_id);
   // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
   h2_session->end_stream_pending_.erase(stream_id);
+  // ストリームの終了で未消費の受信バイト記録を解放する
+  h2_session->discard_stream_recv_bytes(stream_id);
   return 0;
 }
 
@@ -3445,6 +3522,18 @@ void bind_webtransport_h2(nb::module_& m) {
            nb::sig("def _test_unfinished_capsule_bytes(self, session_id: int) "
                    "-> int | None"),
            "テスト専用: 未完成カプセルとして保持中のバイト数")
+      .def("_test_unconsumed_recv_bytes",
+           &H2Session::test_unconsumed_recv_bytes, nb::lock_self(),
+           nb::arg("session_id"),
+           nb::sig("def _test_unconsumed_recv_bytes(self, session_id: int) -> "
+                   "int | None"),
+           "テスト専用: 未消費の受信バイト記録の残量 (キーはセッション ID)")
+      .def("_test_effective_recv_data_length",
+           &H2Session::test_effective_recv_data_length, nb::lock_self(),
+           nb::sig("def _test_effective_recv_data_length(self) -> int | None"),
+           "テスト専用: コネクションレベルで未返却の受信バイト数 (nghttp2 は "
+           "WINDOW_UPDATE を積んだ時点で積んだ分だけ減算する。送出前でも減るが "
+           "0 になるとは限らない)")
       .def("accept_session", &H2Session::accept_session, nb::lock_self(),
            nb::arg("session_id"),
            nb::sig("def accept_session(self, session_id: int) -> bool"),
