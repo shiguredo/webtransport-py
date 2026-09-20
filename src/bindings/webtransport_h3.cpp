@@ -1705,6 +1705,14 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   // されたストリームの保持データと解釈状態が残留すると、接続終了まで
   // 無界に残る。移行済み・投入済みのストリームは空のため no-op
   headers_guards_.erase(stream_id);
+  // 受信中のヘッダーブロックのエントリも除去する。受信途中 (begin_headers_cb が
+  // 発火済み・end_headers_cb が未発火) のストリームは、この状態で終了すると
+  // 接続終了まで残留する。フィールドセクションの分割到着中はもちろん、
+  // QPACK デコードブロック中は nghttp3_conn_close_stream が conn_delete_stream
+  // で当該ストリームを qpack_blocked_streams から外す (nghttp3_conn.c) ため
+  // ブロック解除後も end_headers_cb は発火せず、この時点で除去する以外に
+  // 解放の機会が無い
+  pending_headers_.erase(stream_id);
 
   // セッション ID の復元とバッファ削除は nghttp3 呼び出しより前に行う
   // (nghttp3_conn_close_stream は同期実行される stream_close_cb を呼び、
@@ -2027,6 +2035,13 @@ std::optional<bool> H3Session::has_stream_buffer(int64_t stream_id) const {
 std::optional<bool> H3Session::has_pending_qpack_blocked_fin_stream(
     int64_t stream_id) const {
   if (pending_qpack_blocked_fin_stream_ids_.count(stream_id) == 0) {
+    return std::nullopt;
+  }
+  return true;
+}
+
+std::optional<bool> H3Session::has_pending_headers(int64_t stream_id) const {
+  if (pending_headers_.count(stream_id) == 0) {
     return std::nullopt;
   }
   return true;
@@ -2900,6 +2915,11 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::sig("def _has_pending_qpack_blocked_fin_stream(self, "
                    "stream_id: int) -> bool | None"),
            "テスト専用: QPACK ブロック中 fin の保留記録の有無を確認")
+      .def("_has_pending_headers", &H3Session::has_pending_headers,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def _has_pending_headers(self, stream_id: int) -> "
+                   "bool | None"),
+           "テスト専用: 受信途中のヘッダーブロックのエントリの有無を確認")
       .def("stream_writable", &H3Session::stream_writable, nb::lock_self(),
            nb::arg("stream_id"),
            nb::sig("def stream_writable(self, stream_id: int) -> int | None"),
