@@ -1,7 +1,7 @@
 # http3.Server が移行先アドレスからの CLOSED で接続登録を残す
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-http3-server-migrated-closed-address
 - Polished: 2026-09-18
 
@@ -33,11 +33,9 @@ Connection Migration 後、`src/webtransport/http3/server.py` の `Server` は�
 
 ## 解決方法
 
-- `src/webtransport/http3/server.py` の `Server._handle_datagram` の CLOSED 分岐で `Server._addr_of(candidate)` により登録済みアドレスを解決し、`Server._drain_quic_events` と `Server._process_http3_events` へ渡すアドレスを切り替える。`Server._remove_client` は `Server._drain_quic_events` と `Server._close_client_connection_on_h3_error` の内部で呼ばれるため、渡すアドレスを変えることで両経路の削除が登録済みアドレスで行われる
-- 未登録の送信元アドレスから最初に届くパケットが CONNECTION_CLOSE になる状況を作るテストを `tests/test_e2e_http3.py` に追加する。手順は次のとおりである (`tests/test_quic_server_routing.py` に、移行元ソケットを差し替えて実パケットを送る同種の先例がある)
-  - 接続後、サーバーが `Server._clients` へ元アドレスで登録するまで待つ (登録前に進めると、修正前でも空になって空振りする)
-  - 移行開始はハンドシェイク確認後でないと失敗するため、事前に 1 往復させる (`tests/test_e2e_http3.py` の `test_connection_migration_continues_request` も同じ前提で書かれている)
-  - 移行の開始は `webtransport.quic.Connection.initiate_migration(local_addr, remote_addr) -> bool` を直接呼び、戻り値が True であることを確認する (高レベル `http3.Client` を使う場合は `Client._quic_connection` 経由で呼ぶ)。`initiate_migration` 自体はソケット送出を行わないが、呼び出し直後の `Connection.send()` は移行先パス用のパケット (1200 バイトのパス検証用パケット) を返す。`send()` が `None` を返すことを「送信していない」の根拠にしない
-  - 移行開始から CONNECTION_CLOSE 送出までの間に、クライアントのどのソケットからもパケットを送出しない。`Connection.send()` が返したパケットを移行先ソケットから送る操作も行わない。移行先から 1 パケットでもサーバーが受理すると `quic.ReceiveResult.ACCEPTED` の分岐で `Server._clients` のキーが移行先へ張り替わり、未修正の実装でも `Server._clients` と `Server._dcid_index` が空になってテストが通る (回帰テストとして成立しない)
-  - 移行開始直後に `Server._clients` のキーが元アドレスのままであることを確認してから、CONNECTION_CLOSE を移行先相当の別ソケットから送出し、`Server._clients` と `Server._dcid_index` が空になることを検証する
-- 高レベル `http3.Client.migrate` は `Client._send_pending` で移行先から最初のパケットを送出するため、`Client.migrate` と `Client.close` の組み合わせではこの状況にならない
+- `src/webtransport/http3/server.py` の `Server._handle_datagram` に通知先アドレス `event_addr` を導入し、CLOSED 分岐で `Server._addr_of(candidate)` により登録済みアドレスを解決して `event_addr` に寄せるようにした。`Server._drain_quic_events` と `Server._process_http3_events` の両方へ `event_addr` を渡すため、`Server._remove_client` が登録キーで呼ばれて接続登録 (`Server._clients`)・DCID 索引 (`Server._dcid_index`)・接続の DCID 集合 (`Server._conn_dcids`) が解放される (`src/webtransport/h3/server.py` の `Server._handle_datagram` と同じ形)。解決できない場合は従来どおり受信アドレスを使う
+- `Server._drain_quic_events` と `Server._process_http3_events` の docstring に、`addr` は `Server._clients` の登録キーを渡す契約であることを明記した
+- `tests/test_e2e_http3.py` に `test_server_removes_client_on_closed_from_unregistered_address` を追加した。1 往復後にサーバーが元アドレスで登録していることを確認し、低レベルの `Client._quic_connection.initiate_migration` だけを呼んで移行を開始し (`Connection.send()` が返す保留パケットは送出せずに捨てる)、移行が受理されていないことを確認してから、移行先相当の別ソケットで CONNECTION_CLOSE を送る。`Server._clients`・`Server._dcid_index`・`Server._conn_dcids` が空になることを検証する。送るパケットの DCID が同じ接続に解決されることも事前に表明し、前提が崩れたときに意味のある失敗になるようにした
+- 修正前実装では `Server._clients` に登録が残ってテストが失敗することを実測で確認した (回帰テストとして機能する)
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 本対応のスコープ外: `Server.stop()` は `Server._clients` のみを clear し `Server._dcid_index` / `Server._conn_dcids` を解放しない (`src/webtransport/h3/server.py` も同様)。`stop()` 後に同じインスタンスを再 `start()` すると古い DCID 索引が残る

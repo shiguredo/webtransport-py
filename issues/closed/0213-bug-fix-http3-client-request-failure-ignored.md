@@ -1,7 +1,7 @@
 # http3.Client.request() がストリーム開設と送信登録の失敗を無視する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-http3-client-request-failure-ignored
 - Polished: 2026-09-18
 
@@ -35,12 +35,12 @@
 
 ## 解決方法
 
-- `src/webtransport/http3/client.py` の `Client.request` で `quic.Connection.open_stream` の戻り値と `Http3Connection.submit_request` の戻り値を検査する
-- `submit_request` が false の場合は `Client._quic_connection.reset_stream(stream_id, 0)` を呼んでから -1 を返す
-- `tests/test_e2e_http3.py` に 2 つのテストを追加する
-  - ストリーム枯渇: サーバーが広告する双方向ストリーム上限 (既定 100) まで `Client.request` を呼び、次の呼び出しが -1 を返すことを確認する。上限到達は `quic.Connection.open_stream` の失敗として現れる。`Client._quic_connection.streams_bidi_left` が 0 であることを表明し、枯渇経路で -1 になったことを明示する
-  - `submit_request` 失敗: サーバー側から GOAWAY を送出してクライアントに受信させ、`Client.request` が -1 を返すことを確認する (この経路では `open_stream` は成功し `submit_request` だけが `NGHTTP3_ERR_CONN_CLOSING` で false になる)。手順は次のとおりである
-    - GOAWAY は `Client.request` を 1 回通して 1 往復させてから送出する。往復の完了前に送出すると GOAWAY がパケット化されずクライアントに届かない
-    - 高レベル `http3.Server` に `goaway()` は無い。低レベル `http3.Connection.goaway()` を `Server._clients` の `ClientConnection.http3_connection` に対して呼び、`Server._send_to(addr, client)` で送出する (`tests/test_e2e_http3.py` の他のテストも `Server._clients` を直接参照している)。`goaway()` の時点で GOAWAY フレームは制御ストリームの送信データとして積まれる (`Server.run()` のループも同じ `Server._send_to` を呼ぶため、明示呼び出しは送出タイミングを確定させるために行う)。`goaway()` の後に `Http3Connection.get_streams_to_send()` を中身の確認のために呼ぶと、テスト側が GOAWAY のバイト列を取り出して消費してしまいピアへ届かないため、呼ばない
-    - GOAWAY を送出しただけではクライアントの `run()` が受信を処理するまで `submit_request` は失敗しないため、`Client.request` が -1 を返すまで期限付きで再試行する (クライアント側に GOAWAY 受信を観測する公開 API は無く、固定 sleep では所要時間が読めない)
-    - -1 を観測した時点で `Client._quic_connection.streams_bidi_left` が 0 より大きいことを表明する。この表明を呼び出し前に置くと、GOAWAY が届かないまま上限まで呼んで枯渇で -1 になった場合に表明が素通りし、テストが空振りで通る
+- `src/webtransport/http3/client.py` の `Client.request` で `quic.Connection.open_stream` の戻り値を検査し、負値 (`-1`) の場合はリクエストを登録せずに -1 を返すようにした (未接続の場合も従来どおり -1)
+- `Http3Connection.submit_request` が false を返した場合は `Client._quic_connection.reset_stream(stream_id, 0)` で開設済みの QUIC ストリームをリセットしてから -1 を返すようにした。登録に失敗したままにするとローカルのストリーム状態が接続終了まで open のまま残る。`Http3Connection.close_stream` は nghttp3 に既存ストリームの終了を伝える API であり、nghttp3 がストリームを作る前に失敗する経路 (GOAWAY 受信・QPACK 未バインド) では通知すべき相手がいないため使わない (`src/webtransport/h3/client.py` の `Client.open_stream` の登録失敗時と同じ形)
+- docstring の `Returns` に失敗時の戻り値 (-1) と失敗条件 (未接続・同時ストリーム数の上限到達・ハンドシェイク未完了・接続クローズ直後・登録失敗)、リセットの送出が `run()` の送信ループに委ねられることを明記し、`skills/webtransport-py/SKILL.md` の `request()` にも同じ内容を追記した
+- `tests/test_e2e_http3.py` に 2 件追加した
+  - `test_request_returns_minus_one_when_streams_exhausted`: サーバーが広告する双方向ストリーム上限 (`remote_initial_max_streams_bidi`) まで `Client.request` を呼び `streams_bidi_left` が 0 になったことを表明してから、次の呼び出しが -1 を返すことを確認する
+  - `test_request_returns_minus_one_when_submit_request_fails`: サーバー側から GOAWAY を送出してクライアントに受信させ、`Client.request` が -1 を返すことと、開設済みの QUIC ストリームがリセットされたことをサーバー側の `on_stream_reset` (stream_id はクライアント起点の双方向、error_code は 0) で観測する。GOAWAY は 1 往復後に送出し、`-1` は期限付きで再試行して観測したうえで `streams_bidi_left > 0` を表明し、枯渇経路との取り違えを防ぐ
+- 枯渇のテストは修正前実装でも -1 を返していたため回帰ガードにはならない (修正前は `submit_request(-1, ...)` の失敗を無視して -1 を返していた)。docstring に検出限界として明記した。回帰ガードは登録失敗のテストで、修正前実装では再試行が枯渇まで進んで失敗することを実測で確認した
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 本対応のスコープ外: `Client._setup_http3_streams` は QPACK 用単方向ストリームの開設失敗を検査しないため、QPACK 未バインドのまま `request()` が恒久的に -1 を返し、そのたびに双方向ストリームの累積枠を消費し得る (control ストリームの失敗では `ValueError` が `connect()` へ漏れる)。いずれも本 issue の対象外とする。リクエストの終端 (fin) は 0219 で扱う

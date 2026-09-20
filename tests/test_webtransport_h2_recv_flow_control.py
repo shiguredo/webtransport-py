@@ -1,4 +1,4 @@
-"""WebTransport over HTTP/2 の受信フロー制御違反テスト
+"""WebTransport over HTTP/2 の受信フロー制御違反と受信ウィンドウ返却のテスト
 
 draft-15 Section 6.5 / 6.6 の MUST 「受信データが広告した WT_MAX_DATA /
 WT_MAX_STREAM_DATA を超えたら WT_FLOW_CONTROL_ERROR でセッションを閉じる」
@@ -6,6 +6,12 @@ WT_MAX_STREAM_DATA を超えたら WT_FLOW_CONTROL_ERROR でセッションを�
 send_stream_data は送信側クレジットで塞がれ、超過分を送れないため)。
 セッション閉鎖は close_session 経由の WT_CLOSE_SESSION (error code 0x50)
 で実現され、あわせて Error イベント (WT_FLOW_CONTROL_ERROR) を push する。WT_FLOW_CONTROL_ERROR (0x50) は 0xTBD のプレースホルダ (draft-15 Section 3.4)。
+
+あわせて、アプリへ配送せず破棄した受信バイトの後始末 (ストリーム終了経路での
+未消費受信バイト記録の解放と、コネクションレベル受信ウィンドウの返却) を
+検証する。返却しないと漏れの合計が 32768 バイトを超えた時点で (残りの受信
+ウィンドウが閾値 32767 に届かず) WINDOW_UPDATE を送出できなくなり、接続が
+恒久的に停止する。
 """
 
 from __future__ import annotations
@@ -32,6 +38,16 @@ WT_ERROR = WtErrorCode.WT_ERROR.value
 
 _WT_STREAM = 0x190B4D3C
 _PEER_EXCEEDED = "peer exceeded flow control limit"
+
+# nghttp2 がコネクションレベルの WINDOW_UPDATE を積むのは、返却量が接続の
+# 受信ウィンドウの半分以上のときだけである (nghttp2 の
+# nghttp2_should_send_window_update は local_window_size / 2 と比較する)。
+# 接続の受信ウィンドウは RFC 9113 Section 6.9.2 の既定値 65535 で、
+# SETTINGS_INITIAL_WINDOW_SIZE の対象はストリーム単位であり接続ウィンドウは
+# WINDOW_UPDATE でしか変更できない (nghttp2 も
+# NGHTTP2_INITIAL_CONNECTION_WINDOW_SIZE 固定)。未返却分がこの値未満であれば、
+# 以後の消費と合算されて WINDOW_UPDATE が送出される (恒久停止しない)
+_WINDOW_UPDATE_THRESHOLD = 65535 // 2
 
 
 def _encode_wt_stream_capsule(stream_id: int, data: bytes) -> bytes:
@@ -85,6 +101,57 @@ def _create_server_with_recv_limits(
     _h2_pump(client, server)
     _h2_pump(server, client)
     return client, server
+
+
+def _has_connection_window_update(wire: bytes) -> bool:
+    """WINDOW_UPDATE (Type 0x08, Stream ID 0) が含まれるか確認する
+
+    フレームは Length (3 バイト) + Type + Flags + Stream ID (4 バイト) +
+    Window Size Increment (4 バイト) で、コネクションレベルは Stream ID が 0
+    である。フレーム境界をたどって判定する (DATA のペイロード中に同じ
+    バイト列が現れても誤検知しない)。
+    """
+    offset = 0
+    while offset + 9 <= len(wire):
+        length = int.from_bytes(wire[offset : offset + 3], "big")
+        frame_type = wire[offset + 3]
+        stream_id = int.from_bytes(wire[offset + 5 : offset + 9], "big") & 0x7FFFFFFF
+        if frame_type == 0x08 and stream_id == 0:
+            return True
+        offset += 9 + length
+    return False
+
+
+def _encode_rst_stream_frame(stream_id: int, error_code: int = 0) -> bytes:
+    """RST_STREAM フレーム (Type 0x03) のワイヤバイト列を組み立てる
+
+    h2 の公開 API に HTTP/2 ストリーム自体のリセットを送出する手段が無い
+    ため、ワイヤ注入で再現する (RFC 9113 Section 6.4)。既定の error_code 0 は
+    同節の NO_ERROR。
+    """
+    payload = error_code.to_bytes(4, "big")
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes([0x03, 0x00])
+        + (stream_id & 0x7FFFFFFF).to_bytes(4, "big")
+        + payload
+    )
+
+
+def _inject_incomplete_capsule(server: h2.Session, session_id: int) -> None:
+    """未完成カプセル (宣言長 16 に対してペイロード 4 バイト) を DATA で注入する
+
+    カプセルのヘッダー 2 バイトと未完成のペイロード 4 バイトの計 6 バイトが
+    未消費の受信バイトとして残る (完成したカプセルは process_capsule が
+    ワイヤ長を消費するため残らない)。テストの前提として、記録がちょうど
+    この 6 バイトになっていることを表明する。
+    """
+    incomplete = _encode_varint(0x00) + _encode_varint(16) + b"abcd"
+    ret = server.receive(_encode_data_frame(session_id, incomplete))
+    assert ret > 0, "未完成カプセルの注入に失敗しました"
+    assert server._test_unconsumed_recv_bytes(session_id) == 6, (
+        "未完成カプセルが未消費の記録に残っていない (6 バイト)"
+    )
 
 
 def test_wt_stream_exceeds_max_stream_data_closes_session() -> None:
@@ -301,3 +368,224 @@ def test_unfinished_capsule_larger_than_window_does_not_deadlock() -> None:
             break
 
     assert bytes(received) == payload
+
+
+def test_pre_accept_413_releases_unconsumed_recv_bytes_and_window() -> None:
+    """413 拒否で未消費受信バイトの記録が解放され、コネクションレベル受信ウィンドウが戻ることを確認
+
+    受理前の楽観的カプセルが蓄積上限を超えると 413 で拒否され、wt_sessions_
+    のエントリが削除されて以後の consume_recv_bytes の経路が塞がる。拒否で
+    破棄したバイトをコネクションレベル受信ウィンドウへ返さないと消費した
+    ままになり、漏れの合計が 32768 バイトを超える (残りの受信ウィンドウが
+    閾値 32767 に届かなくなる) と WINDOW_UPDATE を送出できず接続が恒久的に
+    停止する。
+
+    nghttp2 が WINDOW_UPDATE を積むのは返却量が閾値以上のときだけなので、
+    蓄積上限を閾値 + 1 (32768) にして拒否量が閾値を超えるようにする。
+    """
+    client = h2.Session.create_client(h2.Config())
+    server_config = h2.Config()
+    server_config.is_server = True
+    server_config.wt_pre_accept_buffer_limit = _WINDOW_UPDATE_THRESHOLD + 1
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # 受理前の楽観的カプセルは未消費の記録として残る (前提の確認)
+    client.send_datagram(session_id, b"a" * 64)
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+    assert server._test_unconsumed_recv_bytes(session_id) is not None, (
+        "受理前の楽観的カプセルが未消費の記録に残っていない"
+    )
+
+    # 蓄積上限を超える楽観送信をする (カプセルのフレーミング込み)
+    client.send_datagram(session_id, b"x" * 32769)
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+
+    # 413 で拒否され、セッションは確立しない
+    assert server.get_session_ids() == []
+    # 未消費受信バイトの記録が解放されている
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "413 拒否後に未消費受信バイトの記録が残っている"
+    )
+    # 破棄したバイトは消費済みとして扱われ、未返却分は WINDOW_UPDATE の閾値
+    # 未満に留まる。nghttp2 は閾値に達した分だけを WINDOW_UPDATE で返すため、
+    # 拒否の時点で返した分を除いた残り (拒否後に届いた最終フレームの分) だけが
+    # 未返却として残る。返していなければ拒否した全量 (32 KiB 超) が未返却の
+    # まま残り、閾値に到達しないため WINDOW_UPDATE を二度と送出できない
+    effective = server._test_effective_recv_data_length()
+    assert effective is not None and effective < _WINDOW_UPDATE_THRESHOLD, (
+        f"破棄したバイトのコネクションレベル受信ウィンドウが返っていない: {effective}"
+    )
+    # 実際に WINDOW_UPDATE (Stream ID 0) が送出される
+    wire = server.send()
+    assert wire is not None, "413 応答と WINDOW_UPDATE が送出されていない"
+    assert _has_connection_window_update(wire), "WINDOW_UPDATE が送出されていない"
+
+    # 413 応答が届き、拒否されたことを確認する (前提の確認)
+    ret = client.receive(wire)
+    assert ret > 0, "413 応答の受信に失敗しました"
+    rejected = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_REJECTED]
+    assert len(rejected) == 1, "SESSION_REJECTED が 0 回または複数回発火しました"
+    assert rejected[0].status_code == 413
+
+
+def test_peer_end_stream_releases_unconsumed_recv_bytes() -> None:
+    """ピアの END_STREAM によるセッション終了で未消費受信バイトの記録が解放されることを確認
+
+    handle_end_stream は自側の END_STREAM を送らないため両ハーフが閉じず、
+    on_stream_close_callback も到着しない (ストリームは half-closed (remote)
+    のまま接続終了まで残る)。エントリ削除時に記録を解放しないと、その間ずっと
+    残る。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_incomplete_capsule(server, session_id)
+    # 空の DATA + END_STREAM でピアがストリームを閉じる (draft-15 Section 3.4)
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "END_STREAM によるセッション終了後に未消費受信バイトの記録が残っている"
+    )
+
+
+def test_local_close_session_releases_unconsumed_recv_bytes() -> None:
+    """ローカル close_session で未消費受信バイトの記録が解放されることを確認
+
+    close_session 後は is_terminated が立ち、on_data_chunk_recv_callback の
+    早期 return により consume_recv_bytes の経路が塞がる。ピアが END_STREAM を
+    返さなければ on_stream_close_callback も到達しないため、close_session の
+    時点で記録を解放する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_incomplete_capsule(server, session_id)
+    server.close_session(session_id, 0, "")
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "close_session 後に未消費受信バイトの記録が残っている"
+    )
+
+
+def test_2xx_response_releases_unconsumed_recv_bytes() -> None:
+    """2xx 応答の送出で受理前に蓄積した未消費受信バイトの記録が解放されることを確認
+
+    accept_session は 200 固定のため、2xx 非 200 応答は reject_session で
+    生成する (受理前のセッションに限る。受理済みに呼ぶのは誤用)。この経路は
+    wt_sessions_ のエントリを残したまま is_terminated を立てて蓄積を破棄する
+    ため、ピアの END_STREAM を待つ間も記録が残る。
+    """
+    client, server = _create_h2_session_pair()
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0
+    _h2_pump(client, server)
+
+    # 受理していないためセッションは確立しない (前提の確認)
+    assert server.get_session_ids() == []
+
+    # 受理前の楽観的カプセルは未消費の記録として残る (前提の確認)
+    client.send_datagram(session_id, b"a" * 64)
+    wire = client.send()
+    assert wire is not None
+    server.receive(wire)
+    assert server._test_unconsumed_recv_bytes(session_id) is not None, (
+        "受理前の楽観的カプセルが未消費の記録に残っていない"
+    )
+
+    # 2xx 応答 (200 固定の accept_session では生成できない 204) を送出する
+    server.reject_session(session_id, 204)
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "2xx 応答の送出後に未消費受信バイトの記録が残っている"
+    )
+    # 2xx 分岐を通ったことを確認する (非 2xx 分岐はエントリを削除するため
+    # 未完成カプセルの保持量が None になり、エントリが残る 2xx 分岐は 0 になる)
+    assert server._test_unfinished_capsule_bytes(session_id) == 0, (
+        "2xx 応答がセッションを削除する分岐 (非 2xx) を通っている"
+    )
+
+
+def test_peer_close_session_releases_unconsumed_recv_bytes() -> None:
+    """ピアの WT_CLOSE_SESSION で未消費受信バイトの記録が解放されることを確認
+
+    未完成カプセルの末尾を満たすバイトに続けて WT_CLOSE_SESSION カプセルと
+    後続カプセルを 1 つの DATA フレームで注入する。終了を学習すると
+    process_capsules は後続カプセルをバッファごと破棄するため、後続カプセルの
+    4 バイトが未消費の記録として残る (完成した 2 カプセルは process_capsule が
+    ワイヤ長を消費する)。記録を解放しないと接続終了まで残る。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_incomplete_capsule(server, session_id)
+    # 未完成カプセルの末尾 + WT_CLOSE_SESSION (エラーコード 0) + 後続カプセル
+    tail = b"abcd" * 3
+    close_capsule = _encode_wt_close_session_capsule(0, "")
+    trailing_capsule = _encode_capsule(0x00, b"zz")
+    ret = server.receive(_encode_data_frame(session_id, tail + close_capsule + trailing_capsule))
+    assert ret > 0, "WT_CLOSE_SESSION カプセルの注入に失敗しました"
+    _drain_events(server)
+
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "WT_CLOSE_SESSION によるセッション終了後に未消費受信バイトの記録が残っている"
+    )
+
+
+def test_h2_stream_reset_releases_unconsumed_recv_bytes() -> None:
+    """HTTP/2 ストリームのリセットで未消費受信バイトの記録が解放されることを確認
+
+    受信の途中でストリームがリセットされると on_stream_close_callback が
+    発火する。記録を解放しないと接続終了まで残る。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_incomplete_capsule(server, session_id)
+    ret = server.receive(_encode_rst_stream_frame(session_id))
+    assert ret > 0, "RST_STREAM の注入に失敗しました"
+
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "ストリームのリセット後に未消費受信バイトの記録が残っている"
+    )
+
+
+def test_many_sessions_do_not_accumulate_unconsumed_recv_bytes() -> None:
+    """長命コネクションで多数のセッションを終了しても記録が蓄積しないことを確認
+
+    未完成カプセルを受信したセッションを終了させ続けても、記録が残らない
+    ことを確認する。解放しないと wt_sessions_ のエントリが消えても
+    unconsumed_recv_bytes_ のエントリだけが接続終了まで単調増加する。
+    """
+    client, server = _create_h2_session_pair()
+
+    # 同時に生かしたセッションの記録が独立していることを確認する
+    # (片方の解放がもう片方の記録を消さない)
+    first = _connect_h2_session(client, server)
+    second = _connect_h2_session(client, server)
+    _inject_incomplete_capsule(server, first)
+    _inject_incomplete_capsule(server, second)
+    server.close_session(first, 0, "")
+    assert server._test_unconsumed_recv_bytes(first) is None
+    assert server._test_unconsumed_recv_bytes(second) is not None, (
+        "他セッションの終了で無関係な記録まで解放されている"
+    )
+    server.close_session(second, 0, "")
+
+    for _ in range(20):
+        session_id = _connect_h2_session(client, server)
+        _inject_incomplete_capsule(server, session_id)
+
+        server.close_session(session_id, 0, "")
+        assert server._test_unconsumed_recv_bytes(session_id) is None, (
+            "セッション終了後に未消費受信バイトの記録が残っている"
+        )

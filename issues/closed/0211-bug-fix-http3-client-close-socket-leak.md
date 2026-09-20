@@ -1,7 +1,7 @@
 # http3.Client.close() が送信失敗時にソケットを閉じない
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-18
 - Branch: feature/fix-http3-client-close-socket-leak
 - Polished: 2026-09-18
 
@@ -32,6 +32,9 @@
 
 ## 解決方法
 
-- `src/webtransport/http3/client.py` の `Client.close` の本体を `try` / `except OSError` / `finally` で構成し直す。`Client._send_pending` の `OSError` は内側の `try` で捕捉して warning に落とし、`_quic_connection.close()` 由来の予期しない例外は伝播させたまま `finally` でソケットを閉じる (`src/webtransport/quic/client.py` の `Client.close` と同じ形)
-- `logger` を追加して送出失敗を記録する (`logging.getLogger(__name__)` と `"failed to send connection close: %s"` の書式)
-- `tests/test_e2e_http3.py` にテストを追加する。接続確立後に `client._socket.close()` でソケットオブジェクトだけを閉じ (`client._socket` 属性は残す)、`await client.close()` を呼ぶ。`OSError` が伝播せず `client._socket is None` になることと、`caplog` に `webtransport.http3.client` ロガーの `"failed to send connection close"` warning が記録されることを検証する。`tests/test_e2e_quic.py` の `test_client_close_returns_zero_when_send_fails` が同じ手順の先例であり、`tests/test_e2e_quic_advanced.py` の `test_early_data_not_sent_without_session_ticket` が `caplog.at_level` の先例である
+- `src/webtransport/http3/client.py` の `Client.close` を `try` / `except OSError` / `finally` で構成し直した。`Client._send_pending` の `OSError` は内側の `try` で捕捉して warning に落とし、OSError 以外の例外 (await 中のキャンセル等) と `_quic_connection.close()` の例外は伝播させたまま `finally` でソケットを閉じる (`src/webtransport/quic/client.py` の `Client.close` と同じ形)
+- `logging` を import し `logger = logging.getLogger(__name__)` を追加して、送出失敗を `"failed to send connection close: %s"` で記録する (`webtransport.http3.client` ロガー。書式は quic 層と同一)
+- `tests/test_e2e_http3.py` の `test_client_close_closes_socket_when_send_fails` を追加した。接続確立後に `client._socket.close()` でソケットオブジェクトだけを閉じ (`client._socket` 属性は残す)、`await client.close()` を呼んで、例外が伝播しないこと、`webtransport.http3.client` ロガーへ `WARNING` で `"failed to send connection close"` が記録されること、`client._socket` が `None` になることを検証する。docstring には検出限界 (OSError 経路のみを通るため、非 OSError 例外で finally が走ることは検証しない) を明記した
+- 修正前実装では `close()` から `OSError` が伝播してソケットの参照が残ることを実測で確認した (追加テストが回帰を検出する)
+- `CHANGES.md` の `## develop` にはエントリを追加していない。`CODEBASE.md` に「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」という指示がある
+- 本対応のスコープ外: `src/webtransport/http2/client.py` の `Client.close` は同じく後始末が保証されていない (issue の現状で対象外と明記)。`src/webtransport/http3/client.py` の `Client._connect_one` はキャンセル時にソケットを残す経路がある。いずれも別途の対応とする

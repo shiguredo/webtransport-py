@@ -434,8 +434,9 @@ class Server:
         """QUIC イベントを処理する (受信経路とタイマー経路の共通処理)
 
         CONNECTION_CLOSED 到達では呼び出し元の addr キーで登録を外す。
-        呼び出し側は quic_connection と http3_connection が非 None である
-        ことを保証すること。
+        呼び出し側は addr に `_clients` の登録キー (受信アドレスではない) を
+        渡すこと。受信アドレスのままだと登録が解放されずに残る。あわせて
+        quic_connection と http3_connection が非 None であることを保証すること。
         """
         assert client.quic_connection is not None
         assert client.http3_connection is not None
@@ -634,6 +635,9 @@ class Server:
 
         addr = self._normalize_addr(raw_addr)
 
+        # 移行先アドレスからの CLOSED 通知を配信するためのアドレス。
+        # 通常は受信アドレスと一致する
+        event_addr = addr
         client = self._clients.get(addr)
         if client is None:
             # Connection Migration 後は送信元アドレスが変わる。
@@ -659,8 +663,20 @@ class Server:
                         self._refresh_dcid_index(candidate)
                         client = candidate
                     elif result == quic_low.ReceiveResult.CLOSED:
-                        # 移行先からの終了通知は移行先アドレスで処理する
+                        # 未登録アドレスからの終了通知。登録済みの旧アドレス
+                        # (アプリから見た現アドレス) を通知先にして
+                        # _drain_quic_events と _process_http3_events へ流す。
+                        # 受信アドレスのままだと _remove_client が受信アドレスで
+                        # 登録を引くため、接続登録と DCID 索引が解放されずに残る
+                        # (移行の受理前に届いた終了通知や NAT リバインド直後の
+                        # 終了で起こる)。_process_http3_events へ渡す addr も
+                        # 登録キーに揃えるため、_send_to のフォールバック宛先、
+                        # _close_client_connection_on_h3_error の削除キー、
+                        # アプリのコールバック引数が同じ値になる
                         client = candidate
+                        old_addr = self._addr_of(candidate)
+                        if old_addr is not None:
+                            event_addr = old_addr
             if client is None:
                 if not self._running:
                     return False
@@ -696,8 +712,8 @@ class Server:
         if client.quic_connection is None or client.http3_connection is None:
             return True
 
-        await self._drain_quic_events(addr, client)
-        await self._process_http3_events(addr, client)
+        await self._drain_quic_events(event_addr, client)
+        await self._process_http3_events(event_addr, client)
         return True
 
     async def _process_http3_events(self, addr: tuple[str, int], client: ClientConnection) -> None:
@@ -706,6 +722,9 @@ class Server:
         受信の有無にかかわらず毎周回呼ぶ。低レベル層へ直接入力された
         イベント (テスト) や、タイマー処理・再送で生じたイベントも
         データグラムの到着を待たずに処理するため。
+        呼び出し側は addr に `_clients` の登録キーを渡すこと
+        (_send_to のフォールバック宛先と _close_client_connection_on_h3_error
+        の削除キー、およびアプリのコールバック引数が同じ値になる)。
         """
         if client.quic_connection is None or client.http3_connection is None:
             return

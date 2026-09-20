@@ -186,6 +186,14 @@ class Session:
     def _test_unfinished_capsule_bytes(self, session_id: int) -> int | None:
         """テスト専用: 未完成カプセルとして保持中のバイト数"""
 
+    def _test_unconsumed_recv_bytes(self, session_id: int) -> int | None:
+        """テスト専用: 未消費の受信バイト記録の残量 (キーはセッション ID)"""
+
+    def _test_effective_recv_data_length(self) -> int | None:
+        """
+        テスト専用: コネクションレベルで未返却の受信バイト数 (nghttp2 は WINDOW_UPDATE を積んだ時点で積んだ分だけ減算する。送出前でも減るが 0 になるとは限らない)
+        """
+
     def accept_session(self, session_id: int) -> bool:
         """WebTransport セッションを受理 (サーバー用)"""
 
