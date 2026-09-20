@@ -360,6 +360,17 @@ class Http3Connection {
   std::optional<int> stream_flushed(int64_t stream_id) const;
 
   /**
+   * テスト専用: 受信途中のヘッダーブロックのエントリの有無を確認する
+   * (production からは呼ばない。ストリーム終了時の解放の回帰ピン)
+   *
+   * `has_stream_buffer` と同じ観測形式に揃える (エントリが無ければ nullopt)
+   *
+   * @param stream_id ストリーム ID
+   * @return エントリがあれば true、なければ nullopt
+   */
+  std::optional<bool> has_pending_headers(int64_t stream_id) const;
+
+  /**
    * ストリームの送信バッファエントリの有無を確認 (テスト専用)
    *
    * @param stream_id ストリーム ID

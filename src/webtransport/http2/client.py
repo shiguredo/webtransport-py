@@ -60,6 +60,8 @@ class Client:
         self._writer: asyncio.StreamWriter | None = None
         self._running = False
         self._connected = False
+        # connect() 実行中フラグ (実行中の再入を拒否する)
+        self._connecting = False
 
         self._on_headers: Callable[[int, list[tuple[str, str]]], Awaitable[None]] | None = None
         self._on_data: Callable[[int, bytes], Awaitable[None]] | None = None
@@ -148,30 +150,57 @@ class Client:
 
         Returns:
             接続に成功した場合は True
+
+        Raises:
+            RuntimeError: close() を挟まずに、接続済み・接続中、または前回の
+                接続に使った transport (StreamWriter / ソケット) が残っている
+                インスタンスへ再度 connect() を呼んだ場合 (close() が完了した
+                後は再度接続できる)
         """
-        if self._verify_peer:
-            ssl_context = ssl.create_default_context()
-        else:
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-        ssl_context.set_alpn_protocols(["h2"])
+        # 接続断を run() が観測しても _connected は True のまま transport が
+        # 死んで残る。close() は冒頭で _connected を False にしてから
+        # transport を破棄するため、その間は transport だけが残る。どちらの
+        # 状態でも再入は拒否する (close() の後は再入できる)
+        if self._connected or self._connecting or self._writer is not None:
+            raise RuntimeError("connect() has already been called")
 
-        self._reader, self._writer = await asyncio.open_connection(
-            self._host,
-            self._port,
-            ssl=ssl_context,
-        )
+        self._connecting = True
+        try:
+            if self._verify_peer:
+                ssl_context = ssl.create_default_context()
+            else:
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            ssl_context.set_alpn_protocols(["h2"])
 
-        config = http2_low.Config()
-        config.is_server = False
-        self._connection = http2_low.Connection.create_client(config)
+            self._reader, self._writer = await asyncio.open_connection(
+                self._host,
+                self._port,
+                ssl=ssl_context,
+            )
 
-        await self._send_pending()
+            config = http2_low.Config()
+            config.is_server = False
+            self._connection = http2_low.Connection.create_client(config)
 
-        self._running = True
-        self._connected = True
-        return True
+            await self._send_pending()
+
+            self._running = True
+            self._connected = True
+            return True
+        except BaseException:
+            # 失敗時は開いた接続を閉じて状態を戻す (同じインスタンスで
+            # 再試行できるようにする)
+            self._running = False
+            self._connected = False
+            if self._writer is not None:
+                self._writer.close()
+            self._reader = None
+            self._writer = None
+            raise
+        finally:
+            self._connecting = False
 
     async def request(
         self,
@@ -303,11 +332,28 @@ class Client:
 
         if self._connection is not None:
             self._connection.goaway()
-            await self._send_pending()
+            try:
+                await self._send_pending()
+            except OSError:
+                # 接続断 (RST 等) では GOAWAY を送出できなくても閉じる処理へ進む
+                # (h2.Client.close と同じ扱い)
+                pass
 
-        if self._writer is not None:
-            self._writer.close()
-            await self._writer.wait_closed()
+        try:
+            if self._writer is not None:
+                self._writer.close()
+                try:
+                    await self._writer.wait_closed()
+                except ssl.SSLError, ConnectionError, OSError:
+                    # TLS の shutdown (unwrap) は、既に close_notify を送受信
+                    # した transport では失敗し得る。閉じる処理は完了している
+                    # ため握って先へ進む (h2.Client.close と同じ扱い)
+                    pass
+        finally:
+            # close() 後の再接続で前回の接続を引き継がないよう参照を破棄する
+            # (例外経路でも破棄する)
+            self._reader = None
+            self._writer = None
 
     async def __aenter__(self) -> Self:
         """非同期コンテキストマネージャーのエントリーポイント"""

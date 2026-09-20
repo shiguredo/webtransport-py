@@ -170,6 +170,9 @@ class Connection:
     def stream_flushed(self, stream_id: int) -> int | None:
         """ストリームの全送信データが QUIC スタックに受け渡し済みか確認"""
 
+    def _has_pending_headers(self, stream_id: int) -> bool | None:
+        """テスト専用: 受信途中のヘッダーブロックのエントリの有無を確認"""
+
     def _has_stream_buffer(self, stream_id: int) -> bool | None:
         """テスト専用: ストリームの送信バッファエントリの有無を確認"""
 

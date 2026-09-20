@@ -506,6 +506,10 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
   nghttp3_conn_shutdown_stream_read(conn_, stream_id);
   stream_buffers_.erase(stream_id);
   shutdown_stream_ids_.erase(stream_id);
+  // 受信途中のヘッダーブロックも破棄する (nghttp3_conn_shutdown_stream_read は
+  // stream_close コールバックを呼ばないため、ここで解放しないとエントリが
+  // 接続終了まで残る)
+  pending_headers_.erase(stream_id);
 
   Http3Event event;
   event.type = Http3EventType::ResetStream;
@@ -704,6 +708,14 @@ std::optional<int> Http3Connection::stream_flushed(int64_t stream_id) const {
     return std::nullopt;
   }
   return nghttp3_conn_is_stream_flushed(conn_, stream_id);
+}
+
+std::optional<bool> Http3Connection::has_pending_headers(
+    int64_t stream_id) const {
+  if (pending_headers_.find(stream_id) == pending_headers_.end()) {
+    return std::nullopt;
+  }
+  return true;
 }
 
 std::optional<bool> Http3Connection::has_stream_buffer(
@@ -924,6 +936,8 @@ int Http3Connection::stream_close_cb(nghttp3_conn* conn,
 
   self->stream_buffers_.erase(stream_id);
   self->shutdown_stream_ids_.erase(stream_id);
+  // 受信途中のヘッダーブロックも破棄する (close_stream 経由の終了で残さない)
+  self->pending_headers_.erase(stream_id);
   return 0;
 }
 
@@ -1122,6 +1136,15 @@ int Http3Connection::reset_stream_cb(nghttp3_conn* conn,
 
   self->stream_buffers_.erase(stream_id);
   self->shutdown_stream_ids_.erase(stream_id);
+  // 受信途中のヘッダーブロックも破棄する。nghttp3 が自発的に中断する経路のうち
+  // 本クラスで再現できるのは GOAWAY 後の新規リクエストの拒否であり、その経路は
+  // ヘッダーブロックの受信開始前に中断されるためエントリは無い (WebTransport の
+  // 非 2xx 応答も中断するが、`enable_webtransport` が無効な本クラスでは発生せず、
+  // 発生する場合もヘッダー受信完了時の end_headers_cb が先に解放する)。この行を
+  // 通るエントリはテストで再現できていない (回帰ピンは reset_stream と
+  // stream_close_cb の経路にある)。エントリがあった場合に接続終了まで残さない
+  // ための防御として呼ぶ
+  self->pending_headers_.erase(stream_id);
   return 0;
 }
 
@@ -1417,6 +1440,11 @@ void bind_http3(nb::module_& m) {
            nb::arg("stream_id"),
            nb::sig("def stream_flushed(self, stream_id: int) -> int | None"),
            "ストリームの全送信データが QUIC スタックに受け渡し済みか確認")
+      .def("_has_pending_headers", &Http3Connection::has_pending_headers,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def _has_pending_headers(self, stream_id: int) -> "
+                   "bool | None"),
+           "テスト専用: 受信途中のヘッダーブロックのエントリの有無を確認")
       .def("_has_stream_buffer", &Http3Connection::has_stream_buffer,
            nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def _has_stream_buffer(self, stream_id: int) -> "

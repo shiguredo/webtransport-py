@@ -552,6 +552,15 @@ class H3Session {
       int64_t stream_id) const;
 
   /**
+   * テスト専用: 受信途中のヘッダーブロックのエントリが存在するか
+   *
+   * 恒久的な公開 API ではなく、テストでの解放検証にのみ使う。
+   * @param stream_id ストリーム ID
+   * @return エントリが存在する場合は true、存在しない場合は nullopt
+   */
+  std::optional<bool> has_pending_headers(int64_t stream_id) const;
+
+  /**
    * ストリームが書き込み可能か確認
    *
    * @param stream_id ストリーム ID
@@ -780,7 +789,10 @@ class H3Session {
   // 送信待ちデータグラム
   std::deque<std::vector<uint8_t>> pending_datagrams_;
 
-  // 現在受信中のヘッダー
+  // 現在受信中のヘッダー。begin_headers_cb で作成し end_headers_cb で削除する
+  // (受信途中のままストリームが終了した場合は close_stream でも削除する。
+  // QPACK デコードブロック中のまま終了すると end_headers_cb が発火しないため
+  // 必須)
   std::map<int64_t, std::vector<std::pair<std::string, std::string>>>
       pending_headers_;
 

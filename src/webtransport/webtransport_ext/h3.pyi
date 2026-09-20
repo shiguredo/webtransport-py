@@ -195,6 +195,9 @@ class Session:
     def _has_pending_qpack_blocked_fin_stream(self, stream_id: int) -> bool | None:
         """テスト専用: QPACK ブロック中 fin の保留記録の有無を確認"""
 
+    def _has_pending_headers(self, stream_id: int) -> bool | None:
+        """テスト専用: 受信途中のヘッダーブロックのエントリの有無を確認"""
+
     def stream_writable(self, stream_id: int) -> int | None:
         """ストリームが書き込み可能か確認"""
 
