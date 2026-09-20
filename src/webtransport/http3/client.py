@@ -570,7 +570,11 @@ class Client:
             headers: 追加のヘッダー
 
         Returns:
-            ストリーム ID
+            ストリーム ID。未接続の場合、ストリームを開けなかった場合 (同時
+            ストリーム数の上限到達・ハンドシェイク未完了・接続クローズ直後)、
+            リクエストの登録に失敗した場合は -1。登録に失敗した場合は開設済みの
+            QUIC ストリームをリセットしてから -1 を返す (リセットの送出は
+            `run()` の送信ループに委ねられる)
         """
         if self._quic_connection is None or self._http3_connection is None:
             return -1
@@ -578,6 +582,8 @@ class Client:
         self._setup_http3_streams()
 
         stream_id = self._quic_connection.open_stream(True)
+        if stream_id < 0:
+            return -1
 
         request_headers: list[tuple[str, str]] = [
             (":method", method),
@@ -588,7 +594,17 @@ class Client:
         if headers is not None:
             request_headers.extend(headers)
 
-        self._http3_connection.submit_request(stream_id, request_headers)
+        if not self._http3_connection.submit_request(stream_id, request_headers):
+            # 開設済みの QUIC ストリームを低レベル層でリセットする。登録に
+            # 失敗したままだとローカルのストリーム状態が接続終了まで open の
+            # まま残る (h3.Client.open_stream の登録失敗時と同じ形)。
+            # Http3Connection.close_stream は nghttp3 に既存ストリームの終了を
+            # 伝える API であり、nghttp3 がストリームを作る前に失敗する経路
+            # (GOAWAY 受信・QPACK 未バインド) では通知すべき相手がいないため
+            # 使わない
+            self._quic_connection.reset_stream(stream_id, 0)
+            return -1
+
         await self._send_pending()
         return stream_id
 

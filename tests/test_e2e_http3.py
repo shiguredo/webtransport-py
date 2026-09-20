@@ -2224,3 +2224,180 @@ async def test_server_removes_client_on_closed_from_unregistered_address(test_ce
             await asyncio.gather(server_task, return_exceptions=True)
         await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_returns_minus_one_when_streams_exhausted(test_certificates):
+    """双方向ストリームを使い切った状態で request() が -1 を返すことを確認する
+
+    サーバーが広告する双方向ストリーム上限まで request() を呼び、次の
+    呼び出しが -1 を返すことを確認する。ストリーム開設の失敗は
+    quic.Connection.open_stream の契約で -1 として現れる。クライアントの
+    受信ループを回さず応答を処理しないため、開いたストリームは閉じず
+    上限が補充されない。
+
+    検出限界: 修正前の実装も枯渇時は submit_request(-1, ...) の失敗を無視して
+    -1 を返していたため、この手順は修正の回帰ガードにはならない。枯渇時の
+    戻り値の契約を固定し、次のテストで枯渇経路と登録失敗経路を取り違えない
+    ための前提を作るテストである。
+    """
+    from webtransport.http3 import Client, Server
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+    await client.connect()
+
+    try:
+        # サーバーの広告値までストリームを開く。残数と広告値を観測する公開 API が
+        # 無いため private 属性で確認する
+        max_streams = client._quic_connection.remote_initial_max_streams_bidi
+        assert max_streams is not None, "サーバーの広告値が取得できない"
+        for _ in range(max_streams):
+            assert await client.request("GET", "/") >= 0, "上限までストリームを開けない"
+        # 開設済みストリームが枯渇していることを表明する (枯渇経路の確認)
+        streams_left = client._quic_connection.streams_bidi_left
+        assert streams_left == 0, "ストリームが枯渇していない"
+
+        # 枯渇時はストリームを開けず -1 を返す
+        assert await client.request("GET", "/") == -1, "枯渇時に -1 を返していない"
+    finally:
+        if not server_task.done():
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_returns_minus_one_when_submit_request_fails(test_certificates):
+    """GOAWAY 受信後に request() が -1 を返し、開設済みストリームがリセットされることを確認する
+
+    GOAWAY の受信後は nghttp3 が新しいリクエストの登録を拒否するため、
+    quic.Connection.open_stream は成功し Http3Connection.submit_request だけが
+    失敗する。この経路で -1 を返し、開設済みの QUIC ストリームが
+    quic.Connection.reset_stream でリセットされることを、サーバー側の
+    on_stream_reset で観測する。
+
+    検出限界: GOAWAY が届かないまま枯渇した場合は「枯渇経路で -1 になっている」
+    の表明で落ちる (登録失敗経路の -1 と取り違えない)。
+    """
+    from webtransport.http3 import Client, Server
+
+    response_received = asyncio.Event()
+    server_resets: list[tuple[int, int]] = []
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        await server.send_data(addr, stream_id, b"ok", fin=True)
+
+    async def on_stream_reset(stream_id, error_code, addr):
+        server_resets.append((stream_id, error_code))
+
+    server.on_request(on_request)
+    server.on_stream_reset(on_stream_reset)
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+
+    async def on_data(stream_id, data):
+        response_received.set()
+
+    client.on_data(on_data)
+    await client.connect()
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    try:
+        # GOAWAY は往復が完了してから送る (完了前に送るとパケット化されない)
+        first_stream_id = await client.request("GET", "/")
+        assert first_stream_id >= 0
+        await client.send_data(first_stream_id, b"", fin=True)
+        await asyncio.wait_for(response_received.wait(), timeout=5.0)
+
+        # サーバー側の低レベル HTTP/3 コネクションから GOAWAY を送出する。
+        # get_streams_to_send() は呼ばない (GOAWAY のバイト列をテストが
+        # 取り出してしまい、ピアへ届かなくなるため)
+        server_connection = next(iter(server._clients.values()))
+        assert server_connection.http3_connection is not None
+        server_connection.http3_connection.goaway()
+        for addr, known_client in server._clients.items():
+            await server._send_to(addr, known_client)
+
+        # GOAWAY の受信はクライアントの run() が処理するため、-1 を返すまで
+        # 期限付きで再試行する
+        deadline = time.monotonic() + 5.0
+        result = 0
+        while time.monotonic() < deadline:
+            result = await client.request("GET", "/")
+            if result == -1:
+                break
+            await asyncio.sleep(0.01)
+        assert result == -1, "GOAWAY 受信後も request() が成功している"
+        # 枯渇ではなく登録失敗の経路で -1 になったことを表明する (呼び出し前に
+        # 置くと、GOAWAY が届かないまま枯渇した場合に素通りする)
+        streams_left = client._quic_connection.streams_bidi_left
+        assert streams_left is not None and streams_left > 0, "枯渇経路で -1 になっている"
+
+        # 開設済みの QUIC ストリームがリセットされたことをサーバー側で観測する。
+        # 登録に失敗したストリームは最初のストリームより後の ID で、error_code は
+        # 低レベル reset_stream に渡した 0 になる (GOAWAY 後にサーバー側が拒否した
+        # ストリームは H3_REQUEST_REJECTED になるため区別できる)
+        def client_reset_observed() -> bool:
+            # クライアント起点の双方向ストリーム (Bit 0 = 0 / Bit 1 = 0) が
+            # リセットされたことを見る (制御・QPACK の単方向ストリームを拾わない)
+            return any(
+                error_code == 0 and stream_id % 4 == 0 and stream_id != first_stream_id
+                for stream_id, error_code in server_resets
+            )
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if client_reset_observed():
+                break
+            await asyncio.sleep(0.01)
+        assert client_reset_observed(), "登録に失敗したストリームがリセットされていない"
+    finally:
+        if not client_task.done():
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+        if not server_task.done():
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
