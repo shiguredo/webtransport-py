@@ -1,7 +1,7 @@
 # http3 の高レベル層がピアの RESET_STREAM を nghttp3 へ伝えない
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-20
 - Branch: feature/fix-http3-peer-reset-not-forwarded
 - Polished: 2026-09-20
 
@@ -23,7 +23,7 @@
 ## 設計方針
 
 - **採用案**: `Http3Connection::shutdown_stream_read(int64_t stream_id)` を追加し、`STREAM_RESET` の受信時に高レベル層から呼ぶ
-  - 実装は `nghttp3_conn_shutdown_stream_read` を呼んだうえで、`stream_buffers_` と `pending_headers_` を削除する (`nghttp3_conn_shutdown_stream_read` は `stream_close` コールバックを呼ばないため、明示的に解放しないとエントリが残る)。`stream_buffers_` はピアが放棄したストリームへの未送信応答データであり、保持し続けても送出の機会が無いため `reset_stream` と同じ後始末として削除する。イベントは push しない
+  - 実装は `nghttp3_conn_shutdown_stream_read` を呼んだうえで、`stream_buffers_` と `pending_headers_` を削除する (`nghttp3_conn_shutdown_stream_read` は `stream_close` コールバックを呼ばないため、明示的に解放しないとエントリが残る)。ピアがリクエストを放棄したため (RFC 9114 Section 4.1.1)、未送信の送信データも `reset_stream` と同じ後始末として削除する (送信方向は開いたままなので、解放後に積んだデータは送出される)。イベントは push しない
   - 入力契約は `reset_stream` と揃える (接続が無い・閉じている場合は no-op、`stream_id` が 0 未満または 2^62-1 超は黙って無視)
   - `shutdown_stream_ids_` (書き込み側の shutdown 記録) には触れない。読み取りの中断は書き込み側の状態を変えない
   - `Http3Connection.reset_stream` は `ResetStream` イベントを push するため、高レベル層から呼ぶとピアが既にリセットしたストリームへ QUIC の `RESET_STREAM` を返送してしまう。この理由で `reset_stream` の再利用はしない
@@ -51,3 +51,17 @@
 - アプリが明示的に呼ぶ `Client.reset_stream` / `Server.reset_stream` の挙動 (`ResetStream` イベントを push して QUIC `RESET_STREAM` を送出する現行仕様を維持する)
 - WebTransport over HTTP/3 の本番経路 (`src/webtransport/h3/`) のリセット転送 (既に `H3Session::close_stream` で実装済み)
 - nghttp3 のストリームオブジェクト自体の解放 (読み取り中断では残るが、FIN 終端の既存経路と同じ性質であり接続終了で解放される)
+- ピアの `STOP_SENDING` の nghttp3 への転送 (高レベル層に `STOP_SENDING` の分岐が無く、RFC 9114 Section 4.1.1 の SHOULD に対する未実装。追跡 issue は未起票)
+- 同一の drain で完備 HEADERS と `STREAM_RESET` が並んだ場合に `on_stream_reset` が `on_headers` より先に届く順序 (本対応で導入したものではない。追跡 issue は未起票)
+- テスト用の部分 HEADERS バイト列の重複 (`tests/test_http3.py` と `tests/test_e2e_http3_peer_reset.py` の同名相当の定数。追跡 issue は未起票。0221 の対象にも入っていない)
+
+## 解決方法
+
+- `src/bindings/http3.h` / `src/bindings/http3.cpp` に `Http3Connection::shutdown_stream_read(int64_t stream_id)` を追加した。`nghttp3_conn_shutdown_stream_read` で読み取り中断を伝え、`stream_buffers_` と `pending_headers_` を削除する。イベントは push しない (push すると高レベル層がピアのリセットをアプリ起点のリセットとして扱い、こちらから `RESET_STREAM` を送出してしまう)。入力契約は `reset_stream` と揃え (接続が無い・閉じている場合は no-op、範囲外の ID は黙って無視)、書き込み側の状態 (`shutdown_stream_ids_`) は変えない
+- `src/webtransport/http3/client.py` / `src/webtransport/http3/server.py` の `STREAM_RESET` 分岐で `shutdown_stream_read` を呼び、ピアのリセットを nghttp3 へ転送する (アプリの `on_stream_reset` の呼び出しと引数は変えない)
+- `src/webtransport/webtransport_ext/http3.pyi` を再生成し、`skills/webtransport-py/SKILL.md` の `http3.Connection` のメソッド一覧と高レベル層の説明を更新した
+- テストを追加した
+  - `tests/test_http3.py`: 低レベル 3 件。読み取り中断後に部分 HEADERS を再注入してもエントリが作られないこと (nghttp3 に中断が伝わった証拠)、未送信の応答データの解放と送信方向が生きていること、他のストリームのエントリを解放しないこと、`ResetStream` イベントを push しないこと (対照として `reset_stream` は push する)、クライアント側のリクエストストリームでも同じであること
+  - `tests/test_e2e_http3_peer_reset.py`: 実 QUIC ピア (`quic.Client`) で「部分的な HEADERS + RESET_STREAM のみ」を再現し、`_has_pending_headers` の解放・`on_stream_reset` の引数・`wait_for_stream_reset` が `TimeoutError` になること (返送しない) を確認する。クライアント側も対称に検証する (`http3.Server` をピアとし、生の QUIC ストリームデータで部分的な応答 HEADERS を送ってからリセットする。返送の検出は、サーバー側はピアの `wait_for_stream_reset` が `TimeoutError` になること、クライアント側はピアの `on_stream_reset` が発火しないことで確認する)
+- RED は次の 2 通りで実測した: `nghttp3_conn_shutdown_stream_read` の呼び出しを外すと低レベルテストの解放表明が失敗し、高レベル層の転送 (`server.py` / `client.py`) を外すと対応する e2e テストが失敗する
+- 全テストが通過する
