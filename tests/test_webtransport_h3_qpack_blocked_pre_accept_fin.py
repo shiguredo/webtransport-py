@@ -1,14 +1,20 @@
-"""WebTransport over HTTP/3 の QPACK デコードブロック中の受理前 FIN テスト
+"""WebTransport over HTTP/3 の QPACK デコードブロック中の扱いのテスト
 
-QPACK デコードブロック中に届いた受理前 FIN (サーバーが応答を送信する前に
-CONNECT ストリームが FIN で閉じられた) の fin が喪失し、以後どの経路でも
-セッション終了が検知されない問題の修正を検証する。ヘッダーが QPACK デコード
-ブロック中に fin 付きデータが届くと、nghttp3 はデータを inq にバッファし、
+QPACK デコードブロック中に届いたデータの保持と解放を検証する。
+
+ブロック中に fin 付きのヘッダーが届くと、nghttp3 はデータを inq にバッファし、
 ブロック解除後の再処理で READ_EOF を fin として伝播するが、ヘッダー完了後の
 「Server has not submitted response」分岐で WT_SESSION_BLOCKED を立てて
 早期 return するため end_stream コールバックに到達せず fin が喪失する。
 receive_stream_data の fin 引数による保留記録と、ブロック解除後の CONNECT
 判定による移行で検知する。
+
+ブロック解除前にストリームがリセットされた場合は end_headers_cb が発火しない
+ため、per-stream の状態 (保留 FIN 記録・受信途中のヘッダーブロック) を
+close_stream で解放する。
+
+フレーム種別・長さの可変長整数が読み取りを跨ぐ場合は、フレーム境界ガードが
+解釈と保持を行う。
 """
 
 from __future__ import annotations
@@ -275,6 +281,68 @@ def test_qpack_blocked_pre_accept_fin_reset_removes_record() -> None:
         server.receive_stream_data(6, data, False)
     assert server.get_session_ids() == []
     assert all(event.type != h3.EventType.SESSION_CLOSED for event in _drain_events(server))
+
+
+def test_qpack_blocked_reset_removes_pending_headers() -> None:
+    """ブロック中にリセットされたストリームの受信ヘッダーバッファが除去されることを確認
+
+    QPACK デコードブロック中は begin_headers_cb が発火済みで end_headers_cb が
+    未発火のため、pending_headers_ にエントリが残る。この状態でピアが
+    STREAM_RESET を送ると高レベル層 (server.py / client.py) が close_stream を
+    呼ぶが、end_headers_cb は発火しないため、close_stream での除去がなければ
+    エントリが接続終了まで残留する (解放は公開 API の挙動に現れない)。
+    除去はテスト専用の _has_pending_headers で直接確認する。
+    """
+    _client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+
+    # ブロック中にヘッダーを渡すと、ヘッダーブロックのエントリが保持される。
+    # FIN は付けない (保留 FIN 記録の経路と分離し、エントリの解放だけを対象に
+    # する)
+    server.receive_stream_data(0, headers, False)
+    assert server._has_pending_headers(0) is True
+
+    # ブロック解除前にリセットするとエントリが除去される
+    server.close_stream(0, 0)
+    assert server._has_pending_headers(0) is None
+
+    # ブロック解除してもセッションは確立されず、エントリも復活しない
+    # (nghttp3 はブロック登録から外れたストリームを再処理しない)
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    assert server.get_session_ids() == []
+    assert server._has_pending_headers(0) is None
+    assert all(event.type != h3.EventType.SESSION_CLOSED for event in _drain_events(server))
+
+
+def test_partial_headers_reset_removes_pending_headers() -> None:
+    """ブロック外で受信途中のヘッダーブロックもリセットで解放されることを確認
+
+    QPACK デコードブロック中でなくても、フィールドセクションが分割到着して
+    いる間にストリームが終了すると end_headers_cb は発火しない (begin_headers_cb
+    は HEADERS フレームの解釈時点で発火する)。解放が QPACK ブロック中の経路に
+    限定されていないことを、ブロックを解除した状態でヘッダーの先頭だけを
+    渡して確認する。
+    """
+    _client, server, headers, encoder_parts = _create_qpack_blocked_setup()
+
+    # 先頭 2 バイトで HEADERS フレームヘッダー (種別 + 1 バイトの長さ varint) が
+    # 完結し、フィールドセクションが残ることを前提にする。長さが 2 バイト以上の
+    # varint になると先頭 2 バイトはフレーム境界ガードに保持され nghttp3 へ
+    # 渡らないため、このテストは前提を明示的に表明する
+    assert headers[0] == 0x01, "HEADERS フレームではありません"
+    assert 0 < headers[1] < 0x40, "HEADERS の長さが 1 バイトの varint ではありません"
+
+    # ブロックを解除してから HEADERS フレームの先頭だけを渡すと、受信途中の
+    # エントリが保持される
+    for data in encoder_parts:
+        server.receive_stream_data(6, data, False)
+    server.receive_stream_data(0, headers[:2], False)
+    assert server.is_closed() is False
+    assert server._has_pending_headers(0) is True
+
+    # 受信途中のままリセットするとエントリが除去される
+    server.close_stream(0, 0)
+    assert server._has_pending_headers(0) is None
 
 
 def test_qpack_blocked_normal_session_unaffected() -> None:

@@ -275,10 +275,7 @@ QuicConnection::~QuicConnection() {
 
 void QuicConnection::rebind_conn_ref() {
   if (conn_ != nullptr && ssl_ != nullptr) {
-    conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
-      auto* conn = static_cast<QuicConnection*>(ref->user_data);
-      return conn->conn_;
-    };
+    conn_ref_.get_conn = &QuicConnection::conn_ref_get_conn_cb;
     conn_ref_.user_data = this;
     SSL_set_app_data(ssl_, &conn_ref_);
   }
@@ -500,7 +497,8 @@ SSL_CTX* QuicConnection::create_ssl_ctx() {
       SSL_CTX_set_alpn_select_cb(
           ctx,
           [](SSL*, const unsigned char** out, unsigned char* outlen,
-             const unsigned char* in, unsigned int inlen, void* arg) -> int {
+             const unsigned char* in, unsigned int inlen,
+             void* arg) noexcept -> int {
             auto* config = static_cast<QuicConfig*>(arg);
 
             // クライアントの ALPN リストを走査
@@ -738,10 +736,7 @@ bool QuicConnection::initialize_client(const std::string& local_host,
   }
 
   // conn_ref を設定
-  conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
-    auto* self = static_cast<QuicConnection*>(ref->user_data);
-    return self->conn_;
-  };
+  conn_ref_.get_conn = &QuicConnection::conn_ref_get_conn_cb;
   conn_ref_.user_data = this;
 
   // SSL に conn_ref を設定
@@ -871,10 +866,7 @@ bool QuicConnection::initialize_server() {
   }
 
   // conn_ref を設定
-  conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
-    auto* self = static_cast<QuicConnection*>(ref->user_data);
-    return self->conn_;
-  };
+  conn_ref_.get_conn = &QuicConnection::conn_ref_get_conn_cb;
   conn_ref_.user_data = this;
 
   // SSL に conn_ref を設定
@@ -1020,10 +1012,7 @@ bool QuicConnection::initialize_server_from_packet(
   }
 
   // conn_ref を設定
-  conn_ref_.get_conn = [](ngtcp2_crypto_conn_ref* ref) -> ngtcp2_conn* {
-    auto* self = static_cast<QuicConnection*>(ref->user_data);
-    return self->conn_;
-  };
+  conn_ref_.get_conn = &QuicConnection::conn_ref_get_conn_cb;
   conn_ref_.user_data = this;
 
   // SSL に conn_ref を設定
@@ -2569,6 +2558,13 @@ void QuicConnection::push_event(QuicEvent event) {
 }
 
 // ========== ngtcp2 / BoringSSL コールバック ==========
+
+// ngtcp2_crypto が参照する関数ポインタ (4 箇所の同一実装を 1 つに集約している)
+ngtcp2_conn* QuicConnection::conn_ref_get_conn_cb(
+    ngtcp2_crypto_conn_ref* ref) noexcept {
+  auto* conn = static_cast<QuicConnection*>(ref->user_data);
+  return conn->conn_;
+}
 
 int QuicConnection::new_session_cb(SSL* ssl, SSL_SESSION* session) noexcept {
   auto* conn_ref = static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));

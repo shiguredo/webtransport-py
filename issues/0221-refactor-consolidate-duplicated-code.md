@@ -28,7 +28,7 @@ Python 側:
 テスト側:
 
 - `http3.Connection` 用の `_pump` が `tests/test_http3.py` / `test_http3_ack_offset.py` / `test_http3_message_ext.py` / `test_http3_stream_control.py` / `test_http3_stream_priority.py` / `test_http3_stream_state.py` の 6 ファイルに同一実装で存在する (docstring のみ差)。`tests/conftest.py` の `_pump` は `h3.Session` 専用のため流用できていない
-- `_create_connection_pair` が `test_http3.py` を除く 5 ファイルに存在し、`test_http3_stream_priority.py` だけが `server.set_max_client_streams_bidi(100)` を追加で呼ぶ (同ファイルの減算無視テストがこの値に依存する)
+- `_create_connection_pair` が 6 ファイル (`test_http3.py` / `test_http3_ack_offset.py` / `test_http3_message_ext.py` / `test_http3_stream_control.py` / `test_http3_stream_priority.py` / `test_http3_stream_state.py`) に同一実装で存在し、`test_http3_stream_priority.py` だけが `server.set_max_client_streams_bidi(100)` を追加で呼ぶ (同ファイルの減算無視テストがこの値に依存する)
 - 自己署名証明書の生成が `tests/conftest.py` に 2 つある。`test_certificates` フィクスチャは subject 5 属性と SAN (`DNSName("localhost")` と `IPAddress(127.0.0.1)`) を持ち `tempfile.TemporaryDirectory()` で後始末する。`create_test_certificates` は `CN=localhost` のみで SAN を持たず、`tempfile.mkdtemp()` のパスを返して後始末しない。後者はモジュール定数 `CERTFILE` / `KEYFILE` として import 時に 1 回だけ実行される
 - `_encode_capsule` が `tests/conftest.py` と `tests/test_webtransport_h3_close_session_message.py` に同一実装で存在する
 
