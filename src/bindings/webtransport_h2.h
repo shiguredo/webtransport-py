@@ -600,6 +600,30 @@ class H2Session {
       int32_t session_id) const;
 
   /**
+   * テスト専用: 未消費の受信バイト記録の残量を返す
+   * (production からは呼ばない。ストリーム終了時の解放の回帰ピン)
+   *
+   * キーは WebTransport セッションの HTTP/2 ストリーム ID であり、セッション
+   * ID と同じ値になる (WebTransport ストリームはセッションの CONNECT
+   * ストリーム上のカプセルとして多重化される)
+   *
+   * @param session_id セッション ID (HTTP/2 ストリーム ID)
+   * @return 未消費の残量 (エントリが無ければ nullopt)
+   */
+  std::optional<int64_t> test_unconsumed_recv_bytes(int32_t session_id) const;
+
+  /**
+   * テスト専用: コネクションレベルで未返却の受信バイト数を返す
+   * (production からは呼ばない。破棄したバイトの返却の回帰ピン)
+   *
+   * nghttp2_session_get_effective_recv_data_length の値であり、WINDOW_UPDATE
+   * を積んだ時点で積んだ分だけ減算される (送出前でも減るが 0 になるとは限らない)
+   *
+   * @return 未返却の受信バイト数
+   */
+  std::optional<int32_t> test_effective_recv_data_length() const;
+
+  /**
    * セッションレベルの送信可能残量を返す (観測専用)
    *
    * `max_data_local` と `bytes_sent` の差 (負値は 0) を返す。フロー制御の
@@ -751,6 +775,13 @@ class H2Session {
    * 止まれば受信ウィンドウが開かず、ピアの送信が止まる (背圧)
    */
   void consume_recv_bytes(int32_t stream_id, size_t size);
+  // ストリーム終了時の未消費受信バイトの後始末。記録を削除し、破棄した分の
+  // コネクションレベル受信ウィンドウを返す (nghttp2_session_consume は
+  // ストリームの WINDOW_UPDATE も積むため、終了するストリームには使わず
+  // コネクションレベルだけを返す nghttp2_session_consume_connection を使う)
+  void discard_stream_recv_bytes(int32_t stream_id);
+  // アプリへ配送せず破棄する DATA の分をコネクションレベル受信ウィンドウへ返す
+  void consume_connection_recv_bytes(size_t size);
   WtSessionInfo* get_wt_session(int32_t session_id);
 
   // draft-15 Section 4.3: 対向 SETTINGS / WebTransport-Init から初期 FC を設定
