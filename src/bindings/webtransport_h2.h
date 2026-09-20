@@ -182,6 +182,11 @@ struct H2Event {
   int32_t session_id = -1;
   uint64_t stream_id = 0;
   std::vector<uint8_t> data;
+  // エラーコードの意味はイベント種別で異なる。Error は WebTransport の
+  // エラーコード (h2.WtErrorCode)、nghttp2 エラーコードの絶対値 (ローカルの
+  // 失敗)、または HTTP/2 エラーコード。SessionClosed は Application Error Code
+  // (WT_CLOSE_SESSION 受信時)、HTTP/2 エラーコード (ストリームのリセット時。
+  // RFC 9113 Section 7)、または正常終了の 0
   uint32_t error_code = 0;
   std::string error_message;
   bool fin = false;
@@ -254,7 +259,8 @@ struct WtSessionInfo {
   bool is_established = false;
 
   // セッション終了を学習したか (ローカル close_session / サーバー側の
-  // reject_session の 2xx 送出。WT_CLOSE_SESSION 受信はエントリ削除で表現する)。
+  // reject_session の 2xx 送出 / カプセルペイロード不正による RST_STREAM。
+  // WT_CLOSE_SESSION 受信はエントリ削除で表現する)。
   // is_established は connect 直後 (2xx 応答前) も false のため、楽観的送信
   // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
@@ -665,6 +671,15 @@ class H2Session {
   static std::optional<std::pair<uint64_t, size_t>> decode_varint(
       const uint8_t* data,
       size_t length);
+  // ペイロードの可変長整数を読み出す。失敗時はセッションを終了させる
+  // (reset_stream_for_malformed_capsule) ため、呼び出し側は失敗で return する
+  // だけでよい。根拠は定義側を参照
+  std::optional<std::pair<uint64_t, size_t>>
+  read_capsule_varint(int32_t session_id, const uint8_t* data, size_t length);
+
+  // カプセルペイロードのプロトコル違反でストリームをリセットする
+  // (RST_STREAM の submit に失敗した場合は Error イベントを push する)
+  void reset_stream_for_malformed_capsule(int32_t session_id);
 
   std::vector<uint8_t> encode_capsule(CapsuleType type,
                                       const std::vector<uint8_t>& payload);

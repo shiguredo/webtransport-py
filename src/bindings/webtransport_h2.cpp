@@ -257,6 +257,61 @@ std::optional<std::pair<uint64_t, size_t>> H2Session::decode_varint(
   return std::make_pair(value, var_length);
 }
 
+std::optional<std::pair<uint64_t, size_t>> H2Session::read_capsule_varint(
+    int32_t session_id,
+    const uint8_t* data,
+    size_t length) {
+  auto result = decode_varint(data, length);
+  if (!result) {
+    // RFC 9297 Section 3.3: カプセルのペイロードが識別フィールドの終端に
+    // 達していない場合は malformed / incomplete な HTTP メッセージとして
+    // 扱う。HTTP/2 では RFC 9113 Section 8.1.1 により PROTOCOL_ERROR の
+    // ストリームエラー (RST_STREAM) を送出する。draft-15 Section 3.4 の
+    // とおり、ストリームのリセットはセッションを終了させる
+    reset_stream_for_malformed_capsule(session_id);
+    return std::nullopt;
+  }
+  return result;
+}
+
+void H2Session::reset_stream_for_malformed_capsule(int32_t session_id) {
+  // 無言で読み捨てると、後段の検証 (方向・ストリーム状態・二重受信) に
+  // 到達しないままセッションが継続するため、プロトコル違反として扱う。
+  // close_session は使わない: WT_CLOSE_SESSION はアプリケーションシグナルで
+  // あり、draft-15 Section 3.4 が定めるリセットによる終了 (アプリケーション
+  // シグナル無し) と意味が異なる
+  auto* wt_session = get_wt_session(session_id);
+  if (wt_session) {
+    // 以後のカプセル処理と送受信を止める。エントリは残し、RST_STREAM の送出で
+    // 発火する on_stream_close_callback が SessionClosed を通知する。
+    // is_established を落とすと get_session_ids からも消え、受信カプセルの
+    // ゲート (on_data_chunk_recv_callback) が閉じる。capsule_buffer は触らない
+    // (呼び出し元の process_capsules のループが is_terminated を見て破棄する)
+    wt_session->is_terminated = true;
+    wt_session->is_established = false;
+  }
+  if (!session_) {
+    return;
+  }
+  // submit の失敗 (NOMEM 等) は RST_STREAM が送出されず SessionClosed も
+  // 発火しないため、既存の submit 失敗と同じく Error イベントで観測可能に
+  // する (error_code は nghttp2 エラーコードの絶対値)。0 が返っても
+  // ストリームが既に CLOSING の場合は何も積まれないが、カプセル処理の前に
+  // リセットする経路は他に無いため到達しない
+  const int rv = nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE,
+                                           session_id, NGHTTP2_PROTOCOL_ERROR);
+  if (rv == 0) {
+    return;
+  }
+  H2Event event;
+  event.type = H2EventType::Error;
+  event.session_id = session_id;
+  event.stream_id = static_cast<uint64_t>(session_id);
+  event.error_code = static_cast<uint32_t>(-rv);
+  event.error_message = nghttp2_strerror(rv);
+  push_event(std::move(event));
+}
+
 // ========== Capsule エンコード/デコード ==========
 
 std::vector<uint8_t> H2Session::encode_capsule(
@@ -432,12 +487,14 @@ void H2Session::handle_wt_stream(int32_t session_id,
                                  bool fin,
                                  const uint8_t* payload,
                                  size_t length) {
-  if (length == 0) {
-    return;
-  }
+  // ペイロードが空 (Length 0) の場合は Stream ID すら含まれず、RFC 9297
+  // Section 3.3 の「識別フィールドの終端に達していないペイロード」に該当する。
+  // draft-15 Section 6.4 が無視を MAY とする empty WT_STREAM (Stream Data が
+  // 空 = Stream ID のみ) とは異なる入力であり、read_capsule_varint の失敗経路
+  // (プロトコル違反) に委ねる
 
   // Stream ID をデコード
-  auto stream_id_result = decode_varint(payload, length);
+  auto stream_id_result = read_capsule_varint(session_id, payload, length);
   if (!stream_id_result) {
     return;
   }
@@ -566,7 +623,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   size_t offset = 0;
 
   // Stream ID
-  auto stream_id_result = decode_varint(payload + offset, length - offset);
+  auto stream_id_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
     return;
   }
@@ -574,7 +632,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   offset += stream_id_len;
 
   // Error Code
-  auto error_code_result = decode_varint(payload + offset, length - offset);
+  auto error_code_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!error_code_result) {
     return;
   }
@@ -591,7 +650,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   }
 
   // Reliable Size
-  auto reliable_size_result = decode_varint(payload + offset, length - offset);
+  auto reliable_size_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!reliable_size_result) {
     return;
   }
@@ -729,7 +789,8 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   size_t offset = 0;
 
   // Stream ID
-  auto stream_id_result = decode_varint(payload + offset, length - offset);
+  auto stream_id_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
     return;
   }
@@ -737,7 +798,8 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   offset += stream_id_len;
 
   // Error Code
-  auto error_code_result = decode_varint(payload + offset, length - offset);
+  auto error_code_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!error_code_result) {
     return;
   }
@@ -807,7 +869,7 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
 void H2Session::handle_wt_max_data(int32_t session_id,
                                    const uint8_t* payload,
                                    size_t length) {
-  auto max_data_result = decode_varint(payload, length);
+  auto max_data_result = read_capsule_varint(session_id, payload, length);
   if (!max_data_result) {
     return;
   }
@@ -840,7 +902,8 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   size_t offset = 0;
 
   // Stream ID
-  auto stream_id_result = decode_varint(payload + offset, length - offset);
+  auto stream_id_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
     return;
   }
@@ -848,7 +911,8 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   offset += stream_id_len;
 
   // Max Stream Data
-  auto max_data_result = decode_varint(payload + offset, length - offset);
+  auto max_data_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!max_data_result) {
     return;
   }
@@ -932,7 +996,7 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
                                       bool is_bidi,
                                       const uint8_t* payload,
                                       size_t length) {
-  auto max_streams_result = decode_varint(payload, length);
+  auto max_streams_result = read_capsule_varint(session_id, payload, length);
   if (!max_streams_result) {
     return;
   }
@@ -977,7 +1041,8 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
   size_t offset = 0;
 
   // Stream ID
-  auto stream_id_result = decode_varint(payload + offset, length - offset);
+  auto stream_id_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
     return;
   }
@@ -988,7 +1053,7 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
   // (draft-15 Section 6.9 の "the offset of the stream at which the blocking
   // occurred" であり、自側のフロー制御上限ではない)。完全デコードは他の
   // ハンドラと同じく行う
-  if (!decode_varint(payload + offset, length - offset)) {
+  if (!read_capsule_varint(session_id, payload + offset, length - offset)) {
     return;
   }
 
@@ -1047,7 +1112,7 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
 void H2Session::handle_wt_streams_blocked(int32_t session_id,
                                           const uint8_t* payload,
                                           size_t length) {
-  auto max_streams_result = decode_varint(payload, length);
+  auto max_streams_result = read_capsule_varint(session_id, payload, length);
   if (!max_streams_result) {
     return;
   }
