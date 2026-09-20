@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3 の受信ヘッダーバッファがストリーム終了で解放されない
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-20
 - Branch: feature/fix-h3-pending-headers-leak
 - Polished: 2026-09-18
 
@@ -20,8 +20,8 @@
 ## 設計方針
 
 - `H3Session::close_stream` に `pending_headers_` の削除を追加する。ピア起点の `STREAM_RESET` は `src/webtransport/h3/server.py` と `src/webtransport/h3/client.py` から `close_stream` を呼ぶため、報告された残留はこの 1 箇所で解消する
-- `H3Session::stream_close_cb` には削除を置かない。`close_stream` は `nghttp3_conn_close_stream` を呼び、nghttp3 が保持するストリームに対しては `stream_close_cb` を同期発火させる (`_deps/nghttp3/*/source/lib/nghttp3_conn.c` の `nghttp3_conn_close_stream2` → `conn_delete_stream` が `stream_close` を無条件に呼ぶ) ため、`stream_close_cb` 側に置いても同じ削除が二重になるだけである。`close_stream` は削除を `nghttp3_conn_close_stream` の呼び出しより前に置き、コールバック経路に依存しない
-- `H3Session::reset_stream_cb` にも削除を置かない。`reset_stream_cb` は `nghttp3_conn_abort_stream` からのみ発火し、その到達経路で中断されるのは `pending_headers_` のエントリを持たない WT データストリーム (`begin_headers_cb` が発火しない) か、同じ `end_headers_cb` の中でエントリが削除される CONNECT ストリーム (クライアント側の非 2xx 応答による abort は削除より前に同期発火するが残留しない) である。到達経路が確認できない削除を置くと、`pending_headers_` のメンバーシップを「QPACK デコードブロック中」のマーカーとして使っている 3 箇所 (`receive_stream_data` の保留 FIN 記録、`flush_unblocked_held_data` と `read_from_nghttp3` の保持判定) の意味を崩す
+- `H3Session::stream_close_cb` には削除を置かない。`close_stream` は `nghttp3_conn_close_stream` を呼び、nghttp3 が保持するストリームに対しては `stream_close_cb` を同期発火させる (`_deps/nghttp3/*/source/lib/nghttp3_conn.c` の `nghttp3_conn_close_stream2` → `conn_delete_stream` が `stream_close` を呼ぶ) ため、`stream_close_cb` 側に置いても同じ削除が二重になるだけである。`close_stream` は削除を `nghttp3_conn_close_stream` の呼び出しより前に置き、コールバック経路に依存しない
+- `H3Session::reset_stream_cb` にも削除を置かない。`reset_stream_cb` は `nghttp3_conn_abort_stream` からのみ発火し、その到達経路で中断されるのは `pending_headers_` のエントリを持たない WT データストリーム (`begin_headers_cb` が発火しない) か、同じ `end_headers_cb` の中でエントリが削除される CONNECT ストリーム (クライアント側の非 2xx 応答による abort は `end_headers_cb` の削除より後に同期発火するが残留しない) である。到達経路が確認できない削除を置くと、`pending_headers_` のメンバーシップを「QPACK デコードブロック中」のマーカーとして使っている 3 箇所 (`process_after_read` の保留 FIN 記録、`receive_stream_data` の全量保持判定、`flush_unblocked_held_data` の二段判定) の意味を崩す
 - 本 issue は `pending_headers_` の解放のみを対象とする。保持量の上限は扱わない
 
 ## 完了条件
@@ -29,10 +29,18 @@
 - QPACK デコードブロック中にストリームが終了したとき、`H3Session::pending_headers_` のエントリが削除される
 - `pending_headers_` の残留を Python から観測するテスト専用 API を `H3Session` に追加し (`_has_stream_buffer` / `_has_pending_qpack_blocked_fin_stream` と同じ `_has_*` 命名に倣う)、上記を検証するテストが追加されて全テストが通過する
   - 観測 API が無いと残留は外部挙動に現れず、修正前後でテスト結果が変わらない
+- 次は本 issue の対象外である (いずれも追跡 issue は未起票。issue 候補として扱う)
+  - `H3Session::enforce_pre_accept_buffer_limit` は受理前バッファの上限超過時に `nghttp3_conn_close_stream` を直接呼び、`headers_guards_` のエントリを解放しない (ピアの `STREAM_RESET` で `close_stream` が呼ばれるか接続終了まで残る。留置されるのは空のエントリ 1 件で、保持量は接続あたりの開設ストリーム数に比例する)
+  - `pending_pre_accept_fin_session_ids_` は `close_stream` と `close_session` で解放されない。受理前 FIN を記録した CONNECT ストリームが受理前に `STREAM_RESET` されると `accept_session` も `reject_session` も走らないため、int64 1 件が接続終了まで残る (既定の広告済みストリーム数では有界だが、`extend_max_streams_bidi` を使うアプリでは実質無界に伸びる)
+  - 接続終了時に `pending_headers_` を明示 clear する経路は無い (他の per-stream コンテナと同じ扱い。高レベル層は `CONNECTION_CLOSED` で接続ごと破棄する)
 
 ## 解決方法
 
-- `src/bindings/webtransport_h3.cpp` の `H3Session::close_stream` に `pending_headers_.erase(stream_id)` を追加する (既存の `pending_qpack_blocked_fin_stream_ids_.erase` / `headers_guards_.erase` と同じ位置)
-- `H3Session` にテスト専用の観測 API を追加して `pending_headers_` の残留を観測できるようにする
+- `src/bindings/webtransport_h3.cpp` の `H3Session::close_stream` に `pending_headers_.erase(stream_id)` を追加する (既存の `pending_qpack_blocked_fin_stream_ids_.erase` / `headers_guards_.erase` と同じ位置。`nghttp3_conn_close_stream` の呼び出しより前に置く)。`nghttp3_conn_close_stream` は `conn_delete_stream` で当該ストリームを QPACK デコーダーのブロック登録から外すため、ブロック解除後も `end_headers_cb` は発火せず、この時点で除去する以外に解放の機会が無い
+- `H3Session::has_pending_headers` を追加し、`_has_pending_headers` として公開する (`has_stream_buffer` / `has_pending_qpack_blocked_fin_stream` と同じ `std::optional<bool>`。エントリが存在する場合は true、無い場合は nullopt)
 - `src/webtransport/webtransport_ext/h3.pyi` を再生成して追跡分を更新する
-- `tests/` に QPACK デコードブロック中にリセットする経路のテストを追加する。ピア起点の `STREAM_RESET` は低レベル `h3.Session.close_stream(stream_id, error_code)` の呼び出しとして現れるため、`tests/test_webtransport_h3_qpack_blocked_pre_accept_fin.py` の `test_qpack_blocked_pre_accept_fin_reset_removes_record` と同じ構成 (`_create_qpack_blocked_setup` でブロックさせ、ヘッダー到着後に `close_stream` し、追加した観測 API で残留の有無を確認する) で再現する
+- `tests/test_webtransport_h3_qpack_blocked_pre_accept_fin.py` に 2 件を追加する。ピア起点の `STREAM_RESET` は低レベル `h3.Session.close_stream(stream_id, error_code)` の呼び出しとして現れるため、`test_qpack_blocked_pre_accept_fin_reset_removes_record` と同じ構成で再現する
+  - `test_qpack_blocked_reset_removes_pending_headers`: `_create_qpack_blocked_setup` でブロックさせ、ヘッダー到着後に `_has_pending_headers` で保持を表明してから `close_stream` し、解放を確認する。ブロック解除後にもエントリが復活しないことも表明する
+  - `test_partial_headers_reset_removes_pending_headers`: ブロックを解除してから HEADERS フレームの先頭だけを渡し、QPACK ブロック中でない受信途中のエントリも `close_stream` で解放されることを確認する (解放が QPACK ブロック中の経路に限定されていないことの回帰ピン)
+- `close_stream` の `erase` のみを外したビルドでは追加した 2 件だけが失敗し (`assert True is None`)、他の 18 件は通過することを実測で確認した
+- 全テストが通過する
