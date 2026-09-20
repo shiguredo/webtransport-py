@@ -86,6 +86,8 @@ class Client:
         self._remote_addr: tuple[str, int] | None = None
         self._running = False
         self._connected = False
+        # connect() 実行中フラグ (実行中の再入を拒否する)
+        self._connecting = False
         self._control_stream_id = -1
 
         self._on_headers: Callable[[int, list[tuple[str, str]]], Awaitable[None]] | None = None
@@ -364,6 +366,10 @@ class Client:
                 ConnectTimeoutError を送出する
 
         Raises:
+            RuntimeError: close() を挟まずに、接続済み・接続中、または前回の
+                接続に使った transport (StreamWriter / ソケット) が残っている
+                インスタンスへ再度 connect() を呼んだ場合 (close() が完了した
+                後は再度接続できる)
             ConnectTimeoutError: 待機中にハンドシェイク完了イベントが届かず
                 deadline に達した場合
             ConnectRefusedError: 生成失敗時・確立中の OSError 時など、前段
@@ -372,51 +378,71 @@ class Client:
                 `CONNECTION_CLOSE` が届いた場合 (ハンドシェイク完了前の
                 失敗は TLS 由来とみなす)
         """
-        if timeout <= 0:
-            raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
-        quic_config = quic_low.Config()
-        quic_config.alpn_protocols = ["h3"]
-        quic_config.idle_timeout_ns = self._idle_timeout_ns
-        quic_config.verify_peer = self._verify_peer
-        quic_config.server_name = self._host
-        if self._ca_file is not None:
-            quic_config.ca_file = self._ca_file
-        if self._verify_callback is not None:
-            quic_config.verify_callback = self._verify_callback
+        # ピアのセッション終了を run() が観測すると _connected は False に
+        # なるが transport は残る。その状態での再入も拒否する (close() が
+        # transport を破棄してから戻るため、close() の後は再入できる)
+        if self._connected or self._connecting or self._socket is not None:
+            raise RuntimeError("connect() has already been called")
 
-        http3_config = http3_low.Config()
-        http3_config.is_server = False
-
-        # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
-        # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
+        self._connecting = True
         try:
-            candidates = await self._resolve_remote(self._host, self._port)
-        except OSError as exc:
-            raise ConnectRefusedError(
-                f"failed to resolve {self._host}:{self._port}: {exc}"
-            ) from exc
-        if not candidates:
+            if timeout <= 0:
+                raise ConnectTimeoutError(
+                    f"QUIC handshake did not complete within {timeout} seconds"
+                )
+            quic_config = quic_low.Config()
+            quic_config.alpn_protocols = ["h3"]
+            quic_config.idle_timeout_ns = self._idle_timeout_ns
+            quic_config.verify_peer = self._verify_peer
+            quic_config.server_name = self._host
+            if self._ca_file is not None:
+                quic_config.ca_file = self._ca_file
+            if self._verify_callback is not None:
+                quic_config.verify_callback = self._verify_callback
+
+            http3_config = http3_low.Config()
+            http3_config.is_server = False
+
+            # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
+            # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
+            try:
+                candidates = await self._resolve_remote(self._host, self._port)
+            except OSError as exc:
+                raise ConnectRefusedError(
+                    f"failed to resolve {self._host}:{self._port}: {exc}"
+                ) from exc
+            if not candidates:
+                raise ConnectTimeoutError(
+                    f"QUIC handshake did not complete within {timeout} seconds"
+                )
+
+            # 候補ごとに試す (逐次フォールバック)。各試行は timeout 全体で
+            # 駆動する (先頭候補の無応答で予算を使い切ると次候補へ進めない
+            # ため、予算は分割しない)。応答なしのタイムアウト失敗時のみ次候補
+            # へ進み、明示失敗は即座に送出する
+            loop = asyncio.get_running_loop()
+            last_error: ConnectTimeoutError | None = None
+            for family, ip in candidates:
+                try:
+                    await self._connect_one(
+                        family, ip, quic_config, http3_config, timeout, loop.time() + timeout
+                    )
+                    return
+                except ConnectTimeoutError as exc:
+                    last_error = exc
+                    await self._abandon_attempt()
+                    continue
+            if last_error is not None:
+                raise last_error
             raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
 
-        # 候補ごとに試す (逐次フォールバック)。各試行は timeout 全体で
-        # 駆動する (先頭候補の無応答で予算を使い切ると次候補へ進めない
-        # ため、予算は分割しない)。応答なしのタイムアウト失敗時のみ次候補
-        # へ進み、明示失敗は即座に送出する
-        loop = asyncio.get_running_loop()
-        last_error: ConnectTimeoutError | None = None
-        for family, ip in candidates:
-            try:
-                await self._connect_one(
-                    family, ip, quic_config, http3_config, timeout, loop.time() + timeout
-                )
-                return
-            except ConnectTimeoutError as exc:
-                last_error = exc
-                await self._abandon_attempt()
-                continue
-        if last_error is not None:
-            raise last_error
-        raise ConnectTimeoutError(f"QUIC handshake did not complete within {timeout} seconds")
+        except BaseException:
+            # キャンセル (asyncio.wait_for のタイムアウト等) でも開いた
+            # transport を残さない。残すと再入ガードに塞がれて再試行できない
+            await self._abandon_attempt()
+            raise
+        finally:
+            self._connecting = False
 
     async def _abandon_attempt(self) -> None:
         """失敗試行の後始末をして次候補に備える
