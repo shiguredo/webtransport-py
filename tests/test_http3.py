@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from conftest import _encode_varint
+from conftest import _drain_events, _encode_varint
 
 from webtransport import http3
 from webtransport.http3.constants import H3_NO_ERROR
@@ -231,8 +231,8 @@ def test_http3_reset_stream_releases_pending_headers() -> None:
     nghttp3_conn_shutdown_stream_read は stream_close コールバックを呼ばない
     ため、明示的に解放しないとエントリが接続終了まで残る。アプリがピアの
     RESET_STREAM を受けて Client.reset_stream / Server.reset_stream を呼ぶと
-    この経路に到達する (高レベル層は受信したリセットを nghttp3 へ自動転送
-    しないため、転送されない限りエントリは残る)。
+    この経路に到達する (ピア起点のリセットは高レベル層が
+    shutdown_stream_read で転送する)。
     """
     _client, server = _create_connection_pair()
 
@@ -244,6 +244,112 @@ def test_http3_reset_stream_releases_pending_headers() -> None:
     server.reset_stream(0, H3_NO_ERROR)
     assert server._has_pending_headers(0) is None, (
         "reset_stream 後に受信途中のヘッダーブロックのエントリが残っている"
+    )
+
+
+def test_http3_shutdown_stream_read_releases_pending_headers() -> None:
+    """shutdown_stream_read が読み取りを中断し関連する状態を解放することを確認
+
+    ピア起点の RESET_STREAM を高レベル層から転送する経路で使う。nghttp3 に
+    読み取り中断が伝わると以後のデータは消費・破棄されるため、同じストリームへ
+    部分的 HEADERS を再注入してもエントリは作られない。イベントは push しない
+    (ResetStream を push すると高レベル層がピアのリセットをアプリ起点の
+    リセットとして扱い、こちらから RESET_STREAM を送出してしまう)。
+    """
+    _client, server = _create_connection_pair()
+
+    assert _inject_partial_headers(server, 0) > 0
+    assert server._has_pending_headers(0) is True, (
+        "受信途中のヘッダーブロックのエントリが作られていない"
+    )
+    # これ以前に積まれたイベントを捨て、「shutdown_stream_read が push しない」
+    # ことだけを観測できるようにする
+    _drain_events(server)
+    server.shutdown_stream_read(0)
+    assert server._has_pending_headers(0) is None, (
+        "shutdown_stream_read 後に受信途中のヘッダーブロックのエントリが残っている"
+    )
+
+    # nghttp3 の読み取り中断が伝わっている (以後のデータは消費・破棄される)
+    assert _inject_partial_headers(server, 0) > 0
+    assert server._has_pending_headers(0) is None, (
+        "読み取り中断後も受信途中のヘッダーブロックのエントリが作られている"
+    )
+
+    # 他のストリームのエントリは解放しない (キー指定の erase であること)
+    assert _inject_partial_headers(server, 4) > 0
+    assert server._has_pending_headers(4) is True
+    server.shutdown_stream_read(0)
+    assert server._has_pending_headers(4) is True, (
+        "shutdown_stream_read が他ストリームのエントリまで解放している"
+    )
+    server.shutdown_stream_read(4)
+    assert server._has_pending_headers(4) is None
+
+    # イベントは push しない。対照として reset_stream は push する
+    assert all(event.type != http3.EventType.RESET_STREAM for event in _drain_events(server)), (
+        "shutdown_stream_read が ResetStream イベントを push している"
+    )
+    server.reset_stream(4, H3_NO_ERROR)
+    assert any(event.type == http3.EventType.RESET_STREAM for event in _drain_events(server)), (
+        "reset_stream の ResetStream イベントが観測できない (表明が空虚になっている)"
+    )
+
+
+def test_http3_shutdown_stream_read_releases_stream_buffers() -> None:
+    """shutdown_stream_read が未送信の送信データを解放することを確認
+
+    ピアがリクエストを放棄したため、アプリが積んだ未送信の応答データは破棄
+    される。送信方向は開いたままなので、以後の send_data は改めてキューされ
+    送出される (読み取りの中断は書き込み側の状態を変えない)。
+    """
+    _client, server = _create_connection_pair()
+
+    assert _inject_partial_headers(server, 0) > 0
+    assert server.submit_response(0, [(":status", "200")]) is True, "応答の登録に失敗しました"
+    server.send_data(0, b"hello", False)
+    assert server._has_stream_buffer(0) is True, "送信待ちのデータが登録されていない"
+
+    server.shutdown_stream_read(0)
+    assert server._has_stream_buffer(0) is None, (
+        "shutdown_stream_read 後に未送信の応答データが残っている"
+    )
+
+    # 送信方向は生きている (以後の send_data は改めてキューされる)
+    server.send_data(0, b"world", False)
+    assert server._has_stream_buffer(0) is True, "shutdown_stream_read が書き込み側まで止めている"
+
+
+def test_http3_shutdown_stream_read_on_client_request_stream() -> None:
+    """クライアント側のリクエストストリームでも読み取りを中断できることを確認
+
+    高レベル Client は、自分が開いたリクエストストリームがサーバーに
+    リセットされたときに shutdown_stream_read を呼ぶ。
+    """
+    client, server = _create_connection_pair()
+
+    assert client.submit_request(
+        0,
+        [
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+            (":path", "/"),
+        ],
+    ), "リクエストの登録に失敗しました"
+    _pump(client, server)
+
+    assert _inject_partial_headers(client, 0) > 0
+    assert client._has_pending_headers(0) is True, (
+        "受信途中のヘッダーブロックのエントリが作られていない"
+    )
+
+    client.shutdown_stream_read(0)
+    assert client._has_pending_headers(0) is None, (
+        "shutdown_stream_read 後に受信途中のヘッダーブロックのエントリが残っている"
+    )
+    assert all(event.type != http3.EventType.RESET_STREAM for event in _drain_events(client)), (
+        "shutdown_stream_read が ResetStream イベントを push している"
     )
 
 

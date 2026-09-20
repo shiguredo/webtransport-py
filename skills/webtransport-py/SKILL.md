@@ -335,7 +335,7 @@ async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 
 def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
 
-`on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。
+`on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。ピアの RESET_STREAM は読み取り中断として nghttp3 へ転送され、受信途中のヘッダーブロックと未送信の応答データは破棄される (送信方向は開いたまま)。
 
 `http3.Client.__init__(host, port=443, idle_timeout_ns=30_000_000_000, verify_peer=True, ca_file=None, verify_callback=None)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。
 
@@ -355,7 +355,7 @@ def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開�
 ```
 
 `request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。未接続の場合、ストリームを開けなかった場合 (同時ストリーム数の上限到達・ハンドシェイク未完了・接続クローズ直後)、リクエストの登録に失敗した場合は -1 を返す (登録に失敗した場合は開設済みの QUIC ストリームをリセットしてから返す)。
-`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。
+`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。`http3.Client` も `http3.Server` と同様に、ピアの RESET_STREAM を読み取り中断として nghttp3 へ転送し、受信途中のヘッダーブロックと未送信のリクエストデータを破棄する (送信方向は開いたままなので、`reset_stream` を高レベル層が自動で返送することはない)。
 
 ### HTTP/2 (`webtransport.http2`)
 
@@ -611,6 +611,7 @@ def client_stream_priority(stream_id: int, urgency: int, incremental: bool) -> b
 def server_stream_priority(stream_id: int, urgency: int, incremental: bool) -> bool
 
 # ストリーム状態 / フロー制御
+def shutdown_stream_read(stream_id: int) -> None  # 読み取り側シャットダウン (イベントは push しない。QPACK の Stream Cancellation を送出し得る)
 def stream_writable(stream_id: int) -> int | None  # 1 書き込み可 / 0 書き込み不可
 def stream_flushed(stream_id: int) -> int | None  # 1 受け渡し済み / 0 未了
 def frame_payload_left(stream_id: int) -> int | None  # 受信中フレームのペイロード残量

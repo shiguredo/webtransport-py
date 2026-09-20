@@ -216,6 +216,9 @@ class Server:
     ) -> None:
         """ストリームリセット受信時のコールバックを設定する
 
+        ピアのリセットは nghttp3 へ転送され、そのストリームの読み取りが中断
+        される (受信途中のヘッダーブロックと未送信の応答データは破棄される)。
+
         Args:
             callback: async def callback(stream_id: int, error_code: int, addr: tuple[str, int]) -> None
         """
@@ -463,6 +466,11 @@ class Server:
                 if quic_event.fin and quic_event.stream_id % 4 in (0, 1):
                     client.finished_streams.append(quic_event.stream_id)
             elif quic_event.type == quic_low.EventType.STREAM_RESET:
+                # ピアのリセットを nghttp3 へ転送する。転送しないと受信途中の
+                # ヘッダーブロックが接続終了まで残る。reset_stream は
+                # ResetStream を push するため使わない (アプリ起点のリセットと
+                # して扱われ、こちらから RESET_STREAM を送出してしまう)
+                client.http3_connection.shutdown_stream_read(quic_event.stream_id)
                 if self._on_stream_reset is not None:
                     await self._on_stream_reset(
                         quic_event.stream_id,
