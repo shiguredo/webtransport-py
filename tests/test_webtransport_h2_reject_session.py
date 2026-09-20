@@ -31,6 +31,8 @@ from conftest import (
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
+    _encode_headers_frame,
+    _encode_status_header_block,
     _h2_pump,
 )
 
@@ -38,26 +40,12 @@ from webtransport import h2, http2
 
 
 def _encode_status_headers(session_id: int, status_code: int) -> bytes:
-    """:status を指定した HEADERS フレームのワイヤバイト列を組み立てる
+    """`:status` を指定した HEADERS フレームのワイヤバイト列を組み立てる
 
-    HPACK 圧縮済みヘッダーブロックは、静的テーブルの :status (index 8) を
-    参照するリテラルヘッダーフィールド (RFC 7541 Section 6.2.2 の
-    Literal Header Field without Indexing) で組み立てる。0x08 は 4 ビット
-    プレフィックスで index 8 を表し、インクリメンタルインデックスを伴わ
-    ないためデコーダーの動的テーブルを汚さない。フレームは END_HEADERS
-    フラグ付きの HEADERS フレーム (中間応答や END_STREAM なしの最終応答の
-    注入に使う)。
+    HPACK のヘッダーブロック組み立てとフレーム組み立ては conftest の
+    ヘルパーに集約する。
     """
-    status = str(status_code).encode()
-    header_block = bytes([0x08, len(status)]) + status
-    length = len(header_block)
-    frame = (
-        length.to_bytes(3, "big")
-        + bytes([0x01, 0x04])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + header_block
-    )
-    return frame
+    return _encode_headers_frame(session_id, _encode_status_header_block(status_code))
 
 
 def _encode_rst_stream_frame(stream_id: int, error_code: int) -> bytes:
@@ -229,9 +217,9 @@ def test_client_receive_1xx_then_final_response_keeps_session() -> None:
     1xx 受信後は stream state が OPENED に遷移するため、続く最終応答は
     NGHTTP2_HCAT_HEADERS で通知され、レスポンス処理分岐 (HCAT_RESPONSE) で
     捕捉されない。1xx を挟んだ拒否は本対応の削除が機能せず、wt_sessions_
-    のエントリと pending_headers_ が残って DATAGRAM capsule が送出され続け
-    る (既知の制約の回帰ピン)。本テストは修正前実装でも通る設計ピンであり、
-    既知の制約の維持を守る。
+    のエントリが残って DATAGRAM capsule が送出され続ける (既知の制約の
+    回帰ピン。pending_headers_ は 1xx 後の最終応答の完了時に解放される)。
+    本テストは修正前実装でも通る設計ピンであり、既知の制約の維持を守る。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")

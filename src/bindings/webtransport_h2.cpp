@@ -1303,6 +1303,15 @@ void H2Session::consume_recv_bytes(int32_t stream_id, size_t size) {
   }
 }
 
+std::optional<size_t> H2Session::test_pending_header_count(
+    int32_t stream_id) const {
+  auto it = pending_headers_.find(stream_id);
+  if (it == pending_headers_.end()) {
+    return std::nullopt;
+  }
+  return it->second.size();
+}
+
 WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
   auto it = wt_sessions_.find(session_id);
   if (it == wt_sessions_.end()) {
@@ -3026,9 +3035,10 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             // (RST_STREAM 等の後始末は行わない既知の制約)。1xx 中間応答
             // (100-199) は削除対象外: 1xx は中間応答であり拒否ではない
             // (nghttp2 は 1xx で abort せず最終応答を待つ)。1xx を挟んだ
-            // 応答の最終応答は NGHTTP2_HCAT_HEADERS で通知され、本分岐で
-            // 捕捉されないため wt_sessions_ のエントリと pending_headers_
-            // が残る (既知の制約。1xx 後の最終応答の捕捉不能)。なお、
+            // 応答の最終応答は NGHTTP2_HCAT_HEADERS で通知され、本分岐では
+            // 捕捉されないため wt_sessions_ のエントリは残る (既知の制約。
+            // 1xx 後の最終応答の捕捉不能。pending_headers_ は
+            // NGHTTP2_HCAT_HEADERS の分岐で解放する)。なお、
             // 拒否応答の受信前にキュー済みだったカプセル
             // (http2_stream_buffers_) は後始末せず、以後の send() で送出
             // され得る (既存の挙動を維持する。エントリ削除で塞がるのは
@@ -3054,6 +3064,14 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
           }
           h2_session->pending_headers_.erase(it);
         }
+      } else if (frame->headers.cat == NGHTTP2_HCAT_HEADERS) {
+        // 完了したヘッダーブロックのうち NGHTTP2_HCAT_HEADERS として通知
+        // されるもの (trailer。END_STREAM の有無を問わず受理される。および
+        // 1xx 中間応答の後に届く最終応答) のエントリを解放する。後者はストリームが OPENED に
+        // なった後の応答であり nghttp2 は応答として検証するが、分類は
+        // NGHTTP2_HCAT_HEADERS になる。上の 2 分岐では捕捉されない。
+        // wt_sessions_ の扱いは変えない (1xx 後の最終応答の捕捉は別の対応)
+        h2_session->pending_headers_.erase(stream_id);
       }
       break;
 
@@ -3173,6 +3191,12 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
   h2_session->http2_stream_buffers_.erase(stream_id);
   // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
   h2_session->end_stream_pending_.erase(stream_id);
+  // 完了通知が届かなかったヘッダーブロックのエントリをストリームの終了でも
+  // 解放する (完了したブロックは NGHTTP2_HCAT_HEADERS の分岐で解放済み)。
+  // ヘッダー単位の拒否や messaging 検証の失敗では on_frame_recv_callback が
+  // 発火しないまま nghttp2 がストリームを閉じるため、この経路が唯一の解放に
+  // なる (受信途中のまま放置する RST_STREAM の注入では発火しない)
+  h2_session->pending_headers_.erase(stream_id);
   return 0;
 }
 
@@ -3439,6 +3463,11 @@ void bind_webtransport_h2(nb::module_& m) {
       .def("is_webtransport_ready", &H2Session::is_webtransport_ready,
            nb::lock_self(), nb::sig("def is_webtransport_ready(self) -> bool"),
            "対向 SETTINGS で WebTransport over HTTP/2 が有効か")
+      .def("_test_pending_header_count", &H2Session::test_pending_header_count,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def _test_pending_header_count(self, stream_id: int) -> "
+                   "int | None"),
+           "テスト専用: 受信途中のヘッダーブロックのヘッダー数")
       .def("_test_unfinished_capsule_bytes",
            &H2Session::test_unfinished_capsule_bytes, nb::lock_self(),
            nb::arg("session_id"),

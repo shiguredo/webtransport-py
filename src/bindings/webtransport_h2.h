@@ -600,6 +600,16 @@ class H2Session {
       int32_t session_id) const;
 
   /**
+   * テスト専用: 受信途中のヘッダーブロックのヘッダー数を返す
+   * (production からは呼ばない。trailer・1xx 後の最終応答・ストリーム終了での
+   * 解放の回帰ピン)
+   *
+   * @param stream_id HTTP/2 ストリーム ID
+   * @return 保持中のヘッダーブロックのヘッダー数 (エントリが無ければ nullopt)
+   */
+  std::optional<size_t> test_pending_header_count(int32_t stream_id) const;
+
+  /**
    * セッションレベルの送信可能残量を返す (観測専用)
    *
    * `max_data_local` と `bytes_sent` の差 (負値は 0) を返す。フロー制御の
