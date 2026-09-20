@@ -518,6 +518,32 @@ void Http3Connection::reset_stream(int64_t stream_id, uint64_t error_code) {
   push_event(std::move(event));
 }
 
+void Http3Connection::shutdown_stream_read(int64_t stream_id) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // nghttp3_conn_shutdown_stream_read は範囲を assert で検証するため、
+  // ローカルで弾く
+  constexpr int64_t max_varint = (1LL << 62) - 1;
+  if (stream_id < 0 || stream_id > max_varint) {
+    return;
+  }
+
+  // nghttp3 に読み取り中断を伝える (SHUT_RD)。この関数は stream_close
+  // コールバックを呼ばないため、受信途中のヘッダーブロックはここで解放する。
+  // ピアがリクエストを放棄したため、アプリが積んだ未送信の送信データも破棄
+  // する (送信方向は開いたままなので、以後の send_data は改めて送出される)。
+  // 戻り値 (NOMEM / QPACK_FATAL) は握り潰す (読み取り中断は補助的な後始末で、
+  // reset_stream も同じ扱いである)
+  (void)nghttp3_conn_shutdown_stream_read(conn_, stream_id);
+  stream_buffers_.erase(stream_id);
+  pending_headers_.erase(stream_id);
+  // イベントは push しない: ResetStream を push すると高レベル層がピアの
+  // リセットをアプリ起点のリセット要求として扱い、こちらから RESET_STREAM を
+  // 送出してしまう
+}
+
 void Http3Connection::test_force_close() {
   // テスト専用。nghttp3 の read_stream2 / writev_stream が負値を返した経路と
   // 同じ状態 (closed_ のみを立て、イベントは push しない)
@@ -1423,6 +1449,10 @@ void bind_http3(nb::module_& m) {
            nb::lock_self(), nb::arg("stream_id"),
            nb::sig("def shutdown_stream_write(self, stream_id: int) -> None"),
            "ストリームの書き込み側をシャットダウン")
+      .def("shutdown_stream_read", &Http3Connection::shutdown_stream_read,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def shutdown_stream_read(self, stream_id: int) -> None"),
+           "ストリームの読み取り側をシャットダウン (イベントは push しない)")
       .def("next_event", &Http3Connection::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")

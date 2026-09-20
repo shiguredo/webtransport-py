@@ -319,6 +319,29 @@ class Http3Connection {
   void shutdown_stream_write(int64_t stream_id);
 
   /**
+   * ストリームの読み取り側をシャットダウン
+   *
+   * nghttp3 に読み取り中断を伝え (nghttp3 の契約では read 側が abruptly
+   * closed になり、以後の受信データと保持中のデータは破棄される。RFC 9000
+   * Section 19.4 の RESET_STREAM はピアの送信側だけを終端し、受信データの
+   * 破棄を許容する。RFC 9114 Section 4.1.1 の「aborts reading on the
+   * receiving parts of streams」に相当する挙動)、受信途中のヘッダーブロックと
+   * 未送信の送信データを解放する。QPACK の Stream Cancellation (RFC 9204
+   * Section 4.4.2) がピアへ送出され得る。
+   *
+   * 実際に nghttp3 が中断するのは client 起点双方向ストリーム (HTTP/3 の
+   * リクエストストリーム) のみで、それ以外では読み取り中断は行われず本クラスの
+   * エントリだけが解放される。送信方向は止めないため、解放後に積んだデータは
+   * 送出される (書き込み側の状態 shutdown_stream_ids_ は変えない)。
+   * ピア起点の RESET_STREAM を高レベル層から転送する用途を想定しており、
+   * イベントは push しない (reset_stream は ResetStream を push するため、
+   * 高レベル層がピアのリセットをアプリ起点のリセット要求として扱い、こちら
+   * から RESET_STREAM を送出してしまう)
+   * @param stream_id ストリーム ID
+   */
+  void shutdown_stream_read(int64_t stream_id);
+
+  /**
    * 次のイベントを取得
    * @return イベント (なければ nullopt)
    */

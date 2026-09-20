@@ -155,6 +155,9 @@ class Connection:
     def shutdown_stream_write(self, stream_id: int) -> None:
         """ストリームの書き込み側をシャットダウン"""
 
+    def shutdown_stream_read(self, stream_id: int) -> None:
+        """ストリームの読み取り側をシャットダウン (イベントは push しない)"""
+
     def next_event(self) -> Event | None:
         """次のイベントを取得"""
 
