@@ -275,6 +275,33 @@ def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool =
     )
 
 
+def _encode_headers_frame(stream_id: int, header_block: bytes, end_stream: bool = False) -> bytes:
+    """HTTP/2 HEADERS フレームのワイヤバイト列を組み立てる
+
+    END_HEADERS フラグ (0x04) を常に付け、end_stream 指定時は END_STREAM
+    フラグ (0x01) も付ける (RFC 9113 Section 6.2)。受信途中の状態を作る場合は
+    戻り値のバイト列を分割して receive() に渡す。
+    """
+    flags = 0x04 | (0x01 if end_stream else 0x00)
+    return (
+        len(header_block).to_bytes(3, "big")
+        + bytes([0x01, flags])
+        + (stream_id & 0x7FFFFFFF).to_bytes(4, "big")
+        + header_block
+    )
+
+
+def _encode_status_header_block(status_code: int) -> bytes:
+    """`:status` だけを持つ HPACK ヘッダーブロックを組み立てる
+
+    静的テーブルの :status (index 8) を参照するリテラルヘッダーフィールド
+    (RFC 7541 Section 6.2.2 の without Indexing) で組み立てる。0x08 は 4 ビット
+    プレフィックスで index 8 を表し、動的テーブルを汚さない。
+    """
+    status = str(status_code).encode()
+    return bytes([0x08, len(status)]) + status
+
+
 def _encode_goaway_frame(last_stream_id: int, error_code: int = 0) -> bytes:
     """HTTP/2 GOAWAY フレームのワイヤバイト列を組み立てる
 

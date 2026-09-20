@@ -600,6 +600,16 @@ class H2Session {
       int32_t session_id) const;
 
   /**
+   * テスト専用: 受信途中のヘッダーブロックのヘッダー数を返す
+   * (production からは呼ばない。trailer・1xx 後の最終応答・ストリーム終了での
+   * 解放の回帰ピン)
+   *
+   * @param stream_id HTTP/2 ストリーム ID
+   * @return 保持中のヘッダーブロックのヘッダー数 (エントリが無ければ nullopt)
+   */
+  std::optional<size_t> test_pending_header_count(int32_t stream_id) const;
+
+  /**
    * テスト専用: 未消費の受信バイト記録の残量を返す
    * (production からは呼ばない。ストリーム終了時の解放の回帰ピン)
    *

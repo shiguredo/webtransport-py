@@ -180,6 +180,9 @@ class Session:
     def is_webtransport_ready(self) -> bool:
         """対向 SETTINGS で WebTransport over HTTP/2 が有効か"""
 
+    def _test_pending_header_count(self, stream_id: int) -> int | None:
+        """テスト専用: 受信途中のヘッダーブロックのヘッダー数"""
+
     def _test_unfinished_capsule_bytes(self, session_id: int) -> int | None:
         """テスト専用: 未完成カプセルとして保持中のバイト数"""
 
