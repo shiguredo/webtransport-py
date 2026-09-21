@@ -1,7 +1,7 @@
 # h2 で識別フィールドの後に余分なバイトがあるカプセルが検証されない
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-21
 - Branch: feature/fix-h2-capsule-trailing-bytes
 - Polished: 2026-09-20
 
@@ -63,3 +63,17 @@ RFC 9297 Section 3.3 は「各カプセルのペイロードはその定義が�
 - ペイロードが識別フィールドの終端に達しない場合の検証 (0237 で対応済み)
 - クリーンな END_STREAM の直前に切り詰められたカプセルの検証 (0244 で扱う)
 - 未知の Capsule Type の読み捨て (RFC 9297 Section 3.2 のとおり現状維持)
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` に `H2Session::verify_capsule_payload_fully_read` を追加した。固定フィールドのみからなるカプセルで、読み出したフィールドの消費バイト数が `length` に達していない場合 (余分なバイトが残っている場合) は malformed として `H2Session::reset_stream_for_malformed_capsule` (NGHTTP2_PROTOCOL_ERROR の RST_STREAM) を呼ぶ。扱いは 0237 の不完全なペイロードと同じ経路にそろえた
+- 次の 8 箇所に検証を入れた
+  - `H2Session::handle_wt_reset_stream` / `handle_wt_stop_sending` / `handle_wt_max_data` / `handle_wt_max_stream_data` / `handle_wt_max_streams` / `handle_wt_stream_data_blocked` / `handle_wt_streams_blocked`
+  - `H2Session::handle_wt_drain_session` (`payload` と `length` を受け取る形にし、`length != 0` を malformed とする)
+- `H2Session::handle_wt_max_data` / `handle_wt_max_streams` / `handle_wt_streams_blocked` は `read_capsule_varint` の消費バイト数を破棄していたため、読み出し位置を保持する形に直した (7 ハンドラで同じ形にそろえた)
+- 検証の順序は「全フィールドを読み終えた直後にペイロードの形 → フィールドの意味論 (方向・ストリーム状態・値域)」とした。`H2Session::handle_wt_reset_stream` の Error Code の範囲検証だけは既存の位置 (Reliable Size より前) を維持したため、余分なバイトと範囲外の Error Code を同時に持つ入力では `WT_ERROR` セッションエラーが優先される。`H2Session::handle_wt_stop_sending` は逆に形の検証が先に走る
+- テストを追加した
+  - `tests/test_webtransport_h2_capsule_trailing_bytes.py` (26 件): 8 箇所の違反 (余分なバイト 1 バイトと複数バイト、WT_MAX_STREAMS / WT_STREAMS_BLOCKED の両方向・単方向) で PROTOCOL_ERROR の RST_STREAM・WT_CLOSE_SESSION 不在・該当イベント不在・両側の SessionClosed を表明し、余分なバイトを持たない対照 (PADDING と DATAGRAM に過剰適用していないことを含む)・優先関係 2 件・受理前バッファ経由の排出 1 件を検証する
+  - `tests/conftest.py` に `_encode_rst_stream_frame` / `_assert_session_closed_by_protocol_error` / `_PROTOCOL_ERROR` / `_WT_CLOSE_SESSION_TYPE_BYTES` を集約し、`tests/test_webtransport_h2_incomplete_capsule_payload.py` のローカル実装を削除した (残る 2 ファイルの `_encode_rst_stream_frame` の集約は 0248 が追跡する)
+- RED は 2 通りで実測した: 検証を無効化すると違反側の 11 件が失敗し、`H2Session::handle_wt_reset_stream` の範囲検証と形の検証の順序を入れ替えると優先関係テストが失敗する
+- 全テストが通過する (1289 passed / 1 skipped)
