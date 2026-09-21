@@ -51,6 +51,7 @@
 - `stop_sending` は `http2` 層には追加しない。低レベル `webtransport_ext.http2.Connection` に `stop_sending` が無く (`reset_stream` のみ)、`h2` 層の `stop_sending` は WT_STOP_SENDING カプセルを送出する API であるため、HTTP/2 フレーム層である `http2` 層には同等の操作が存在しない。`http2` 層で送信停止が必要な場合は `reset_stream` を使う
 - 再エクスポートは import と `__all__` への追加だけで行う。`webtransport.http3.constants` のサブモジュール経路も残し、到達経路を二重にする意図を `src/webtransport/http3/__init__.py` に書く
 - 0251 (h3 のピア STOP_SENDING の扱い) は h3 の `on_stream_end` を既存 API として前提し、同じ `src/webtransport/h3/{client,server}.py` のイベント分岐を触る。実装順によっては rebase が必要になる (0251 を先に実装した場合、本 issue の `on_stream_end` 追加時に同じ drain の形を突き合わせる)。
+- 変更対象: `src/webtransport/h3/client.py` / `h3/server.py` (`on_stream_end`)、`src/webtransport/h2/client.py` / `h2/server.py` (`on_stream_end`)、`src/webtransport/quic/server.py` (`shutdown_stream` / `close` と回収経路のキャンセル遅延)、`src/webtransport/http2/client.py` / `http2/server.py` (`reset_stream`)、`src/webtransport/h2/__init__.py` / `src/webtransport/http3/__init__.py` (再エクスポート)、`skills/webtransport-py/SKILL.md`、追加 API のテスト (`h3` / `h2` の `on_stream_end`、`quic.Server.shutdown_stream` / `close`、`http2` の `reset_stream`、再エクスポート)
 - 追加 API は `skills/webtransport-py/SKILL.md` にも書く。`tests/test_skill_api_consistency.py` は SKILL に載せた名前が実装に存在することを検査するだけで、逆方向 (実装にあって SKILL に無い API) は検出しないため、追記漏れは人手で確認する。`tests/test_type_stub_layout.py` はスタブの配置 (実装を隠す `.pyi` の不在とスタブパッケージ名の一致) だけを検査するため、再エクスポートの追加は同テストの対象外である
 
 ## 完了条件

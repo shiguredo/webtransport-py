@@ -26,7 +26,7 @@
   - ピアの STOP_SENDING は「自側の書き込み側の終了要求」であるため、読み取り側を閉じる `shutdown_stream_read` ではなく `shutdown_stream_write` を使う。読み取り側が既に終端している (`STREAM_RESET` を転送済み) 場合も、書き込み側の終了は独立して扱う (読み取り側の終端は `pending_headers_` / `stream_buffers_` の解放で表現され、書き込み側の記録 `shutdown_stream_ids_` とは別である)
   - `Http3Connection::shutdown_stream_write` の入力契約は変えない (接続が無い・閉じている場合は no-op)
   - RESET_STREAM の送出自体は ngtcp2 が行うため、高レベル層から改めて送出しない (0240 で `reset_stream` の再利用を避けたのと同じ理由)
-  - アプリ向けのコールバックは追加しない。0220 は層間 API の非対称のうち「ストリーム終了の観測・ストリームの中断・再エクスポート」の 3 点を対象としており、`on_stop_sending` はその対象に含まれない (0220 の目的)。アプリから送信不能を観測する手段は 0250 (http3 の `on_stop_sending`) と 0251 (h3 のピア STOP_SENDING の扱い) が追跡する
+  - アプリ向けのコールバックは追加しない。0220 は層間 API の非対称のうち「ストリーム終了の観測・ストリームの中断・接続の終了・再エクスポート」の 4 点を対象としており、`on_stop_sending` はその対象に含まれない (0220 の目的)。アプリから送信不能を観測する手段は 0250 (http3 の `on_stop_sending`) と 0251 (h3 のピア STOP_SENDING の扱い) が追跡する
 - **不採用**: `src/bindings/quic.cpp` の `NGTCP2_ERR_STREAM_SHUT_WR` 経路で QUIC 層から HTTP/3 層へ通知する案。層をまたぐ新しい通知経路が必要になり、ピアの STOP_SENDING 以外 (アプリ起点の終了) と区別できない。原因が既知である以上、原因側で扱う
 - `on_stream_reset` の扱い (0240 の `shutdown_stream_read` の転送) は変えない。stop_sending と reset_stream は独立した方向を扱う
 - テストで「シャットダウンされたか」を判別するため、低レベル `Http3Connection` にテスト専用 API `_is_stream_write_shutdown` (`shutdown_stream_ids_` の参照) を追加する。既存の `_has_stream_buffer` は送信バッファが事前にある場合にシャットダウンを判別できないため (CODEBASE.md の「E2E テスト向けライブラリとして細粒度の機能を用意する」方針に沿う)
