@@ -26,19 +26,20 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    _PROTOCOL_ERROR,
+    _WT_CLOSE_SESSION_TYPE_BYTES,
+    _assert_session_closed_by_protocol_error,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
+    _encode_rst_stream_frame,
     _encode_varint,
     _h2_pump,
 )
 
 from webtransport import h2
-
-# エラーコード (RFC 9113 Section 7 の HTTP/2 エラーコード)
-_PROTOCOL_ERROR = 0x01
 
 # カプセル種別 (draft-ietf-webtrans-http2-15 Section 6)
 _WT_RESET_STREAM = 0x190B4D39
@@ -59,65 +60,6 @@ _WT_CLOSE_SESSION = 0x2843
 _INCOMPLETE_VARINT_2BYTE = b"\x40"
 _INCOMPLETE_VARINT_4BYTE = b"\x80"
 _INCOMPLETE_VARINT_8BYTE = b"\xc0"
-
-# WT_CLOSE_SESSION の Type varint (2 バイト)。この 2 バイトがワイヤに現れれば
-# WT_CLOSE_SESSION が送出されたことになる
-_WT_CLOSE_SESSION_TYPE_BYTES = b"\x68\x43"
-
-
-def _encode_rst_stream_frame(stream_id: int, error_code: int) -> bytes:
-    """RST_STREAM フレームのワイヤバイト列を組み立てる
-
-    Type 0x03、ペイロードは 4 バイトのエラーコードである (RFC 9113
-    Section 6.4)。nghttp2 はフラグを付けずに送出する。
-    """
-    payload = error_code.to_bytes(4, "big")
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x03, 0x00])
-        + (stream_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
-
-
-def _assert_session_closed_by_protocol_error(
-    server: h2.Session,
-    client: h2.Session,
-    session_id: int,
-) -> None:
-    """RST_STREAM (PROTOCOL_ERROR) でセッションが終了することを確認する
-
-    カプセルのペイロードが不完全な場合は RFC 9297 Section 3.3 と RFC 9113
-    Section 8.1.1 により PROTOCOL_ERROR のストリームエラーになる。アプリ
-    ケーションシグナル (WT_CLOSE_SESSION) は送出しない (draft-15 Section 3.4)。
-    """
-    # 前提: ピア側はまだリセットを受け取っていない (表明が空虚にならない
-    # ようにする)
-    assert client.get_session_ids() == [session_id], "ピア側のセッションが確立していません"
-
-    wire = server.send()
-    assert wire is not None, "RST_STREAM が送出されませんでした"
-    assert _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) in wire, (
-        "PROTOCOL_ERROR の RST_STREAM が送出されていません"
-    )
-    assert _WT_CLOSE_SESSION_TYPE_BYTES not in wire, "WT_CLOSE_SESSION が送出されました"
-
-    events = _drain_events(server)
-    assert all(event.type != h2.EventType.ERROR for event in events), "Error イベントが発火しました"
-    assert server.get_session_ids() == [], "セッションが終了していません"
-    closed_events = [event for event in events if event.type == h2.EventType.SESSION_CLOSED]
-    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
-    assert closed_events[0].session_id == session_id
-    assert closed_events[0].error_code == _PROTOCOL_ERROR
-
-    # ピアにもストリームのリセットが届き、同じエラーコードでセッションが終了する
-    client.receive(wire)
-    assert client.get_session_ids() == [], "ピア側のセッションが終了していません"
-    client_closed = [
-        event for event in _drain_events(client) if event.type == h2.EventType.SESSION_CLOSED
-    ]
-    assert len(client_closed) == 1, "ピア側で SessionClosed が 1 件だけ発火していません"
-    assert client_closed[0].error_code == _PROTOCOL_ERROR
 
 
 @pytest.mark.parametrize(

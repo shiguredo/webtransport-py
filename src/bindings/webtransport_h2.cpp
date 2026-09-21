@@ -312,6 +312,20 @@ void H2Session::reset_stream_for_malformed_capsule(int32_t session_id) {
   push_event(std::move(event));
 }
 
+bool H2Session::verify_capsule_payload_fully_read(int32_t session_id,
+                                                  size_t offset,
+                                                  size_t length) {
+  if (offset == length) {
+    return true;
+  }
+  // RFC 9297 Section 3.3: カプセルのペイロードは定義が挙げるフィールドを
+  // 正確に含まなければならず、識別フィールドの後に余分なバイトを含む場合は
+  // malformed な HTTP メッセージとして扱う。扱いは不完全なペイロード
+  // (read_capsule_varint のデコード失敗) と同じにする
+  reset_stream_for_malformed_capsule(session_id);
+  return false;
+}
+
 // ========== Capsule エンコード/デコード ==========
 
 std::vector<uint8_t> H2Session::encode_capsule(
@@ -467,7 +481,7 @@ void H2Session::process_capsule(int32_t session_id,
       handle_wt_close_session(session_id, payload, length);
       break;
     case CapsuleType::WtDrainSession:
-      handle_wt_drain_session(session_id);
+      handle_wt_drain_session(session_id, payload, length);
       break;
     case CapsuleType::WtStreamsBlockedBidi:
     case CapsuleType::WtStreamsBlockedUni:
@@ -656,6 +670,14 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     return;
   }
   auto [reliable_size, reliable_size_len] = *reliable_size_result;
+  offset += reliable_size_len;
+
+  // ペイロードが Reliable Size の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。Error Code の範囲検証は既存の順序 (Reliable Size
+  // より前) を維持するため、ここより先に走る
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
@@ -804,6 +826,13 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
     return;
   }
   auto [error_code, error_code_len] = *error_code_result;
+  offset += error_code_len;
+
+  // ペイロードが Application Error Code の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (値域) より先に検証する
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
 
   // draft-15 Section 6.3: Application Protocol Error Code は 0xffffffff
   // 以下。超過は WT_ERROR セッションエラー。二重受信検出より先に検証する
@@ -869,11 +898,21 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
 void H2Session::handle_wt_max_data(int32_t session_id,
                                    const uint8_t* payload,
                                    size_t length) {
-  auto max_data_result = read_capsule_varint(session_id, payload, length);
+  size_t offset = 0;
+
+  auto max_data_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!max_data_result) {
     return;
   }
   auto [max_data, max_data_len] = *max_data_result;
+  offset += max_data_len;
+
+  // ペイロードが Maximum Data の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (減少値) より先に検証する
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
@@ -917,6 +956,14 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
     return;
   }
   auto [max_data, max_data_len] = *max_data_result;
+  offset += max_data_len;
+
+  // ペイロードが Maximum Stream Data の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (方向・減少値) より先に
+  // 検証する
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
@@ -996,11 +1043,21 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
                                       bool is_bidi,
                                       const uint8_t* payload,
                                       size_t length) {
-  auto max_streams_result = read_capsule_varint(session_id, payload, length);
+  size_t offset = 0;
+
+  auto max_streams_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!max_streams_result) {
     return;
   }
   auto [max_streams, max_streams_len] = *max_streams_result;
+  offset += max_streams_len;
+
+  // ペイロードが Maximum Streams の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (2^60 上限) より先に検証する
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
 
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session) {
@@ -1053,7 +1110,19 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
   // (draft-15 Section 6.9 の "the offset of the stream at which the blocking
   // occurred" であり、自側のフロー制御上限ではない)。完全デコードは他の
   // ハンドラと同じく行う
-  if (!read_capsule_varint(session_id, payload + offset, length - offset)) {
+  auto max_stream_data_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
+  if (!max_stream_data_result) {
+    return;
+  }
+  auto [max_stream_data, max_stream_data_len] = *max_stream_data_result;
+  (void)max_stream_data;
+  offset += max_stream_data_len;
+
+  // ペイロードが Maximum Stream Data の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (方向・ストリーム状態) より
+  // 先に検証する
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
     return;
   }
 
@@ -1112,11 +1181,21 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
 void H2Session::handle_wt_streams_blocked(int32_t session_id,
                                           const uint8_t* payload,
                                           size_t length) {
-  auto max_streams_result = read_capsule_varint(session_id, payload, length);
+  size_t offset = 0;
+
+  auto max_streams_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
   if (!max_streams_result) {
     return;
   }
   auto [max_streams, max_streams_len] = *max_streams_result;
+  offset += max_streams_len;
+
+  // ペイロードが Maximum Streams の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (2^60 上限) より先に検証する
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
 
   if (!get_wt_session(session_id)) {
     return;
@@ -1210,7 +1289,17 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   nghttp2_session_resume_data(session_, session_id);
 }
 
-void H2Session::handle_wt_drain_session(int32_t session_id) {
+void H2Session::handle_wt_drain_session(int32_t session_id,
+                                        const uint8_t* payload,
+                                        size_t length) {
+  (void)payload;
+
+  // draft-15 Section 6.13: WT_DRAIN_SESSION の Length は 0 であり、ペイロードを
+  // 持つカプセルは RFC 9297 Section 3.3 の余分なバイトとして扱う
+  if (!verify_capsule_payload_fully_read(session_id, 0, length)) {
+    return;
+  }
+
   H2Event event;
   event.type = H2EventType::SessionDraining;
   event.session_id = session_id;

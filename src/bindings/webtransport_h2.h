@@ -681,6 +681,20 @@ class H2Session {
   // (RST_STREAM の submit に失敗した場合は Error イベントを push する)
   void reset_stream_for_malformed_capsule(int32_t session_id);
 
+  // 固定フィールドのみからなるカプセルのペイロードに、定義が挙げるフィールド
+  // の後ろの余分なバイトが残っていないことを検証する (RFC 9297 Section 3.3。
+  // フィールドの不足は read_capsule_varint のデコード失敗が担う)。全フィールド
+  // を読み終えた直後に offset (読み出したフィールドの消費バイト数合計) と
+  // length を渡して呼び、余分なバイトが残っている場合は malformed として
+  // reset_stream_for_malformed_capsule を呼んで false を返す。呼び出し側は
+  // false で return するだけでよい。残りのバイトが正当なペイロードである
+  // カプセル (WT_STREAM / DATAGRAM / WT_CLOSE_SESSION / PADDING) と、本実装が
+  // フィールドを読み出していない WT_DATA_BLOCKED (draft-15 Section 6.8 の
+  // Maximum Data を検証していない) には掛けない
+  bool verify_capsule_payload_fully_read(int32_t session_id,
+                                         size_t offset,
+                                         size_t length);
+
   std::vector<uint8_t> encode_capsule(CapsuleType type,
                                       const std::vector<uint8_t>& payload);
   void process_capsules(int32_t session_id,
@@ -732,7 +746,9 @@ class H2Session {
   void handle_wt_close_session(int32_t session_id,
                                const uint8_t* payload,
                                size_t length);
-  void handle_wt_drain_session(int32_t session_id);
+  void handle_wt_drain_session(int32_t session_id,
+                               const uint8_t* payload,
+                               size_t length);
   void handle_end_stream(int32_t session_id);
 
   // HTTP/2 DATA フレームとして Capsule を送信
