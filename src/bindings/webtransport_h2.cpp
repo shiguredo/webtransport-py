@@ -1268,20 +1268,31 @@ void H2Session::handle_datagram(int32_t session_id,
 void H2Session::handle_wt_close_session(int32_t session_id,
                                         const uint8_t* payload,
                                         size_t length) {
-  uint32_t error_code = 0;
-  const uint8_t* message_bytes = nullptr;
-  size_t message_len = 0;
-
-  if (length >= 4) {
-    error_code = (static_cast<uint32_t>(payload[0]) << 24) |
-                 (static_cast<uint32_t>(payload[1]) << 16) |
-                 (static_cast<uint32_t>(payload[2]) << 8) |
-                 static_cast<uint32_t>(payload[3]);
-    if (length > 4) {
-      message_bytes = payload + 4;
-      message_len = length - 4;
-    }
+  // draft-15 Section 6.12: Application Error Code は 32 ビット固定であり、
+  // 4 バイト未満のペイロードは RFC 9297 Section 3.3 の「定義が挙げる
+  // フィールドの終端より前に終わるペイロード」に該当する。不完全な可変長
+  // 整数のデコード失敗とは異なり固定長フィールドのため read_capsule_varint を
+  // 通らず、ここで検証して malformed として扱う (RFC 9113 Section 8.1.1 の
+  // PROTOCOL_ERROR ストリームエラー)。Application Error Message の検証より
+  // 前に置く (フィールドが欠けているペイロードのメッセージを検証しても
+  // 意味が無い)
+  if (length < 4) {
+    reset_stream_for_malformed_capsule(session_id);
+    return;
   }
+
+  const uint32_t error_code = (static_cast<uint32_t>(payload[0]) << 24) |
+                              (static_cast<uint32_t>(payload[1]) << 16) |
+                              (static_cast<uint32_t>(payload[2]) << 8) |
+                              static_cast<uint32_t>(payload[3]);
+  // Application Error Message は 4 バイト以降の残り全部であり、空も合法
+  // (draft-15 Section 3.4 が "an error code and an optional explanatory
+  // message" と定め、Section 6.12 の "The message takes up the remainder of the
+  // capsule" に下限が無い)。length == 4 では payload + 4 は
+  // 終端を指すだけで参照しない (message_len が 0 のため下の検証と組み立ては
+  // 素通りする)
+  const uint8_t* message_bytes = payload + 4;
+  const size_t message_len = length - 4;
 
   // draft-15 Section 6.12: Application Error Message は 1024 バイト以下の
   // 正しい UTF-8 である。超過または不正な UTF-8 は WT_ERROR セッションエラー。
@@ -1356,12 +1367,13 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // を閉じた場合のセッション終了処理 (draft-15 Section 3.4 の正規の終了経路)。
   // 対象は確立済み (is_established) のセッションに限定する: 非 2xx 拒否、
   // サーバー側の受理前 FIN は確立されておらず、誤検知しない
-  // (非 2xx 拒否は応答受信時にエントリ削除済み)。WT_CLOSE_SESSION 受信済み
-  // のセッションは handle_wt_close_session がエントリを削除済みのため、
-  // get_wt_session が失敗してここで返る。ローカル close_session 済みの
-  // セッションは is_terminated のためスキップする: コンプライアントなピアは
-  // WT_CLOSE_SESSION 送出後に必ず END_STREAM を送る (Section 6.12 の MUST)
-  // ため、カプセル処理による SessionClosed の後に検知が来て二重発火する。
+  // (非 2xx 拒否は応答受信時にエントリ削除済み)。正常な WT_CLOSE_SESSION を
+  // 受信済みのセッションは handle_wt_close_session がエントリを削除済みのため
+  // get_wt_session が失敗し、Application Error Code が欠けた WT_CLOSE_SESSION
+  // では is_terminated が立つため、いずれもここで返る。ローカル close_session
+  // 済みのセッションは is_terminated のためスキップする: コンプライアントな
+  // ピアは WT_CLOSE_SESSION 送出後に必ず END_STREAM を送る (Section 6.12 の
+  // MUST) ため、カプセル処理による SessionClosed の後に検知が来て二重発火する。
   // handle_wt_close_session と並置する (共通ヘルパー化はしない): 並置時に
   // エントリ削除・バッファ破棄を欠落させると「エントリ不在で塞がる」前提が
   // 崩れる
@@ -2552,11 +2564,12 @@ void H2Session::send_stream_data(int32_t session_id,
                                  bool fin) {
   // 終了したセッション ID への送信を黙って無視する (send_datagram と同じ
   // ガード構成。チェックを send_capsule に置かない理由は send_datagram の
-  // コメントを参照)。終了の検知はエントリと終了フラグで行う:
+  // コメントを参照)。終了の検知はエントリと終了フラグで行う: 正常な
   // WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアントの
-  // 非 2xx 拒否受信後はエントリが削除されて塞がり、ローカル close_session
-  // 後は is_terminated で塞がる (サーバー側の reject_session の 2xx 送出も
-  // 同様)。塞がないと WT_STREAM / WT_STREAM_FIN capsule が
+  // 非 2xx 拒否受信後はエントリが削除されて塞がり、ペイロード不正のカプセル
+  // (Application Error Code が欠けた WT_CLOSE_SESSION など) とローカル
+  // close_session 後は is_terminated で塞がる (サーバー側の reject_session の
+  // 2xx 送出も同様)。塞がないと WT_STREAM / WT_STREAM_FIN capsule が
   // WT_CLOSE_SESSION の後ろに積まれてワイヤへ送出され得る (flush 前) か、
   // http2_stream_buffers_ に残留する (flush 後)
   auto* wt_session = get_wt_session(session_id);
@@ -2774,10 +2787,10 @@ void H2Session::stop_sending(int32_t session_id,
   // 終了したセッション ID と、一度も connect されていないセッション ID への
   // 送信を黙って無視する (send_datagram と同じガード。チェックを
   // send_capsule に置かない理由は send_datagram のコメントを参照)。終了の
-  // 検知はエントリと終了フラグで行う: WT_CLOSE_SESSION 受信後・ピアの
+  // 検知はエントリと終了フラグで行う: 正常な WT_CLOSE_SESSION 受信後・ピアの
   // END_STREAM 受信後・クライアントの非 2xx 拒否受信後はエントリが削除
-  // されて塞がり、ローカル close_session 後は is_terminated で塞がる
-  // (サーバー側の reject_session の 2xx 送出も同様)。
+  // されて塞がり、ペイロード不正のカプセルとローカル close_session 後は
+  // is_terminated で塞がる (サーバー側の reject_session の 2xx 送出も同様)。
   // エントリ不在の ID 宛にカプセルをキューすると消えた
   // http2_stream_buffers_ エントリが再生成されて残留し、メモリを保持し
   // 続けるため、ここで返す
@@ -2826,9 +2839,10 @@ void H2Session::send_datagram(int32_t session_id,
   // 前の終了通知である。受信後は終了を学習した状態とみなし、新たなデータ
   // グラムを送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、
   // 本対応は仕様強制ではなく実装ポリシー)。終了の検知はエントリと終了フラグ
-  // で行う: WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後はエントリが
-  // 削除されて塞がり、ローカル close_session 後は is_terminated で塞がる
-  // (サーバー側の reject_session の 2xx 送出も同様)。
+  // で行う: 正常な WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後は
+  // エントリが削除されて塞がり、ペイロード不正のカプセルとローカル
+  // close_session 後は is_terminated で塞がる (サーバー側の reject_session の
+  // 2xx 送出も同様)。
   // エントリ不在の ID (未 connect・両ハーフクローズ後にエントリが削除された
   // ID) も無視する。チェックは
   // send_capsule ではなくここに置く: send_capsule は close_session
@@ -2864,11 +2878,13 @@ void H2Session::close_session(int32_t session_id,
   // コメントを参照)。ローカル close_session はエントリを残したまま
   // is_terminated を立てるため、2 回目以降の呼び出しはここで返る (塞がない
   // と WT_CLOSE_SESSION capsule が二重送出され、flush 後は
-  // http2_stream_buffers_ に残留する)。終了を学習したセッション ID
-  // (WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアントの
-  // 非 2xx 拒否受信後) はエントリが削除されて塞がる (サーバー側の
-  // reject_session の 2xx 送出も同様)。送信側フロー制御超過は保留と
-  // BLOCKED 送出で待つため close_session の内部呼び出しは行わない
+  // http2_stream_buffers_ に残留する)。正常な WT_CLOSE_SESSION を受信済みの
+  // セッション ID (ピアの END_STREAM 受信後・クライアントの非 2xx 拒否受信後も
+  // 同様) はエントリが削除されて塞がる (サーバー側の reject_session の 2xx
+  // 送出も同様)。ペイロード不正のカプセル (Application Error Code が欠けた
+  // WT_CLOSE_SESSION など) では is_terminated が立つため冒頭のガードで塞がる。
+  // 送信側フロー制御超過は保留と BLOCKED 送出で待つため close_session の内部
+  // 呼び出しは行わない
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
     return;
@@ -2914,12 +2930,12 @@ void H2Session::close_session(int32_t session_id,
   // のを防ぐ (send_capsule にはチェックを入れないため、1 回目の呼び出しで
   // 送出される後始末カプセル WT_CLOSE_SESSION 自体は冒頭のガードで塞がれ
   // ない。塞がれるのは 2 回目以降の呼び出しでキューされる WT_CLOSE_SESSION)。
-  // 受信側 (handle_wt_close_session) はエントリ削除で同じ効果 (以後の送受信
-  // の遮断) を得る。ここではエントリを残したまま is_established も false に
-  // し、get_session_ids からの消滅と open_stream の失敗 (セッション終了後の
-  // 新規ストリーム開放の抑止) を行う。is_established が false になることで
-  // 以後の受信カプセル処理 (on_data_chunk_recv_callback のゲート) も停止する
-  // (h3 側の close_stream と同様の終了後後始末)
+  // 受信側の正常な WT_CLOSE_SESSION (handle_wt_close_session) はエントリ削除で
+  // 同じ効果 (以後の送受信の遮断) を得る。ここではエントリを残したまま
+  // is_established も false にし、get_session_ids からの消滅と open_stream の
+  // 失敗 (セッション終了後の新規ストリーム開放の抑止) を行う。is_established が
+  // false になることで以後の受信カプセル処理 (on_data_chunk_recv_callback の
+  // ゲート) も停止する (h3 側の close_stream と同様の終了後後始末)
   wt_session->is_terminated = true;
   wt_session->is_established = false;
 
@@ -2940,8 +2956,10 @@ bool H2Session::is_webtransport_ready() const {
 void H2Session::drain_session(int32_t session_id) {
   // 終了したセッション ID と、一度も connect されていないセッション ID への
   // 送信を黙って無視する (send_datagram と同じガード。stop_sending も同じ
-  // 構成。終了の検知はエントリと終了フラグで行う: 終了経路はエントリ削除、
-  // ローカル close_session 後は is_terminated で塞がる)。エントリ不在の ID
+  // 構成。終了の検知はエントリと終了フラグで行う: 正常な終了経路はエントリ
+  // 削除、ペイロード不正のカプセル (Application Error Code が欠けた
+  // WT_CLOSE_SESSION など) とローカル close_session 後は is_terminated で
+  // 塞がる)。エントリ不在の ID
   // 宛にカプセルをキューすると http2_stream_buffers_ エントリが再生成されて
   // 残留するため、ここで返す
   auto* wt_session = get_wt_session(session_id);
