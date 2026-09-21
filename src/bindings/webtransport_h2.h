@@ -260,7 +260,7 @@ struct WtSessionInfo {
 
   // セッション終了を学習したか (ローカル close_session / サーバー側の
   // reject_session の 2xx 送出 / カプセルペイロード不正による RST_STREAM。
-  // WT_CLOSE_SESSION 受信はエントリ削除で表現する)。
+  // 正常な WT_CLOSE_SESSION 受信はエントリ削除で表現する)。
   // is_established は connect 直後 (2xx 応答前) も false のため、楽観的送信
   // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
@@ -537,13 +537,15 @@ class H2Session {
    *
    * 終了したセッション ID と、一度も connect されていないセッション ID への
    * 送信は黙って無視する。セッション終了の検知は wt_sessions_ のエントリと
-   * is_terminated フラグで行う: WT_CLOSE_SESSION 受信後・ピアの END_STREAM
-   * 受信後はエントリが削除されて塞がり (draft-15 Section 3.4 のセッション
-   * 終了 = CONNECT ストリームのクローズ)、ローカル close_session 後は終了
-   * フラグで塞ぐ (Section 6.12 の WT_CLOSE_SESSION による終了通知。本対応は
-   * 仕様強制ではなく実装ポリシーである)。楽観的送信 (draft-15 Section 3.2
-   * の MAY) は妨げない: クライアントは connect 直後 (2xx 応答前)、サーバー
-   * は CONNECT リクエスト受信時に wt_sessions_ へエントリが挿入され、終了
+   * is_terminated フラグで行う: 正常な WT_CLOSE_SESSION 受信後・ピアの
+   * END_STREAM 受信後はエントリが削除されて塞がり (draft-15 Section 3.4 の
+   * セッション終了 = CONNECT ストリームのクローズ)、ペイロード不正のカプセル
+   * (Application Error Code が欠けた WT_CLOSE_SESSION など) とローカル
+   * close_session 後は終了フラグで塞ぐ (Section 6.12 の WT_CLOSE_SESSION に
+   * よる終了通知。本対応は仕様強制ではなく実装ポリシーである)。楽観的送信
+   * (draft-15 Section 3.2 の MAY) は妨げない: クライアントは connect 直後
+   * (2xx 応答前)、サーバーは CONNECT リクエスト受信時に wt_sessions_ へ
+   * エントリが挿入され、終了
    * フラグが立っていないため従来どおり送出される。クライアントが非 2xx 応答
    * (拒否) を受けたセッション ID 宛の送信は、応答受信時に wt_sessions_ から
    * 削除されるため塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る
@@ -560,10 +562,11 @@ class H2Session {
    * WT_CLOSE_SESSION capsule を送信
    *
    * 終了したセッション ID への呼び出しは黙って無視する (send_datagram と
-   * 同じガード構成。ローカル close_session 後は is_terminated で塞がり、
-   * 2 回目以降の呼び出しは WT_CLOSE_SESSION を送出しない。WT_CLOSE_SESSION
-   * 受信後・ピアの END_STREAM 受信後・非 2xx 拒否受信後はエントリが削除
-   * されて塞がる)。
+   * 同じガード構成。ローカル close_session 後とペイロード不正のカプセル
+   * (Application Error Code が欠けた WT_CLOSE_SESSION など) は is_terminated で
+   * 塞がり、2 回目以降の呼び出しは WT_CLOSE_SESSION を送出しない。正常な
+   * WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・非 2xx 拒否受信後は
+   * エントリが削除されて塞がる)。
    * @param session_id セッション ID
    * @param error_code エラーコード
    * @param error_message エラーメッセージ
