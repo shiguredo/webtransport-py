@@ -1,7 +1,7 @@
 # http3 の高レベル層で同一 drain の on_stream_reset が on_headers より先に届く
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-21
 - Branch: feature/fix-http3-reset-before-headers-ordering
 - Polished: 2026-09-20
 
@@ -59,3 +59,19 @@
 - 低レベル `Http3Connection` のイベント順序 (nghttp3 の受信順であり変更しない)
 - アプリが `reset_stream` を呼んだ場合の `ResetStream` イベントの順序 (アプリ起点の要求であり本 issue の対象ではない)
 - `STOP_SENDING` 分岐の追加 (0245) は同じ QUIC イベント drain を触るため、実装の順序によっては rebase が必要になる
+
+## 解決方法
+
+- `src/webtransport/http3/client.py` / `server.py` で、QUIC イベント drain 中に検出したピア起点のリセットは `Http3Connection.shutdown_stream_read` をその場で呼び、アプリへの `on_stream_reset` 通知だけを保留する形にした。保留分は同一バッチの HTTP/3 イベント drain を終えた後 (`on_stream_end` の通知より前) に到着順で通知する。クライアントは `pending_resets` (run ループのバッチ局所)、サーバーは `ClientConnection.pending_stream_resets` (受信経路とタイマー経路の両方から `_drain_quic_events` → `_process_http3_events` の順で呼ばれるため接続単位。既存の `finished_streams` と同じ形)
+- 保留しても後続データが先に届くことはない: `shutdown_stream_read` により当該ストリームの以後の受信データは破棄されるため、リセット後に届いた `STREAM_DATA` からイベントは生じず、先に到着した HEADERS のイベントだけが HTTP/3 の drain に残る
+- 同一バッチに `CONNECTION_CLOSED` が並ぶ場合も保留分は失われない (サーバーは `_remove_client` の後も `_process_http3_events` が接続オブジェクトを引数で受けて通知でき、クライアントは同一周回で通知する)
+- `on_headers` / `on_stream_reset` (`http3.Client`) と `on_request` / `on_stream_reset` (`http3.Server`) の docstring、および `skills/webtransport-py/SKILL.md` の HTTP/3 の節に「同一の受信バッチでは先に到着した HEADERS / DATA のコールバックがリセットより先に呼ばれ、複数のリセットは到着順に通知され、接続終了と同一バッチでも通知は失われない」を明記した
+- `tests/test_e2e_http3_peer_reset.py` に 5 件を追加した
+  - サーバー側 DUT: run ループを止めてピアにリクエストと RESET_STREAM を別々にフラッシュさせ、ソケットに溜まったデータグラムを `_drain_quic_events` 1 回で処理して `["request", "reset"]` を表明する (`reset_only` と、リセット直後に `CONNECTION_CLOSED` を送る `reset_and_close` の 2 ケース)
+  - クライアント側 DUT: run ループ停止中にピアが応答 HEADERS と RESET_STREAM を送り、run ループ再開後に `Client._receive` が読む 1 バッチで `["headers", "reset"]` を表明する
+  - 対照 2 件: リセットのみを受信したとき `on_stream_reset` が 1 回だけで、`on_request` / `on_headers` が呼ばれないこと
+- RED は実測した: 保留を外す (git stash で develop 状態に戻す) と順序検証 2 件が順序逆転で失敗し、戻すと全件通過する
+- データグラムの収集は固定待機ではなく「読み取りが途切れるまで集める」方式にした (全 suite 実行時に 1 件が flaky になったため)
+- `/review-diff-code` は 3 周実施し、致命的・重要 0 件。指摘のうち「テストファイルの `except A, B:` が構文エラー」は Python 3.14 の PEP 758 で有効 (ast.parse・pytest 収集・ruff が通過) のため棄却し、「`CHANGES.md` に `[FIX]` を追記すべき」は CODEBASE.md の指示が有効なため棄却した
+- `CHANGES.md` は CODEBASE.md の指示により更新しない。公開 API (nanobind) の変更は無い
+- 全テストが通過する (1324 passed)

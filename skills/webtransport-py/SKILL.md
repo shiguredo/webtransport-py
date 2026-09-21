@@ -335,7 +335,7 @@ async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 
 def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
 
-`on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。ピアの RESET_STREAM は読み取り中断として nghttp3 へ転送され、受信途中のヘッダーブロックと未送信の応答データは破棄される (送信方向は開いたまま)。ピアの STOP_SENDING は書き込み側の終了として nghttp3 へ転送される (RESET_STREAM の送出は ngtcp2 が行う。RFC 9000 Section 3.5)。転送後はそのストリームへの送信が行われない (nghttp3 の SHUT_WR と、シャットダウン済みストリームの `send_data` no-op の両方で止まる)。
+`on_stream_end` は受信した QUIC FIN の単一経路で通知する (ヘッダーと FIN が同一の QUIC STREAM_DATA で届いても 1 回だけ呼ばれる)。RESET_STREAM / STOP_SENDING で終了した場合は呼ばれず `on_stream_reset` が担う。ピアの RESET_STREAM は読み取り中断として nghttp3 へ転送され、受信途中のヘッダーブロックと未送信の応答データは破棄される (送信方向は開いたまま)。同一の受信バッチに完備した HEADERS とピア起点のリセットが並ぶ場合は、先に到着した HEADERS のコールバック (`on_request`) が `on_stream_reset` より先に呼ばれる。ピアの STOP_SENDING は書き込み側の終了として nghttp3 へ転送される (RESET_STREAM の送出は ngtcp2 が行う。RFC 9000 Section 3.5)。転送後はそのストリームへの送信が行われない (nghttp3 の SHUT_WR と、シャットダウン済みストリームの `send_data` no-op の両方で止まる)。
 
 `http3.Client.__init__(host, port=443, idle_timeout_ns=30_000_000_000, verify_peer=True, ca_file=None, verify_callback=None)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。
 
@@ -355,7 +355,7 @@ def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開�
 ```
 
 `request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。未接続の場合、ストリームを開けなかった場合 (同時ストリーム数の上限到達・ハンドシェイク未完了・接続クローズ直後)、リクエストの登録に失敗した場合は -1 を返す (登録に失敗した場合は開設済みの QUIC ストリームをリセットしてから返す)。
-`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。`http3.Client` も `http3.Server` と同様に、ピアの RESET_STREAM を読み取り中断として nghttp3 へ転送し、受信途中のヘッダーブロックと未送信のリクエストデータを破棄する (送信方向は開いたままなので、`reset_stream` を高レベル層が自動で返送することはない)。ピアの STOP_SENDING も同様に書き込み側の終了として nghttp3 へ転送し、以後そのストリームへの送信は行われない。
+`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。`http3.Client` も `http3.Server` と同様に、ピアの RESET_STREAM を読み取り中断として nghttp3 へ転送し、受信途中のヘッダーブロックと未送信のリクエストデータを破棄する (送信方向は開いたままなので、`reset_stream` を高レベル層が自動で返送することはない)。同一の受信バッチに完備した HEADERS とピア起点のリセットが並ぶ場合は、先に到着した HEADERS のコールバック (`on_headers`) が `on_stream_reset` より先に呼ばれる。ピアの STOP_SENDING も同様に書き込み側の終了として nghttp3 へ転送し、以後そのストリームへの送信は行われない。
 
 ### HTTP/2 (`webtransport.http2`)
 

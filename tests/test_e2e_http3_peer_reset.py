@@ -226,3 +226,299 @@ async def test_client_forwards_peer_reset_stream(test_certificates) -> None:
             await asyncio.gather(client_task, return_exceptions=True)
         await _stop_http3_server(server, server_task)
         await client.close()
+
+
+async def _collect_datagrams(server: http3.Server) -> list[bytes]:
+    """DUT のソケットに届いたデータグラムを、途切れるまで集める
+
+    固定の待機では全 suite 実行時の遅延で取りこぼすため、読み取りが連続して
+    空になるまで (クワイエットになるまで) 集める。
+    """
+    collected: list[bytes] = []
+    idle = 0
+    while idle < 5:
+        batch = _read_available(server)
+        if batch:
+            collected.extend(batch)
+            idle = 0
+        else:
+            idle += 1
+        await asyncio.sleep(0.02)
+    return collected
+
+
+def _read_available(server: http3.Server) -> list[bytes]:
+    """DUT のソケットに溜まっている受信データグラムを読み切る (非ブロッキング)"""
+    datagrams: list[bytes] = []
+    while True:
+        try:
+            data, _raw_addr = server._socket.recvfrom(65535)
+        except BlockingIOError, InterruptedError:
+            break
+        datagrams.append(data)
+    return datagrams
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_connection", [False, True], ids=["reset_only", "reset_and_close"])
+async def test_same_batch_headers_before_reset_on_server(
+    test_certificates, close_connection: bool
+) -> None:
+    """サーバー側 DUT: 同一バッチの完備 HEADERS がリセットより先に通知されることを確認
+
+    DUT の run ループを止めてピアにリクエストと RESET_STREAM を別々に
+    フラッシュさせ、ソケットに溜まったデータグラムを 1 回の QUIC イベント
+    drain (`_drain_quic_events` 1 回) として処理する。転送を保留しない実装では
+    QUIC の drain で `on_stream_reset` が先に呼ばれるため、本テストは修正前
+    実装で失敗する。
+    """
+    order: list[str] = []
+
+    async def on_request(
+        stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]
+    ) -> None:
+        order.append("request")
+
+    async def on_stream_reset(stream_id: int, error_code: int, addr: tuple[str, int]) -> None:
+        order.append("reset")
+
+    server = _create_http3_server(test_certificates)
+    server.on_request(on_request)
+    server.on_stream_reset(on_stream_reset)
+    await server.start()
+    server_task = asyncio.create_task(_run_server(server))
+
+    peer = http3.Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+    peer_task: asyncio.Task[None] | None = None
+
+    async def run_peer() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await peer.run()
+
+    try:
+        await peer.connect()
+        peer_task = asyncio.create_task(run_peer())
+
+        # DUT の run ループを止め、ピアのリクエストと RESET_STREAM を DUT が
+        # 読む前にソケットへ溜める
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+
+        stream_id = await peer.request("GET", "/same-batch")
+        assert stream_id >= 0, "リクエストの送信に失敗しました"
+        await peer.reset_stream(stream_id, _RESET_ERROR_CODE)
+        if close_connection:
+            # リセット直後に接続を閉じ、同一バッチに CONNECTION_CLOSED を並べる。
+            # close はパケットを生成するだけなので、収集の前に明示的に送出する
+            # (保留したリセットの通知は接続終了の処理後も失われない)
+            peer._quic_connection.close(0, "bye")
+            await peer._send_pending()
+
+        addr, server_client = next(iter(server._clients.items()))
+        datagrams = await _collect_datagrams(server)
+        assert datagrams, "ピアのデータグラムが届いていません"
+
+        # 溜まったデータグラムを 1 バッチとして処理する
+        assert server_client.quic_connection is not None
+        for datagram in datagrams:
+            server_client.quic_connection.receive(datagram, server._local_addr, addr)
+        await server._drain_quic_events(addr, server_client)
+        await server._process_http3_events(addr, server_client)
+
+        assert order == ["request", "reset"], f"コールバックの順序が逆転しています: {order}"
+    finally:
+        if peer_task is not None:
+            peer_task.cancel()
+            await asyncio.gather(peer_task, return_exceptions=True)
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await server.stop()
+        await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_same_batch_headers_before_reset_on_client(test_certificates) -> None:
+    """クライアント側 DUT: 同一バッチの完備 HEADERS がリセットより先に通知されることを確認
+
+    DUT の run ループを止めている間にピアが応答 HEADERS と RESET_STREAM を
+    別々にフラッシュし、run ループを再開して `Client._receive` に 1 バッチで
+    読ませる。両方が 1 バッチに入らず 2 バッチに分かれても、送信順のとおり
+    HEADERS のバッチが先に処理されるため期待する順序になる (バッチをまたぐ
+    場合の転送は保留の有無に依存しない)。
+    """
+    order: list[str] = []
+    request_seen = asyncio.Event()
+    request_info: dict[str, tuple[str, int]] = {}
+
+    async def on_request(
+        stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]
+    ) -> None:
+        request_info["addr"] = addr
+        request_seen.set()
+
+    async def on_headers(stream_id: int, headers: list[tuple[str, str]]) -> None:
+        order.append("headers")
+
+    async def on_stream_reset(stream_id: int, error_code: int) -> None:
+        order.append("reset")
+
+    server = _create_http3_server(test_certificates)
+    server.on_request(on_request)
+    await server.start()
+    server_task = asyncio.create_task(_run_server(server))
+
+    client = http3.Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+    client.on_headers(on_headers)
+    client.on_stream_reset(on_stream_reset)
+    client_task: asyncio.Task[None] | None = None
+
+    async def run_client() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await client.run()
+
+    try:
+        await client.connect()
+        stream_id = await client.request("GET", "/same-batch")
+        assert stream_id >= 0, "リクエストの送信に失敗しました"
+        client_task = asyncio.create_task(run_client())
+        await asyncio.wait_for(request_seen.wait(), timeout=_WAIT_LIMIT)
+
+        # DUT の run ループを止めている間に、ピアの応答 HEADERS と
+        # RESET_STREAM を別々のフラッシュで送り切る
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
+        client_task = None
+
+        addr = request_info["addr"]
+        _addr, server_client = next(iter(server._clients.items()))
+        await server.submit_response(addr, stream_id, [(":status", "200")])
+        assert server_client.quic_connection is not None
+        server_client.quic_connection.reset_stream(stream_id, _RESET_ERROR_CODE)
+        await server._send_to(addr, server_client)
+
+        # run ループを再開すると _receive が両データグラムを 1 バッチで読む
+        client_task = asyncio.create_task(run_client())
+        await _wait_until(lambda: len(order) >= 2, f"コールバックが 2 件届きませんでした: {order}")
+
+        assert order == ["headers", "reset"], f"コールバックの順序が逆転しています: {order}"
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+        await _stop_http3_server(server, server_task)
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reset_only_notifies_once_on_server(test_certificates) -> None:
+    """サーバー側 DUT: リセットのみを受信したとき on_stream_reset が 1 回だけ呼ばれることを確認
+
+    ピアは部分的な HEADERS (完備しないため nghttp3 はヘッダーを通知しない) を
+    送ってから RESET_STREAM を送る。`on_request` は呼ばれない (対照)。
+    """
+    order: list[str] = []
+
+    async def on_request(
+        stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]
+    ) -> None:
+        order.append("request")
+
+    async def on_stream_reset(stream_id: int, error_code: int, addr: tuple[str, int]) -> None:
+        order.append("reset")
+
+    server = _create_http3_server(test_certificates)
+    server.on_request(on_request)
+    server.on_stream_reset(on_stream_reset)
+    await server.start()
+    server_task = asyncio.create_task(_run_server(server))
+
+    peer = quic.Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+
+    try:
+        await peer.connect()
+        stream_id = await peer.open_stream(bidirectional=True)
+        assert stream_id >= 0, "ストリームを開けませんでした"
+        await peer.send_stream_data(stream_id, _PARTIAL_HEADERS, fin=False)
+        await _wait_until(
+            lambda: bool(server._clients),
+            "サーバーがクライアントを登録しませんでした",
+        )
+        _addr, server_client = next(iter(server._clients.items()))
+        http3_connection = server_client.http3_connection
+        assert http3_connection is not None
+        await _wait_until(
+            lambda: http3_connection._has_pending_headers(stream_id) is True,
+            "受信途中のヘッダーブロックのエントリが作られていません",
+        )
+
+        # ピアは RESET_STREAM のみを送る (完備した HEADERS は送らない)
+        peer._connection.reset_stream(stream_id, _RESET_ERROR_CODE)
+        await peer._send_pending()
+
+        await _wait_until(lambda: bool(order), f"リセットの通知が届きませんでした: {order}")
+        await asyncio.sleep(_RETURN_CHECK_SECONDS)
+        assert order == ["reset"], f"リセットのみの受信で順序または回数が不正です: {order}"
+    finally:
+        await _stop_http3_server(server, server_task)
+        await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_reset_only_notifies_once_on_client(test_certificates) -> None:
+    """クライアント側 DUT: リセットのみを受信したとき on_stream_reset が 1 回だけ呼ばれることを確認
+
+    ピア (http3.Server) が DUT のリクエストを受信してから RESET_STREAM を送る。
+    応答 HEADERS は送らないため `on_headers` は呼ばれない (対照)。
+    """
+    order: list[str] = []
+    request_seen = asyncio.Event()
+    request_info: dict[str, tuple[str, int]] = {}
+
+    async def on_request(
+        stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]
+    ) -> None:
+        request_info["addr"] = addr
+        request_seen.set()
+
+    async def on_headers(stream_id: int, headers: list[tuple[str, str]]) -> None:
+        order.append("headers")
+
+    async def on_stream_reset(stream_id: int, error_code: int) -> None:
+        order.append("reset")
+
+    server = _create_http3_server(test_certificates)
+    server.on_request(on_request)
+    await server.start()
+    server_task = asyncio.create_task(_run_server(server))
+
+    client = http3.Client(host="127.0.0.1", port=server.actual_port, verify_peer=False)
+    client.on_headers(on_headers)
+    client.on_stream_reset(on_stream_reset)
+    client_task: asyncio.Task[None] | None = None
+
+    async def run_client() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await client.run()
+
+    try:
+        await client.connect()
+        stream_id = await client.request("GET", "/reset-only")
+        assert stream_id >= 0, "リクエストの送信に失敗しました"
+        client_task = asyncio.create_task(run_client())
+        await asyncio.wait_for(request_seen.wait(), timeout=_WAIT_LIMIT)
+
+        addr = request_info["addr"]
+        _addr, server_client = next(iter(server._clients.items()))
+        assert server_client.quic_connection is not None
+        server_client.quic_connection.reset_stream(stream_id, _RESET_ERROR_CODE)
+        await server._send_to(addr, server_client)
+
+        await _wait_until(lambda: bool(order), f"リセットの通知が届きませんでした: {order}")
+        await asyncio.sleep(_RETURN_CHECK_SECONDS)
+        assert order == ["reset"], f"リセットのみの受信で順序または回数が不正です: {order}"
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+        await _stop_http3_server(server, server_task)
+        await client.close()
