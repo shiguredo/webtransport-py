@@ -1,6 +1,6 @@
 {
   "ngtcp2": {
-    "ref": "1e4399d428ddcf510eca55b0f11306e333aa5194",
+    "ref": "eb9e154d18e0a88e4d7f202592bfa484d26efcbc",
     "url": "https://github.com/ngtcp2/ngtcp2"
   },
   "nghttp3": {
@@ -12,7 +12,7 @@
     "url": "https://github.com/nghttp2/nghttp2"
   },
   "aws-lc": {
-    "tag": "v5.8.0",
+    "tag": "v5.9.0",
     "url": "https://github.com/aws/aws-lc"
   }
 }
