@@ -7,7 +7,7 @@
 
 ## 目的
 
-同じ概念を扱うモジュール間で公開 API の有無が揃っておらず、利用者が層を選ぶと観測も制御もできない操作がある。本 issue は層間 API の非対称のうち、ストリーム終了の観測・ストリームの中断・再エクスポートの 3 点を対象とし、欠けている公開 API を追加する。`on_stop_sending` / `on_error` / `on_goaway` など他の非対称は対象外とする。
+同じ概念を扱うモジュール間で公開 API の有無が揃っておらず、利用者が層を選ぶと観測も制御もできない操作がある。本 issue は層間 API の非対称のうち、ストリーム終了の観測・ストリームの中断・接続の終了・再エクスポートの 4 点を対象とし、欠けている公開 API を追加する。`on_stop_sending` / `on_error` / `on_goaway` など他の非対称は対象外とする。
 
 ## 現状
 
@@ -28,6 +28,12 @@
 - `http2` 層に中断 API が無いのは `Client` と `Server` の両側である。`src/webtransport/http2/client.py` の `Client` には `reset_stream` / `stop_sending` が無く、`src/webtransport/http2/server.py` の `ResponseWriter` も `send_headers` / `send_data` / `drain` のみで、`h2.Server` の `SessionWriter` が持つ `reset_stream` / `stop_sending` に相当する API が無い
 - 到達できるのは低レベル Sans-I/O の `webtransport_ext.http2.Connection.reset_stream` のみである。同層は HTTP/2 フレーム層の RST_STREAM を送出する API であり、`h2` 層の `Client.reset_stream` / `SessionWriter.reset_stream` (WebTransport カプセル層で状態検証とエラーコードのリマップを行う) とは層も意味も異なる
 
+接続の終了:
+
+- `src/webtransport/quic/server.py` の `Server` には特定のクライアントだけを閉じる API が無い。`stop()` が全接続を `Connection.close()` で閉じたうえでサーバーを停止するだけであり、1 接続を終了コードと理由付きで閉じられない
+- 低レベル `webtransport_ext.quic.Connection.close(error_code=0, reason="")` はアプリケーションエラーコードと理由を付けた CONNECTION_CLOSE を生成できる (`ngtcp2_ccerr_set_application_error`)。`quic.Client.close()` は接続を閉じられるがエラーコードと理由は受け取らない
+- MOQT (moqt-py) の server 役を QUIC 直結で実装する用途では、セッション終了を peer へ伝えるために終了コードと理由を渡せる接続 close が必要であり、この API の不在が moqt-py 側の実装保留の理由になっている
+
 再エクスポート:
 
 - `webtransport_ext/h2.pyi` に `CapsuleType` が公開されているが、`src/webtransport/h2/__init__.py` の import と `__all__` に無い
@@ -38,6 +44,9 @@
 - `on_stream_end` は `http3` と同じ「QUIC FIN の単一経路」で実装する。`h3` の受信ループで `quic.EventType.STREAM_DATA` の `fin` を接続単位に記録し、イベント処理の後に 1 回だけ通知する。対象は WebTransport のデータストリーム (双方向 = `stream_id % 4 in (0, 1)` と単方向 = `stream_id % 4 in (2, 3)` の両方) とし、CONNECT ストリームと WebTransport 以外のストリームは除外する。`http3` の `stream_id % 4 in (0, 1)` は HTTP/3 のリクエストストリームが双方向であるための条件であり、単方向データストリームを持つ `h3` にはそのまま適用しない。CONNECT ストリームの判定は FIN を観測した時点、すなわち `receive_stream_data` を呼ぶ前に行う (`receive_stream_data` が CONNECT ストリームの FIN を処理するとセッションが閉じ、`Session.get_session_ids()` から消えるため。`h3.Client` は `_is_closing_connect_stream`、`h3.Server` は `stream_id` が `Session.get_session_ids()` に含まれるかで判定する)。WebTransport 以外のストリームの除外と `session_id` の解決はイベント処理の後に `Session.stream_wt_session_id(stream_id)` で行い、None なら通知しない。コールバックの形は `h3.Client` が `on_stream_end(stream_id)`、`h3.Server` が `on_stream_end(session_id, stream_id, addr)` とする。`h3.EventType.STREAM_CLOSED` は発火源に使わない
 - `h2` は `Event.fin` を `on_stream_end` として surface する。`on_stream_data` に fin を渡す形にはせず、終了は専用のコールバックで通知する。低レベルの `Event.fin` は同一ストリームで複数回到達し得るため、FIN を通知済みの `(session_id, stream_id)` を保持して 2 回目以降は発火させない (`h2.Server` は 1 接続で複数セッションを扱うため `stream_id` だけでは足りない)。`h2.Client` は再接続で同じインスタンスを使い回し、セッション ID とストリーム ID の双方が数値として再利用されるため、`connect()` で記録を破棄する (`h2.Client` がピアクローズ観測 (`_peer_closed_session_ids`) を `connect()` で破棄しているのと同じ扱い)。コールバックの形は `h2.Client` が `on_stream_end(stream_id)`、`h2.Server` が `on_stream_end(stream_id, session_writer)` とし、それぞれ `on_stream_data` と同じ引数の形に揃える
 - `quic.Server.shutdown_stream` は `quic.Client.shutdown_stream` と同じ意味にする。QUIC フレーム層の API であり、`h3.Server.reset_stream` が行う nghttp3 への通知とエラーコードのリマップは行わない
+- `quic.Server.close(addr, error_code=0, reason="")` を追加し、`self._connections` から `addr` で接続を引いて低レベル `Connection.close(error_code, reason)` を呼び、`_send_to` で CONNECTION_CLOSE を送出する。未登録の `addr` は `send_datagram` と同じく何もしない。引数の形はサーバー側の他の送出系 API (`send_stream_data` / `send_datagram`) に揃えて `addr` を先頭に取り、`quic.Client.close()` (引数なし) とは揃えない。ハンドシェイク完了前の close は ngtcp2 がエラーコードを APPLICATION_ERROR に置換して理由を落とすため (RFC 9000 Section 10.2.3)、終了コードと理由が伝わるのはハンドシェイク完了後である
+- `quic.Server.close()` はローカル起点の終了として扱い、`on_connection_closed` を発火しない (低レベルの close() が終了イベントを push しない契約と `quic.Client.close()` に合わせる)。接続の後始末 (登録解除・DCID 索引の破棄・接続タスクの停止) は既存の受信ループの回収経路 (`is_closed()` を見た `_discard_connection`) に任せ、`close()` からは接続の登録を操作しない
+- 回収経路の `_discard_connection` は未完了の接続タスクをキャンセルするため、アプリコールバックの中から `close()` を呼ぶと実行中のコールバックへ `CancelledError` が注入される。`quic.Server.close()` は公開 API であり、イベント処理 (コールバック) の中からも呼べる必要があるため、実行中のコールバックを中断せず、イベント処理の完了を待ってから回収する形にする
 - `http2.Client` と `http2.ResponseWriter` に `reset_stream` を追加する。低レベル `webtransport_ext.http2.Connection.reset_stream` が HTTP/2 フレーム層の RST_STREAM を送出するため、`h2` 層の同名 API (WebTransport カプセル層で状態検証とエラーコードのリマップを行う) とは層も意味も異なる。この意味差を docstring に書き、利用者が層を選べるようにする
 - `stop_sending` は `http2` 層には追加しない。低レベル `webtransport_ext.http2.Connection` に `stop_sending` が無く (`reset_stream` のみ)、`h2` 層の `stop_sending` は WT_STOP_SENDING カプセルを送出する API であるため、HTTP/2 フレーム層である `http2` 層には同等の操作が存在しない。`http2` 層で送信停止が必要な場合は `reset_stream` を使う
 - 再エクスポートは import と `__all__` への追加だけで行う。`webtransport.http3.constants` のサブモジュール経路も残し、到達経路を二重にする意図を `src/webtransport/http3/__init__.py` に書く
@@ -47,16 +56,18 @@
 
 - `h3` / `h2` の `Client` と `Server` に `on_stream_end` があり、FIN の受信で 1 回だけ発火する。`h3` は双方向と単方向の両方のデータストリームで発火し、CONNECT ストリームの FIN (セッション終了) とリセットでは発火しない。`h2` は同一ストリームで `Event.fin` が複数回到達しても 1 回だけ発火し、`h2.Client` は再接続後の新しいセッションでも発火する。呼び出しの形は `h3.Client` / `h2.Client` が `on_stream_end(stream_id)`、`h3.Server` が `on_stream_end(session_id, stream_id, addr)`、`h2.Server` が `on_stream_end(stream_id, session_writer)` である
 - `quic.Server.shutdown_stream(addr, stream_id, error_code=0)` が `quic.Client.shutdown_stream` と同じく RESET_STREAM と STOP_SENDING を送出する
+- `quic.Server.close(addr, error_code=0, reason="")` が指定したクライアントへ終了コードと理由付きの CONNECTION_CLOSE を送出し、`stop()` を呼ばずに 1 接続だけを閉じられる。他クライアントの通信は継続する。未登録の `addr` では何も起きず、`on_connection_closed` は発火しない。閉じた接続の登録と接続タスクは回収される (リークしない)。アプリコールバックの中から呼んでもコールバックが `CancelledError` で中断されない
 - `http2.Client` と `http2.ResponseWriter` に `reset_stream(stream_id, error_code=0)` があり、HTTP/2 フレーム層の RST_STREAM を送出する (`h2` 層の `Client` / `SessionWriter` の同名 API は WebTransport カプセル層で状態検証とエラーコードのリマップを行うため、層が異なることを docstring で区別する)
 - `webtransport.h2.CapsuleType` と `webtransport.http3` の各エラーコード定数 (`src/webtransport/http3/constants.py` の `__all__` の 11 個) が import できる
 - `skills/webtransport-py/SKILL.md` の `h3` / `h2` / `quic.Server` / `http2` の各節と「注意点」の節が、追加 API と再エクスポートの実装と一致している (`tests/test_skill_api_consistency.py` は SKILL から実装の方向しか検査しないため、追記漏れは目視で確認する)
-- 追加分のテストが入り、全テストが通過する。`h3` の `on_stream_end` は双方向と単方向の両方のデータストリームで発火し、CONNECT ストリームの FIN では発火しないこと、`h2` の `on_stream_end` は同一ストリームで 1 回だけ発火し、`h2.Client` の再接続後も新しいセッションの FIN で発火することを検証する。`quic.Server.shutdown_stream` と `http2` 層の `reset_stream` は送出するフレーム (RESET_STREAM / STOP_SENDING / RST_STREAM) まで検証する
+- 追加分のテストが入り、全テストが通過する。`h3` の `on_stream_end` は双方向と単方向の両方のデータストリームで発火し、CONNECT ストリームの FIN では発火しないこと、`h2` の `on_stream_end` は同一ストリームで 1 回だけ発火し、`h2.Client` の再接続後も新しいセッションの FIN で発火することを検証する。`quic.Server.shutdown_stream` と `http2` 層の `reset_stream` は送出するフレーム (RESET_STREAM / STOP_SENDING / RST_STREAM) まで、`quic.Server.close` はピア側の `error_code` / `reason` で終了コードと理由が観測できるところまで検証する
 
 ## 解決方法
 
 - `src/webtransport/h3/client.py` / `h3/server.py` に `on_stream_end` の setter を追加し、QUIC FIN の単一経路 (`src/webtransport/http3/client.py` の `finished_streams` と同じ形) で発火させる。CONNECT ストリームの判定は `receive_stream_data` を呼ぶ前に行い、WebTransport 以外のストリームの除外と `session_id` の解決はイベント処理の後に `Session.stream_wt_session_id` で行う
 - `src/webtransport/h2/client.py` / `h2/server.py` に `on_stream_end` の setter を追加し、`Event.fin` で発火させる。通知済みの `(session_id, stream_id)` を保持し、同一セッションの同一ストリームの 2 回目以降の `Event.fin` では発火させない。`h2.Client` は再接続で ID が再利用されるため、`connect()` で記録を破棄する
 - `src/webtransport/quic/server.py` に `async def shutdown_stream(self, addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None` を追加する (`self._connections` から addr で接続を引き、`close_stream` を呼んで送信を drain する)
+- `src/webtransport/quic/server.py` に `async def close(self, addr: tuple[str, int], error_code: int = 0, reason: str = "") -> None` を追加する (`self._connections` から addr で接続を引き、`Connection.close` を呼んで `_send_to` で CONNECTION_CLOSE を送出する。後始末は受信ループの回収に任せ、接続タスクを実行中のコールバックごとキャンセルしない)
 - `http2.Client` に `async def reset_stream(self, stream_id: int, error_code: int = 0) -> None` を追加し、`src/webtransport/http2/server.py` の `ResponseWriter` にも同じシグネチャで追加する (低レベル `http2.Connection.reset_stream` へ委譲する)
 - `src/webtransport/h2/__init__.py` に `CapsuleType` を、`src/webtransport/http3/__init__.py` に `constants.py` の `__all__` の 11 個を追加する (import と `__all__` の両方)
 - `skills/webtransport-py/SKILL.md` の `h3` / `h2` / `quic.Server` / `http2.ResponseWriter` の各節と再エクスポートの注意点を更新する。再エクスポートの追加により、`h2.CapsuleType` は再エクスポートされていない旨の記述 (`skills/webtransport-py/SKILL.md` の「注意点」の節) が実装と一致しなくなるため、あわせて直す。`webtransport.http3` からの定数の import 経路は SKILL にまだ書かれておらず、別のドキュメント修正 issue (0224) が同じ箇所を対象にしているため、実装順によってはそちらの前提が変わる点を申し送る
