@@ -1,7 +1,7 @@
 # h2 でクリーンな END_STREAM の直前に切り詰められたカプセルが検証されない
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-21
 - Branch: feature/fix-h2-truncated-capsule-at-end-stream
 - Polished: 2026-09-20
 
@@ -27,7 +27,7 @@ RFC 9297 Section 3.3 の第 3 段落は「カプセルを運ぶストリーム�
 - 検査位置は `is_established` / `is_terminated` の判定より後にし、`SessionClosed` の push とエントリ破棄より前に置く。確立前 (受理前・非 2xx 拒否) のセッションはこの判定で早期 return するため、切り詰めの検証対象にならない (セッションとして成立していない入力であり、既存の挙動を維持する。サーバー側の受理前 FIN ではエントリが残留し、その後の `H2Session::accept_session` でも切り詰めは再検査しない)
 - バッファが空の場合は現状の正常終了を維持する (エントリ破棄・送信バッファ破棄・`SessionClosed` の error_code 0)
 - ピアが WT_CLOSE_SESSION を送ってから END_STREAM を送る経路は、`H2Session::handle_wt_close_session` がエントリを削除済みのため `H2Session::handle_end_stream` の確立判定で早期 return する (現状維持)。本 issue の対象は END_STREAM のみで終わるセッションである
-- 変更対象: `src/bindings/webtransport_h2.cpp`、`src/bindings/webtransport_h2.h` (コメント更新のみ。挙動の変更は無い)、`tests/test_webtransport_h2_end_stream.py` (END_STREAM のテスト。既存の `_encode_capsule` / `_encode_data_frame` / `_drain_events` をそのまま使える)、`tests/test_webtransport_h2_recv_flow_control.py` (既存テストの前提変更。下の「既存テストの前提が 1 件変わる」を参照)。RST_STREAM の検出は 0237 のローカルヘルパ (`tests/test_webtransport_h2_incomplete_capsule_payload.py` の `_encode_rst_stream_frame` と `_assert_session_closed_by_protocol_error`) に倣う。0248 の 変更対象は現時点で `tests/conftest.py` と既存 3 テストファイルであり、本 issue で新たに追加する `tests/test_webtransport_h2_end_stream.py` のローカルヘルパを含まないため、本 issue を先に実装してローカルヘルパを増やす場合は 0248 の磨き上げ時に範囲へ追加する
+- 変更対象: `src/bindings/webtransport_h2.cpp`、`src/bindings/webtransport_h2.h` (コメント更新のみ。挙動の変更は無い)、`tests/test_webtransport_h2_end_stream.py` (END_STREAM のテスト。既存の `_encode_capsule` / `_encode_data_frame` / `_drain_events` をそのまま使える)、`tests/test_webtransport_h2_recv_flow_control.py` (既存テストの前提変更。下の「既存テストの前提が 1 件変わる」を参照)、`tests/conftest.py` (`_assert_session_closed_by_protocol_error` の docstring のみ)。RST_STREAM の検出は 0237 のローカルヘルパではなく、0241 で `tests/conftest.py` に集約済みの `_encode_rst_stream_frame` / `_assert_session_closed_by_protocol_error` / `_PROTOCOL_ERROR` を import する (ローカルヘルパは増やさないため、0248 の変更対象に本 issue のテストファイルを追加する必要は無い)
 - 前提が変わる既存の記述 (コメント 3 箇所) とテスト (1 件) をあわせて直す
   - `H2Session::reset_stream_for_malformed_capsule` の「capsule_buffer は触らない (呼び出し元の process_capsules のループが is_terminated を見て破棄する)」は、`H2Session::handle_end_stream` から呼ぶ経路では成立しない (破棄はエントリごと `on_stream_close_callback` で行われる)。呼び出し元ごとの違いを書く
   - `WtSessionInfo::is_terminated` のコメント (`src/bindings/webtransport_h2.h`) は終了理由の列挙に「END_STREAM 時点でカプセルが途中だったこと (フレーミングの欠落)」を追加する
@@ -51,3 +51,21 @@ RFC 9297 Section 3.3 の第 3 段落は「カプセルを運ぶストリーム�
 - ペイロードが揃ったカプセルの値の意味論 (単調性・ストリーム状態など) の既存検証 (本 issue では変更しない)
 - 確立前 (受理前・非 2xx 拒否・サーバー側の受理前 FIN) のセッションで切り詰められたカプセル (早期 return により検証しない。受理前 FIN の場合はエントリが残留し、その後に `H2Session::accept_session` すると確立済みかつ切り詰め未検証のセッションが残り得るが、本 issue の対象外とする)
 - 「WT_CLOSE_SESSION 無しの END_STREAM に対する応答の END_STREAM 送出」(既知の制約として現状維持)
+
+## 解決方法
+
+- `H2Session::handle_end_stream` の確立・終了済み判定 (早期 return) の直後に `H2Session::reset_stream_for_malformed_capsule` を通した。RFC 9297 Section 3.3 第 3 段落は、カプセルを運ぶストリームの受信側がクリーンに終了し (HTTP/2 では END_STREAM)、そのとき最後のカプセルがまだ途中だった場合を malformed / incomplete なメッセージとして扱う MUST を定める。扱いは RFC 9113 Section 8.1.1 の PROTOCOL_ERROR のストリームエラーになる。バッファが空 (カプセル境界で終わった) 場合だけ error code 0 のクリーン終了を維持し、`SessionClosed` は直接 push しない (後始末は RST_STREAM の送出で発火する `on_stream_close_callback` が行う)
+- 検査位置は早期 return より後、`SessionClosed` の push とエントリ破棄より前にした。確立前 (受理前 FIN・非 2xx 拒否) と終了済み (`is_terminated`) は検証しない: 受理前は draft-15 Section 3.2 のとおりカプセルを処理せず、終了済みは `on_data_chunk_recv_callback` が受信カプセル自体を破棄するためである。受理前に END_STREAM が届いた場合は終了通知も切り詰めの検証も行わずエントリと蓄積が残る (既知のギャップ。受理前 FIN の検知は未追跡で、本 issue でも対応しない)
+- コメントは、切り詰めの検証が入ることを `H2Session::handle_end_stream` / `WtSessionInfo::is_terminated` / 終了検知の定型コメント (`send_stream_data` / `stop_sending` / `send_datagram` / `close_session`) と `send_datagram` の docstring に反映した。`H2Session::reset_stream_for_malformed_capsule` の `capsule_buffer` の扱いは、呼び出し元 (process_capsules / handle_end_stream) ごとの破棄経路を書き分けた
+- `tests/test_webtransport_h2_end_stream.py` に次を追加した
+  - 切り詰め 5 通り (Type varint 途中 / Type のみ / Length varint 途中 / Length のみ / ペイロード途中) で PROTOCOL_ERROR の RST_STREAM が送出され、`SessionClosed` (error_code は PROTOCOL_ERROR) が 1 回だけ通知されること。切り詰めだけではセッションが終了しないこと (後続の DATA を待つ) も表明する
+  - 切り詰めと END_STREAM が同一 DATA フレームでも同じ観測になること (nghttp2 のペイロード通知がフレーム通知より先という前提の固定)
+  - カプセル境界で終わった END_STREAM は従来どおり error code 0 のクリーン終了になること (対照。受信側のカプセルバッファが空であることも表明する)
+  - 受理前の END_STREAM では検証しないこと (検査位置を早期 return より前に置く誤配置の検出)
+  - 受理前バッファに残った切り詰めが受理後の END_STREAM で検証されること (受理時に残バッファをリセットする誤実装の検出。未消費受信バイトの記録が解放されることも表明する)
+- 既存テストの前提変更として `tests/test_webtransport_h2_recv_flow_control.py` の `test_peer_end_stream_releases_unconsumed_recv_bytes` の docstring を更新した (解放の契機が `handle_end_stream` の直接呼び出しから RST_STREAM に伴う `on_stream_close_callback` に変わった)。`tests/conftest.py` の `_assert_session_closed_by_protocol_error` の docstring にも切り詰めを追記した
+- RED は 2 通りで実測した: `H2Session::handle_end_stream` を develop 版に戻すと切り詰め 5 通りと同一フレームの 6 件が失敗し対照 2 件は通り、検査を早期 return より前に置く誤配置では受理前の対照テストが失敗する
+- issue の「対象外」の補正: 検証しないのは「受理前に END_STREAM が届いた場合」に限る。受理前に蓄積した切り詰めは `accept_session` の排出後もバッファに残り、受理後の END_STREAM で本対応の一般経路として検証される
+- 設計方針との差異: RST_STREAM の表明は 0237 のローカルヘルパではなく 0241 で `tests/conftest.py` に集約済みの共有ヘルパを使った (ローカルヘルパを増やしていないため 0248 の変更対象の見直しは不要。0248 の現状の記述は 0241 の集約で古くなっている)
+- `CHANGES.md` は CODEBASE.md の指示により更新しない。公開 API (nanobind) の変更は無く、型スタブの再生成も不要
+- 全テストが通過する (1317 passed)
