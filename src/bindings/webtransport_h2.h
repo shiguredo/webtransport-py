@@ -259,8 +259,9 @@ struct WtSessionInfo {
   bool is_established = false;
 
   // セッション終了を学習したか (ローカル close_session / サーバー側の
-  // reject_session の 2xx 送出 / カプセルペイロード不正による RST_STREAM。
-  // 正常な WT_CLOSE_SESSION 受信はエントリ削除で表現する)。
+  // reject_session の 2xx 送出 / カプセルペイロード不正、または END_STREAM の
+  // 時点でカプセルが切り詰められていた場合の RST_STREAM)。
+  // 正常な WT_CLOSE_SESSION 受信はエントリ削除で表現する。
   // is_established は connect 直後 (2xx 応答前) も false のため、楽観的送信
   // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
@@ -550,8 +551,10 @@ class H2Session {
    * (拒否) を受けたセッション ID 宛の送信は、応答受信時に wt_sessions_ から
    * 削除されるため塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る
    * 既知の制約)。ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了
-   * 経路 (draft-15 Section 3.4 の正規の終了経路) も END_STREAM 検知でエントリ
-   * が削除されるため塞がれる
+   * 経路 (draft-15 Section 3.4 の正規の終了経路) は、カプセル境界で終わって
+   * いれば END_STREAM 検知でエントリが削除されて塞がれ、カプセルが切り詰め
+   * られていれば PROTOCOL_ERROR の RST_STREAM になり、
+   * on_stream_close_callback がエントリを削除するため、いずれも塞がれる
    * @param session_id セッション ID
    * @param data データ
    */

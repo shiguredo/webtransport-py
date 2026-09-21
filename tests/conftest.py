@@ -786,9 +786,10 @@ def _assert_session_closed_by_protocol_error(
 ) -> None:
     """RST_STREAM (PROTOCOL_ERROR) でセッションが終了することを確認する
 
-    カプセルのペイロードが不正な場合は RFC 9297 Section 3.3 と RFC 9113
-    Section 8.1.1 により PROTOCOL_ERROR のストリームエラーになる。アプリ
-    ケーションシグナル (WT_CLOSE_SESSION) は送出しない (draft-15 Section 3.4)。
+    カプセルのペイロードが不正な場合、またはクリーンな終了時にカプセルが
+    切り詰められていた場合は、RFC 9297 Section 3.3 と RFC 9113 Section 8.1.1
+    により PROTOCOL_ERROR のストリームエラーになる。アプリケーションシグナル
+    (WT_CLOSE_SESSION) は送出しない (draft-15 Section 3.4)。
     unexpected_event を渡すと、その種別のイベントが push されていないこと
     (無言で受理されていないこと) を表明する。
     """

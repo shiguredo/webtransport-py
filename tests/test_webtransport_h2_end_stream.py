@@ -12,22 +12,45 @@ END_STREAM 応答の送出と、受信後の close_session / send_stream_data �
 
 さらに、非 WebTransport リクエストへの自動 405 応答 (Allow: CONNECT と
 END_STREAM 付き) も検証する。
+
+RFC 9297 Section 3.3 の第 3 段落は、カプセルを運ぶストリームの受信側が
+クリーンに終了し (HTTP/2 では END_STREAM)、そのとき最後のカプセルがまだ途中
+だった場合を malformed / incomplete なメッセージとして扱う MUST を定める。
+WT_CLOSE_SESSION を伴わず END_STREAM のみで終わった場合、カプセル境界で
+終わったときだけがクリーンな終了 (error code 0) であり、途中で終わった場合は
+PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) になることも
+検証する。
 """
 
 from __future__ import annotations
 
 import pytest
 from conftest import (
+    _PROTOCOL_ERROR,
+    _assert_session_closed_by_protocol_error,
     _connect_h2_session,
     _create_h2_http2_pair,
     _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
+    _encode_rst_stream_frame,
+    _encode_varint,
     _h2_pump,
 )
 
 from webtransport import h2, http2
+
+# WT_MAX_DATA の Type (4 バイト可変長整数)。切り詰めの 5 通り (Type varint
+# 途中 / Type のみ / Length varint 途中 / Length のみ / ペイロード途中) を組み立てる
+_WT_MAX_DATA_TYPE_VARINT: bytes = _encode_varint(0x190B4D3D)
+_TRUNCATED_CAPSULES: list[bytes] = [
+    _WT_MAX_DATA_TYPE_VARINT[:2],
+    _WT_MAX_DATA_TYPE_VARINT,
+    _WT_MAX_DATA_TYPE_VARINT + b"\x40",
+    _WT_MAX_DATA_TYPE_VARINT + b"\x08",
+    _WT_MAX_DATA_TYPE_VARINT + b"\x08" + b"\x00\x00\x00\x00",
+]
 
 
 def _encode_headers_frame(session_id: int, header_block: bytes, end_stream: bool = False) -> bytes:
@@ -74,6 +97,176 @@ def test_end_stream_only_closes_session() -> None:
     client.send_datagram(session_id, b"after-end-stream")
     wire = client.send()
     assert wire is None or _encode_capsule(0x00, b"after-end-stream") not in wire
+
+
+@pytest.mark.parametrize(
+    "truncated",
+    _TRUNCATED_CAPSULES,
+    ids=["type_partial", "type_only", "length_partial", "length_only", "payload_partial"],
+)
+def test_end_stream_with_truncated_capsule_resets_stream(truncated: bytes) -> None:
+    """カプセルの切り詰めのまま END_STREAM を受信すると PROTOCOL_ERROR の RST_STREAM になることを確認
+
+    根拠はモジュール docstring。修正前は未処理のバッファを検査せず、error code 0 の
+    正常終了としてセッションを閉じていた。切り詰めだけではセッションは終了せず
+    (後続の DATA を待つ)、END_STREAM が届いた時点でリセットされることも表明する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # カプセルが途中の DATA (END_STREAM なし) を届ける
+    ret = server.receive(_encode_data_frame(session_id, truncated))
+    assert ret > 0, "カプセルの注入に失敗しました"
+    assert server._test_unfinished_capsule_bytes(session_id) == len(truncated), (
+        "切り詰めが未完成カプセルとして保持されていません"
+    )
+    assert server.get_session_ids() == [session_id], (
+        "カプセルが途中の時点でセッションが終了しています"
+    )
+
+    # 空の DATA + END_STREAM でピアがストリームを閉じる (draft-15 Section 3.4)
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+
+    _assert_session_closed_by_protocol_error(server, client, session_id)
+
+
+def test_end_stream_in_same_frame_as_truncated_capsule_resets_stream() -> None:
+    """切り詰めと END_STREAM が同一 DATA フレームでも PROTOCOL_ERROR になることを確認
+
+    nghttp2 は DATA のペイロード通知 (カプセル処理) をフレーム通知 (END_STREAM
+    検知) より先に行うため、フレームを分けた場合と同じ観測になる。1 回の
+    receive() に切り詰めと END_STREAM が同居する入力でも、カプセル処理で
+    バッファに残った分が END_STREAM 検知時に検証されることを固定する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    ret = server.receive(_encode_data_frame(session_id, _WT_MAX_DATA_TYPE_VARINT, end_stream=True))
+    assert ret > 0, "切り詰めと END_STREAM の注入に失敗しました"
+
+    _assert_session_closed_by_protocol_error(server, client, session_id)
+
+
+def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
+    """完成したカプセルの直後の END_STREAM は従来どおり error code 0 で終了することを確認
+
+    カプセル境界で終わった場合は RFC 9297 Section 3.3 の切り詰めに該当せず、
+    draft-15 Section 6.12 の「WT_CLOSE_SESSION 無しのクリーンな終了」になる
+    (対照)。受信側のカプセルバッファが空のときに END_STREAM が届いても
+    RST_STREAM を送出しないことも表明する (wire の表明は補助であり、主たる
+    判別は SessionClosed の error_code 0)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    # 完成したカプセル (PADDING。draft-15 Section 6.1) を届けてバッファを空にする
+    ret = server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D38, b"")))
+    assert ret > 0, "カプセルの注入に失敗しました"
+    assert server._test_unfinished_capsule_bytes(session_id) == 0, (
+        "完成したカプセルでバッファが空になっていません"
+    )
+
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+
+    events = _drain_events(server)
+    closed_events = [event for event in events if event.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == 0, "クリーンな終了の error code が 0 ではありません"
+    assert closed_events[0].error_message == ""
+    assert all(event.type != h2.EventType.ERROR for event in events), "Error イベントが発火しました"
+    wire = server.send()
+    assert wire is None or _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) not in wire, (
+        "カプセル境界の END_STREAM で RST_STREAM が送出されました"
+    )
+
+
+def test_end_stream_pre_accept_truncated_capsule_no_termination() -> None:
+    """受理前のセッションでは切り詰められたカプセルを検証しないことを確認
+
+    サーバーは受理するまでカプセルを処理せず、受理前の DATA は上限付きで蓄積
+    される (draft-15 Section 3.2 の楽観送信。RFC 9297 Section 3.2 の Capsule
+    Protocol も 2xx まで not in use)。確立前は `handle_end_stream` の確立判定で
+    早期 return するため切り詰めの検証も行われず、エントリと蓄積が残る。
+    検査を早期 return より前に置く誤実装を検出する。
+
+    背景 (対象外): 受理前にピアが END_STREAM だけで閉じた場合の終了通知 (受理前
+    FIN の検知) は本対応の対象外である。この場合、後で accept_session しても
+    終了通知も切り詰めの検証も行われず、エントリと蓄積が残る。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+    ready_events = [
+        event for event in _drain_events(server) if event.type == h2.EventType.SESSION_READY
+    ]
+    assert len(ready_events) == 1, "SESSION_READY が 1 件だけ発火していません"
+
+    # 受理前にカプセルが途中の DATA を届ける (上限付きで蓄積される)
+    ret = server.receive(_encode_data_frame(session_id, _WT_MAX_DATA_TYPE_VARINT))
+    assert ret > 0, "切り詰めカプセルの注入に失敗しました"
+
+    # 受理前に空の DATA + END_STREAM でピアがストリームを閉じる
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+
+    assert server._test_unfinished_capsule_bytes(session_id) == len(_WT_MAX_DATA_TYPE_VARINT), (
+        "受理前の END_STREAM 後に切り詰めが保持されていません"
+    )
+    assert all(event.type != h2.EventType.SESSION_CLOSED for event in _drain_events(server)), (
+        "受理前のセッションで SessionClosed が発火しました"
+    )
+    wire = server.send()
+    assert wire is None or _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) not in wire, (
+        "受理前のセッションで RST_STREAM が送出されました"
+    )
+    assert server.get_session_ids() == [], "受理前のセッションが確立扱いになっています"
+
+
+def test_end_stream_after_accept_with_truncated_pre_accept_buffer_resets_stream() -> None:
+    """受理前バッファに残った切り詰めが受理後の END_STREAM で検証されることを確認
+
+    受理前の DATA は蓄積され、accept_session の排出では切り詰めの分が
+    バッファに残る (カプセルのフレーミングが揃うまで後続のバイトを待つ)。受理後に
+    END_STREAM が届いた時点で切り詰めとして検証され、PROTOCOL_ERROR の
+    RST_STREAM になる。受理時に残バッファをリセットする実装 (後続を待たずに
+    誤って malformed にする) を検出する。
+    """
+    client, server = _create_h2_session_pair()
+
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+
+    # 受理前にカプセルが途中の DATA を届ける (蓄積される)
+    ret = server.receive(_encode_data_frame(session_id, _WT_MAX_DATA_TYPE_VARINT))
+    assert ret > 0, "切り詰めカプセルの注入に失敗しました"
+    assert server.get_session_ids() == [], "受理前にセッションが確立しています"
+
+    # 受理すると蓄積分が排出されるが、切り詰めは後続を待って残る
+    assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
+    assert server.get_session_ids() == [session_id], "セッションが確立していません"
+    assert server._test_unfinished_capsule_bytes(session_id) == len(_WT_MAX_DATA_TYPE_VARINT), (
+        "受理後も切り詰めが未完成カプセルとして残っていません"
+    )
+    wire = server.send()
+    assert wire is not None, "受理時の応答が送出されていません"
+    assert _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) not in wire, (
+        "受理時に切り詰めをリセットしています"
+    )
+    client.receive(wire)
+
+    # 受理後の END_STREAM で切り詰めが検証される
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+
+    _assert_session_closed_by_protocol_error(server, client, session_id)
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "RST_STREAM によるセッション終了後に未消費受信バイトの記録が残っている"
+    )
 
 
 def test_end_stream_after_recv_wt_close_session_no_double() -> None:
