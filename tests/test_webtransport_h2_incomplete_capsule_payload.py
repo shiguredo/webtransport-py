@@ -8,11 +8,13 @@
 のストリームエラー (RST_STREAM) を送出する。draft-ietf-webtrans-http2-15
 Section 3.4 のとおり、ストリームのリセットはセッションを終了させる。
 
-対象はペイロードの可変長整数を読む 8 ハンドラ (WT_STREAM / WT_RESET_STREAM /
+対象はペイロードの可変長整数を読む 9 ハンドラ (WT_STREAM / WT_RESET_STREAM /
 WT_STOP_SENDING / WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS /
-WT_STREAM_DATA_BLOCKED / WT_STREAMS_BLOCKED) すべてである。修正前はどの
-ハンドラも無言で return していたため、方向検証・ストリーム状態検証・二重受信
-検証が入力次第で回避できた。
+WT_STREAM_DATA_BLOCKED / WT_STREAMS_BLOCKED / WT_DATA_BLOCKED) すべてである。
+デコード失敗を無言で return していた時期には、方向検証・ストリーム状態検証・
+二重受信検証が入力次第で回避できた。WT_DATA_BLOCKED は読み出しハンドラ自体が
+無く、PADDING と同じ no-op 分岐でカプセルごと読み捨てられていたため、
+Maximum Data の欠落が検証されない状態だった。
 
 Stream ID のみでデータを持たない WT_STREAM は、ストリームを開閉しない
 カプセルとして従来どおりイベントを発火しない (draft-15 Section 6.4 の MAY。
@@ -50,6 +52,7 @@ _WT_MAX_DATA = 0x190B4D3D
 _WT_MAX_STREAM_DATA = 0x190B4D3E
 _WT_MAX_STREAMS_BIDI = 0x190B4D3F
 _WT_MAX_STREAMS_UNI = 0x190B4D40
+_WT_DATA_BLOCKED = 0x190B4D41
 _WT_STREAM_DATA_BLOCKED = 0x190B4D42
 _WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
 _WT_STREAMS_BLOCKED_UNI = 0x190B4D44
@@ -92,6 +95,12 @@ _INCOMPLETE_VARINT_8BYTE = b"\xc0"
         # WT_MAX_STREAMS: 両方向 / 単方向
         (_WT_MAX_STREAMS_BIDI, _INCOMPLETE_VARINT_2BYTE),
         (_WT_MAX_STREAMS_UNI, _INCOMPLETE_VARINT_2BYTE),
+        # WT_DATA_BLOCKED: Maximum Data が不完全 (2 バイト / 4 バイト / 8 バイト
+        # varint)、および空ペイロード
+        (_WT_DATA_BLOCKED, _INCOMPLETE_VARINT_2BYTE),
+        (_WT_DATA_BLOCKED, _INCOMPLETE_VARINT_4BYTE),
+        (_WT_DATA_BLOCKED, _INCOMPLETE_VARINT_8BYTE),
+        (_WT_DATA_BLOCKED, b""),
         # WT_STREAM_DATA_BLOCKED: Stream ID / Maximum Stream Data が不完全
         (_WT_STREAM_DATA_BLOCKED, _INCOMPLETE_VARINT_2BYTE),
         (_WT_STREAM_DATA_BLOCKED, _encode_varint(0) + _INCOMPLETE_VARINT_2BYTE),
@@ -118,6 +127,10 @@ _INCOMPLETE_VARINT_8BYTE = b"\xc0"
         "max_stream_data_value",
         "max_streams_bidi",
         "max_streams_uni",
+        "data_blocked_2byte",
+        "data_blocked_4byte",
+        "data_blocked_8byte",
+        "data_blocked_empty",
         "stream_data_blocked_stream_id",
         "stream_data_blocked_value",
         "streams_blocked_bidi",
@@ -127,7 +140,9 @@ _INCOMPLETE_VARINT_8BYTE = b"\xc0"
 def test_incomplete_payload_resets_stream(capsule_type: int, payload: bytes) -> None:
     """不完全なペイロードのカプセルが PROTOCOL_ERROR でストリームを閉じることを確認
 
-    修正前は無言で読み捨てられ、セッションが維持されたまま検証が回避できた。
+    デコード失敗を無言で return していた時期はセッションが維持されたまま
+    検証が回避でき、WT_DATA_BLOCKED はペイロードを読むハンドラ自体が無く
+    カプセルごと読み捨てられていた。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)

@@ -7,12 +7,11 @@ RFC 9297 Section 3.3 は「各カプセルのペイロードはその定義が�
 エラー (RST_STREAM) を送出する。draft-ietf-webtrans-http2-15 Section 3.4 の
 とおり、ストリームのリセットはセッションを終了させる。
 
-対象は固定フィールドのみからなる 7 ハンドラ (WT_RESET_STREAM / WT_STOP_SENDING /
+対象は固定フィールドのみからなる 8 ハンドラ (WT_RESET_STREAM / WT_STOP_SENDING /
 WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS / WT_STREAM_DATA_BLOCKED /
-WT_STREAMS_BLOCKED) と、ペイロードを持てない WT_DRAIN_SESSION である。残りの
-バイトが正当なペイロードであるカプセル (WT_STREAM / DATAGRAM /
-WT_CLOSE_SESSION / PADDING) には適用しない。WT_DATA_BLOCKED はフィールドを
-読み出していないため本テストの対象外である。
+WT_STREAMS_BLOCKED / WT_DATA_BLOCKED) と、ペイロードを持てない WT_DRAIN_SESSION
+である。残りのバイトが正当なペイロードであるカプセル (WT_STREAM / DATAGRAM /
+WT_CLOSE_SESSION / PADDING) には適用しない。
 
 検証の順序も固定する。WT_RESET_STREAM の Error Code の範囲検証は既存の順序
 (Reliable Size より前) を維持するため、余分なバイトと範囲外の Error Code を
@@ -51,6 +50,7 @@ _WT_MAX_DATA = 0x190B4D3D
 _WT_MAX_STREAM_DATA = 0x190B4D3E
 _WT_MAX_STREAMS_BIDI = 0x190B4D3F
 _WT_MAX_STREAMS_UNI = 0x190B4D40
+_WT_DATA_BLOCKED = 0x190B4D41
 _WT_STREAM_DATA_BLOCKED = 0x190B4D42
 _WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
 _WT_STREAMS_BLOCKED_UNI = 0x190B4D44
@@ -102,6 +102,10 @@ _ACCEPTED_MAX_STREAM_DATA = h2.Config().wt_initial_max_stream_data + 1
         # WT_MAX_STREAMS: Maximum Streams (両方向 / 単方向)
         (_WT_MAX_STREAMS_BIDI, _encode_varint(100) + _TRAILING_BYTE, None),
         (_WT_MAX_STREAMS_UNI, _encode_varint(100) + _TRAILING_BYTE, None),
+        # WT_DATA_BLOCKED: Maximum Data。形の検証が意味論検証より先に走ることを
+        # 固定する (WT_MAX_DATA の減少値検証へ誤って流れた場合の検出は、
+        # 既定値未満の値を受理させる対照表の行が担う)
+        (_WT_DATA_BLOCKED, _encode_varint(100) + _TRAILING_BYTE, None),
         # WT_STREAM_DATA_BLOCKED: Stream ID / Maximum Stream Data
         (
             _WT_STREAM_DATA_BLOCKED,
@@ -122,6 +126,7 @@ _ACCEPTED_MAX_STREAM_DATA = h2.Config().wt_initial_max_stream_data + 1
         "max_stream_data",
         "max_streams_bidi",
         "max_streams_uni",
+        "data_blocked",
         "stream_data_blocked",
         "streams_blocked_bidi",
         "streams_blocked_uni",
@@ -165,6 +170,9 @@ def test_trailing_byte_capsule_resets_stream(
         ),
         (_WT_MAX_STREAMS_BIDI, _encode_varint(100), None),
         (_WT_MAX_STREAMS_UNI, _encode_varint(100), None),
+        # 既定値未満の 100。値の意味論 (減少値検証) へ誤って流れていないことを
+        # セッション存続の表明で検出できる
+        (_WT_DATA_BLOCKED, _encode_varint(100), None),
         (_WT_STREAM_DATA_BLOCKED, _encode_varint(0) + _encode_varint(100), None),
         (_WT_STREAMS_BLOCKED_BIDI, _encode_varint(100), None),
         (_WT_STREAMS_BLOCKED_UNI, _encode_varint(100), None),
@@ -182,6 +190,7 @@ def test_trailing_byte_capsule_resets_stream(
         "max_stream_data",
         "max_streams_bidi",
         "max_streams_uni",
+        "data_blocked",
         "stream_data_blocked",
         "streams_blocked_bidi",
         "streams_blocked_uni",
