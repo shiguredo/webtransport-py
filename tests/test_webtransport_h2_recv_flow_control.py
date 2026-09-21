@@ -439,12 +439,13 @@ def test_pre_accept_413_releases_unconsumed_recv_bytes_and_window() -> None:
 
 
 def test_peer_end_stream_releases_unconsumed_recv_bytes() -> None:
-    """ピアの END_STREAM によるセッション終了で未消費受信バイトの記録が解放されることを確認
+    """未完成カプセルのまま届いた END_STREAM で未消費受信バイトの記録が解放されることを確認
 
-    handle_end_stream は自側の END_STREAM を送らないため両ハーフが閉じず、
-    on_stream_close_callback も到着しない (ストリームは half-closed (remote)
-    のまま接続終了まで残る)。エントリ削除時に記録を解放しないと、その間ずっと
-    残る。
+    この入力ではカプセルが途中のまま END_STREAM が届くため、RFC 9297
+    Section 3.3 の MUST により malformed として PROTOCOL_ERROR の RST_STREAM が
+    送出される。エントリの破棄と記録の解放は、RST_STREAM の送出で発火する
+    on_stream_close_callback が行う (記録を解放する経路が handle_end_stream の
+    直接呼び出しから変わる)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
