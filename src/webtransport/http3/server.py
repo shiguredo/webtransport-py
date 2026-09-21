@@ -45,6 +45,9 @@ class ClientConnection:
         # 同じ通知経路になるよう接続単位で保持し、HTTP/3 層のイベントを
         # 処理したあとに通知する
         self.finished_streams: list[int] = []
+        # ピア起点のリセットの通知待ち (到着順)。_drain_quic_events で検出しても、
+        # アプリへの通知は同一バッチの _process_http3_events を終えるまで保留する
+        self.pending_stream_resets: list[tuple[int, int]] = []
 
     def setup_http3_streams(self) -> None:
         """HTTP/3 制御ストリームとQPACKストリームを設定する"""
@@ -161,6 +164,11 @@ class Server:
     ) -> None:
         """リクエスト受信時のコールバックを設定する
 
+        同一の受信バッチに完備した HEADERS とピア起点のリセットが並ぶ場合は、
+        先に到着した HEADERS の本コールバックが `on_stream_reset` より先に
+        呼ばれる。複数のリセットは到着順に通知され、同一バッチに接続終了が
+        並んでも通知は失われない。
+
         Args:
             callback: async def callback(stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]) -> None
         """
@@ -218,6 +226,10 @@ class Server:
 
         ピアのリセットは nghttp3 へ転送され、そのストリームの読み取りが中断
         される (受信途中のヘッダーブロックと未送信の応答データは破棄される)。
+        同一の受信バッチに完備した HEADERS が並ぶ場合は、先に到着した
+        HEADERS / DATA のコールバックが本コールバックより先に呼ばれる。
+        複数のリセットは到着順に通知され、同一バッチに接続終了が並んでも
+        通知は失われない。
 
         Args:
             callback: async def callback(stream_id: int, error_code: int, addr: tuple[str, int]) -> None
@@ -471,12 +483,12 @@ class Server:
                 # ResetStream を push するため使わない (アプリ起点のリセットと
                 # して扱われ、こちらから RESET_STREAM を送出してしまう)
                 client.http3_connection.shutdown_stream_read(quic_event.stream_id)
-                if self._on_stream_reset is not None:
-                    await self._on_stream_reset(
-                        quic_event.stream_id,
-                        quic_event.error_code,
-                        addr,
-                    )
+                # アプリへの通知は保留する。同一バッチに完備した HEADERS が
+                # 並ぶ場合、先に到着した HEADERS / DATA の通知より後にリセットを
+                # 通知するため (同一バッチでは next_event が返す順序がワイヤの
+                # 到着順になる。ngtcp2 が受信したフレーム順にイベントを積む
+                # 実装に依存する)
+                client.pending_stream_resets.append((quic_event.stream_id, quic_event.error_code))
             elif quic_event.type == quic_low.EventType.STOP_SENDING:
                 # ピアの送信停止要求を nghttp3 へ転送する。転送しないと
                 # nghttp3 は書き込み側を生存とみなし、送信データを返し続ける
@@ -801,6 +813,15 @@ class Server:
                     http3_event.stream_id,
                     http3_event.error_code,
                 )
+
+        # 保留したピア起点のリセットを到着順に通知する。先に到着した
+        # HEADERS / DATA の通知の後、on_stream_end の通知より前に出す
+        # (リセットと on_stream_end の相対順序は現状維持)
+        pending_resets = client.pending_stream_resets
+        client.pending_stream_resets = []
+        if self._on_stream_reset is not None:
+            for stream_id, error_code in pending_resets:
+                await self._on_stream_reset(stream_id, error_code, addr)
 
         # HTTP/3 の DATA を処理したあとに STREAM_END を通知する。
         # コールバック未設定でも滞留させないよう必ず取り出す
