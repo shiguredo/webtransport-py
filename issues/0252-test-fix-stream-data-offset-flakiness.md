@@ -1,7 +1,7 @@
 # QUIC の STREAM_DATA offset テストが pacing の期限待ちを行わず flaky に失敗する
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-21
 - Branch: feature/fix-stream-data-offset-flakiness
 - Polished: {YYYY-MM-DD}
 
@@ -34,3 +34,9 @@
 
 - pacing を無効化する API の追加 (ngtcp2 側の設定であり、本 issue では扱わない)
 - 固定回数の送受信ループを持つ他のテストの一括見直し
+
+## 解決方法
+
+- `tests/test_quic_stream_data_offset.py` の `test_stream_data_offset_matches_cumulative_position` の交換ループを `PUMP_ATTEMPTS` 回にし、両側の `send()` が `None` のときは `wait_pacing_timeout` で期限まで待って再試行するようにした
+- STREAM_DATA イベントの収集を交換ループ内へ移し、全チャンク (5000 バイト) の受信を確認できた時点でループを打ち切るようにした
+- 検証: 修正前は手元の macOS 26.4 (arm64) で 50 回中 19 回失敗した。修正後は同じ環境で 200 回連続実行して全成功した。prek の pytest (全テスト) も通過した
