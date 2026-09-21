@@ -682,6 +682,15 @@ class Client:
                             quic_event.stream_id,
                             quic_event.error_code,
                         )
+                elif quic_event.type == quic_low.EventType.STOP_SENDING:
+                    # ピアの送信停止要求を nghttp3 へ転送する。転送しないと
+                    # nghttp3 は書き込み側を生存とみなし、送信データを返し続ける
+                    # (RFC 9000 Section 3.5 は Ready / Send 状態での RESET_STREAM
+                    # 送出を MUST、Data Sent 状態での延期を MAY と定め、ngtcp2 は
+                    # 未 ACK の送信データが残っていれば自動送出する)。
+                    # 読み取り側を閉じる shutdown_stream_read とは逆方向であり、
+                    # 読み取り側の終端とは独立して扱う
+                    self._http3_connection.shutdown_stream_write(quic_event.stream_id)
                 elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
                     self._connected = False

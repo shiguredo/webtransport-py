@@ -179,6 +179,9 @@ class Connection:
     def _has_stream_buffer(self, stream_id: int) -> bool | None:
         """テスト専用: ストリームの送信バッファエントリの有無を確認"""
 
+    def _is_stream_write_shutdown(self, stream_id: int) -> bool:
+        """テスト専用: 書き込み側をシャットダウン済みのストリームか確認"""
+
     def frame_payload_left(self, stream_id: int) -> int | None:
         """受信中フレームのペイロード残量を取得"""
 

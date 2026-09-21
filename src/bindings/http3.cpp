@@ -752,6 +752,15 @@ std::optional<bool> Http3Connection::has_stream_buffer(
   return true;
 }
 
+bool Http3Connection::has_stream_write_shutdown(int64_t stream_id) const {
+  // コネクションが無い・閉じている場合は偽を返す (frame_payload_left と
+  // 同じガード。has_stream_buffer / has_pending_headers は conn_ を見ない)
+  if (!conn_ || closed_) {
+    return false;
+  }
+  return shutdown_stream_ids_.contains(stream_id);
+}
+
 std::optional<uint64_t> Http3Connection::frame_payload_left(
     int64_t stream_id) const {
   if (!conn_ || closed_) {
@@ -1480,6 +1489,12 @@ void bind_http3(nb::module_& m) {
            nb::sig("def _has_stream_buffer(self, stream_id: int) -> "
                    "bool | None"),
            "テスト専用: ストリームの送信バッファエントリの有無を確認")
+      .def("_is_stream_write_shutdown",
+           &Http3Connection::has_stream_write_shutdown, nb::lock_self(),
+           nb::arg("stream_id"),
+           nb::sig("def _is_stream_write_shutdown(self, stream_id: int) -> "
+                   "bool"),
+           "テスト専用: 書き込み側をシャットダウン済みのストリームか確認")
       .def(
           "frame_payload_left", &Http3Connection::frame_payload_left,
           nb::lock_self(), nb::arg("stream_id"),

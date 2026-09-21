@@ -1,7 +1,7 @@
 # http3 の高レベル層がピアの STOP_SENDING を nghttp3 へ伝えない
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-21
 - Branch: feature/fix-http3-peer-stop-sending-not-forwarded
 - Polished: 2026-09-20
 
@@ -26,9 +26,10 @@
   - ピアの STOP_SENDING は「自側の書き込み側の終了要求」であるため、読み取り側を閉じる `shutdown_stream_read` ではなく `shutdown_stream_write` を使う。読み取り側が既に終端している (`STREAM_RESET` を転送済み) 場合も、書き込み側の終了は独立して扱う (読み取り側の終端は `pending_headers_` / `stream_buffers_` の解放で表現され、書き込み側の記録 `shutdown_stream_ids_` とは別である)
   - `Http3Connection::shutdown_stream_write` の入力契約は変えない (接続が無い・閉じている場合は no-op)
   - RESET_STREAM の送出自体は ngtcp2 が行うため、高レベル層から改めて送出しない (0240 で `reset_stream` の再利用を避けたのと同じ理由)
-  - アプリ向けのコールバックは追加しない。0220 は層間 API の非対称のうち「ストリーム終了の観測・ストリームの中断・再エクスポート」の 3 点を対象としており、`on_stop_sending` はその対象に含まれない (0220 の目的)。本 issue は nghttp3 への転送だけを対象とし、アプリから送信不能を観測する手段の追加は追跡 issue が無い (未起票)
+  - アプリ向けのコールバックは追加しない。0220 は層間 API の非対称のうち「ストリーム終了の観測・ストリームの中断・再エクスポート」の 3 点を対象としており、`on_stop_sending` はその対象に含まれない (0220 の目的)。アプリから送信不能を観測する手段は 0250 (http3 の `on_stop_sending`) と 0251 (h3 のピア STOP_SENDING の扱い) が追跡する
 - **不採用**: `src/bindings/quic.cpp` の `NGTCP2_ERR_STREAM_SHUT_WR` 経路で QUIC 層から HTTP/3 層へ通知する案。層をまたぐ新しい通知経路が必要になり、ピアの STOP_SENDING 以外 (アプリ起点の終了) と区別できない。原因が既知である以上、原因側で扱う
 - `on_stream_reset` の扱い (0240 の `shutdown_stream_read` の転送) は変えない。stop_sending と reset_stream は独立した方向を扱う
+- テストで「シャットダウンされたか」を判別するため、低レベル `Http3Connection` にテスト専用 API `_is_stream_write_shutdown` (`shutdown_stream_ids_` の参照) を追加する。既存の `_has_stream_buffer` は送信バッファが事前にある場合にシャットダウンを判別できないため (CODEBASE.md の「E2E テスト向けライブラリとして細粒度の機能を用意する」方針に沿う)
 - 低レベル `Http3Connection::shutdown_stream_write` の契約 (以後の `send_data` が no-op、シャットダウン前に積んだ未送信データも送出されない) は `tests/test_http3_message_ext.py` の既存テスト 3 件で固定済みである。本 issue で低レベルのテストを追加する必要はない (`shutdown_stream_write` は `stream_buffers_` を消さないが、nghttp3 が SHUT_WR で当該ストリームを送出対象にしないため未送信データは送出されず、解放は既存のストリーム終了経路に任せる)
 - 変更対象: `src/webtransport/http3/client.py` / `server.py`、`tests/test_e2e_http3_peer_stop_sending.py` (新規。0240 の `tests/test_e2e_http3_peer_reset.py` と同じ構成で実 QUIC ピアから STOP_SENDING を送る)、`skills/webtransport-py/SKILL.md` (`http3.Client` / `http3.Server` の説明に転送の契約を追記する)
 - 0246 (同一 drain の `on_stream_reset` と `on_headers` の順序) が同じ QUIC イベント drain を触るため、実装の順序によっては rebase が必要になる
@@ -40,7 +41,7 @@
   - DUT が所有する `http3_connection` を run ループを止めた状態で直接駆動した場合、`send_data` の後に `get_streams_to_send` が当該ストリームを返さない (転送が無ければ返す。e2e で run ループを動かしたままだと送信待ちが毎周回 drain されるため、この観測は使えない)
   - `stream_writable` の値だけでは判別できない (未知ストリーム・フロー制御ブロック・読み取りブロックでも 0 になる)
 - 実 QUIC ピアからの再現は DUT の側ごとに構成を分ける
-  - サーバー側 DUT (`http3.Server`): ピアは `quic.Client` とし、低レベル `_connection.stop_sending(stream_id, error_code)` と `_send_pending()` で STOP_SENDING だけを送出する (0240 のサーバー側 e2e と同じ手順)
+  - サーバー側 DUT (`http3.Server`): ピアは `http3.Client` とし、低レベル `_quic_connection.stop_sending(stream_id, error_code)` と `_send_pending()` で STOP_SENDING だけを送出する (QPACK 符号化済みのリクエストで DUT の nghttp3 にストリームを作る必要があるため `quic.Client` は使わない)
   - クライアント側 DUT (`http3.Client`): ピアは `http3.Server` とし、その低レベル `quic_connection.stop_sending(...)` と `server._send_to(...)` で STOP_SENDING を送出する (0240 のクライアント側テストと同じ構成)。`quic.Client` は `http3.Client` のピアになれない (双方が QUIC クライアント)
   - 注意: ピアの `stop_sending` は `ngtcp2_conn_shutdown_stream_read` を呼ぶため、DUT の送信側ストリームがピアから見て終端済み (SHUT_RD かつ受信済みバイト数が final size に達している) だと 0 を返して STOP_SENDING を送出しない。DUT の送信側を終端しないこと (`Client.request` は FIN を送らないため、クライアント側 DUT のリクエストはそのままでよい。サーバー側 DUT では応答を `send_data(..., fin=False)` のままにする。転送後は `send_data(..., fin=True)` が no-op になり終端できないため、送信方向の終端は ngtcp2 の RESET_STREAM に任せる)
 - 高レベル層の転送を外した状態で、上の判別の観測結果が変わることを実測で確認する (RED。低レベルの契約自体は `tests/test_http3_message_ext.py` の既存テストで固定済みなので、追加の低レベルテストは作らない)
@@ -48,7 +49,20 @@
 
 ## 対象外
 
-- アプリ向けの `on_stop_sending` コールバックの追加 (0220 の対象はストリーム終了の観測・ストリームの中断・再エクスポートの 3 点であり、`on_stop_sending` は含まれない。追跡 issue も無い。未起票)
+- アプリ向けの `on_stop_sending` コールバックの追加 (0220 の対象はストリーム終了の観測・ストリームの中断・接続の終了・再エクスポートの 4 点であり、`on_stop_sending` は含まれない。0250 / 0251 が追跡する)
 - ピアの RESET_STREAM の読み取り側の転送 (0240 で対応済み)
 - STOP_SENDING を受けた後に同じストリームで送信を再開する API (RFC 9000 Section 3.5 / 19.4 により送信方向は終端し、再開できない)
 - `src/webtransport/h3/` (WebTransport over HTTP/3) のピア STOP_SENDING の扱い。WebTransport のデータストリームも nghttp3 を介する (`H3Session` は `nghttp3_conn_read_stream2` / `nghttp3_conn_writev_stream` を使う) ため同種の欠陥が残るが、h3 層には書き込み側シャットダウン API が無く別対応になるため本 issue では扱わない (この経路を追跡する issue は未起票)
+
+## 解決方法
+
+- `src/webtransport/http3/client.py` と `server.py` の QUIC イベント drain に `quic_low.EventType.STOP_SENDING` の分岐を追加し、`Http3Connection.shutdown_stream_write(stream_id)` を呼ぶ。ピアの送信停止要求は自側の書き込み側の終了要求であるため、読み取り側を閉じる `shutdown_stream_read` (STREAM_RESET の分岐) とは独立して扱う。RESET_STREAM の送出は ngtcp2 に任せ、高レベル層からは送出しない
+- 転送後は低レベルの `send_data` が no-op (送信対象を作らない) になり、nghttp3 の書き込み側も終了するため、nghttp3 が返したデータが破棄される経路が塞がる
+- テストでシャットダウンを判別するため、低レベル `Http3Connection` にテスト専用 API `_is_stream_write_shutdown` を追加した。`shutdown_stream_ids_` を参照し、コネクションが無い・閉じている場合は false を返す (`frame_payload_left` と同じガード)。C++ ヘッダと stub に反映済み
+- `tests/test_e2e_http3_peer_stop_sending.py` を追加した。サーバー側 DUT (`http3.Server`) はピアを `http3.Client`、クライアント側 DUT (`http3.Client`) はピアを `http3.Server` とし、それぞれ低レベルの `stop_sending` + `_send_pending()` / `_send_to` で STOP_SENDING だけを送出する。`_is_stream_write_shutdown` が真になること (転送) と、その後の `send_data` が `get_streams_to_send` に現れないこと (no-op) を表明する
+- 完了条件がサーバー側のピアを `quic.Client` としていた点は `http3.Client` に変更した (QPACK 符号化済みのリクエストで DUT の nghttp3 にストリームを作る必要があるため。0240 が `quic.Client` を使ったのは RESET_STREAM だけを送るためであり、STOP_SENDING では同じ制約が無い)
+- コメントの引用は RFC 9000 Section 3.5 の状態条件 (Ready / Send は MUST、Data Sent は MAY) と ngtcp2 の実装条件 (未 ACK の送信データが残っていれば自動送出) を書き分けた
+- `skills/webtransport-py/SKILL.md` の `http3.Server` / `http3.Client` の節に、ピアの STOP_SENDING を書き込み側の終了として nghttp3 へ転送する契約を追記した
+- RED は 2 通りで実測した: `client.py` / `server.py` の追加分岐を外す (git stash で develop 状態に戻す) と e2e 2 件が失敗し、低レベル `send_data` のシャットダウン判定を外す変異ではクライアント側テストの no-op 表明が失敗する
+- `CHANGES.md` は CODEBASE.md の指示により更新しない。公開 API (nanobind) の追加はテスト専用 API `_is_stream_write_shutdown` のみで、型スタブは `make develop` の生成結果と一致させた
+- 全テストが通過する (1319 passed)
