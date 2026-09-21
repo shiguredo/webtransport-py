@@ -6,9 +6,11 @@
 
 from conftest import (
     CLIENT_ADDR,
+    PUMP_ATTEMPTS,
     SERVER_ADDR,
     create_client_server_pair,
     perform_handshake,
+    wait_pacing_timeout,
 )
 
 from webtransport import quic
@@ -35,8 +37,14 @@ def test_stream_data_offset_matches_cumulative_position():
     for chunk in chunks:
         client.send_stream_data(stream_id, chunk)
 
-    # パケットを交換してサーバーに届ける
-    for _ in range(100):
+    # パケットを交換してサーバーに届ける。pacing 有効時は send() が送信可能
+    # 期限まで空振りするため、両方向空振りなら期限まで待って再試行する。
+    # 全チャンクの受信を確認できたら打ち切る (それ以上待つとタイマー消費で
+    # 無駄に時間がかかるため)
+    received = []
+    received_bytes = 0
+    total_bytes = sum(len(chunk) for chunk in chunks)
+    for _ in range(PUMP_ATTEMPTS):
         client_packet = client.send()
         if client_packet is not None:
             server.receive(client_packet.data, SERVER_ADDR, CLIENT_ADDR)
@@ -44,14 +52,23 @@ def test_stream_data_offset_matches_cumulative_position():
         if server_packet is not None:
             client.receive(server_packet.data, CLIENT_ADDR, SERVER_ADDR)
 
-    # サーバーの STREAM_DATA イベントを収集する
-    received = []
-    while True:
-        event = server.next_event()
-        if event is None:
+        # サーバーの STREAM_DATA イベントを収集する
+        while True:
+            event = server.next_event()
+            if event is None:
+                break
+            if event.type == quic.EventType.STREAM_DATA:
+                received.append((event.offset, len(event.data)))
+                received_bytes += len(event.data)
+
+        if received_bytes >= total_bytes:
             break
-        if event.type == quic.EventType.STREAM_DATA:
-            received.append((event.offset, len(event.data)))
+        if (
+            client_packet is None
+            and server_packet is None
+            and not wait_pacing_timeout(client, server)
+        ):
+            break
 
     # 各イベントの offset が累積位置と一致する (連続配送の検証)
     assert received, "STREAM_DATA イベントが受信されていません"
@@ -60,4 +77,4 @@ def test_stream_data_offset_matches_cumulative_position():
         assert offset == expected_offset
         expected_offset += data_len
     # 全チャンクが欠落なく届いている
-    assert expected_offset == sum(len(chunk) for chunk in chunks)
+    assert expected_offset == total_bytes
