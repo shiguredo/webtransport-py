@@ -281,7 +281,11 @@ def test_fin_after_send_ignored() -> None:
 
 
 def test_data_blocked_on_wire() -> None:
-    """セッション上限超過で WT_DATA_BLOCKED が送出される"""
+    """セッション上限超過で WT_DATA_BLOCKED が送出され、対向が受理することを確認
+
+    送信側が組む Maximum Data (1 フィールド) の形と、受信側が要求する形
+    (フィールドの不足も余分なバイトも無いこと) が一致していることも見る。
+    """
     client = h2.Session.create_client(h2.Config())
     server_config = h2.Config()
     server_config.is_server = True
@@ -300,6 +304,14 @@ def test_data_blocked_on_wire() -> None:
     wire = client.send()
     assert wire is not None
     assert _encode_capsule(_WT_DATA_BLOCKED, _encode_varint(8)) in wire
+
+    # 自実装が送出した WT_DATA_BLOCKED を自実装の受信側が受理する
+    # (送信形と受信側の形検証の合成。ずれていれば RST_STREAM でセッションが
+    # 終了するため、ここで検出できる)
+    assert server.receive(wire) > 0, "WT_DATA_BLOCKED を含むワイヤの受信に失敗しました"
+    assert server.get_session_ids() == [session_id], (
+        "WT_DATA_BLOCKED の受信でセッションが終了しました"
+    )
 
 
 def test_streams_blocked_on_wire() -> None:

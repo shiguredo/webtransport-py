@@ -11,10 +11,18 @@ WT_STREAM_DATA_BLOCKED が、有効な状態のストリームと未使用の St
 WT_CLOSE_SESSION (error code 0x50) で実現され、ワイヤ部分列チェックで
 検証する。WT_FLOW_CONTROL_ERROR (0xTBD) のプレースホルダ
 (draft-15 Section 3.4)。
+
+Section 6.8 の WT_DATA_BLOCKED も対象に含む。Maximum Data (可変長整数) を
+受理し、advisory な通知として扱って自側のフロー制御状態とクレジットを
+更新しないこと、アプリへイベントを push しないことを検証する。ペイロードの
+形 (フィールドの不足・不完全な可変長整数・余分なバイト) の検証は、カプセル
+横断の tests/test_webtransport_h2_incomplete_capsule_payload.py と
+tests/test_webtransport_h2_capsule_trailing_bytes.py が担う。
 """
 
 from __future__ import annotations
 
+import pytest
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
@@ -40,6 +48,7 @@ _WT_MAX_DATA = 0x190B4D3D
 _WT_MAX_STREAM_DATA = 0x190B4D3E
 _WT_MAX_STREAMS_BIDI = 0x190B4D3F
 _WT_MAX_STREAMS_UNI = 0x190B4D40
+_WT_DATA_BLOCKED = 0x190B4D41
 _WT_STREAM_DATA_BLOCKED = 0x190B4D42
 _WT_STREAM_FIN = 0x190B4D3B
 _WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
@@ -47,6 +56,17 @@ _WT_STREAMS_BLOCKED_UNI = 0x190B4D44
 
 # Maximum Streams の上限は 2^60
 _MAX_STREAMS_LIMIT = 1 << 60
+
+# WT_DATA_BLOCKED の Maximum Data に使う可変長整数の値とワイヤ長。1 バイトは
+# 最小値 0、2 / 4 / 8 バイトは各符号化長で表せる最大値 (それぞれ 2^14 - 1、
+# 2^30 - 1、可変長整数の上限 2^62 - 1。RFC 9000 Section 16)
+_MAX_VARINT_VALUE = (1 << 62) - 1
+_DATA_BLOCKED_VARINTS = [
+    (0, 1),
+    ((1 << 14) - 1, 2),
+    ((1 << 30) - 1, 4),
+    (_MAX_VARINT_VALUE, 8),
+]
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
@@ -296,6 +316,100 @@ def test_wt_streams_blocked_decrease_does_not_close() -> None:
     session_id = _connect_h2_session(client, server)
 
     _inject_capsule(server, session_id, _WT_STREAMS_BLOCKED_BIDI, _encode_varint(50))
+    _assert_no_flow_control_error_sent(server)
+
+
+@pytest.mark.parametrize(
+    ("value", "wire_length"),
+    _DATA_BLOCKED_VARINTS,
+    ids=["1byte", "2byte", "4byte", "8byte"],
+)
+def test_wt_data_blocked_accepted_for_valid_varint_lengths(value: int, wire_length: int) -> None:
+    """Maximum Data が正しい WT_DATA_BLOCKED が受理されセッションが存続することを確認
+
+    draft-15 Section 6.8 は Maximum Data を可変長整数と定めるため、1 / 2 / 4 /
+    8 バイトのいずれの符号化も受け入れる。値域の MUST は無いため上限
+    (2^62 - 1) も受理する。フィールドの読み出しを実装していないと、この
+    対照テストは (修正前でも) 通ってしまうため RED の観測対象ではない。
+    """
+    assert len(_encode_varint(value)) == wire_length, "前提: 可変長整数のワイヤ長"
+
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_capsule(server, session_id, _WT_DATA_BLOCKED, _encode_varint(value))
+
+    _assert_no_flow_control_error_sent(server)
+    assert not [event for event in _drain_events(server) if event.type == h2.EventType.ERROR], (
+        "Error イベントが発火しました"
+    )
+    assert server.get_session_ids() == [session_id], "セッションが終了しています"
+
+
+def test_wt_data_blocked_accepted_for_non_minimal_varint() -> None:
+    """値 0 を 8 バイトで符号化した Maximum Data も受理されることを確認
+
+    RFC 9297 Section 1.1 と RFC 9000 Section 16 は「値は必要最小限のバイト数で
+    符号化する必要はない」とするため、非最小符号化も受理しなければならない。
+    0xc0 は 8 バイト可変長整数のプレフィックスであり、`decode_varint` は値では
+    なくプレフィックスから消費バイト数を決めるため、この入力は
+    フィールド 1 つでペイロードが終端する (長さの一致検証それ自体の判別は、
+    余分なバイトを持つ入力を使うカプセル横断の
+    tests/test_webtransport_h2_capsule_trailing_bytes.py が担う)。
+
+    受理だけを表明するテストであり、ペイロードを検証しない修正前実装
+    (no-op 分岐) でも通る。RED の観測対象ではない。
+    """
+    payload = b"\xc0" + b"\x00" * 7
+
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_capsule(server, session_id, _WT_DATA_BLOCKED, payload)
+
+    _assert_no_flow_control_error_sent(server)
+    assert not [event for event in _drain_events(server) if event.type == h2.EventType.ERROR], (
+        "Error イベントが発火しました"
+    )
+    assert server.get_session_ids() == [session_id], "セッションが終了しています"
+
+
+def test_wt_data_blocked_does_not_update_flow_control_state() -> None:
+    """受理した WT_DATA_BLOCKED が自側のフロー制御状態を更新しないことを確認
+
+    draft-15 Section 6.8 の Maximum Data は「ブロックが発生したセッション
+    レベルの上限」の申告であり、WT_MAX_DATA と違って自側の送信上限
+    (max_data_local) を書き換えない。送信クレジットを観測点にして、既定値より
+    大きい値を送っても残量が変わらないこと (状態更新が起きていないこと) を
+    固定する。イベントも push しない (WT_STREAMS_BLOCKED と同じ advisory な
+    通知)。
+
+    続けて WT_MAX_DATA を注入し、WT_DATA_BLOCKED が前回受信値
+    (received_max_data) を汚染していないことも固定する。汚染していれば
+    1_500_000 は「減少」と誤判定され WT_FLOW_CONTROL_ERROR になる。
+
+    カプセルを無視する修正前実装 (no-op 分岐) でも通る。RED の観測対象では
+    ない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    credit_before = server.get_send_credit(session_id)
+    assert credit_before == h2.Config().wt_initial_max_data, (
+        "前提: 初期クレジットが対向の広告値と一致していません"
+    )
+
+    _inject_capsule(server, session_id, _WT_DATA_BLOCKED, _encode_varint(2_000_000))
+
+    assert server.get_send_credit(session_id) == credit_before, (
+        "WT_DATA_BLOCKED が送信クレジットを更新しています"
+    )
+    assert _drain_events(server) == [], "WT_DATA_BLOCKED でイベントが発火しました"
+    assert server.get_session_ids() == [session_id], "セッションが終了しています"
+
+    # 前回受信値が WT_DATA_BLOCKED の値 (2_000_000) に汚染されていなければ、
+    # SETTINGS 由来の 1_048_576 からの増加として受理される
+    _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(1_500_000))
     _assert_no_flow_control_error_sent(server)
 
 

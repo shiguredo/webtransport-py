@@ -688,9 +688,7 @@ class H2Session {
   // length を渡して呼び、余分なバイトが残っている場合は malformed として
   // reset_stream_for_malformed_capsule を呼んで false を返す。呼び出し側は
   // false で return するだけでよい。残りのバイトが正当なペイロードである
-  // カプセル (WT_STREAM / DATAGRAM / WT_CLOSE_SESSION / PADDING) と、本実装が
-  // フィールドを読み出していない WT_DATA_BLOCKED (draft-15 Section 6.8 の
-  // Maximum Data を検証していない) には掛けない
+  // カプセル (WT_STREAM / DATAGRAM / WT_CLOSE_SESSION / PADDING) には掛けない
   bool verify_capsule_payload_fully_read(int32_t session_id,
                                          size_t offset,
                                          size_t length);
@@ -740,6 +738,9 @@ class H2Session {
   void handle_wt_streams_blocked(int32_t session_id,
                                  const uint8_t* payload,
                                  size_t length);
+  void handle_wt_data_blocked(int32_t session_id,
+                              const uint8_t* payload,
+                              size_t length);
   void handle_datagram(int32_t session_id,
                        const uint8_t* payload,
                        size_t length);

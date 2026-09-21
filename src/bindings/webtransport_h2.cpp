@@ -487,9 +487,14 @@ void H2Session::process_capsule(int32_t session_id,
     case CapsuleType::WtStreamsBlockedUni:
       handle_wt_streams_blocked(session_id, payload, length);
       break;
-    case CapsuleType::Padding:
     case CapsuleType::WtDataBlocked:
-      // フロー制御通知・PADDING は現時点では状態更新のみ不要
+      handle_wt_data_blocked(session_id, payload, length);
+      break;
+    case CapsuleType::Padding:
+      // PADDING は意味を持つフィールドが無く (draft-15 Section 6.1 の
+      // "has no semantic value")、同節は受信側に検証を義務付けていない
+      // ("A receiver is not obligated to verify padding but MAY treat non-zero
+      // padding as a stream error") ため、状態更新もアプリへの通知も不要
       break;
   }
 }
@@ -1208,6 +1213,46 @@ void H2Session::handle_wt_streams_blocked(int32_t session_id,
     report_flow_control_error(session_id, "WT_STREAMS_BLOCKED exceeds 2^60");
     return;
   }
+}
+
+void H2Session::handle_wt_data_blocked(int32_t session_id,
+                                       const uint8_t* payload,
+                                       size_t length) {
+  size_t offset = 0;
+
+  // Maximum Data。受信側の状態を変える値ではないため読み捨てる
+  // (draft-15 Section 6.8 の "the session-level limit at which blocking
+  // occurred" であり、自側の送信上限 (max_data_local) を更新する値ではなく
+  // 自側が広告済みの受信上限の再申告である)。読み出しはペイロードの形を
+  // 検証するために行う
+  auto max_data_result =
+      read_capsule_varint(session_id, payload + offset, length - offset);
+  if (!max_data_result) {
+    return;
+  }
+  auto [max_data, max_data_len] = *max_data_result;
+  (void)max_data;
+  offset += max_data_len;
+
+  // ペイロードが Maximum Data の終端で終わっていることを検証する
+  // (RFC 9297 Section 3.3)
+  if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
+    return;
+  }
+
+  // draft-15 Section 6.8 は WT_DATA_BLOCKED を "input to tuning of flow
+  // control algorithms and for debugging purposes" と位置付けるだけであり、
+  // エンドポイント (受信側) に MUST を課していない。同節の MUST は中間装置
+  // 向け (consume して自身の制限に対する flow control signals を生成する)
+  // であり、本実装は中間装置ではない。エンドポイント側の関連する MUST は
+  // Section 4.4 の "An endpoint MUST NOT wait for a WT_DATA_BLOCKED ...
+  // capsule before sending a WT_MAX_DATA ... capsule" であり、受信しても
+  // 待たない本実装と整合する。よって WT_STREAMS_BLOCKED と同じく advisory な
+  // 通知として扱い、状態もフロー制御クレジットも更新せず、アプリへの
+  // イベントも push しない。値域の検証も行わない: Section 6.8 の Maximum Data
+  // には上限の MUST が無く (2^60 の MUST は Section 6.7 / 6.10 の Maximum
+  // Streams 系に固有で、Maximum Data 系には無い)、同じ block 系の
+  // WT_STREAM_DATA_BLOCKED も検証していない
 }
 
 void H2Session::handle_datagram(int32_t session_id,
