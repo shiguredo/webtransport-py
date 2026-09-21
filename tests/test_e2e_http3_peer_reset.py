@@ -29,6 +29,10 @@ _WAIT_LIMIT = 5.0
 # 返送の有無を確認する猶予 (秒)。返送していれば 1 往復で届くため短くてよい
 _RETURN_CHECK_SECONDS = 0.3
 
+# データグラムの収集で、読み取りが途切れてから打ち切るまでの時間 (秒)。
+# CI の高負荷時に ACK と後続パケットの到着が離れても取りこぼさない幅を取る
+_QUIET_SECONDS = 0.5
+
 
 async def _wait_until(predicate: Callable[[], bool], message: str) -> None:
     """条件が成立するまで待つ (期限までに成立しなければ失敗する)"""
@@ -231,18 +235,26 @@ async def test_client_forwards_peer_reset_stream(test_certificates) -> None:
 async def _collect_datagrams(server: http3.Server) -> list[bytes]:
     """DUT のソケットに届いたデータグラムを、途切れるまで集める
 
-    固定の待機では全 suite 実行時の遅延で取りこぼすため、読み取りが連続して
-    空になるまで (クワイエットになるまで) 集める。
+    固定の待機では全 suite 実行時の遅延で取りこぼすため、最初の 1 件を
+    上限時間まで待ち、その後は読み取りが続く限り (クワイエット時間まで)
+    集める。ACK だけのデータグラムが先に届いても、後続の HEADERS / RESET
+    を取りこぼさない。
     """
     collected: list[bytes] = []
-    idle = 0
-    while idle < 5:
+    deadline = time.monotonic() + _WAIT_LIMIT
+    while time.monotonic() < deadline:
         batch = _read_available(server)
         if batch:
             collected.extend(batch)
-            idle = 0
-        else:
-            idle += 1
+            break
+        await asyncio.sleep(0.02)
+
+    quiet_deadline = time.monotonic() + _QUIET_SECONDS
+    while time.monotonic() < quiet_deadline:
+        batch = _read_available(server)
+        if batch:
+            collected.extend(batch)
+            quiet_deadline = time.monotonic() + _QUIET_SECONDS
         await asyncio.sleep(0.02)
     return collected
 
