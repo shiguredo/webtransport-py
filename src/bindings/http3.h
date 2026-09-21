@@ -402,6 +402,22 @@ class Http3Connection {
   std::optional<bool> has_stream_buffer(int64_t stream_id) const;
 
   /**
+   * テスト専用: 書き込み側をシャットダウン済みのストリームかを確認する
+   *
+   * production からは呼ばない。`shutdown_stream_write` が呼ばれたか
+   * (以後の `send_data` が no-op になるか) の回帰ピンであり、送信バッファの
+   * 有無 (`has_stream_buffer`) だけでは、バッファが事前にある場合に
+   * シャットダウンを判別できないため追加した
+   *
+   * コネクションが無い・閉じている場合は false を返す (`frame_payload_left` と
+   * 同じガード。`has_stream_buffer` / `has_pending_headers` は `conn_` を見ない)
+   *
+   * @param stream_id ストリーム ID
+   * @return シャットダウン済みなら true
+   */
+  bool has_stream_write_shutdown(int64_t stream_id) const;
+
+  /**
    * 受信中フレームのペイロード残量を取得
    *
    * クライアント双方向ストリームまたはリモート制御ストリーム以外は 0。
