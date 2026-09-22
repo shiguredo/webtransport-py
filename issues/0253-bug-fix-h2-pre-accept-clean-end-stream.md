@@ -1,7 +1,7 @@
 # h2 で受理前のクリーン END_STREAM がセッション終了として検知されない
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-23
 - Branch: feature/fix-h2-pre-accept-clean-end-stream
 - Polished: 2026-09-23
 
@@ -49,3 +49,11 @@ WT-H3 は受理前 FIN の検知と遅延クローズを実装済み (0058 / 006
 
 - 受理後 END_STREAM / WT_CLOSE_SESSION 経路の応答 END_STREAM の扱い変更 (ストリームが half-closed (remote) のまま残る既知の制約の解消)
 - データストリームのピア FIN を高レベル API へ通知する対応 (0220 で扱う)
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.cpp` / `.h` に受理前 END_STREAM の検知と終了処理を追加した。`H2Session::handle_end_stream` の早期 return 分岐で、サーバー側かつ未確立・未終了のセッションを新メンバー `pending_pre_accept_end_stream_session_ids_` に記録するだけに留め、`H2Session::accept_session` が 2xx を送出し受理前の蓄積カプセルを遅延処理した後に `H2Session::terminate_pre_accept_end_stream_session` で終了処理する。クリーンな終了は `SessionClosed` (error_code 0)、受理前に届いた WT_CLOSE_SESSION が遅延処理で確定した場合はその error code、蓄積に切り詰めが残る場合は PROTOCOL_ERROR のストリームエラーになる (初期フロー制御カプセルは送出しない)
+- 受理前 END_STREAM を検知したセッションは終了を学習した状態として `send_datagram` / `drain_session` を塞ぐ。保留集合は `reject_session` / `close_session` / `handle_wt_close_session` / `reset_stream_for_malformed_capsule` / `on_stream_close_callback` / 終了処理の各経路で除去し、ムーブコンストラクタ / ムーブ代入でも転送する
+- `H2Session::accept_session` の Python docstring (.def / .pyi) と関連 API の docstring・コメントを新しい挙動に合わせて更新した (メンテナンスされていた「ピアの END_STREAM 受信後」の一般化は受理後 END_STREAM に限定した)
+- テスト: `tests/test_webtransport_h2_end_stream.py` に同一フレーム / 別フレームの終了検知、2xx と初期フロー制御カプセル不送出、データグラム抑止、ドレイン抑止、受理前 END_STREAM + WT_CLOSE_SESSION の二重発火なし (error code 0 / 42)、切り詰めの PROTOCOL_ERROR、既存ピンの docstring 更新を追加・更新した。`tests/test_e2e_webtransport_h2.py` に高レベル `h2.Server` の on_session_ready → on_session_closed の順序を検証する e2e を追加し、テストヘルパー `_encode_connect_headers_frame` は `tests/conftest.py` に集約した
+- `CHANGES.md` は CODEBASE.md の指示により更新していない
