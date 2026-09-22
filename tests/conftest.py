@@ -291,6 +291,23 @@ def _encode_headers_frame(stream_id: int, header_block: bytes, end_stream: bool 
     )
 
 
+def _encode_connect_headers_frame(session_id: int, end_stream: bool) -> bytes:
+    """CONNECT リクエストの HEADERS フレームのワイヤバイト列を組み立てる
+
+    クライアント API は CONNECT ストリームを END_STREAM だけで閉じる手段を
+    持たないため、受理前 END_STREAM はワイヤ注入で再現する。HPACK はリテラル
+    表現と静的テーブル参照で組み立てる。
+    """
+    header_block = (
+        b"\x00\x07:method\x07CONNECT"
+        + b"\x00\x09:protocol\x0cwebtransport"
+        + b"\x87"  # :scheme: https
+        + b"\x84"  # :path: /
+        + b"\x01\x09localhost"  # :authority: localhost
+    )
+    return _encode_headers_frame(session_id, header_block, end_stream=end_stream)
+
+
 def _encode_status_header_block(status_code: int) -> bytes:
     """`:status` だけを持つ HPACK ヘッダーブロックを組み立てる
 

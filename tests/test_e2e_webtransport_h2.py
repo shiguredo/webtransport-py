@@ -1198,6 +1198,64 @@ async def test_h2_server_accept_via_on_session_request(test_certificates, decisi
 
 
 @pytest.mark.asyncio
+async def test_h2_server_on_session_closed_after_pre_accept_end_stream(test_certificates):
+    """受理前 END_STREAM で閉じたピアに対し on_session_ready の後に on_session_closed が 1 回呼ばれることを確認
+
+    CONNECT ストリームが 2xx 送出前に END_STREAM で閉じられた場合、高レベル
+    Server は受理 (on_session_ready) の後にセッション終了 (on_session_closed) を
+    1 回通知する。高レベル `h2.Client` は CONNECT ストリームを END_STREAM だけで
+    閉じる手段を持たないため、Sans-IO クライアントの接続に生フレームを注入して
+    再現する。
+    """
+    callback_order: list[str] = []
+    ready_event = asyncio.Event()
+    closed_event = asyncio.Event()
+
+    async def on_session_request(session_id, headers, addr):
+        return None
+
+    async def on_session_ready(session_writer):
+        callback_order.append("ready")
+        ready_event.set()
+
+    async def on_session_closed(session_writer):
+        callback_order.append("closed")
+        closed_event.set()
+
+    server, reader, writer, _client, session_id = await _h2_server_with_sans_io_client(
+        test_certificates, on_session_request
+    )
+    server.on_session_ready(on_session_ready)
+    server.on_session_closed(on_session_closed)
+    try:
+        # クライアントが送ろうとしていた CONNECT は送出せず、受理前 END_STREAM
+        # 付きの CONNECT を直接注入する
+        from conftest import _encode_connect_headers_frame
+
+        writer.write(_encode_connect_headers_frame(session_id, end_stream=True))
+        await writer.drain()
+
+        # 受理 (ready) の後に終了 (closed) が届く
+        await asyncio.wait_for(ready_event.wait(), timeout=5.0)
+        await asyncio.wait_for(closed_event.wait(), timeout=5.0)
+        assert callback_order == ["ready", "closed"]
+
+        # 受理の 2xx 応答を読み切ってから閉じる (未読の応答が残ったまま TLS の
+        # close_notify を送ると shutdown が失敗するため)
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(65535), timeout=0.5)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
     """on_session_request が 403 を返すと Client.connect() が HandshakeFailedError を送出することを確認
 

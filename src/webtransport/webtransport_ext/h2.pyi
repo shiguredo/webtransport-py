@@ -195,7 +195,9 @@ class Session:
         """
 
     def accept_session(self, session_id: int) -> bool:
-        """WebTransport セッションを受理 (サーバー用)"""
+        """
+        WebTransport セッションを受理 (サーバー用)。受理前にピアが WT_CLOSE_SESSION 無しの END_STREAM で CONNECT ストリームを閉じていた場合は、2xx を送出し受理前に蓄積したカプセルを遅延処理した後にセッション終了 (SessionClosed) を発火する (error_code は 0。WT_CLOSE_SESSION が遅延処理で確定した場合はその error code。切り詰めが残る場合は PROTOCOL_ERROR のストリームエラー)
+        """
 
     def reject_session(self, session_id: int, status_code: int) -> None:
         """

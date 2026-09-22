@@ -287,11 +287,14 @@ void H2Session::reset_stream_for_malformed_capsule(int32_t session_id) {
     // is_established を落とすと get_session_ids からも消え、受信カプセルの
     // ゲート (on_data_chunk_recv_callback) が閉じる。capsule_buffer は触らない:
     // process_capsules から呼ぶ場合はループが is_terminated を見て破棄し、
-    // handle_end_stream から呼ぶ場合は on_stream_close_callback がエントリごと
-    // 破棄する
+    // handle_end_stream / terminate_pre_accept_end_stream_session から呼ぶ場合は
+    // on_stream_close_callback がエントリごと破棄する
     wt_session->is_terminated = true;
     wt_session->is_established = false;
   }
+  // 受理前 END_STREAM の保留記録も除去する (malformed のストリームエラーで
+  // 終了するため)
+  pending_pre_accept_end_stream_session_ids_.erase(session_id);
   if (!session_) {
     return;
   }
@@ -1341,6 +1344,8 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   // (handle_end_stream の経路は自側が END_STREAM を送らない点が異なる)
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
+  // 受理前 END_STREAM の保留記録も除去する
+  pending_pre_accept_end_stream_session_ids_.erase(session_id);
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
   end_stream_pending_.insert(session_id);
@@ -1367,8 +1372,8 @@ void H2Session::handle_wt_drain_session(int32_t session_id,
 void H2Session::handle_end_stream(int32_t session_id) {
   // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
   // を閉じた場合のセッション終了処理 (draft-15 Section 3.4 の正規の終了経路)。
-  // 対象は確立済み (is_established) のセッションに限定する: 非 2xx 拒否、
-  // サーバー側の受理前 FIN は確立されておらず、誤検知しない
+  // 終了処理の対象は確立済み (is_established) のセッションに限定する: 非 2xx
+  // 拒否とサーバー側の受理前 END_STREAM は確立されておらず、終了処理は行わない
   // (非 2xx 拒否は応答受信時にエントリ削除済み)。正常な WT_CLOSE_SESSION を
   // 受信済みのセッションは handle_wt_close_session がエントリを削除済みのため
   // get_wt_session が失敗し、Application Error Code が欠けた WT_CLOSE_SESSION
@@ -1382,10 +1387,20 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // 下の切り詰め検証の対象外になる: 受理前は draft-15 Section 3.2 のとおり
   // カプセルを処理せず (RFC 9297 Section 3.2 の Capsule Protocol も 2xx まで
   // not in use)、終了済みは on_data_chunk_recv_callback が受信カプセル自体を
-  // 破棄する。受理前の END_STREAM は終了通知も切り詰めの検証も行わず、エントリ
-  // と蓄積が残る (既知のギャップ)
+  // 破棄する。受理前 END_STREAM は保留集合に記録し、終了処理と切り詰めの検証は
+  // accept_session の遅延カプセル処理後に行う
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || !wt_session->is_established || wt_session->is_terminated) {
+    // サーバーが 2xx を送出する前にピアが WT_CLOSE_SESSION 無しの END_STREAM で
+    // CONNECT ストリームを閉じた場合 (受理前 END_STREAM) は、ここでは終了処理を
+    // 行わず保留集合に記録するだけに留める。accept_session が 2xx を送出し、
+    // 受理前に蓄積したカプセルを遅延処理した後に終了処理を行う (draft-15
+    // Section 3.4 のセッション終了条件のうち、確立前の CONNECT ストリームの
+    // クローズ)
+    if (is_server_ && wt_session != nullptr && !wt_session->is_established &&
+        !wt_session->is_terminated) {
+      pending_pre_accept_end_stream_session_ids_.insert(session_id);
+    }
     return;
   }
 
@@ -1427,6 +1442,43 @@ void H2Session::handle_end_stream(int32_t session_id) {
   wt_sessions_.erase(session_id);
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
+}
+
+void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
+  auto* wt_session = get_wt_session(session_id);
+  if (!wt_session) {
+    return;
+  }
+
+  // 受理前に蓄積したカプセルが残っている場合、END_STREAM はカプセル境界で
+  // 終わっていない。RFC 9297 Section 3.3 の malformed / incomplete なメッセージ
+  // として扱い、PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) に
+  // する。受理後 END_STREAM の handle_end_stream と同じ扱いであり、
+  // SessionClosed は RST_STREAM の送出で発火する on_stream_close_callback が
+  // 通知する (error_code は nghttp2 のクローズ由来)
+  if (!wt_session->capsule_buffer.empty()) {
+    reset_stream_for_malformed_capsule(session_id);
+    return;
+  }
+
+  // WT_CLOSE_SESSION 無しのクリーンクローズは error code 0 かつ空のエラー
+  // 文字列の WT_CLOSE_SESSION と等価 (draft-15 Section 6.12)
+  H2Event event;
+  event.type = H2EventType::SessionClosed;
+  event.session_id = session_id;
+  event.error_code = 0;
+  push_event(std::move(event));
+
+  // エントリと送信バッファを破棄し、以後の送信をエントリ不在で塞ぐ。応答の
+  // END_STREAM は送出しない (受理後 END_STREAM の検知と同じ扱い。Section 6.12
+  // の受信者 MUST は WT_CLOSE_SESSION 受信時の応答についての規定であり、
+  // END_STREAM のみの受信には該当しない。ストリームは half-closed (remote) の
+  // まま接続終了まで残る)
+  http2_stream_buffers_.erase(session_id);
+  wt_sessions_.erase(session_id);
+  // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
+  discard_stream_recv_bytes(session_id);
+  pending_pre_accept_end_stream_session_ids_.erase(session_id);
 }
 
 // ========== Capsule 送信 ==========
@@ -2062,6 +2114,8 @@ H2Session::H2Session(H2Session&& other) noexcept
       pending_headers_(std::move(other.pending_headers_)),
       wt_sessions_(std::move(other.wt_sessions_)),
       end_stream_pending_(std::move(other.end_stream_pending_)),
+      pending_pre_accept_end_stream_session_ids_(
+          std::move(other.pending_pre_accept_end_stream_session_ids_)),
       peer_enable_connect_protocol_(other.peer_enable_connect_protocol_),
       peer_wt_enabled_(other.peer_wt_enabled_),
       peer_wt_initial_max_data_(other.peer_wt_initial_max_data_),
@@ -2093,6 +2147,8 @@ H2Session& H2Session::operator=(H2Session&& other) noexcept {
     pending_headers_ = std::move(other.pending_headers_);
     wt_sessions_ = std::move(other.wt_sessions_);
     end_stream_pending_ = std::move(other.end_stream_pending_);
+    pending_pre_accept_end_stream_session_ids_ =
+        std::move(other.pending_pre_accept_end_stream_session_ids_);
     peer_enable_connect_protocol_ = other.peer_enable_connect_protocol_;
     peer_wt_enabled_ = other.peer_wt_enabled_;
     peer_wt_initial_max_data_ = other.peer_wt_initial_max_data_;
@@ -2397,6 +2453,17 @@ bool H2Session::accept_session(int32_t session_id) {
   // 終了済み) は、初期クレジットを送出しない
   auto* established_session = get_wt_session(session_id);
   if (!established_session || established_session->is_terminated) {
+    // 遅延処理 (process_capsules) で WT_CLOSE_SESSION を処理した場合や不正
+    // カプセルのリセット時は、エントリ削除・is_terminated の各経路が保留記録を
+    // 除去済みである。経路追加への防御としてここでも除去する
+    pending_pre_accept_end_stream_session_ids_.erase(session_id);
+    return true;
+  }
+
+  // 受理前 END_STREAM を検知したセッションは、2xx 送出と受理前蓄積の遅延処理
+  // まで完了したここで終了処理を行う。初期フロー制御カプセルは送出しない
+  if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
+    terminate_pre_accept_end_stream_session(session_id);
     return true;
   }
 
@@ -2500,6 +2567,8 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   // accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)
   if (status_code / 100 != 2) {
     wt_sessions_.erase(session_id);
+    // 受理前 END_STREAM の保留記録も除去する
+    pending_pre_accept_end_stream_session_ids_.erase(session_id);
     // エントリ削除で consume_recv_bytes の経路が塞がるため、受理前に受信した
     // 記録を解放する
     discard_stream_recv_bytes(session_id);
@@ -2507,6 +2576,9 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
     auto* wt_session = get_wt_session(session_id);
     if (wt_session) {
       wt_session->is_terminated = true;
+      // 受理前 END_STREAM の保留記録も除去する (エントリを残したまま終了を
+      // 学習するため、エントリ削除に依存しない)
+      pending_pre_accept_end_stream_session_ids_.erase(session_id);
       // 蓄積も破棄する (以後処理しない)
       wt_session->capsule_buffer.clear();
       // 破棄した蓄積分はアプリへ配送されないため、未消費の受信バイト記録も
@@ -2587,7 +2659,7 @@ void H2Session::send_stream_data(int32_t session_id,
   // 終了したセッション ID への送信を黙って無視する (send_datagram と同じ
   // ガード構成。チェックを send_capsule に置かない理由は send_datagram の
   // コメントを参照)。終了の検知はエントリと終了フラグで行う: 正常な
-  // WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後 (カプセル境界で終わった
+  // WT_CLOSE_SESSION 受信後・受理後 END_STREAM 受信後 (カプセル境界で終わった
   // 場合)・クライアントの非 2xx 拒否受信後はエントリが削除されて塞がり、
   // ペイロード不正のカプセル (Application Error Code が欠けた WT_CLOSE_SESSION
   // など)・切り詰められたままの END_STREAM・ローカル close_session 後は
@@ -2807,9 +2879,10 @@ void H2Session::stop_sending(int32_t session_id,
   }
 
   // 終了したセッション ID と、一度も connect されていないセッション ID への
-  // 送信を黙って無視する (send_datagram と同じガード。チェックを
+  // 送信を黙って無視する (send_datagram と同じくエントリと終了フラグで塞ぐ。
+  // チェックを
   // send_capsule に置かない理由は send_datagram のコメントを参照)。終了の
-  // 検知はエントリと終了フラグで行う: 正常な WT_CLOSE_SESSION 受信後・ピアの
+  // 検知はエントリと終了フラグで行う: 正常な WT_CLOSE_SESSION 受信後・受理後
   // END_STREAM 受信後 (カプセル境界で終わった場合)・クライアントの非 2xx 拒否
   // 受信後はエントリが削除されて塞がり、ペイロード不正のカプセル・切り詰め
   // られたままの END_STREAM・ローカル close_session 後は is_terminated で
@@ -2862,7 +2935,7 @@ void H2Session::send_datagram(int32_t session_id,
   // 前の終了通知である。受信後は終了を学習した状態とみなし、新たなデータ
   // グラムを送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、
   // 本対応は仕様強制ではなく実装ポリシー)。終了の検知はエントリと終了フラグ
-  // で行う: 正常な WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後
+  // で行う: 正常な WT_CLOSE_SESSION 受信後・受理後 END_STREAM 受信後
   // (カプセル境界で終わった場合) はエントリが削除されて塞がり、ペイロード不正の
   // カプセル・切り詰められたままの END_STREAM・ローカル close_session 後は
   // is_terminated で塞がる (サーバー側の reject_session の 2xx 送出も同様。
@@ -2873,8 +2946,9 @@ void H2Session::send_datagram(int32_t session_id,
   // send_capsule ではなくここに置く: send_capsule は close_session
   // (WT_CLOSE_SESSION) / reset_stream / フロー制御応答の送信にも使われて
   // おり、そこにチェックを入れると終了後の後始末カプセルまで塞がれる
-  // (send_stream_data / reset_stream / stop_sending / drain_session /
-  // close_session はここと同じガードを自前で持つ)。
+  // (send_stream_data / reset_stream / stop_sending / close_session はエントリと
+  // 終了フラグのガードを自前で持つ。受理前 END_STREAM の保留ガードは
+  // send_datagram と drain_session のみが持つ)。
   // 楽観的送信 (draft-15 Section 3.2 の MAY
   // 「クライアントは応答を待たずに WebTransport カプセルを送信してよい」)
   // は妨げない: クライアントは connect 直後 (2xx 応答前)・サーバーは
@@ -2885,13 +2959,21 @@ void H2Session::send_datagram(int32_t session_id,
   if (!wt_session || wt_session->is_terminated) {
     return;
   }
+  // 受理前 END_STREAM を検知したセッションは終了を学習した状態であり、
+  // 終了処理 (accept_session 後) までにキューされる DATAGRAM を塞ぐ。
+  // 検知前にキュー済みの DATAGRAM は accept_session の nghttp2_session_send で
+  // 送出され得る (handle_wt_close_session のように検知時点で破棄する経路では
+  // ない)
+  if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
+    return;
+  }
 
   // クライアントが非 2xx 応答 (拒否) を受けたセッション ID 宛の送信は、
   // 応答受信時に wt_sessions_ から削除されるためエントリ確認で塞がれる
   // (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
   // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
-  // Section 3.4 の正規の終了経路) も END_STREAM 検知でエントリが削除される
-  // ため塞がれる
+  // Section 3.4 の正規の終了経路) も受理後 END_STREAM の検知でエントリが
+  // 削除されるため塞がれる (受理前 END_STREAM は上の保留ガードで塞ぐ)
   send_capsule(session_id, CapsuleType::Datagram, data);
 }
 
@@ -2904,7 +2986,7 @@ void H2Session::close_session(int32_t session_id,
   // is_terminated を立てるため、2 回目以降の呼び出しはここで返る (塞がないと
   // WT_CLOSE_SESSION capsule が二重送出され、flush 後は
   // http2_stream_buffers_ に残留する)。正常な WT_CLOSE_SESSION を受信済みの
-  // セッション ID (ピアの END_STREAM 受信後・クライアントの非 2xx 拒否受信後も
+  // セッション ID (受理後 END_STREAM 受信後・クライアントの非 2xx 拒否受信後も
   // 同様) はエントリが削除されて塞がる (サーバー側の reject_session の 2xx
   // 送出も同様)。ペイロード不正のカプセル (Application Error Code が欠けた
   // WT_CLOSE_SESSION など) や切り詰められたままの END_STREAM では is_terminated
@@ -2965,6 +3047,9 @@ void H2Session::close_session(int32_t session_id,
   // ゲート) も停止する (h3 側の close_stream と同様の終了後後始末)
   wt_session->is_terminated = true;
   wt_session->is_established = false;
+  // 受理前 END_STREAM の保留記録も除去する (エントリを残したまま終了を学習
+  // するため、エントリ削除に依存しない)
+  pending_pre_accept_end_stream_session_ids_.erase(session_id);
 
   // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
   // RST_STREAM ではアプリケーション終了を正しく伝えられない
@@ -2982,7 +3067,8 @@ bool H2Session::is_webtransport_ready() const {
 
 void H2Session::drain_session(int32_t session_id) {
   // 終了したセッション ID と、一度も connect されていないセッション ID への
-  // 送信を黙って無視する (send_datagram と同じガード。stop_sending も同じ
+  // 送信を黙って無視する (send_datagram と同じくエントリと終了フラグで塞ぐ。
+  // 受理前 END_STREAM の保留ガードも同じ。stop_sending も同じ
   // 構成。終了の検知はエントリと終了フラグで行う: 正常な終了経路はエントリ
   // 削除、ペイロード不正のカプセル (Application Error Code が欠けた
   // WT_CLOSE_SESSION など) とローカル close_session 後は is_terminated で
@@ -2991,6 +3077,11 @@ void H2Session::drain_session(int32_t session_id) {
   // 残留するため、ここで返す
   auto* wt_session = get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
+    return;
+  }
+  // 受理前 END_STREAM を検知したセッションは終了を学習した状態であり、
+  // 終了処理 (accept_session 後) までにキューされる WT_DRAIN_SESSION を塞ぐ
+  if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
     return;
   }
 
@@ -3506,6 +3597,8 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
     h2_session->push_event(std::move(event));
     h2_session->wt_sessions_.erase(stream_id);
   }
+  // 受理前 END_STREAM の保留記録も除去する (エントリを削除する経路)
+  h2_session->pending_pre_accept_end_stream_session_ids_.erase(stream_id);
 
   h2_session->http2_stream_buffers_.erase(stream_id);
   // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
@@ -3808,10 +3901,16 @@ void bind_webtransport_h2(nb::module_& m) {
            "WINDOW_UPDATE "
            "を積んだ時点で積んだ分だけ減算する。送出前でも減るが "
            "0 になるとは限らない)")
-      .def("accept_session", &H2Session::accept_session, nb::lock_self(),
-           nb::arg("session_id"),
-           nb::sig("def accept_session(self, session_id: int) -> bool"),
-           "WebTransport セッションを受理 (サーバー用)")
+      .def(
+          "accept_session", &H2Session::accept_session, nb::lock_self(),
+          nb::arg("session_id"),
+          nb::sig("def accept_session(self, session_id: int) -> bool"),
+          "WebTransport セッションを受理 (サーバー用)。受理前にピアが "
+          "WT_CLOSE_SESSION 無しの END_STREAM で CONNECT ストリームを閉じていた"
+          "場合は、2xx を送出し受理前に蓄積したカプセルを遅延処理した後に"
+          "セッション終了 (SessionClosed) を発火する (error_code は 0。"
+          "WT_CLOSE_SESSION が遅延処理で確定した場合はその error code。"
+          "切り詰めが残る場合は PROTOCOL_ERROR のストリームエラー)")
       .def("reject_session", &H2Session::reject_session, nb::lock_self(),
            nb::arg("session_id"), nb::arg("status_code"),
            nb::sig("def reject_session(self, session_id: int, status_code: "

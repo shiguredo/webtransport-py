@@ -6,6 +6,13 @@
 のクリーンクローズは error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION
 と等価 (Section 6.12)。
 
+サーバーが 2xx を送出する前にピアが CONNECT ストリームを END_STREAM で閉じた
+場合 (受理前 END_STREAM) は、検知時点では保留記録のみを行い、accept_session
+が 2xx を送出して受理前の蓄積カプセルを遅延処理した後にセッション終了として
+処理する (error code 0。蓄積に切り詰めが残る場合は PROTOCOL_ERROR のストリーム
+エラー)。受理前 END_STREAM を検知したセッションへのデータグラム送信と
+ドレイン要求は塞ぐ。
+
 あわせて、WT_CLOSE_SESSION 受信後の挙動 (Section 6.12 の受信者 MUST である
 END_STREAM 応答の送出と、受信後の close_session / send_stream_data が
 塞がれて SessionClosed が二重発火しないこと) を検証する。
@@ -33,7 +40,9 @@ from conftest import (
     _create_h2_session_pair,
     _drain_events,
     _encode_capsule,
+    _encode_connect_headers_frame,
     _encode_data_frame,
+    _encode_headers_frame,
     _encode_rst_stream_frame,
     _encode_varint,
     _h2_pump,
@@ -51,21 +60,6 @@ _TRUNCATED_CAPSULES: list[bytes] = [
     _WT_MAX_DATA_TYPE_VARINT + b"\x08",
     _WT_MAX_DATA_TYPE_VARINT + b"\x08" + b"\x00\x00\x00\x00",
 ]
-
-
-def _encode_headers_frame(session_id: int, header_block: bytes, end_stream: bool = False) -> bytes:
-    """HEADERS フレームのワイヤバイト列を組み立てる
-
-    HPACK 圧縮済みヘッダーブロックを指定して HEADERS フレームを組み立てる。
-    END_STREAM フラグ付きで受理と同時クローズの応答等を再現する。
-    """
-    flags = 0x04 | (0x01 if end_stream else 0x00)  # END_HEADERS | END_STREAM
-    return (
-        len(header_block).to_bytes(3, "big")
-        + bytes([0x01, flags])
-        + (session_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + header_block
-    )
 
 
 def test_end_stream_only_closes_session() -> None:
@@ -184,17 +178,14 @@ def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
 
 
 def test_end_stream_pre_accept_truncated_capsule_no_termination() -> None:
-    """受理前のセッションでは切り詰められたカプセルを検証しないことを確認
+    """受理前のセッションでは END_STREAM 受信時に切り詰めの検証も終了通知も行わないことを確認
 
     サーバーは受理するまでカプセルを処理せず、受理前の DATA は上限付きで蓄積
     される (draft-15 Section 3.2 の楽観送信。RFC 9297 Section 3.2 の Capsule
-    Protocol も 2xx まで not in use)。確立前は `handle_end_stream` の確立判定で
-    早期 return するため切り詰めの検証も行われず、エントリと蓄積が残る。
-    検査を早期 return より前に置く誤実装を検出する。
-
-    背景 (対象外): 受理前にピアが END_STREAM だけで閉じた場合の終了通知 (受理前
-    FIN の検知) は本対応の対象外である。この場合、後で accept_session しても
-    終了通知も切り詰めの検証も行われず、エントリと蓄積が残る。
+    Protocol も 2xx まで not in use)。受理前 END_STREAM は保留記録のみを行い、
+    切り詰めの検証と終了処理は accept_session の遅延カプセル処理後に行うため、
+    受理を呼ばないこの時点では SessionClosed も RST_STREAM も発生せず、エントリ
+    と蓄積が残る。検査を早期 return より前に置く誤実装を検出する。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -692,26 +683,223 @@ def test_headers_200_end_stream_ready_and_closed() -> None:
     assert wire is None or b"\x99\x0b\x4d\x3d" not in wire
 
 
-def test_end_stream_server_pre_accept_fin_no_termination() -> None:
-    """サーバー側の受理前 FIN (CONNECT + END_STREAM) で終了処理が実行されないことを確認
+def test_end_stream_server_pre_accept_end_stream_terminates_after_accept() -> None:
+    """サーバー側の受理前 END_STREAM (CONNECT + END_STREAM) が accept_session 後に終了することを確認
 
-    CONNECT リクエストの HEADERS に END_STREAM が付く受理前 FIN は、確立
-    済みでないため検知対象外となり、エントリが残留する (h3 側の受理前 FIN
-    対応の h2 版は本対応のスコープ外)。HPACK 動的テーブルを汚さないよう、
-    注入はテスト内の最後の操作にする。
+    CONNECT リクエストの HEADERS に END_STREAM が付く受理前 END_STREAM は、
+    検知時点では保留記録のみで SessionClosed は発火しない (2xx を返す前に
+    終了処理をしない)。accept_session が 2xx を送出した後にセッション終了
+    (error code 0) として処理される。WT_CLOSE_SESSION 無しのクリーンクローズ
+    は error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION と等価
+    (draft-15 Section 3.4 / 6.12)。
     """
     _client, server = _create_h2_session_pair()
 
     # CONNECT + END_STREAM の HEADERS フレームを注入する
-    header_block = (
-        b"\x00\x07:method\x07CONNECT"
-        + b"\x00\x09:protocol\x0cwebtransport"
-        + b"\x87"  # :scheme: https
-        + b"\x84"  # :path: /
-        + b"\x01\x09localhost"  # :authority: localhost
-    )
-    ret = server.receive(_encode_headers_frame(1, header_block, end_stream=True))
+    ret = server.receive(_encode_connect_headers_frame(1, end_stream=True))
     assert ret > 0, "HEADERS フレームの注入に失敗しました"
 
-    # セッション終了として誤検知されない (SessionClosed は発火しない)
+    # 検知時点では終了処理を行わない (2xx を返す前)
     assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(server))
+
+    # 受理すると 2xx が送出され、その後にセッション終了として処理される
+    assert server.accept_session(1) is True, "セッションの受理に失敗しました"
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+    assert closed_events[0].session_id == 1
+    assert closed_events[0].error_code == 0, "クリーンな終了の error code が 0 ではありません"
+    assert server.get_session_ids() == [], "セッションが終了していません"
+
+    # 2xx は送出される (受理前 END_STREAM でも応答可能性を損なわない)。
+    # HPACK の静的テーブル index 8 (:status 200) の 1 バイト表現は 0x88
+    wire = server.send()
+    assert wire is not None, "受理の応答が送出されていません"
+    assert b"\x88" in wire, "2xx (:status 200) の応答ヘッダーが送出されていません"
+    # 初期フロー制御カプセルは終了するセッションへ送出しない
+    assert _encode_varint(0x190B4D3D) not in wire, "WT_MAX_DATA が送出されました"
+    assert _encode_varint(0x190B4D3F) not in wire, "WT_MAX_STREAMS (BIDI) が送出されました"
+    assert _encode_varint(0x190B4D40) not in wire, "WT_MAX_STREAMS (UNI) が送出されました"
+    assert _encode_rst_stream_frame(1, _PROTOCOL_ERROR) not in wire, (
+        "クリーンな受理前 END_STREAM で RST_STREAM が送出されました"
+    )
+
+
+def test_end_stream_server_pre_accept_end_stream_after_headers_terminates_after_accept() -> None:
+    """HEADERS の後に別フレームで届く受理前 END_STREAM も accept_session 後に終了することを確認
+
+    受理前 END_STREAM の検知は CONNECT + END_STREAM が同一フレームの場合と、
+    HEADERS の後に DATA フレームで届く場合の両方で成立する (検知は
+    on_frame_recv_callback の END_STREAM 判定で共通)。クライアントは 2xx の
+    受信でセッション確立を認識できる (受理前 END_STREAM は応答可能性を損なわない)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+    ready_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1, "SESSION_READY が 1 件だけ発火していません"
+
+    # 受理前に空の DATA + END_STREAM でピアがストリームを閉じる
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+    assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(server))
+
+    # 受理すると 2xx が送出され、その後にセッション終了として処理される
+    assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
+    wire = server.send()
+    assert wire is not None, "受理の応答が送出されていません"
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == 0, "クリーンな終了の error code が 0 ではありません"
+    assert server.get_session_ids() == [], "セッションが終了していません"
+
+    # クライアントは 2xx の受信でセッション確立を認識する
+    client.receive(wire)
+    client_events = _drain_events(client)
+    assert any(e.type == h2.EventType.SESSION_READY for e in client_events), (
+        "クライアントがセッション確立を認識していません"
+    )
+    assert client.get_session_ids() == [session_id], "クライアント側のセッションが確立していません"
+
+
+def test_end_stream_server_pre_accept_end_stream_datagram_ignored() -> None:
+    """受理前 END_STREAM を検知したセッションへの send_datagram が送出されないことを確認
+
+    検知後は終了を学習した状態として扱い、accept_session までにキューされる
+    DATAGRAM を塞ぐ (受理前はストリームエントリが作られず send_stream_data は
+    既に送出されず、open_stream も is_established が false で失敗するため、
+    ガードが要るのはエントリが存在するデータグラム送信のみ)。
+    """
+    _client, server = _create_h2_session_pair()
+    ret = server.receive(_encode_connect_headers_frame(1, end_stream=True))
+    assert ret > 0, "HEADERS フレームの注入に失敗しました"
+
+    # 検知後のデータグラム送信は黙って無視される
+    server.send_datagram(1, b"pre-accept-datagram-must-not-be-sent")
+
+    assert server.accept_session(1) is True, "セッションの受理に失敗しました"
+    wire = server.send()
+    assert wire is not None, "受理の応答が送出されていません"
+    assert b"pre-accept-datagram-must-not-be-sent" not in wire, (
+        "検知後の send_datagram がワイヤへ送出されました"
+    )
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+
+
+def test_end_stream_server_pre_accept_truncated_capsule_resets_stream_after_accept() -> None:
+    """受理前 END_STREAM の時点で切り詰めが残る場合、accept_session 後に PROTOCOL_ERROR で終了することを確認
+
+    受理前はカプセルを処理しない (draft-15 Section 3.2 の MUST) ため、切り詰め
+    の検証は accept_session の遅延処理後に行う。END_STREAM がカプセル境界で
+    終わっていないため、RFC 9297 Section 3.3 の malformed / incomplete として
+    PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) になり、clean な
+    SessionClosed (error code 0) は発火しない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+    ready_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1, "SESSION_READY が 1 件だけ発火していません"
+
+    # 受理前にカプセルが途中の DATA を届ける (上限付きで蓄積される)
+    ret = server.receive(_encode_data_frame(session_id, _WT_MAX_DATA_TYPE_VARINT))
+    assert ret > 0, "切り詰めカプセルの注入に失敗しました"
+
+    # 受理前に空の DATA + END_STREAM でピアがストリームを閉じる
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+    assert server._test_unfinished_capsule_bytes(session_id) == len(_WT_MAX_DATA_TYPE_VARINT), (
+        "受理前の END_STREAM 後に切り詰めが保持されていません"
+    )
+
+    # 受理の 2xx 送出後に切り詰めが検証され、PROTOCOL_ERROR の RST_STREAM になる
+    assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
+    wire = server.send()
+    assert wire is not None, "受理の応答が送出されていません"
+    assert _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) in wire, (
+        "PROTOCOL_ERROR の RST_STREAM が送出されていません"
+    )
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == _PROTOCOL_ERROR, (
+        "切り詰めの終了が clean (error code 0) になっています"
+    )
+    assert server.get_session_ids() == [], "セッションが終了していません"
+
+    # ピアにも RST_STREAM が届き、同じエラーコードでセッションが終了する
+    client.receive(wire)
+    client_closed = [e for e in _drain_events(client) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(client_closed) == 1, "ピア側の SessionClosed が 1 件だけ発火していません"
+    assert client_closed[0].error_code == _PROTOCOL_ERROR
+    assert client.get_session_ids() == [], "ピア側のセッションが終了していません"
+
+
+def test_end_stream_server_pre_accept_end_stream_drain_session_ignored() -> None:
+    """受理前 END_STREAM を検知したセッションへの drain_session が送出されないことを確認
+
+    drain_session は send_datagram と同じくエントリと終了状態でガードするため、
+    検知後にキューされる WT_DRAIN_SESSION も塞がれる。
+    """
+    _client, server = _create_h2_session_pair()
+    ret = server.receive(_encode_connect_headers_frame(1, end_stream=True))
+    assert ret > 0, "HEADERS フレームの注入に失敗しました"
+
+    # 検知後のドレイン要求は黙って無視される
+    server.drain_session(1)
+
+    assert server.accept_session(1) is True, "セッションの受理に失敗しました"
+    wire = server.send()
+    assert wire is not None, "受理の応答が送出されていません"
+    assert _encode_capsule(0x78AE, b"") not in wire, (
+        "検知後の drain_session がワイヤへ送出されました"
+    )
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+
+
+@pytest.mark.parametrize("close_error_code", [0, 42], ids=["zero", "forty_two"])
+def test_end_stream_pre_accept_wt_close_session_and_end_stream_single_fire(
+    close_error_code: int,
+) -> None:
+    """受理前に WT_CLOSE_SESSION と END_STREAM の両方が届いても SessionClosed が 1 回だけ発火することを確認
+
+    受理前の WT_CLOSE_SESSION は蓄積され、accept_session の遅延処理で確定する。
+    同じく受理前に届いた END_STREAM は保留記録され、遅延処理でセッションが
+    閉じた場合は保留記録を除去するだけで終了処理を重ねない (二重発火しない)。
+    SessionClosed の error code はカプセルの値 (0 と非 0 の両方) になる。
+    受信者 MUST の END_STREAM 応答 (draft-15 Section 6.12) も成立する。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+    ready_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_READY]
+    assert len(ready_events) == 1, "SESSION_READY が 1 件だけ発火していません"
+
+    # 受理前に WT_CLOSE_SESSION を届ける (蓄積される)
+    close_payload = close_error_code.to_bytes(4, "big")
+    ret = server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, close_payload)))
+    assert ret > 0, "WT_CLOSE_SESSION の注入に失敗しました"
+
+    # 受理前に空の DATA + END_STREAM でピアがストリームを閉じる
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+    assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(server))
+
+    # 受理の遅延処理で 1 回だけ終了し、受信者 MUST の END_STREAM 応答が送出される
+    assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == close_error_code
+    assert server.get_session_ids() == [], "セッションが終了していません"
+
+    wire = server.send()
+    assert wire is not None, "END_STREAM 応答が送出されていません"
+    assert _encode_data_frame(session_id, end_stream=True) in wire, (
+        "WT_CLOSE_SESSION への END_STREAM 応答が送出されていません"
+    )
