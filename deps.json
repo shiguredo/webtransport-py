@@ -4,7 +4,7 @@
     "url": "https://github.com/ngtcp2/ngtcp2"
   },
   "nghttp3": {
-    "ref": "ffc6cdb93eb3ddb9a8f10abbd032255c5f320e1c",
+    "ref": "044ad5ff641cd1aaab6b7f62be833c7d831b60e4",
     "url": "https://github.com/ngtcp2/nghttp3"
   },
   "nghttp2": {
