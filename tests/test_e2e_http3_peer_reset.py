@@ -35,9 +35,13 @@ _QUIET_SECONDS = 0.5
 
 # ピアの再送タイマーが「遠のいた」と見なす下限 (ナノ秒)。ループバックの PTO は
 # 数十ミリ秒、アイドル期限は既定 30 秒であり、その中間を取る。PTO は再送のたびに
-# 倍化するため厳密な判定ではないが、DUT が ACK を返す条件では 1 回目の判定で
-# アイドル期限になり、再送が続いている間はここで待つ
+# 倍化するため厳密な判定ではないが、DUT が ACK を返す条件では数回の判定 (実測
+# 20〜45 ミリ秒) でアイドル期限に変わり、再送が続いている間はここで待つ
 _SETTLED_TIMEOUT_NS = 1_000_000_000
+
+# ピアの送信待ちの掃き出しで、空振りが連続したら打ち切る回数。pacing の期限待ちで
+# 空振りしても期限後に送れる場合があるため、1 回ではなく連続で確認する
+_FLUSH_QUIET_ROUNDS = 3
 
 
 async def _wait_until(predicate: Callable[[], bool], message: str) -> None:
@@ -258,19 +262,23 @@ async def _wait_peer_handshake_settled(peer: http3.Client) -> None:
 
 
 async def _flush_peer_sends(peer: http3.Client) -> None:
-    """ピアの送信待ちを pacing の期限も待ちながら掃き出す
+    """ピアの HTTP/3 層と QUIC 層に溜まった送信待ちを掃き出す
 
-    `_send_pending` は輻輳ウィンドウの枯渇・フロー制御・pacing の期限待ちで
-    空振りして 0 を返す。空振りのときは期限を待って繰り返し、空振りのまま
-    次の期限が遠い (`_SETTLED_TIMEOUT_NS` より先、または期限なし) ときに
-    打ち切る: 生存中の接続はアイドル期限 (既定 30 秒) を常に返すため、期限の
-    有無だけでは「送るものが無い」ことを判定できない。
+    `_send_pending` は輻輳ウィンドウ・フロー制御・pacing の期限待ちで空振りして
+    0 を返すため、空振りしたら期限を待って繰り返し、`_FLUSH_QUIET_ROUNDS` 回
+    連続で空振りした時点で打ち切る。
+
+    タイマー (`handle_timeout`) は駆動しない: 再送の生成は収集の目的ではなく、
+    駆動すると未 ACK の再送が収集ウィンドウを延ばしてテストを遅くする。期限が
+    到来済みで待っている再送はここでは送らない。
     """
+    quiet_rounds = 0
     for _ in range(PUMP_ATTEMPTS):
         if await peer._send_pending() > 0:
+            quiet_rounds = 0
             continue
-        timeout = peer._quic_connection.get_timeout()
-        if timeout is None or timeout > _SETTLED_TIMEOUT_NS:
+        quiet_rounds += 1
+        if quiet_rounds >= _FLUSH_QUIET_ROUNDS:
             return
         wait_pacing_timeout(peer._quic_connection)
 
@@ -282,10 +290,10 @@ async def _collect_datagrams(server: http3.Server, peer: http3.Client) -> list[b
     HEADERS / RESET が未書き込みのまま収集が終わる場合を取りこぼす。収集の
     直前にピアの送信待ちを掃き出してから読み切る。
 
-    収集の前にピアの run ループを止めるのは、未 ACK の再送が静穏時間を延ばし
-    続けてバッチに重複が混ざるのを防ぎ、バッチを決定的にするためである。
-    取りこぼしを防いでいるのは、呼び出し側の `_wait_peer_handshake_settled` と
-    ここの掃き出しである。
+    収集の前にピアの run ループを止めるのは、未 ACK の再送が収集ウィンドウ中に
+    送られ続けてバッチの内容が非決定的になり、静穏時間も延びるのを防ぐためで
+    ある。取りこぼしを防いでいるのは、呼び出し側の
+    `_wait_peer_handshake_settled` とここの掃き出しである。
     """
     await _flush_peer_sends(peer)
 
@@ -327,9 +335,9 @@ async def test_same_batch_headers_before_reset_on_server(
 ) -> None:
     """サーバー側 DUT: 同一バッチの完備 HEADERS がリセットより先に通知されることを確認
 
-    DUT の run ループを止めてピアにリクエストと RESET_STREAM を別々に
-    フラッシュさせ、ソケットに溜まったデータグラムを 1 回の QUIC イベント
-    drain (`_drain_quic_events` 1 回) として処理する。転送を保留しない実装では
+    DUT の run ループを止めてピアにリクエスト (HEADERS) と RESET_STREAM を
+    送出させ、ソケットに溜まったデータグラムを 1 回の QUIC イベント drain
+    (`_drain_quic_events` 1 回) として処理する。転送を保留しない実装では
     QUIC の drain で `on_stream_reset` が先に呼ばれるため、本テストは修正前
     実装で失敗する。
     """
@@ -396,7 +404,7 @@ async def test_same_batch_headers_before_reset_on_server(
             peer_task = None
 
         datagrams = await _collect_datagrams(server, peer)
-        assert datagrams, f"ピアのデータグラムが届いていません (order={order})"
+        assert datagrams, f"ピアのデータグラムが届いていません (order={order} datagrams=0)"
 
         # 溜まったデータグラムを 1 バッチとして処理する
         assert server_client.quic_connection is not None
