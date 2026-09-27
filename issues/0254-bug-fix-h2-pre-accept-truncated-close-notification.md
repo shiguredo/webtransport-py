@@ -1,7 +1,7 @@
 # h2 で受理前 END_STREAM の切り詰め終了が send() を呼ぶまで通知されない
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-28
 - Branch: feature/fix-h2-pre-accept-truncated-close-notification
 - Polished: 2026-09-27
 
@@ -45,3 +45,12 @@ h2 で、受理前 END_STREAM を検知したセッションに切り詰めが�
 - 受理後 END_STREAM の切り詰め経路 (通知は `H2Session::receive` 末尾の `nghttp2_session_send` で確定するため、EOF 時の drain を見送っても本経路には窓が無い)
 - 高レベル `h2.Server` の EOF 時の drain の見直し (残る窓は、通知が高レベルループ末尾の `send()` で push される経路。例: `accept_session` の遅延カプセル処理で受理前の不正カプセルを検出して終了する `is_terminated` の早期 return)
 - 受理前 END_STREAM の保留状態の設計変更 (0256 で扱う)
+
+## 解決方法
+
+- `H2Session::terminate_pre_accept_end_stream_session` の切り詰め分岐 (`if (!wt_session->capsule_buffer.empty())` ブロック) で、`reset_stream_for_malformed_capsule` の直後に `nghttp2_session_send(session_)` を呼ぶようにした。RST_STREAM の送出と同時に `on_stream_close_callback` が `SessionClosed` (error_code は PROTOCOL_ERROR) を push するため、`accept_session` から戻った時点で通知とエントリの後始末 (エントリ削除と受信バイト記録の解放) が確定する。この関数が `accept_session` (nghttp2 コールバック外) からのみ呼ばれることを `src/bindings/webtransport_h2.h` の宣言コメントにも明記した
+- クリーン分岐と対称になったのは通知の確定タイミングであり、送出タイミングは非対称のまま (クリーン分岐は closed 0255 のとおり呼び出し元の `send()`、切り詰め分岐は `accept_session` 内)。クリーン分岐には `nghttp2_session_send` を足していない
+- `tests/test_webtransport_h2_end_stream.py` の `test_end_stream_server_pre_accept_truncated_capsule_resets_stream_after_accept` で、`accept_session` 直後に `SessionClosed` が 1 回発火すること、`get_session_ids()` が空であること、受信バイト記録が解放されていることを表明するようにした (従来は `server.send()` の後で観測していた)
+- RED は表明を先に追加した状態で対象テストが失敗することを実測で確認した (`accept_session` 直後の `SessionClosed` が 0 件)。修正後に対象テスト 34 件と全テスト 1331 件が通過する (全体テストで 1 件失敗した http3 e2e の flaky は closed 済みの別 issue で本変更と無関係)
+- 実装中の気づき 1: 完了条件にあった「クリーン分岐に `nghttp2_session_send` を足す誤実装をテストで検出する (対照)」は、`send()` が送出済みバッファを返すだけのため公開 API から観測できず、テストの表明で固定できない。対照の項目を外し、意図 (クリーン分岐には足さない) は設計方針と実装コメントに残した
+- 実装中の気づき 2: 差分レビューの指摘により、`reset_stream_for_malformed_capsule` が再入になる経路を「`on_data_chunk_recv_callback` → `process_capsules` → `read_capsule_varint` / `verify_capsule_payload_fully_read`」と特定し、ワイヤ順序の観測位置 (2xx は `accept_session` 内、RST_STREAM は直後の `send()`) を issue 側で正した
