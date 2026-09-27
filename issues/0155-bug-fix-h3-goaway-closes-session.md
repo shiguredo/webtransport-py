@@ -1,7 +1,7 @@
 # h3 が GOAWAY 受信をプロトコルエラーとして切断する
 
 - Created: 2026-09-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-28
 - Branch: feature/fix-h3-goaway-closes-session
 - Polished: 2026-09-28
 
@@ -62,3 +62,14 @@
 - issue 側の判断ミス: 完了条件は上記 MAY を必須と読み違えていた。加えて GOAWAY ID の意味論の考慮が漏れていた。`refs/h3/rfc9114.txt` Section 5.2 は GOAWAY ID 以上の新規要求を拒否することを求めており、ID によっては新規 open が正当に拒否される。テストの注入値と表明の組み合わせでは ID 制約の分離ができていなかった
 - よって原因は両方である。nghttp3 の保守的な実装と、issue の完了条件の書き過ぎが重なっている。`shutdown_cb` が `closed_` を立てる本来の不具合 (protocol-error close) とは別の層の話であり、切り分けて記録する
 - 再開条件: nghttp3 上流が GOAWAY ID 考慮の open 可否に対応したら reopened にする。または完了条件を「既存継続と通知のみ」に絞り直し、新規 open を対象外として再開する。作業ブランチは残し、部分修正は再開時に流用する
+
+## 解決方法
+
+- `H3Session::shutdown_cb` を変更し、GOAWAY 受信で `closed_` を立てずに `H3EventType::GoAway` イベントを積むようにした (`noexcept` は維持)。`H3Event` に `uint64_t goaway_id` を追加し、`bind_webtransport_h3` の `.def_ro("goaway_id", ...)` で公開した。`H3EventType` は末尾に `GoAway` を追加し (既存値の数値は不変。`GOAWAY = 9`)、`src/webtransport/webtransport_ext/h3.pyi` は `make develop` で再生成した
+- `is_closed()` は接続エラー (nghttp3 の負値 return) のみを表すようになり、GOAWAY 受信では偽のままになる。`is_closed()` の doc を `.h` / nanobind / `.pyi` で更新した。高レベル `Client.run` と `Server._handle_datagram` の `is_closed()` 分岐は変更していない (GOAWAY では発火せず、分岐に除外条件を足すと GOAWAY 受信後の本物の接続エラーの検出まで抑止されるため)
+- 高レベル `h3.Client` / `h3.Server` に `on_goaway` を追加した。シグネチャは `Client` が `(goaway_id)`、`Server` が `(goaway_id, addr)`。初回受信のみ通知し、2 回目以降は GOAWAY ID の異同を問わず通知しない (`Client._goaway_notified` は connect 試行ごとと `close()` で、`ClientConnection.goaway_notified` は接続ごとにリセットする)
+- テスト: `tests/test_webtransport_h3_goaway.py` (新規) で、client / server 双方のセッションで GOAWAY 受信後に `is_closed()` が偽のままであること、`GoAway` イベントが GOAWAY ID 付きで発火すること、既存の WT データストリームとデータグラムの送受信が継続すること、複数回の GOAWAY でイベントが毎回積まれ接続が閉じられないことを表明した。`tests/test_e2e_webtransport_h3.py` に client 側と server 側の e2e (`H3_GENERAL_PROTOCOL_ERROR` 不送出、`on_goaway` が 1 回だけ発火、2 回目は ID が異なっても発火しない) を追加した。GOAWAY フレームの組み立ては `tests/conftest.py` の `_encode_h3_goaway_frame` に集約した
+- RED は低レベルテストを先に追加した状態で失敗することを実測で確認した (`is_closed()` が真になり `GoAway` イベントが発火しない)。修正後に全テスト 1338 件が通過する
+- 差分レビューの指摘により、初回のみ通知の表明を「ID が異なる 2 回目でも発火しない」に強化し (ID を増加させると RFC 9114 Section 5.2 の接続エラーになるため小さい値を使う)、既存ストリーム継続の表明とサーバー側 `on_goaway` の試験を追加し、client 側のフラグ名を h2 と同じ `_goaway_notified` に揃えた
+- `skills/webtransport-py/SKILL.md` に `h3.EventType.GOAWAY` / `h3.Event.goaway_id` / `h3.Client.on_goaway` / `h3.Server.on_goaway` を追記し、`h2.Client` の比較記述 (h3 に `on_goaway` が無いという記述) を修正した。`is_closed()` の説明にも GOAWAY の扱いを追記した
+- 対象外の残件 (別 issue 候補): GOAWAY 受信後に `open_stream` が QUIC ストリームを開いて即 RESET_STREAM する (nghttp3 が新規 open を拒否するため)、GOAWAY 受信後の `Client.connect()` が SETTINGS 待ちのタイムアウトになる件
