@@ -33,6 +33,12 @@ _RETURN_CHECK_SECONDS = 0.3
 # CI の高負荷時に ACK と後続パケットの到着が離れても取りこぼさない幅を取る
 _QUIET_SECONDS = 0.5
 
+# ピアの再送タイマーが「遠のいた」と見なす下限 (ナノ秒)。ループバックの PTO は
+# 数十ミリ秒、アイドル期限は既定 30 秒であり、その中間を取る。PTO は再送のたびに
+# 倍化するため厳密な判定ではないが、DUT が ACK を返す条件では 1 回目の判定で
+# アイドル期限になり、再送が続いている間はここで待つ
+_SETTLED_TIMEOUT_NS = 1_000_000_000
+
 
 async def _wait_until(predicate: Callable[[], bool], message: str) -> None:
     """条件が成立するまで待つ (期限までに成立しなければ失敗する)"""
@@ -232,27 +238,57 @@ async def test_client_forwards_peer_reset_stream(test_certificates) -> None:
         await client.close()
 
 
+async def _wait_peer_handshake_settled(peer: http3.Client) -> None:
+    """ピアの再送タイマーが遠のくまで待つ (DUT の run ループは動かしたまま呼ぶ)
+
+    ピアのハンドシェイクのフライトが未 ACK のまま DUT の run ループを止めると、
+    ピアがハンドシェイクを再送し続け、1-RTT のフレーム (HEADERS) の送出が
+    遅れる。DUT が ACK を返せる間は run ループを動かしておき、ピアの次の
+    タイマー期限が `_SETTLED_TIMEOUT_NS` より遠くなるまで待つ。未 ACK の
+    ack-eliciting パケットがある間は損失検出タイマーが張られるため、期限が
+    遠いことは再送が続いていないことの目安になる (PTO の倍化があるため近似)。
+    """
+    deadline = time.monotonic() + _WAIT_LIMIT
+    while time.monotonic() < deadline:
+        timeout = peer._quic_connection.get_timeout()
+        if timeout is None or timeout > _SETTLED_TIMEOUT_NS:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("ピアのハンドシェイクの再送タイマーが遠のきません")
+
+
 async def _flush_peer_sends(peer: http3.Client) -> None:
     """ピアの送信待ちを pacing の期限も待ちながら掃き出す
 
     `_send_pending` は輻輳ウィンドウの枯渇・フロー制御・pacing の期限待ちで
-    空振りして 0 を返すため、送るものが無くなるまで期限を待って繰り返す。
+    空振りして 0 を返す。空振りのときは期限を待って繰り返し、空振りのまま
+    次の期限が遠い (`_SETTLED_TIMEOUT_NS` より先、または期限なし) ときに
+    打ち切る: 生存中の接続はアイドル期限 (既定 30 秒) を常に返すため、期限の
+    有無だけでは「送るものが無い」ことを判定できない。
     """
     for _ in range(PUMP_ATTEMPTS):
-        sent = await peer._send_pending()
-        if sent == 0 and not wait_pacing_timeout(peer._quic_connection):
-            break
+        if await peer._send_pending() > 0:
+            continue
+        timeout = peer._quic_connection.get_timeout()
+        if timeout is None or timeout > _SETTLED_TIMEOUT_NS:
+            return
+        wait_pacing_timeout(peer._quic_connection)
 
 
-async def _collect_datagrams(server: http3.Server) -> list[bytes]:
-    """DUT のソケットに届いたデータグラムを、途切れるまで集める
+async def _collect_datagrams(server: http3.Server, peer: http3.Client) -> list[bytes]:
+    """DUT のソケットに届いたデータグラムを、ピアの送信待ちを掃き出してから集める
 
-    固定の待機では全 suite 実行時の遅延で取りこぼすため、最初の 1 件を
-    上限時間まで待ち、その後は読み取りが続く限り (クワイエット時間まで)
-    集める。ACK だけのデータグラムが先に届いても、後続の HEADERS / RESET
-    を取りこぼさない。呼び出し側がピアの送信待ちを掃き出してから呼ぶ前提で、
-    ここでは未送出のフレームを待たない。
+    固定の待機や静穏時間だけによる打ち切りは、ピアの送信キューに残った
+    HEADERS / RESET が未書き込みのまま収集が終わる場合を取りこぼす。収集の
+    直前にピアの送信待ちを掃き出してから読み切る。
+
+    収集の前にピアの run ループを止めるのは、未 ACK の再送が静穏時間を延ばし
+    続けてバッチに重複が混ざるのを防ぎ、バッチを決定的にするためである。
+    取りこぼしを防いでいるのは、呼び出し側の `_wait_peer_handshake_settled` と
+    ここの掃き出しである。
     """
+    await _flush_peer_sends(peer)
+
     collected: list[bytes] = []
     deadline = time.monotonic() + _WAIT_LIMIT
     while time.monotonic() < deadline:
@@ -324,6 +360,11 @@ async def test_same_batch_headers_before_reset_on_server(
         await peer.connect()
         peer_task = asyncio.create_task(run_peer())
 
+        # ハンドシェイクのフライトが ACK されるまで DUT を動かしたまま待つ。
+        # 未 ACK のまま DUT を止めるとピアがハンドシェイクを再送し続け、
+        # リクエストの HEADERS の送出が遅れて収集から漏れる
+        await _wait_peer_handshake_settled(peer)
+
         # DUT の run ループを止め、ピアのリクエストと RESET_STREAM を DUT が
         # 読む前にソケットへ溜める
         server_task.cancel()
@@ -345,8 +386,17 @@ async def test_same_batch_headers_before_reset_on_server(
             await peer._send_pending()
 
         addr, server_client = next(iter(server._clients.items()))
-        datagrams = await _collect_datagrams(server)
-        assert datagrams, "ピアのデータグラムが届いていません"
+
+        # ピアの run ループを止めてから収集する。止めないと未 ACK の再送が
+        # 静穏時間を延ばし続け、バッチに重複が混ざる (取りこぼしを防いでいる
+        # のは直前の _wait_peer_handshake_settled と収集前の掃き出し)
+        if peer_task is not None:
+            peer_task.cancel()
+            await asyncio.gather(peer_task, return_exceptions=True)
+            peer_task = None
+
+        datagrams = await _collect_datagrams(server, peer)
+        assert datagrams, f"ピアのデータグラムが届いていません (order={order})"
 
         # 溜まったデータグラムを 1 バッチとして処理する
         assert server_client.quic_connection is not None
@@ -355,7 +405,9 @@ async def test_same_batch_headers_before_reset_on_server(
         await server._drain_quic_events(addr, server_client)
         await server._process_http3_events(addr, server_client)
 
-        assert order == ["request", "reset"], f"コールバックの順序が逆転しています: {order}"
+        assert order == ["request", "reset"], (
+            f"コールバックの順序が逆転しています: order={order} datagrams={len(datagrams)}"
+        )
     finally:
         if peer_task is not None:
             peer_task.cancel()
