@@ -330,6 +330,18 @@ def _encode_goaway_frame(last_stream_id: int, error_code: int = 0) -> bytes:
     return len(payload).to_bytes(3, "big") + bytes([0x07, 0x00]) + (0).to_bytes(4, "big") + payload
 
 
+def _large_binary_payload(size: int = 32 * 1024) -> bytes:
+    """比較用の大きなバイナリペイロードを作る
+
+    `bytes((index % 256) for index in range(size))` のような周期 256 の
+    パターンは、256 バイトの倍数のずれ (256・512・…) をバイト比較で検出
+    できない。`index * 137 + index // 256` の下位 8 ビットは周期が 65536
+    バイトになり、256 バイトの倍数のずれを検出できる。`size` は周期未満で
+    使うこと (周期以上では 65536 の倍数のずれが再び盲点になる)。
+    """
+    return bytes(((index * 137 + index // 256) % 256) for index in range(size))
+
+
 def _encode_h3_goaway_frame(goaway_id: int) -> bytes:
     """HTTP/3 GOAWAY フレームのワイヤバイト列を組み立てる
 

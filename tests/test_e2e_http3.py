@@ -6,6 +6,58 @@ import socket
 import time
 
 import pytest
+from conftest import _large_binary_payload
+
+
+def _assert_payload_matches(actual: bytes, expected: bytes, label: str) -> None:
+    """受信データが期待値と一致することを、不一致の詳細を付けて確認する
+
+    pytest の bytes 比較は最初の不一致位置とその 1 バイトしか表示しないため、
+    どちらの受信側か (label)・長さ・最初の不一致位置・期待値と実値の該当範囲を
+    出力する。転送の破損 (欠落・重複・ずれ) の切り分けに必要な情報を残す。
+    """
+    if actual == expected:
+        return
+    common = min(len(actual), len(expected))
+    position = next(
+        (index for index in range(common) if actual[index] != expected[index]),
+        common,
+    )
+    start = max(0, position - 8)
+    end = min(common, position + 24)
+    raise AssertionError(
+        f"{label} が一致しません: 長さ expected={len(expected)} actual={len(actual)} "
+        f"最初の不一致位置={position} "
+        f"expected[{start}:{end}]={expected[start:end]!r} "
+        f"actual[{start}:{end}]={actual[start:end]!r}"
+    )
+
+
+def test_assert_payload_matches_reports_mismatch_details():
+    """不一致時に label・長さ・最初の不一致位置・該当範囲が出力されることを確認
+
+    `test_large_post_body` の失敗時にどちらの受信側で何がずれたかを出力から
+    判断できることが要件であり、その出力内容をここで直接検証する。
+    """
+    # 一致する場合は何も送出しない
+    _assert_payload_matches(b"abcdef", b"abcdef", "サーバーが受信したボディ")
+
+    # 同じ長さで内容がずれる場合
+    with pytest.raises(AssertionError) as excinfo:
+        _assert_payload_matches(b"abXdef", b"abcdef", "サーバーが受信したボディ")
+    message = str(excinfo.value)
+    assert "サーバーが受信したボディ" in message
+    assert "長さ expected=6 actual=6" in message
+    assert "最初の不一致位置=2" in message
+    assert "expected[0:6]=b'abcdef'" in message
+    assert "actual[0:6]=b'abXdef'" in message
+
+    # 長さが異なる場合 (末尾の欠落・余剰)
+    with pytest.raises(AssertionError) as excinfo:
+        _assert_payload_matches(b"abc", b"abcdef", "クライアントが受信したエコー")
+    message = str(excinfo.value)
+    assert "クライアントが受信したエコー" in message
+    assert "長さ expected=6 actual=3" in message
 
 
 def test_import_server_client():
@@ -1087,10 +1139,15 @@ async def test_chunked_response_body(test_certificates):
 
 @pytest.mark.asyncio
 async def test_large_post_body(test_certificates):
-    """大きな POST ボディがエコーされることを確認"""
+    """大きな POST ボディがエコーされることを確認
+
+    ペイロードは `conftest._large_binary_payload` (周期 65536 で 256 バイトの
+    倍数のずれも検出できるパターン)、assert の詳細は `_assert_payload_matches`
+    を参照。
+    """
     from webtransport.http3 import Client, Server
 
-    payload = bytes((index % 256) for index in range(32 * 1024))
+    payload = _large_binary_payload()
     server_buffer = bytearray()
     client_buffer = bytearray()
     server_complete = asyncio.Event()
@@ -1163,14 +1220,137 @@ async def test_large_post_body(test_certificates):
     await asyncio.wait_for(server_complete.wait(), timeout=10.0)
     await asyncio.wait_for(client_complete.wait(), timeout=10.0)
 
-    assert bytes(server_buffer) == payload
-    assert bytes(client_buffer) == payload
+    _assert_payload_matches(bytes(server_buffer), payload, "サーバーが受信したボディ")
+    _assert_payload_matches(bytes(client_buffer), payload, "クライアントが受信したエコー")
 
     client_task.cancel()
     server_task.cancel()
     await asyncio.gather(client_task, server_task, return_exceptions=True)
 
     await client.close()
+    await server.stop()
+
+
+@pytest.mark.parametrize("drop_mod", [3, 5, 8], ids=["drop-1-in-3", "drop-1-in-5", "drop-1-in-8"])
+@pytest.mark.asyncio
+async def test_large_post_body_with_datagram_loss(test_certificates, drop_mod):
+    """データグラムを落としても大きな POST ボディが壊れないことを確認
+
+    `LossyRelay` をクライアントとサーバーの間に挟み、双方向のデータグラムを
+    `drop_mod` 個に 1 個落とす (3 通りを回す)。QUIC は損失検出と再送で欠落を
+    回復するため (RFC 9002 Section 6 / RFC 9000 Section 13.3)、転送は完了し、
+    ペイロードは 1 バイトも壊れない。
+
+    書き出し時に送信バッファを解放する実装では、再送が解放済みメモリを再読して
+    内容がずれる (ngtcp2 の保持契約違反)。この症状は Sans-IO のロス注入で
+    決定的に再現・修正済みであり、本テストは同じ症状を実ソケットの E2E で
+    確認する回帰である (壊れれば再送バッファの保持と解放の管理が退行している)。
+    損失注入が作用したことは `relay.dropped` で確認し、注入なしの対照は
+    `test_large_post_body` である。
+    """
+    from lossy_relay import LossyRelay, LossyRelayPacket
+
+    from webtransport.http3 import Client, Server
+
+    payload = _large_binary_payload()
+    server_buffer = bytearray()
+    client_buffer = bytearray()
+    server_complete = asyncio.Event()
+    client_complete = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        pass
+
+    async def on_data(stream_id, data, addr):
+        server_buffer.extend(data)
+        if not server_complete.is_set() and len(server_buffer) >= len(payload):
+            server_complete.set()
+            await server.submit_response(
+                addr,
+                stream_id,
+                [(":status", "200"), ("content-type", "application/octet-stream")],
+            )
+            await server.send_data(addr, stream_id, bytes(server_buffer), fin=True)
+
+    server.on_request(on_request)
+    server.on_data(on_data)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    def drop_every_nth(packet: LossyRelayPacket) -> bool:
+        """方向ごとの通し番号で `drop_mod` 個に 1 個落とす (再送も数える)"""
+        return packet.index % drop_mod == drop_mod - 1
+
+    relay = LossyRelay(
+        server_addr=("127.0.0.1", server.actual_port),
+        drop_rule=drop_every_nth,
+    )
+
+    async with relay:
+        client = Client(
+            host="127.0.0.1",
+            port=relay.actual_port,
+            verify_peer=False,
+        )
+
+        async def on_client_data(stream_id, data):
+            client_buffer.extend(data)
+            if len(client_buffer) >= len(payload):
+                client_complete.set()
+
+        client.on_data(on_client_data)
+
+        # ハンドシェイクでもパケットを落とすため再送の分だけ待つが、CI と prek の
+        # pytest-timeout (30 秒) の内側に収める
+        await asyncio.wait_for(client.connect(timeout=10.0), timeout=20.0)
+
+        stream_id = await client.request("POST", "/large-lossy")
+        assert stream_id >= 0
+        await client.send_data(stream_id, payload, fin=True)
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+
+        try:
+            # 転送の完了待ちも pytest-timeout (30 秒) の内側に収める
+            await asyncio.wait_for(server_complete.wait(), timeout=10.0)
+            await asyncio.wait_for(client_complete.wait(), timeout=10.0)
+
+            # 損失注入が実際に作用したことを確認する (0 件なら再送経路を
+            # 通っておらず、このテストは何も検証していない)
+            assert relay.dropped["c2s"] > 0, "クライアント方向のデータグラムが落ちていません"
+            assert relay.dropped["s2c"] > 0, "サーバー方向のデータグラムが落ちていません"
+
+            _assert_payload_matches(bytes(server_buffer), payload, "サーバーが受信したボディ")
+            _assert_payload_matches(bytes(client_buffer), payload, "クライアントが受信したエコー")
+        finally:
+            client_task.cancel()
+            await asyncio.gather(client_task, return_exceptions=True)
+            await client.close()
+
+    server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+
     await server.stop()
 
 

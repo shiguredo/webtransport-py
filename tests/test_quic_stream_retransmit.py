@@ -11,12 +11,19 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import CLIENT_ADDR, SERVER_ADDR, create_client_server_pair, perform_handshake
+from conftest import (
+    CLIENT_ADDR,
+    SERVER_ADDR,
+    _large_binary_payload,
+    create_client_server_pair,
+    perform_handshake,
+)
 
 from webtransport import quic
 
-# QUIC パケット境界をまたぐサイズを選ぶ
-PAYLOAD = bytes((index % 256) for index in range(32 * 1024))
+# QUIC パケット境界をまたぐサイズを選ぶ。256 バイトの倍数のずれも検出
+# できるよう、周期 256 ではなく周期 65536 のパターンを使う
+PAYLOAD = _large_binary_payload()
 
 # 完了待ちの壁時計デッドライン (秒)。pytest-timeout=30 の内側に収める
 COMPLETION_DEADLINE = 20.0

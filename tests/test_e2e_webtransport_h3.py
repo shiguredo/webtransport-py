@@ -9,7 +9,7 @@ import time
 from typing import Literal
 
 import pytest
-from conftest import _encode_h3_goaway_frame
+from conftest import _encode_h3_goaway_frame, _large_binary_payload
 
 from webtransport import quic
 from webtransport.exceptions import (
@@ -1660,8 +1660,9 @@ async def test_large_stream_payload(test_certificates):
     """比較的大きなストリームペイロードが往復することを確認"""
     from webtransport.h3 import Client
 
-    # 32 KiB。QUIC パケット境界をまたぐサイズを選ぶ
-    payload = bytes((index % 256) for index in range(32 * 1024))
+    # 32 KiB。QUIC パケット境界をまたぐサイズを選ぶ。256 バイトの倍数の
+    # ずれも検出できるよう、周期 256 ではなく周期 65536 のパターンを使う
+    payload = _large_binary_payload()
     server_buffer = bytearray()
     client_buffer = bytearray()
     session_ready_event = asyncio.Event()
