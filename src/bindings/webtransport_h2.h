@@ -783,7 +783,10 @@ class H2Session {
   // END_STREAM で閉じた場合) を検知したセッションの終了処理。accept_session が
   // 2xx を送出し、受理前に蓄積したカプセルを遅延処理した後に呼ぶ。カプセル
   // 境界で終わっていれば SessionClosed (error_code 0) を通知し、切り詰めが
-  // 残る場合は PROTOCOL_ERROR のストリームエラーにする
+  // 残る場合は PROTOCOL_ERROR のストリームエラーにして RST_STREAM を送出する
+  // (通知とエントリの後始末を呼び出し元の send() に依存させないため、この
+  // 分岐は nghttp2_session_send を呼ぶ)。nghttp2_session_send を呼ぶため、
+  // この関数は nghttp2 コールバック外 (accept_session 経由) からのみ呼ぶこと
   void terminate_pre_accept_end_stream_session(int32_t session_id);
 
   // HTTP/2 DATA フレームとして Capsule を送信

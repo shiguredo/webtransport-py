@@ -829,7 +829,11 @@ def test_end_stream_server_pre_accept_truncated_capsule_resets_stream_after_acce
     の検証は accept_session の遅延処理後に行う。END_STREAM がカプセル境界で
     終わっていないため、RFC 9297 Section 3.3 の malformed / incomplete として
     PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) になり、clean な
-    SessionClosed (error code 0) は発火しない。
+    SessionClosed (error code 0) は発火しない。RST_STREAM は accept_session の中で
+    送出されるため、SessionClosed とエントリ削除は accept_session から戻った
+    時点で確定しており、server.send() を待たずに観測できる (呼び出し元の send()
+    に委ねると、高レベル層が次の読み取りで EOF を受けた場合に通知が drain
+    されない)。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -849,20 +853,36 @@ def test_end_stream_server_pre_accept_truncated_capsule_resets_stream_after_acce
         "受理前の END_STREAM 後に切り詰めが保持されていません"
     )
 
-    # 受理の 2xx 送出後に切り詰めが検証され、PROTOCOL_ERROR の RST_STREAM になる
+    # 受理の 2xx 送出後に切り詰めが検証され、PROTOCOL_ERROR の RST_STREAM が
+    # accept_session の中で送出される。SessionClosed とエントリの後始末は
+    # accept_session から戻った時点で確定し、send() を待たない
     assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
+    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(closed_events) == 1, (
+        "accept_session 直後に SessionClosed が 1 件だけ発火していません"
+    )
+    assert closed_events[0].session_id == session_id
+    assert closed_events[0].error_code == _PROTOCOL_ERROR, (
+        "切り詰めの終了が PROTOCOL_ERROR ではありません"
+    )
+    # accept_session 直後にセッションは確立扱いから外れる (get_session_ids は
+    # is_established で絞るため空になる)。エントリ削除そのものは
+    # on_stream_close_callback の discard_stream_recv_bytes で起きるため、
+    # 受信バイト記録の解放で観測する
+    assert server.get_session_ids() == [], (
+        "accept_session 直後にセッションが確立扱いのまま残っています"
+    )
+    assert server._test_unconsumed_recv_bytes(session_id) is None, (
+        "accept_session 直後に受信バイト記録が解放されていません"
+    )
+
+    # ワイヤには 2xx HEADERS の後に RST_STREAM が並ぶ (send() は送出済みの
+    # バッファを返すだけになる)
     wire = server.send()
     assert wire is not None, "受理の応答が送出されていません"
     assert _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) in wire, (
         "PROTOCOL_ERROR の RST_STREAM が送出されていません"
     )
-    closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
-    assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
-    assert closed_events[0].session_id == session_id
-    assert closed_events[0].error_code == _PROTOCOL_ERROR, (
-        "切り詰めの終了が clean (error code 0) になっています"
-    )
-    assert server.get_session_ids() == [], "セッションが終了していません"
 
     # ピアにも RST_STREAM が届き、同じエラーコードでセッションが終了する
     client.receive(wire)

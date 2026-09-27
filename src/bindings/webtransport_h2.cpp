@@ -1466,9 +1466,15 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   // として扱い、PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) に
   // する。受理後 END_STREAM の handle_end_stream と同じ扱いであり、
   // SessionClosed は RST_STREAM の送出で発火する on_stream_close_callback が
-  // 通知する (error_code は nghttp2 のクローズ由来)
+  // 通知する (error_code は nghttp2 のクローズ由来)。この関数は accept_session
+  // (nghttp2 コールバック外) からのみ呼ばれるため、ここで nghttp2_session_send を
+  // 呼んでも再入にならない。送出を呼び出し元の send() に委ねると、
+  // accept_session から戻った時点では通知とエントリの後始末が確定せず、
+  // 高レベル層が次の読み取りで EOF を受けてイベント drain の前に抜けると
+  // on_session_closed が呼ばれない窓が残る
   if (!wt_session->capsule_buffer.empty()) {
     reset_stream_for_malformed_capsule(session_id);
+    nghttp2_session_send(session_);
     return;
   }
 
