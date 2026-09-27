@@ -89,6 +89,11 @@ async def main() -> None:
     #   on_datagram の session_id は Quarter Stream ID から復元する
     #   (draft-ietf-webtrans-http3-16 Section 4.5)。仕様逸脱ピアが巨大な
     #   Quarter Stream ID を送った場合は負の値になり得る
+    # on_goaway(goaway_id: int, addr: tuple[str, int])
+    #   GOAWAY 受信の通知 (draft-ietf-webtrans-http3-16 Section 4.7)。graceful
+    #   shutdown の通知であり接続もセッションも継続する。初回受信でのみ発火する。
+    #   GOAWAY ID はクライアント→サーバー方向では push ID を表す
+    #   (RFC 9114 Section 7.2.6)
 
     async def on_session_ready(session_id: int, addr: tuple[str, int]) -> None:
         # サーバーから単方向ストリームを開いて送信する (デフォルト単方向)
@@ -157,6 +162,10 @@ async def main() -> None:
     #   error_code はレンジ外または予約済みコードポイントでは None
     #   (draft-ietf-webtrans-http3-16 Section 4.4)
     # on_datagram(data: bytes)
+    # on_goaway(goaway_id: int)
+    #   GOAWAY 受信の通知。graceful shutdown の通知であり接続もセッションも
+    #   継続する。初回受信でのみ発火する。GOAWAY ID はサーバー→クライアント
+    #   方向ではクライアントが開始した要求の識別子を表す (RFC 9114 Section 7.2.6)
 
     async def on_stream_data(stream_id: int, data: bytes) -> None:
         print(f"データ受信: {data}")
@@ -240,7 +249,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 
 `send_stream_data` / `send_datagram` は `SessionWriter` と `h2.Client` のどちらも data が 1 MiB 超なら `ValueError` を送出する (未接続の `h2.Client` は送信しないため例外にならない)。
 
-`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。メソッドの形は `h3.Client` と同じだが、`close_stream` は無く、リセットは `reset_stream`、送信停止は `stop_sending` を使う。コールバックは `on_session_ready(session_id: int)` / `on_session_closed(session_id: int)` / `on_stream_data(stream_id: int, data: bytes)` / `on_stream_reset(stream_id: int, error_code: int)` / `on_datagram(data: bytes)` / `on_stop_sending(stream_id: int, error_code: int)` / `on_error(error_code: int, error_message: str)` / `on_goaway(last_stream_id: int, error_code: int)` で、`h3.Client` に無い `on_stop_sending` / `on_error` / `on_goaway` を持つ (addr は付かない)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
+`h2.Client.__init__(url, verify_peer=True, origin="", config=None, close_wait_timeout=3.0)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。メソッドの形は `h3.Client` と同じだが、`close_stream` は無く、リセットは `reset_stream`、送信停止は `stop_sending` を使う。コールバックは `on_session_ready(session_id: int)` / `on_session_closed(session_id: int)` / `on_stream_data(stream_id: int, data: bytes)` / `on_stream_reset(stream_id: int, error_code: int)` / `on_datagram(data: bytes)` / `on_stop_sending(stream_id: int, error_code: int)` / `on_error(error_code: int, error_message: str)` / `on_goaway(last_stream_id: int, error_code: int)` で、`h3.Client` に無い `on_stop_sending` / `on_error` を持つ (`on_goaway` は h3 にもあり、h2 は `(last_stream_id, error_code)`、h3 は `(goaway_id)` でシグネチャが異なる。addr は付かない)。`connect(timeout: float = 10.0) -> None` は対向の SETTINGS を待ってから Extended CONNECT を送る。失敗時は `WebTransportConnectError` 派生の具体例外 (`ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError`) を送出する。Config の上限値超えでは `ValueError` を送出する。`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる (0 以下なら待機しない)。`close()` 後は `session_id` が -1 になる。
 
 ### QUIC (`webtransport.quic`)
 
@@ -534,7 +543,7 @@ def connect(stream_id: int, url: str, origin: str = "") -> bool  # クライア�
 def accept_session(stream_id: int) -> bool  # サーバー
 def reject_session(stream_id: int, status_code: int) -> None
 def close_session(session_id: int, error_code: int = 0, error_message: str = "") -> None
-def is_closed() -> bool
+def is_closed() -> bool  # 接続エラー時のみ真 (GOAWAY 受信では真にならず、セッションを継続できる)
 def is_webtransport_ready() -> bool  # 対向 SETTINGS で WebTransport over HTTP/3 が有効か (クライアント用)
 def get_session_ids() -> list[int]
 def get_session_streams(session_id: int) -> list[StreamInfo]
@@ -719,11 +728,11 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 
 - `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
 - `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING` / `INFORMATIONAL` / `TRAILERS` / `ERROR`
-- `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR`
+- `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR` / `GOAWAY`
 - `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE` / `INFORMATIONAL` / `TRAILERS`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR` / `GOAWAY`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空) / `last_stream_id` (GOAWAY でのみ意味を持つ。他イベントでは 0)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `goaway_id` (GOAWAY でのみ意味を持つ。他イベントでは 0。RFC 9114 Section 7.2.6 のとおりクライアント→サーバー方向では push ID、サーバー→クライアント方向ではクライアントが開始した要求の識別子) / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空) / `last_stream_id` (GOAWAY でのみ意味を持つ。他イベントでは 0)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
 
 ## 注意点
 
