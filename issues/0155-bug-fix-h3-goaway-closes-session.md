@@ -38,12 +38,12 @@
 ## 完了条件
 
 - GOAWAY 受信後に `is_closed()` が偽のままであること (低レベル Sans-IO で確認する。GOAWAY フレーム (`0x07` + Length + GOAWAY ID) を制御ストリームへ `Session.receive_stream_data` で注入して発生させる。h3 バインディングに GOAWAY 送出 API は無い)
-- 継続を表明する試験の GOAWAY ID は、既存セッションの CONNECT ストリーム ID より大きい値 (例: 4 または 8) を注入する (RFC 9114 Section 5.2 は GOAWAY ID 以上の要求を拒否するため、ID 0 では「既存セッションを継続できる」ことを表明できない)
+- 継続を表明する試験の GOAWAY ID は、client 側セッションへ注入する場合は既存セッションの CONNECT ストリーム ID より大きい値 (例: 4 または 8) にする (RFC 9114 Section 5.2 は GOAWAY ID 以上の識別子の要求を拒否するため、ID 0 では「既存セッションを継続できる」ことを表明できない)。server 側セッションへ注入する GOAWAY の ID は push ID を表す (RFC 9114 Section 7.2.6) ため、この数値要件は client 側の継続表明に対するものである
 - GOAWAY 受信後も、確立済みセッションの既存ストリームと datagram の送受信を継続できること (低レベル Sans-IO で確認する)
 - 高レベル層が `H3_GENERAL_PROTOCOL_ERROR` を送出しないこと
 - 初回 GOAWAY 受信で `on_goaway` が 1 回発火すること (クライアント側は `(goaway_id)`、サーバー側は `(goaway_id, addr)`。重複 GOAWAY で多重発火しないこと)
 - 0131 由来の接続エラー注入テストが引き続き `is_closed()` 真を維持すること (回帰両立。`is_closed()` 分岐を変更していないことの確認でもある)
-- `tests/test_webtransport_h3_goaway.py` (新規) に GOAWAY フレーム注入による継続テスト (制御ストリームへ注入し、`is_closed()` 偽 + `GoAway` イベント + 既存ストリーム / datagram の送受信継続を表明) を追加し、`tests/test_e2e_webtransport_h3.py` に `H3_GENERAL_PROTOCOL_ERROR` 不送出と `on_goaway` 発火のテストを追加すること (e2e は `Client._webtransport_session.receive_stream_data` への制御ストリーム注入で GOAWAY を発生させる。ピアの制御ストリーム ID は 3 と決め打ちできない — サーバーが QPACK エンコーダーを先に開くと 3 は QPACK になる。`tests/test_webtransport_h3_settings_ready.py` が同じ論点を扱っており、同テストと同じ方法で制御ストリームを特定する)
+- `tests/test_webtransport_h3_goaway.py` (新規) に GOAWAY フレーム注入による継続テスト (制御ストリームへ注入し、`is_closed()` 偽 + `GoAway` イベント + 既存ストリーム / datagram の送受信継続を表明) を追加し、`tests/test_e2e_webtransport_h3.py` に `H3_GENERAL_PROTOCOL_ERROR` 不送出と `on_goaway` 発火のテストを追加すること (e2e は `Client._webtransport_session.receive_stream_data` への制御ストリーム注入で GOAWAY を発生させる。e2e のピアは `webtransport.h3.Server` であり、`Server._setup_streams` → `open_http3_uni_streams` が制御 → QPACK エンコーダ → QPACK デコーダの順に開くため、サーバー起動の単方向ストリームは制御 3 / エンコーダ 7 / デコーダ 11 に確定する。ピアの制御ストリーム ID を外から観測する API は無いため、確定した 3 を使う)
 - 全テストが通過すること
 
 ## reopened にした理由
