@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 
 import pytest
-from conftest import _encode_varint
+from conftest import PUMP_ATTEMPTS, _encode_varint, wait_pacing_timeout
 
 from webtransport import http3, quic
 
@@ -232,13 +232,26 @@ async def test_client_forwards_peer_reset_stream(test_certificates) -> None:
         await client.close()
 
 
+async def _flush_peer_sends(peer: http3.Client) -> None:
+    """ピアの送信待ちを pacing の期限も待ちながら掃き出す
+
+    `_send_pending` は輻輳ウィンドウの枯渇・フロー制御・pacing の期限待ちで
+    空振りして 0 を返すため、送るものが無くなるまで期限を待って繰り返す。
+    """
+    for _ in range(PUMP_ATTEMPTS):
+        sent = await peer._send_pending()
+        if sent == 0 and not wait_pacing_timeout(peer._quic_connection):
+            break
+
+
 async def _collect_datagrams(server: http3.Server) -> list[bytes]:
     """DUT のソケットに届いたデータグラムを、途切れるまで集める
 
     固定の待機では全 suite 実行時の遅延で取りこぼすため、最初の 1 件を
     上限時間まで待ち、その後は読み取りが続く限り (クワイエット時間まで)
     集める。ACK だけのデータグラムが先に届いても、後続の HEADERS / RESET
-    を取りこぼさない。
+    を取りこぼさない。呼び出し側がピアの送信待ちを掃き出してから呼ぶ前提で、
+    ここでは未送出のフレームを待たない。
     """
     collected: list[bytes] = []
     deadline = time.monotonic() + _WAIT_LIMIT
@@ -319,6 +332,11 @@ async def test_same_batch_headers_before_reset_on_server(
         stream_id = await peer.request("GET", "/same-batch")
         assert stream_id >= 0, "リクエストの送信に失敗しました"
         await peer.reset_stream(stream_id, _RESET_ERROR_CODE)
+        # リクエストと RESET_STREAM を確実に送出してから接続を閉じる。close は
+        # 未送出のストリームデータを破棄するため、run ループ任せの送出を待つと
+        # フレームがワイヤに載らないまま接続だけが閉じる (報告した順序の表明が
+        # 空になる)
+        await _flush_peer_sends(peer)
         if close_connection:
             # リセット直後に接続を閉じ、同一バッチに CONNECTION_CLOSED を並べる。
             # close はパケットを生成するだけなので、収集の前に明示的に送出する
