@@ -2461,10 +2461,16 @@ int H3Session::shutdown_cb(nghttp3_conn* conn,
                            int64_t id,
                            void* conn_user_data) noexcept {
   (void)conn;
-  (void)id;
 
+  // GOAWAY 受信は graceful shutdown の通知であり接続エラーではない
+  // (draft-ietf-webtrans-http3-16 Section 4.7: GOAWAY 受信後もセッションを
+  // 継続してよい)。closed_ は立てず (is_closed() は接続エラーのみを表す)、
+  // GOAWAY ID 付きのイベントを積んでアプリに通知する
   auto* session = static_cast<H3Session*>(conn_user_data);
-  session->closed_ = true;
+  H3Event event;
+  event.type = H3EventType::GoAway;
+  event.goaway_id = static_cast<uint64_t>(id);
+  session->push_event(std::move(event));
   return 0;
 }
 
@@ -2664,7 +2670,8 @@ void bind_webtransport_h3(nb::module_& m) {
       .value("STOP_SENDING", H3EventType::StopSending)
       .value("DATAGRAM", H3EventType::Datagram)
       .value("ERROR", H3EventType::Error)
-      .value("SESSION_REJECTED", H3EventType::SessionRejected);
+      .value("SESSION_REJECTED", H3EventType::SessionRejected)
+      .value("GOAWAY", H3EventType::GoAway);
 
   // H3Event
   nb::class_<H3Event>(h3_mod, "Event", "WebTransport イベント")
@@ -2684,6 +2691,12 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_ro("status_code", &H3Event::status_code,
               "SessionRejected 発火時の HTTP status code。他イベントでは 0 "
               "(パース失敗・範囲外は 0 に丸められる)")
+      .def_ro(
+          "goaway_id", &H3Event::goaway_id,
+          "GoAway 発火時の GOAWAY ID。他イベントでは 0 (RFC 9114 Section "
+          "7.2.6: "
+          "クライアント→サーバー方向は push ID、サーバー→クライアント方向は "
+          "クライアントが開始した要求の ID)")
       .def_ro("headers", &H3Event::headers,
               "SESSION_READY 発火時の受信 CONNECT ヘッダー。他イベントでは空");
 
@@ -2885,7 +2898,10 @@ void bind_webtransport_h3(nb::module_& m) {
            nb::sig("def get_required_streams(self) -> list[tuple[str, bool]]"),
            "必要な QUIC ストリーム ID のリストを取得")
       .def("is_closed", &H3Session::is_closed, nb::lock_self(),
-           nb::sig("def is_closed(self) -> bool"), "接続が閉じられたか")
+           nb::sig("def is_closed(self) -> bool"),
+           "接続が閉じられたか (接続エラーを意味する nghttp3 の負値 return "
+           "のときのみ "
+           "真。GOAWAY 受信では真にならず、セッションを継続できる)")
       .def(
           "is_webtransport_ready", &H3Session::is_webtransport_ready,
           nb::lock_self(), nb::sig("def is_webtransport_ready(self) -> bool"),

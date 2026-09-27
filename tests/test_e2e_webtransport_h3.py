@@ -9,6 +9,7 @@ import time
 from typing import Literal
 
 import pytest
+from conftest import _encode_h3_goaway_frame
 
 from webtransport import quic
 from webtransport.exceptions import (
@@ -3381,3 +3382,191 @@ async def test_high_level_initiate_key_update(test_certificates):
 
     await client.close()
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_goaway_keeps_connection_and_notifies_once(test_certificates):
+    """GOAWAY 受信で接続を閉じず on_goaway が 1 回だけ発火することを確認
+
+    GOAWAY は graceful shutdown の通知であり、接続もセッションも継続する
+    (draft-ietf-webtrans-http3-16 Section 4.7)。低レベルが GOAWAY 受信で
+    is_closed() を真にすると、高レベル層が H3_GENERAL_PROTOCOL_ERROR
+    (RFC 9114 Section 8.1) で CONNECTION_CLOSE を送出してしまう。
+
+    GOAWAY を送出する公開 API は h3 バインディングに無いため、ピア (サーバー) の
+    制御ストリームへ GOAWAY フレームを注入して再現する。サーバー起動の単方向
+    ストリームは制御 3 / QPACK エンコーダ 7 / QPACK デコーダ 11 の順に開かれる
+    (Server._setup_streams → open_http3_uni_streams) ため、制御ストリームは 3。
+    """
+    from webtransport.h3 import Client
+
+    goaway_events: list[int] = []
+    goaway_received = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    async def on_goaway(goaway_id):
+        goaway_events.append(goaway_id)
+        goaway_received.set()
+
+    client.on_goaway(on_goaway)
+
+    try:
+        await client.connect()
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+
+        # サーバーの制御ストリーム (3) へ GOAWAY (ID 4) を注入する
+        webtransport_session = client._webtransport_session
+        assert webtransport_session is not None
+        webtransport_session.receive_stream_data(3, _encode_h3_goaway_frame(4), False)
+
+        await asyncio.wait_for(goaway_received.wait(), timeout=5.0)
+        assert goaway_events == [4], "on_goaway が GOAWAY ID 付きで 1 回発火していません"
+
+        # 接続は閉じられていない (H3_GENERAL_PROTOCOL_ERROR の
+        # CONNECTION_CLOSE を送出していない)
+        assert client.is_connected is True, "GOAWAY 受信で接続が閉じられています"
+        assert client._quic_connection is not None
+        assert client._quic_connection.is_closed() is False, (
+            "GOAWAY 受信で QUIC 接続が閉じられています"
+        )
+
+        # 2 回目の GOAWAY は GOAWAY ID が異なっても通知しない。ID を増加させると
+        # 接続エラーになる (RFC 9114 Section 5.2) ため小さい値にする
+        webtransport_session.receive_stream_data(3, _encode_h3_goaway_frame(0), False)
+        await asyncio.sleep(0.2)
+        assert goaway_events == [4], "2 回目の GOAWAY で on_goaway が多重発火しました"
+
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+    finally:
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_goaway_keeps_connection_and_notifies_once(test_certificates):
+    """サーバーが GOAWAY を受信しても on_goaway(goaway_id, addr) が 1 回だけ発火することを確認
+
+    GOAWAY は graceful shutdown の通知であり、接続もセッションも継続する
+    (draft-ietf-webtrans-http3-16 Section 4.7)。サーバーが受信する GOAWAY の ID は
+    push ID を表す (RFC 9114 Section 7.2.6)。低レベルが GOAWAY 受信で is_closed() を
+    真にすると、`Server._handle_datagram` の分岐が H3_GENERAL_PROTOCOL_ERROR で
+    CONNECTION_CLOSE を送出してしまう。
+
+    クライアントの制御ストリームは 2 (Client も制御 → QPACK エンコーダ → QPACK
+    デコーダの順に開く) であり、サーバー側のセッションへ直接注入する。
+    """
+    from webtransport.h3 import Client
+
+    goaway_events: list[tuple[int, tuple[str, int]]] = []
+    goaway_received = asyncio.Event()
+    session_ready = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_session_ready(session_id, addr):
+        session_ready.set()
+
+    async def on_goaway(goaway_id, addr):
+        goaway_events.append((goaway_id, addr))
+        goaway_received.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_goaway(on_goaway)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+    )
+
+    try:
+        await client.connect()
+
+        async def run_client():
+            try:
+                await client.run()
+            except asyncio.CancelledError:
+                pass
+
+        client_task = asyncio.create_task(run_client())
+
+        await asyncio.wait_for(session_ready.wait(), timeout=5.0)
+
+        # サーバー側のクライアント接続のセッションへ、クライアントの制御
+        # ストリーム (2) を経由して GOAWAY (push ID 4) を注入する
+        client_addr, client_connection = next(iter(server._clients.items()))
+        webtransport_session = client_connection.webtransport_session
+        assert webtransport_session is not None
+        webtransport_session.receive_stream_data(2, _encode_h3_goaway_frame(4), False)
+        # サーバーの受信ループは QUIC イベントを契機に WebTransport イベントを
+        # drain するため、データグラムを 1 つ送って契機を作る
+        await client.send_datagram(b"trigger-goaway")
+
+        await asyncio.wait_for(goaway_received.wait(), timeout=5.0)
+        assert len(goaway_events) == 1, "on_goaway が 1 回だけ発火していません"
+        assert goaway_events[0][0] == 4, "on_goaway の GOAWAY ID が一致しません"
+        assert goaway_events[0][1] == client_addr, "on_goaway の addr が一致しません"
+
+        # 接続は閉じられていない (H3_GENERAL_PROTOCOL_ERROR の
+        # CONNECTION_CLOSE を送出していない)
+        assert client.is_connected is True, "GOAWAY 受信で接続が閉じられています"
+        assert client_connection.quic_connection is not None
+        assert client_connection.quic_connection.is_closed() is False, (
+            "GOAWAY 受信でサーバー側の QUIC 接続が閉じられています"
+        )
+
+        # 2 回目の GOAWAY では GOAWAY ID が異なっても通知しない
+        webtransport_session.receive_stream_data(2, _encode_h3_goaway_frame(0), False)
+        await client.send_datagram(b"trigger-goaway-again")
+        await asyncio.sleep(0.2)
+        assert len(goaway_events) == 1, "2 回目の GOAWAY で on_goaway が多重発火しました"
+
+        client_task.cancel()
+        server_task.cancel()
+        await asyncio.gather(client_task, server_task, return_exceptions=True)
+    finally:
+        await client.close()
+        await server.stop()

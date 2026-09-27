@@ -330,6 +330,18 @@ def _encode_goaway_frame(last_stream_id: int, error_code: int = 0) -> bytes:
     return len(payload).to_bytes(3, "big") + bytes([0x07, 0x00]) + (0).to_bytes(4, "big") + payload
 
 
+def _encode_h3_goaway_frame(goaway_id: int) -> bytes:
+    """HTTP/3 GOAWAY フレームのワイヤバイト列を組み立てる
+
+    Type 0x07、Length、Stream ID / Push ID である (RFC 9114 Section 7.2.6)。
+    Length は GOAWAY ID の varint 長。h3 の公開 API に送出手段が存在しないため、
+    制御ストリームへのワイヤ注入で再現する。`_encode_goaway_frame` は HTTP/2 用
+    (last_stream_id と error_code の 8 バイト固定) であり形式が異なる。
+    """
+    id_bytes = _encode_varint(goaway_id)
+    return bytes([0x07]) + _encode_varint(len(id_bytes)) + id_bytes
+
+
 # エラーコード (RFC 9113 Section 7 の HTTP/2 エラーコード)
 _PROTOCOL_ERROR = 0x01
 

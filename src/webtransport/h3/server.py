@@ -36,6 +36,8 @@ class ClientConnection:
         self.quic_connection: quic.Connection | None = None
         self.webtransport_session: h3_low.Session | None = None
         self.streams_setup: bool = False
+        # GOAWAY を通知済みかどうか (初回のみ通知するためのフラグ)
+        self.goaway_notified: bool = False
 
 
 class Server:
@@ -115,6 +117,7 @@ class Server:
             Callable[[int, int, int | None, tuple[str, int]], Awaitable[None]] | None
         ) = None
         self._on_datagram: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_goaway: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
 
     @property
     def host(self) -> str:
@@ -187,6 +190,23 @@ class Server:
             callback: async def callback(session_id: int, addr: tuple[str, int]) -> None
         """
         self._on_session_closed = callback
+
+    def on_goaway(
+        self,
+        callback: Callable[[int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """GOAWAY 受信時のコールバックを設定する
+
+        GOAWAY は graceful shutdown の通知であり、接続もセッションも継続する
+        (draft-ietf-webtrans-http3-16 Section 4.7)。初回受信でのみ発火し、
+        2 回目以降は GOAWAY ID の異同を問わず発火しない。登録前に受信した
+        GOAWAY は通知しない。GOAWAY ID はクライアント→サーバー方向では push ID
+        を表す (RFC 9114 Section 7.2.6)。
+
+        Args:
+            callback: async def callback(goaway_id: int, addr: tuple[str, int]) -> None
+        """
+        self._on_goaway = callback
 
     def on_stream_data(
         self,
@@ -562,6 +582,15 @@ class Server:
                         b"",
                         fin=True,
                     )
+
+            elif webtransport_event.type == h3_low.EventType.GOAWAY:
+                # graceful shutdown の通知であり、接続もセッションも継続する
+                # (draft-ietf-webtrans-http3-16 Section 4.7)。接続ごとに初回
+                # 受信のみ通知し、2 回目以降は GOAWAY ID の異同を問わず通知しない
+                if not client.goaway_notified:
+                    client.goaway_notified = True
+                    if self._on_goaway is not None:
+                        await self._on_goaway(webtransport_event.goaway_id, addr)
 
             elif webtransport_event.type == h3_low.EventType.STREAM_DATA:
                 if self._on_stream_data is not None:

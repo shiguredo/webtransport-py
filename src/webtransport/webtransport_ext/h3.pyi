@@ -59,6 +59,8 @@ class EventType(enum.Enum):
 
     SESSION_REJECTED = 8
 
+    GOAWAY = 9
+
 class Event:
     """WebTransport イベント"""
 
@@ -80,6 +82,12 @@ class Event:
     @property
     def status_code(self) -> int:
         """SessionRejected 発火時の HTTP status code。他イベントでは 0 (パース失敗・範囲外は 0 に丸められる)"""
+
+    @property
+    def goaway_id(self) -> int:
+        """
+        GoAway 発火時の GOAWAY ID。他イベントでは 0 (RFC 9114 Section 7.2.6: クライアント→サーバー方向は push ID、サーバー→クライアント方向は クライアントが開始した要求の ID)
+        """
 
     @property
     def headers(self) -> list[tuple[str, str]]:
@@ -175,7 +183,9 @@ class Session:
         """必要な QUIC ストリーム ID のリストを取得"""
 
     def is_closed(self) -> bool:
-        """接続が閉じられたか"""
+        """
+        接続が閉じられたか (接続エラーを意味する nghttp3 の負値 return のときのみ 真。GOAWAY 受信では真にならず、セッションを継続できる)
+        """
 
     def is_webtransport_ready(self) -> bool:
         """対向 SETTINGS で WebTransport over HTTP/3 が有効か (クライアント用)"""
