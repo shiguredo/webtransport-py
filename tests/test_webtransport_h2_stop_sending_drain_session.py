@@ -55,10 +55,14 @@ def test_stop_sending_after_peer_end_stream_not_sent() -> None:
 
     ピアが END_STREAM のみで CONNECT ストリームを閉じた場合 (draft-15
     Section 3.4 の正規の終了経路)、handle_end_stream がエントリを削除する。
-    エントリ削除後も自側の END_STREAM 応答は送出されない (既知の制約) ため
-    HTTP/2 ストリームは half-closed (remote) で生存し、nghttp2_session_resume_data
-    が成功する。修正前はエントリ不在でもカプセルをキューしてワイヤへ送出
-    されていた (終了済みセッション宛の誤送出)。
+    エントリ削除後は stop_sending がエントリ不在で塞がれ、WT_STOP_SENDING
+    カプセルは送出されない。ワイヤには応答 END_STREAM (空 DATA + END_STREAM)
+    が送出される (WT_CLOSE_SESSION 無しのクリーンな終了は error code 0 の
+    WT_CLOSE_SESSION による終了と等価 (Section 6.12) であり、同節の受信者 MUST は
+    文面上はカプセルの受信を条件とするが、等価規定の下で END_STREAM のみの受信にも
+    適用する実装ポリシー。確立時にキュー済みの初期フロー制御カプセルが同じ
+    ワイヤに残り得る)。修正前はエントリ不在でもカプセルをキューしてワイヤへ
+    送出されていた (終了済みセッション宛の誤送出)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)

@@ -1341,7 +1341,8 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   // 合わせて両ハーフが閉じてクローズし、同時ストリーム枠を消費し続けない。
   // END_STREAM を送らないピアでは、自側は応答の END_STREAM で half-closed
   // (local) になったままピアの END_STREAM 待ちでストリームは閉じない
-  // (handle_end_stream の経路は自側が END_STREAM を送らない点が異なる)
+  // (handle_end_stream の経路も等価規定 (Section 6.12) により応答 END_STREAM を
+  // 送出するため、この点は共通である)
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
   // 受理前 END_STREAM の保留記録も除去する
@@ -1427,21 +1428,31 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // エントリを削除して以後の on_stream_close_callback / close_session /
   // send_datagram / send_stream_data / open_stream / reset_stream /
   // stop_sending / drain_session をエントリ不在で塞ぐ。RST_STREAM を送出しない
-  // クリーンな終了では、エントリ破棄の契機になる on_stream_close_callback が
-  // 発火しない (ストリームは half-closed (remote) のまま残る) ため、破棄と
-  // 記録の解放をここで直接行う。キュー済みのカプセル
-  // (http2_stream_buffers_) も破棄する: 2xx + END_STREAM (受理と
-  // 同時クローズ) では同一 receive() 内で確立処理が初期フロー制御カプセル
-  // をキューしており、セッション終了を学習した後に送出しないため
-  // (on_stream_close_callback のバッファ破棄と対称)。ピアの END_STREAM に
-  // 対する自側の応答 (END_STREAM 送出) は行わない (ストリームは
-  // half-closed (remote) のまま接続終了まで残る既知の制約。Section 6.12 の
-  // 受信者側 MUST は WT_CLOSE_SESSION 受信時の応答についての規定であり、
-  // END_STREAM のみの受信には該当しない)
+  // クリーンな終了では、検知時点ではエントリ破棄の契機になる
+  // on_stream_close_callback が発火しない (応答 END_STREAM の送出は呼び出し元の
+  // receive() 末尾 / send() であり、その時点で両ハーフが閉じて発火するが、
+  // エントリは削除済みのため SessionClosed も後始末も行わない) ため、破棄と
+  // 記録の解放をここで直接行う。キュー済みのカプセル (http2_stream_buffers_) も
+  // 破棄する: 2xx + END_STREAM (受理と同時クローズ) では同一 receive() 内で
+  // 確立処理が初期フロー制御カプセルをキューしており、セッション終了を学習した
+  // 後に送出しないため (on_stream_close_callback のバッファ破棄と対称)。
+  // ピアの END_STREAM に対する自側の応答 END_STREAM も送出する:
+  // WT_CLOSE_SESSION 無しのクリーンな終了は error code 0 の WT_CLOSE_SESSION に
+  // よる終了と等価 (Section 6.12) であり、同節の受信者 MUST (END_STREAM 付きの
+  // フレームで応答してストリームを閉じる) は文面上はカプセルの受信を条件とするが、
+  // 等価規定の下で END_STREAM のみの受信にも適用する。これは仕様が強制する
+  // ものではなく、従来の「受信者 MUST は END_STREAM のみの受信には該当しない」
+  // という解釈を、h3 の SESSION_CLOSED で応答 FIN を送る経路と揃えてストリームを
+  // 両ハーフクローズで閉じ同時ストリーム枠を解放するための実装ポリシーとして
+  // 変更したものである。nghttp2_session_send は呼ばない
+  // (on_frame_recv_callback から呼ばれるため)。送出は呼び出し元の receive()
+  // 末尾または send() に委ねる (handle_wt_close_session と同じ)
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
+  end_stream_pending_.insert(session_id);
+  nghttp2_session_resume_data(session_, session_id);
 }
 
 void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
@@ -1470,15 +1481,25 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   push_event(std::move(event));
 
   // エントリと送信バッファを破棄し、以後の送信をエントリ不在で塞ぐ。応答の
-  // END_STREAM は送出しない (受理後 END_STREAM の検知と同じ扱い。Section 6.12
-  // の受信者 MUST は WT_CLOSE_SESSION 受信時の応答についての規定であり、
-  // END_STREAM のみの受信には該当しない。ストリームは half-closed (remote) の
-  // まま接続終了まで残る)
+  // END_STREAM は受理後 END_STREAM の handle_end_stream と同じ扱いで送出する:
+  // WT_CLOSE_SESSION 無しのクリーンな終了は error code 0 の WT_CLOSE_SESSION に
+  // よる終了と等価 (draft-15 Section 6.12) であり、同節の受信者 MUST
+  // (END_STREAM 付きのフレームで応答してストリームを閉じる) は文面上はカプセルの
+  // 受信を条件とするが、等価規定の下で END_STREAM のみの受信にも適用する
+  // (仕様が強制するものではなく、h3 の応答 FIN と揃えて同時ストリーム枠を解放
+  // するための実装ポリシー)。2xx は accept_session が送出済みであり、ここで
+  // 積んだ応答 END_STREAM は呼び出し元 (高レベル層の send()) の
+  // nghttp2_session_send で送出される (受理前に蓄積した WT_CLOSE_SESSION を
+  // 遅延処理する handle_wt_close_session と同じ位置・同じ 2 操作)。エントリは
+  // 削除済みのため、両ハーフクローズ時の on_stream_close_callback は
+  // SessionClosed を発火しない
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
   pending_pre_accept_end_stream_session_ids_.erase(session_id);
+  end_stream_pending_.insert(session_id);
+  nghttp2_session_resume_data(session_, session_id);
 }
 
 // ========== Capsule 送信 ==========
@@ -3694,7 +3715,7 @@ nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
 
   auto it = h2_session->http2_stream_buffers_.find(stream_id);
   if (it == h2_session->http2_stream_buffers_.end() || it->second.empty()) {
-    // draft-15 Section 6.12: CLOSE 後は END_STREAM で half-close
+    // draft-15 Section 6.12: END_STREAM の送出を保留していれば half-close
     if (end_pending) {
       *data_flags |= NGHTTP2_DATA_FLAG_EOF;
       h2_session->end_stream_pending_.erase(stream_id);
@@ -3716,7 +3737,7 @@ nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
     it->second.pop_front();
   }
 
-  // 送信キューが空で close_session 後なら EOF
+  // 送信キューが空で END_STREAM の送出を保留していれば EOF
   if (it->second.empty() && end_pending) {
     *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     h2_session->end_stream_pending_.erase(stream_id);

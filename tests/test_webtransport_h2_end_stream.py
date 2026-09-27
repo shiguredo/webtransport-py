@@ -63,13 +63,17 @@ _TRUNCATED_CAPSULES: list[bytes] = [
 
 
 def test_end_stream_only_closes_session() -> None:
-    """END_STREAM のみでセッション終了が検知され send_datagram が送出されないことを確認
+    """END_STREAM のみの終了でセッション終了が検知され応答 END_STREAM が送出されることを確認
 
     ピアが WT_CLOSE_SESSION を送らず END_STREAM のみで CONNECT ストリームを
     閉じた場合 (draft-15 Section 3.4 の正規の終了経路) にセッション終了が
     検知され、SessionClosed (error_code 0、error_message 空) が発火する。
     WT_CLOSE_SESSION なしのクリーンクローズは error code 0 かつ空のエラー
-    文字列の WT_CLOSE_SESSION と等価 (Section 6.12)。エントリ削除により
+    文字列の WT_CLOSE_SESSION と等価 (Section 6.12) である。同節の受信者 MUST
+    (END_STREAM 付きのフレームで応答してストリームを閉じる) は文面上はカプセルの
+    受信を条件とするが、等価規定の下で END_STREAM のみの受信にも適用する
+    実装ポリシーとし、応答の空 DATA + END_STREAM を送出してストリームを
+    両ハーフクローズで閉じ、同時ストリーム枠を解放する。エントリ削除により
     send_datagram が塞がれる (エントリの削除は公開 API から直接観測でき
     ないため、送出抑止で間接検証する)。
     """
@@ -91,6 +95,17 @@ def test_end_stream_only_closes_session() -> None:
     client.send_datagram(session_id, b"after-end-stream")
     wire = client.send()
     assert wire is None or _encode_capsule(0x00, b"after-end-stream") not in wire
+
+    # 応答 END_STREAM (空 DATA + END_STREAM) が送出される。RST_STREAM の
+    # フレームには同じバイト列が部分列として現れるため、リセットへの退行を
+    # 検出できるよう RST_STREAM の不在も表明する
+    assert wire is not None, "応答 END_STREAM が送出されていません"
+    assert _encode_data_frame(session_id, end_stream=True) in wire, (
+        "クリーンな終了に応答 END_STREAM が送出されていません"
+    )
+    assert _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) not in wire, (
+        "クリーンな終了で RST_STREAM が送出されました"
+    )
 
 
 @pytest.mark.parametrize(
@@ -149,7 +164,9 @@ def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
     draft-15 Section 6.12 の「WT_CLOSE_SESSION 無しのクリーンな終了」になる
     (対照)。受信側のカプセルバッファが空のときに END_STREAM が届いても
     RST_STREAM を送出しないことも表明する (wire の表明は補助であり、主たる
-    判別は SessionClosed の error_code 0)。
+    判別は SessionClosed の error_code 0)。あわせて同節の受信者 MUST は文面上は
+    カプセルの受信を条件とするが、等価規定の下で END_STREAM のみの受信にも
+    適用する実装ポリシーとし、応答 END_STREAM (空 DATA + END_STREAM) を送出する。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -174,6 +191,10 @@ def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
     wire = server.send()
     assert wire is None or _encode_rst_stream_frame(session_id, _PROTOCOL_ERROR) not in wire, (
         "カプセル境界の END_STREAM で RST_STREAM が送出されました"
+    )
+    assert wire is not None, "応答 END_STREAM が送出されていません"
+    assert _encode_data_frame(session_id, end_stream=True) in wire, (
+        "クリーンな終了に応答 END_STREAM が送出されていません"
     )
 
 
@@ -722,6 +743,12 @@ def test_end_stream_server_pre_accept_end_stream_terminates_after_accept() -> No
     assert _encode_rst_stream_frame(1, _PROTOCOL_ERROR) not in wire, (
         "クリーンな受理前 END_STREAM で RST_STREAM が送出されました"
     )
+    # 応答 END_STREAM も送出される (同節の受信者 MUST は文面上はカプセルの受信を
+    # 条件とするが、等価規定の下で END_STREAM のみの受信にも適用する実装ポリシー。
+    # 受理の 2xx 送出後に積まれ、呼び出し元の send() で送出される)
+    assert _encode_data_frame(1, end_stream=True) in wire, (
+        "クリーンな受理前 END_STREAM に応答 END_STREAM が送出されていません"
+    )
 
 
 def test_end_stream_server_pre_accept_end_stream_after_headers_terminates_after_accept() -> None:
@@ -730,7 +757,10 @@ def test_end_stream_server_pre_accept_end_stream_after_headers_terminates_after_
     受理前 END_STREAM の検知は CONNECT + END_STREAM が同一フレームの場合と、
     HEADERS の後に DATA フレームで届く場合の両方で成立する (検知は
     on_frame_recv_callback の END_STREAM 判定で共通)。クライアントは 2xx の
-    受信でセッション確立を認識できる (受理前 END_STREAM は応答可能性を損なわない)。
+    受信でセッション確立を認識し (受理前 END_STREAM は応答可能性を損なわない)、
+    続く応答 END_STREAM (同節の受信者 MUST は文面上はカプセルの受信を条件とするが、
+    等価規定の下で END_STREAM のみの受信にも適用する実装ポリシー) を検知して
+    SessionClosed が 1 回発火する。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -754,13 +784,17 @@ def test_end_stream_server_pre_accept_end_stream_after_headers_terminates_after_
     assert closed_events[0].error_code == 0, "クリーンな終了の error code が 0 ではありません"
     assert server.get_session_ids() == [], "セッションが終了していません"
 
-    # クライアントは 2xx の受信でセッション確立を認識する
+    # クライアントは 2xx の受信でセッションを確立し、続く応答 END_STREAM の
+    # 検知で SessionClosed を 1 回発火してセッションを終了する
     client.receive(wire)
     client_events = _drain_events(client)
     assert any(e.type == h2.EventType.SESSION_READY for e in client_events), (
         "クライアントがセッション確立を認識していません"
     )
-    assert client.get_session_ids() == [session_id], "クライアント側のセッションが確立していません"
+    client_closed = [e for e in client_events if e.type == h2.EventType.SESSION_CLOSED]
+    assert len(client_closed) == 1, "ピア側の SessionClosed が 1 件だけ発火していません"
+    assert client_closed[0].error_code == 0, "ピア側の終了がクリーンではありません"
+    assert client.get_session_ids() == [], "ピア側のセッションが終了していません"
 
 
 def test_end_stream_server_pre_accept_end_stream_datagram_ignored() -> None:

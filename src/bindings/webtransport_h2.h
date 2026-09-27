@@ -952,8 +952,9 @@ class H2Session {
   // WebTransport セッション管理
   std::map<int32_t, WtSessionInfo> wt_sessions_;
 
-  // close_session 後に END_STREAM を送るストリーム
-  // draft-15 Section 6.12
+  // END_STREAM の送出を保留しているストリーム (close_session 後の送出側
+  // half-close のほか、ピアの WT_CLOSE_SESSION への応答と、WT_CLOSE_SESSION 無しの
+  // クリーンな終了への応答。Section 6.12)
   std::set<int32_t> end_stream_pending_;
 
   // サーバーが 2xx を送出する前にピアが WT_CLOSE_SESSION 無しの END_STREAM で
