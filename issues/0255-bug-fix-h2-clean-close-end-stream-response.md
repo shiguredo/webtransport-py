@@ -1,7 +1,7 @@
 # h2 で END_STREAM のみのセッション終了に応答 END_STREAM を送出しない
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-27
 - Branch: feature/fix-h2-clean-close-end-stream-response
 - Polished: 2026-09-27
 
@@ -42,3 +42,12 @@ draft-ietf-webtrans-http2-15 Section 6.12 (`refs/webtrans/draft-ietf-webtrans-ht
 
 - 受理前 END_STREAM の切り詰め終了の通知タイミング (0254 で扱う)
 - 受理前 END_STREAM の保留状態の設計変更 (0256 で扱う)
+
+## 解決方法
+
+- `H2Session::handle_end_stream` (受理後 END_STREAM) と `H2Session::terminate_pre_accept_end_stream_session` (受理前 END_STREAM) のクリーン終了経路で、`H2Session::handle_wt_close_session` と同じく `end_stream_pending_` にセッション ID を追加し、`nghttp2_session_resume_data` を呼ぶようにした。エントリとバッファの破棄と `SessionClosed` (error_code 0) の push は検知時点で先に行うため、両ハーフクローズ時の `on_stream_close_callback` はエントリ不在で `SessionClosed` を発火しない
+- 根拠は WT_CLOSE_SESSION 無しのクリーンな終了が error code 0 の WT_CLOSE_SESSION による終了と等価であること (draft-ietf-webtrans-http2-15 Section 6.12)。同節の受信者 MUST は文面上はカプセルの受信を条件とするため、等価規定の下で END_STREAM のみの受信にも適用する実装ポリシーとし、closed 0070 / closed 0253 が「該当しない」として見送っていた扱いを変更した。h3 が SESSION_CLOSED で応答 FIN を送る経路と揃え、ストリームを両ハーフクローズで閉じて同時ストリーム枠を解放する
+- 受理前経路の応答 END_STREAM は `H2Session::accept_session` の 2xx 送出より後に積まれるため、呼び出し元 (高レベル `h2.Server` の受信ループの `send()`) で送出される。受理前に蓄積した WT_CLOSE_SESSION を遅延処理する `H2Session::handle_wt_close_session` と同じ位置・同じ 2 操作である
+- コメントを新挙動に合わせて書き直した (`H2Session::handle_end_stream` / `H2Session::terminate_pre_accept_end_stream_session` / `H2Session::handle_wt_close_session` / `H2Session::data_source_read_callback` と `H2Session::end_stream_pending_` のメンバーコメント)
+- テスト: `tests/test_webtransport_h2_end_stream.py` で受理後・受理前・クライアント側の応答 END_STREAM を表明し、受理前 END_STREAM で閉じたピアが 2xx の確立直後に `SessionClosed` を 1 回発火してセッションが消えることまで固定した (RST_STREAM への退行も検出できるよう RST_STREAM の不在も表明する)。`tests/test_webtransport_h2_stop_sending_drain_session.py` の docstring を新挙動に更新した
+- RED は表明を先に追加してから実装し、応答 END_STREAM を送出しない状態で受理後・受理前・クライアント側・ピア側 `SessionClosed` の 4 件が失敗することを実測で確認した。修正後に全テスト 1331 件が通過する
