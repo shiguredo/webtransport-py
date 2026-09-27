@@ -1,4 +1,4 @@
-# WebTransport over HTTP/3 が GOAWAY 受信で接続を閉じたものとして扱い、高レベル API が H3_GENERAL_PROTOCOL_ERROR で切断する
+# h3 が GOAWAY 受信をプロトコルエラーとして切断する
 
 - Created: 2026-09-06
 - Completed: {YYYY-MM-DD}
@@ -32,17 +32,25 @@
 
 ## 対象・対象外
 
-- 対象: `src/bindings/webtransport_h3.cpp` (`shutdown_cb` と enum 登録) / `src/bindings/webtransport_h3.h` (`H3EventType::GoAway` と `is_closed()` doc) / `src/webtransport/h3.pyi` (`GOAWAY` 公開) / `src/webtransport/h3/client.py` と `server.py` (`on_goaway` と `is_closed()` 分岐除外) / `tests/test_webtransport_h3_goaway.py` (新規、低レベル) と `tests/test_e2e_webtransport_h3.py` (高レベル) / `CHANGES.md`
-- 対象外: `drain_session` 送信側 / `http3.cpp` / `http2.cpp` / `WT_DRAIN_SESSION` 経路 (0122 の所有)
+- 対象: `src/bindings/webtransport_h3.cpp` (`shutdown_cb` と enum 登録) / `src/bindings/webtransport_h3.h` (`H3EventType::GoAway` と `is_closed()` doc) / `src/webtransport/webtransport_ext/h3.pyi` (`GOAWAY` 公開) / `src/webtransport/h3/client.py` と `server.py` (`on_goaway` と `is_closed()` 分岐除外) / `tests/test_webtransport_h3_goaway.py` (新規、低レベル) と `tests/test_e2e_webtransport_h3.py` (高レベル)。`CHANGES.md` は変更しない (CODEBASE.md の指示)
+- 対象外: GOAWAY 受信後の新規ストリームの open (nghttp3 が `NGHTTP3_CONN_FLAG_GOAWAY_RECVED` を立てて open 系を一律 `NGHTTP3_ERR_CONN_CLOSING` で拒否する実装であり、こちら側で緩和できない。フォークは CODEBASE.md で禁止。RFC 9114 Section 5.2 の "Endpoints MUST NOT initiate new requests" に適合するため仕様違反ではなく、draft-ietf-webtrans-http3-16 Section 4.7 の "MAY open new WebTransport streams" は許容規定) / `drain_session` 送信側 / `http3.cpp` / `http2.cpp` / `WT_DRAIN_SESSION` 経路 (0122 の所有)
 
 ## 完了条件
 
-- GOAWAY 受信後に `is_closed()` が偽のままであり、既存セッションで新規ストリームの open と datagram の送信が可能なこと (低レベル Sans-IO で確認する)
+- GOAWAY 受信後に `is_closed()` が偽のままであること (低レベル Sans-IO で確認する)
+- GOAWAY 受信後も、確立済みセッションの既存ストリームと datagram の送受信を継続できること (低レベル Sans-IO で確認する)
 - 高レベル層が `H3_GENERAL_PROTOCOL_ERROR` を送出しないこと
-- 初回 GOAWAY 受信で `on_goaway` が 1 回発火すること
+- 初回 GOAWAY 受信で `on_goaway` が 1 回発火すること (重複 GOAWAY で多重発火しないこと)
 - 0131 由来の接続エラー注入テストが引き続き `is_closed()` 真を維持すること (回帰両立)
-- `tests/test_webtransport_h3_goaway.py` (新規) に GOAWAY フレーム注入による継続テスト (制御ストリームへ注入し、`is_closed()` 偽 + `GoAway` イベント + open / send 可を表明) を追加し、`tests/test_e2e_webtransport_h3.py` に `H3_GENERAL_PROTOCOL_ERROR` 不送出と `on_goaway` 発火のテストを追加すること
-- 既存のテスト全 834 件が引き続き通過すること
+- `tests/test_webtransport_h3_goaway.py` (新規) に GOAWAY フレーム注入による継続テスト (制御ストリームへ注入し、`is_closed()` 偽 + `GoAway` イベント + 既存ストリーム / datagram の送受信継続を表明) を追加し、`tests/test_e2e_webtransport_h3.py` に `H3_GENERAL_PROTOCOL_ERROR` 不送出と `on_goaway` 発火のテストを追加すること
+- 全テストが通過すること
+
+## reopened にした理由
+
+- pending にした理由に記録した再開条件のうち 2 つ目 (「完了条件を『既存継続と通知のみ』に絞り直し、新規 open を対象外として再開する」) を選び、完了条件を絞り直したうえで再開する。1 つ目の「nghttp3 上流が GOAWAY ID 考慮の open 可否に対応する」は未達であり、新規 open は引き続き対象外とする
+- 本来の不具合は現行の develop でも未修正であることを確認した。`src/bindings/webtransport_h3.cpp` の `H3Session::shutdown_cb` は `session->closed_ = true;` のままで、`src/webtransport/h3/client.py` の `run` と `src/webtransport/h3/server.py` の `_process_quic_events` は `is_closed()` をプロトコルエラーとして扱い `H3_GENERAL_PROTOCOL_ERROR` の `CONNECTION_CLOSE` を送出する分岐を持っている。対照の `src/bindings/http3.cpp` の `Http3Connection::shutdown_cb` はイベントを積むだけで `closed_` を立てないままであり、同じ nghttp3 コールバックの解釈が 2 ファイルで正反対の状態が続いている
+- pending 中に develop が進み、`src/bindings/webtransport_h3.cpp` / `.h` / `src/webtransport/h3/*.py` / テストの構成が変わった。作業ブランチ `feature/fix-h3-goaway-closes-session` (コミット `1e53979`) の部分修正は流用候補として残っているが、develop との差が大きいため、そのままマージせず現行の構成に合わせて実装し直す
+- 再開にあたり issue の記述を現行の構成と規約に合わせて更新した: 型スタブのパスを `src/webtransport/webtransport_ext/h3.pyi` に修正し、`CHANGES.md` を変更対象から外し (CODEBASE.md の指示)、完了条件の「新規ストリームの open」を対象外へ移した
 
 ## pending にした理由
 
