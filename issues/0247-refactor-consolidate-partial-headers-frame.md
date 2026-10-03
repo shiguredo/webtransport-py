@@ -3,7 +3,7 @@
 - Created: 2026-09-20
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-consolidate-partial-headers-frame
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-03
 
 ## 目的
 
@@ -12,9 +12,9 @@
 ## 現状
 
 - `tests/test_http3.py` の `_inject_partial_headers(conn, stream_id)` は `bytes([0x01]) + _encode_varint(100) + b"\x00\x00"` を組み立て、`conn.receive_stream_data(stream_id, frame, False)` へ渡す。Length を 100 と宣言し、実際のペイロードは 2 バイトである
-- `tests/test_e2e_http3_peer_reset.py` の `_PARTIAL_HEADERS` は同じバイト列を定数として持ち、`peer.send_stream_data(stream_id, _PARTIAL_HEADERS, fin=False)` と `peer_connection.send_stream_data(stream_id, _PARTIAL_HEADERS, False)` の 2 箇所で使う
+- `tests/test_e2e_http3_peer_reset.py` の `_PARTIAL_HEADERS` は同じバイト列を定数として持ち、3 箇所で使う (`peer.send_stream_data(stream_id, _PARTIAL_HEADERS, fin=False)` が 2 箇所、`peer_connection.send_stream_data(stream_id, _PARTIAL_HEADERS, False)` が 1 箇所)
 - どちらのファイルも `tests/conftest.py` の `_encode_varint` を import しており、バイト列の組み立て方だけが重複している
-- 「Length を 100 と宣言し、実際のペイロードは 2 バイト」という理由のコメントも両ファイルに別々に書かれている
+- 「Length を実際のペイロードより大きく宣言して受信途中の状態を作る」という理由のコメントも両ファイルに別々に書かれている
 - 用途が異なる (片方は Sans-I/O の `receive_stream_data` への注入、もう片方は実 QUIC ストリームへの送出) ため、単純な定数の共通化だけでは済まない可能性がある
 
 ## 設計方針
