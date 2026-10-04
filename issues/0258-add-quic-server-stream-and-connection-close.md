@@ -3,7 +3,7 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-quic-server-stream-and-connection-close
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-04
 
 ## 目的
 
