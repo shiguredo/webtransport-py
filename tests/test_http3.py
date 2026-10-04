@@ -400,3 +400,52 @@ def test_http3_pending_headers_are_independent_per_stream() -> None:
     assert server._has_pending_headers(4) is None, (
         "close_stream 後に受信途中のヘッダーブロックのエントリが残っている"
     )
+
+
+def test_split_send_delivers_body_with_single_fin() -> None:
+    """低レベル Connection の分割送りが 1 つのボディと 1 回の終端になることを確認
+
+    高レベル Client.request は呼び出し時に必ず終端するため分割送りを提供しない。
+    分割送りは Sans-IO 層の submit_request / send_data が担うため、fin=False を
+    挟んだ送信が相手側で 1 つのボディに連結され、終端の fin が最後のチャンクで
+    1 回だけ立つことを固定する。
+    """
+    client, server = _create_connection_pair()
+
+    assert client.submit_request(
+        0,
+        [
+            (":method", "POST"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+            (":path", "/"),
+        ],
+    )
+    # ヘッダーを先に届ける (ヘッダーとボディを同じチャンクにまとめない順序)
+    _pump(client, server)
+
+    # 前半は fin を立てずに送る
+    client.send_data(0, b"pay", fin=False)
+    middle_chunks = client.get_streams_to_send()
+    assert any(stream_id == 0 for stream_id, _data, _fin in middle_chunks), (
+        "分割送りの前半が送信キューに積まれていない"
+    )
+    assert not any(fin for stream_id, _data, fin in middle_chunks if stream_id == 0), (
+        "分割送りの前半で終端している"
+    )
+    for stream_id, data, fin in middle_chunks:
+        server.receive_stream_data(stream_id, data, fin)
+
+    # 後半で終端する (fin が立つチャンクは 1 つだけ)
+    client.send_data(0, b"load", fin=True)
+    last_chunks = client.get_streams_to_send()
+    last_body = [(data, fin) for stream_id, data, fin in last_chunks if stream_id == 0]
+    assert len(last_body) == 1, "分割送りの後半が 1 チャンクで送られていない"
+    assert last_body[0][1] is True, "分割送りの後半で終端していない"
+    for stream_id, data, fin in last_chunks:
+        server.receive_stream_data(stream_id, data, fin)
+
+    # サーバー側では分割送りのボディが 1 つに連結されて届く
+    events = _drain_events(server)
+    body = b"".join(event.data for event in events if event.type == http3.EventType.DATA)
+    assert body == b"payload", "分割送りのボディが連結されて届いていない"

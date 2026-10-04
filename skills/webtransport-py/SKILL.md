@@ -356,7 +356,7 @@ def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアン�
 # on_stream_reset(stream_id: int, error_code: int)
 # on_connection_error(error_code: int, error_message: str)
 
-async def request(method: str, path: str, headers: list[tuple[str, str]] | None = None) -> int
+async def request(method: str, path: str, headers: list[tuple[str, str]] | None = None, body: bytes | None = None) -> int
 async def send_data(stream_id: int, data: bytes, fin: bool = False) -> None
 async def reset_stream(stream_id: int, error_code: int = 0) -> None  # QUIC RESET_STREAM + nghttp3 通知
 async def migrate() -> bool  # Connection Migration (ローカル UDP ソケットを差し替える)
@@ -364,7 +364,8 @@ def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開�
 ```
 
 `request()` は `:method` `:path` `:scheme` `:authority` の擬似ヘッダーを自動で付与する。未接続の場合、ストリームを開けなかった場合 (同時ストリーム数の上限到達・ハンドシェイク未完了・接続クローズ直後)、リクエストの登録に失敗した場合は -1 を返す (登録に失敗した場合は開設済みの QUIC ストリームをリセットしてから返す)。
-`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。`http3.Client` も `http3.Server` と同様に、ピアの RESET_STREAM を読み取り中断として nghttp3 へ転送し、受信途中のヘッダーブロックと未送信のリクエストデータを破棄する (送信方向は開いたままなので、`reset_stream` を高レベル層が自動で返送することはない)。同一の受信バッチに完備した HEADERS とピア起点のリセットが並ぶ場合は、先に到着した HEADERS のコールバック (`on_headers`) が `on_stream_reset` より先に呼ばれる。ピアの STOP_SENDING も同様に書き込み側の終了として nghttp3 へ転送し、以後そのストリームへの送信は行われない。
+`request()` はヘッダー送信からリクエスト終端 (fin) までを一連で行い、`body` を省略しても空ボディで終端する。呼び出し後に同じストリームへ `send_data` しても送出されない。分割送りは低レベル `Connection.submit_request` / `Connection.send_data` を使う (HTTP/3 には HTTP/2 の END_STREAM フラグが無く、終端は fin で表現する。RFC 9114 Appendix A.2)。
+`http3.Client` / `http3.Server` の `send_data` は生の入力バイト数が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。`http3.Client.request` の `body` も 1 MiB 超なら、ヘッダーを送出する前に `ValueError` を送出する。`http3.Client` も `http3.Server` と同様に、ピアの RESET_STREAM を読み取り中断として nghttp3 へ転送し、受信途中のヘッダーブロックと未送信のリクエストデータを破棄する (送信方向は開いたままなので、`reset_stream` を高レベル層が自動で返送することはない)。同一の受信バッチに完備した HEADERS とピア起点のリセットが並ぶ場合は、先に到着した HEADERS のコールバック (`on_headers`) が `on_stream_reset` より先に呼ばれる。ピアの STOP_SENDING も同様に書き込み側の終了として nghttp3 へ転送し、以後そのストリームへの送信は行われない。
 
 ### HTTP/2 (`webtransport.http2`)
 
@@ -383,7 +384,7 @@ async def drain() -> None  # 送信待ちフレームを空になるまで送出
 
 `on_stream_end` はリクエストボディ終端 (END_STREAM) の受信で通知する。ボディなしのリクエスト (HEADERS に END_STREAM) でも呼ばれる。RESET_STREAM で終了した場合は呼ばれない。
 
-`http2.Client.__init__(host, port=443, verify_peer=True)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形だが `body: bytes | None = None` を持ち、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
+`http2.Client.__init__(host, port=443, verify_peer=True)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形で、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
 
 `http2.Client` / `http2.Server` / `ResponseWriter` の `send_data` は data が 1 MiB 超なら `ValueError` を送出する (`http2.Client` は接続が未確立のときは送信しないため例外にならない)。`http2.Client.request` の `body` も 1 MiB 超なら、ヘッダーを送出する前に `ValueError` を送出する。
 

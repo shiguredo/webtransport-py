@@ -158,15 +158,24 @@ async def test_client_forwards_peer_stop_sending(test_certificates) -> None:
     高レベル `http3.Client` の STOP_SENDING 分岐が低レベル `Http3Connection` へ
     書き込み側の終了を伝える (サーバー側と対称)。ピアの `http3.Server` は
     リクエスト受信後に低レベルの `stop_sending` で STOP_SENDING だけを送出する。
-    `Client.request` は FIN を送らないため、ピアから見て自側の書き込み側は
-    終端しておらず STOP_SENDING が送出される。
+
+    高レベル `Client.request` はリクエストを終端するため、ピアから見て書き込み側が
+    開いているストリームは低レベル API で用意する (終端済みのストリームへ送出
+    された STOP_SENDING は ngtcp2 がアプリへ通知しない)。
     """
     request_received = asyncio.Event()
+    unterminated_request_received = asyncio.Event()
+    request_count = 0
 
     async def on_request(
         stream_id: int, headers: list[tuple[str, str]], addr: tuple[str, int]
     ) -> None:
-        request_received.set()
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            request_received.set()
+        else:
+            unterminated_request_received.set()
 
     server = _create_http3_server(test_certificates)
     server.on_request(on_request)
@@ -178,8 +187,9 @@ async def test_client_forwards_peer_stop_sending(test_certificates) -> None:
 
     try:
         await client.connect()
-        stream_id = await client.request("GET", "/peer-stop-sending")
-        assert stream_id >= 0, "リクエストの送信に失敗しました"
+        # 1 本目は公開 API で送り、HTTP/3 の制御・QPACK ストリームの設定を済ませる
+        setup_stream_id = await client.request("GET", "/peer-stop-sending-setup")
+        assert setup_stream_id >= 0, "リクエストの送信に失敗しました"
 
         async def run_client() -> None:
             with contextlib.suppress(asyncio.CancelledError):
@@ -188,8 +198,27 @@ async def test_client_forwards_peer_stop_sending(test_certificates) -> None:
         client_task = asyncio.create_task(run_client())
         await asyncio.wait_for(request_received.wait(), timeout=_WAIT_LIMIT)
 
+        # 2 本目は低レベル API で開いて終端しない。終端済みのストリームには
+        # ピアの STOP_SENDING が通知されないため、転送の検証には書き込み側が
+        # 開いたままのストリームが要る
+        quic_connection = client._quic_connection
+        assert quic_connection is not None
+        stream_id = quic_connection.open_stream(True)
+        assert stream_id >= 0, "ストリームを開けませんでした"
+
         http3_connection = client._http3_connection
         assert http3_connection is not None
+        assert http3_connection.submit_request(
+            stream_id,
+            [
+                (":method", "GET"),
+                (":path", "/peer-stop-sending"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+            ],
+        ), "リクエストの登録に失敗しました"
+        await client._send_pending()
+        await asyncio.wait_for(unterminated_request_received.wait(), timeout=_WAIT_LIMIT)
 
         # ピアは STOP_SENDING だけを送る (RESET_STREAM は送らない)
         await _wait_until(

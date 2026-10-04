@@ -378,9 +378,9 @@ async def test_server_client_post_with_body(test_certificates):
 
     await client.connect()
 
-    stream_id = await client.request("POST", "/echo")
+    # ボディは request() が送信して終端する
+    stream_id = await client.request("POST", "/echo", body=b"payload")
     assert stream_id >= 0
-    await client.send_data(stream_id, b"payload", fin=True)
 
     async def run_client():
         try:
@@ -408,8 +408,9 @@ async def test_server_client_post_with_body(test_certificates):
 async def test_server_on_stream_end_fires_after_body(test_certificates):
     """Server.on_stream_end がリクエストボディ終端で発火することを確認
 
-    分割して送ったボディの受信完了を検知してから応答する。on_data が先に
-    呼ばれ、on_stream_end は 1 回だけ同じ stream_id で呼ばれる。
+    body 付きのリクエストでボディの受信完了を検知してから応答する。on_data が
+    先に呼ばれ、on_stream_end は 1 回だけ同じ stream_id で呼ばれる。分割送りの
+    検証は低レベル Connection の対で行う (高レベルは分割送りを提供しない)。
     """
     from webtransport.http3 import Client, Server
 
@@ -470,11 +471,9 @@ async def test_server_on_stream_end_fires_after_body(test_certificates):
 
     await client.connect()
 
-    stream_id = await client.request("POST", "/echo")
+    # ボディは request() が送信して終端する
+    stream_id = await client.request("POST", "/echo", body=b"payload")
     assert stream_id >= 0
-    # ボディを 2 回に分けて送り、最後に FIN を付ける
-    await client.send_data(stream_id, b"pay")
-    await client.send_data(stream_id, b"load", fin=True)
 
     async def run_client():
         try:
@@ -563,9 +562,9 @@ async def test_server_on_stream_end_fires_for_bodyless_request(test_certificates
 
     await client.connect()
 
+    # 終端は request() が行う (body 省略時も空ボディで終端する)
     stream_id = await client.request("GET", "/empty")
     assert stream_id >= 0
-    await client.send_data(stream_id, b"", fin=True)
 
     async def run_client():
         try:
@@ -580,6 +579,107 @@ async def test_server_on_stream_end_fires_for_bodyless_request(test_certificates
 
     # on_data は呼ばれず、on_stream_end は 1 回だけ呼ばれる
     assert calls == [("request", stream_id), ("stream_end", stream_id)]
+
+    client_task.cancel()
+    server_task.cancel()
+    await asyncio.gather(client_task, server_task, return_exceptions=True)
+
+    await client.close()
+    await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_terminates_bodyless_and_body_requests(test_certificates):
+    """request() が body の有無にかかわらずリクエストを終端することを確認
+
+    body を省略した GET と body 付きの POST を同じ接続で送り、どちらも
+    on_stream_end が 1 回だけ発火し、POST のボディが全量サーバーへ届くことを
+    固定する。終端を利用者の send_data に委ねていると終端し忘れが無言の
+    ハングになるため、サーバー側の観測でその失敗が起きないことを表明する。
+    """
+    from webtransport.http3 import Client, Server
+
+    server_bodies: dict[int, bytearray] = {}
+    server_ends: list[int] = []
+    both_ends = asyncio.Event()
+    response_stream_ids: list[int] = []
+    both_responses = asyncio.Event()
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    async def on_request(stream_id, headers, addr):
+        server_bodies[stream_id] = bytearray()
+
+    async def on_data(stream_id, data, addr):
+        server_bodies[stream_id].extend(data)
+
+    async def on_stream_end(stream_id, addr):
+        server_ends.append(stream_id)
+        if len(server_ends) == 2:
+            both_ends.set()
+        # 終端を検知してから応答する (終端が届かなければ応答も返らない)
+        await server.submit_response(addr, stream_id, [(":status", "204")])
+        await server.send_data(addr, stream_id, b"", fin=True)
+
+    server.on_request(on_request)
+    server.on_data(on_data)
+    server.on_stream_end(on_stream_end)
+
+    await server.start()
+
+    async def run_server():
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        host="127.0.0.1",
+        port=server.actual_port,
+        verify_peer=False,
+    )
+
+    async def on_headers(stream_id, headers):
+        response_stream_ids.append(stream_id)
+        if len(response_stream_ids) == 2:
+            both_responses.set()
+
+    client.on_headers(on_headers)
+
+    await client.connect()
+
+    # body 省略の GET と body 付きの POST を順に送る
+    get_stream_id = await client.request("GET", "/")
+    post_stream_id = await client.request("POST", "/body", body=b"payload")
+    assert get_stream_id >= 0
+    assert post_stream_id >= 0
+
+    async def run_client():
+        try:
+            await client.run()
+        except asyncio.CancelledError:
+            pass
+
+    client_task = asyncio.create_task(run_client())
+
+    await asyncio.wait_for(both_ends.wait(), timeout=5.0)
+
+    # 終端は各ストリームで 1 回だけ発火する (二重発火しない)
+    assert sorted(server_ends) == sorted([get_stream_id, post_stream_id])
+    # body 省略時は空ボディ、body 付きは全量が届く
+    assert bytes(server_bodies[get_stream_id]) == b""
+    assert bytes(server_bodies[post_stream_id]) == b"payload"
+
+    # 終端が届いたのでサーバーが応答でき、両ストリームの応答ヘッダーが届く
+    await asyncio.wait_for(both_responses.wait(), timeout=5.0)
+    assert sorted(response_stream_ids) == sorted([get_stream_id, post_stream_id])
 
     client_task.cancel()
     server_task.cancel()
@@ -874,7 +974,6 @@ async def test_stream_end_callback(test_certificates):
 
     stream_id = await client.request("GET", "/end")
     assert stream_id >= 0
-    await client.send_data(stream_id, b"", fin=True)
 
     async def run_client():
         try:
@@ -1115,7 +1214,6 @@ async def test_chunked_response_body(test_certificates):
 
     stream_id = await client.request("GET", "/chunked")
     assert stream_id >= 0
-    await client.send_data(stream_id, b"", fin=True)
 
     async def run_client():
         try:
@@ -1205,9 +1303,8 @@ async def test_large_post_body(test_certificates):
 
     await client.connect()
 
-    stream_id = await client.request("POST", "/large")
+    stream_id = await client.request("POST", "/large", body=payload)
     assert stream_id >= 0
-    await client.send_data(stream_id, payload, fin=True)
 
     async def run_client():
         try:
@@ -1319,9 +1416,8 @@ async def test_large_post_body_with_datagram_loss(test_certificates, drop_mod):
         # pytest-timeout (30 秒) の内側に収める
         await asyncio.wait_for(client.connect(timeout=10.0), timeout=20.0)
 
-        stream_id = await client.request("POST", "/large-lossy")
+        stream_id = await client.request("POST", "/large-lossy", body=payload)
         assert stream_id >= 0
-        await client.send_data(stream_id, payload, fin=True)
 
         async def run_client():
             try:
@@ -1641,7 +1737,6 @@ async def test_stream_end_callback_bodyless_response(test_certificates):
 
     stream_id = await client.request("GET", "/end")
     assert stream_id >= 0
-    await client.send_data(stream_id, b"", fin=True)
 
     async def run_client():
         try:
@@ -1928,7 +2023,6 @@ async def test_connection_migration_continues_request(test_certificates):
     try:
         stream_id = await client.request("GET", "/before")
         assert stream_id >= 0
-        await client.send_data(stream_id, b"", fin=True)
         await asyncio.wait_for(request_received.wait(), timeout=5.0)
         await asyncio.wait_for(client_got_body.wait(), timeout=5.0)
         assert b"body:/before" in client_received
@@ -1941,7 +2035,6 @@ async def test_connection_migration_continues_request(test_certificates):
         client_got_body.clear()
         stream_id = await client.request("GET", "/after")
         assert stream_id >= 0
-        await client.send_data(stream_id, b"", fin=True)
         await asyncio.wait_for(second_request_received.wait(), timeout=5.0)
         await asyncio.wait_for(client_got_body.wait(), timeout=5.0)
         assert b"body:/after" in client_received
@@ -2330,7 +2423,6 @@ async def test_server_removes_client_on_closed_from_unregistered_address(test_ce
         # 移行はハンドシェイク確認後でないと成立しないため 1 往復させる
         stream_id = await client.request("GET", "/")
         assert stream_id >= 0
-        await client.send_data(stream_id, b"", fin=True)
         await asyncio.wait_for(response_received.wait(), timeout=5.0)
 
         # サーバーが元アドレスで登録するまで待つ (登録前に進めると未修正の
@@ -2527,7 +2619,6 @@ async def test_request_returns_minus_one_when_submit_request_fails(test_certific
         # GOAWAY は往復が完了してから送る (完了前に送るとパケット化されない)
         first_stream_id = await client.request("GET", "/")
         assert first_stream_id >= 0
-        await client.send_data(first_stream_id, b"", fin=True)
         await asyncio.wait_for(response_received.wait(), timeout=5.0)
 
         # サーバー側の低レベル HTTP/3 コネクションから GOAWAY を送出する。

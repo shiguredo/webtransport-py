@@ -65,7 +65,6 @@ async def test_large_response_throughput(test_certificates):
 
     stream_id = await client.request("GET", "/large")
     assert stream_id >= 0
-    await client.send_data(stream_id, b"", fin=True)
 
     client_task = asyncio.create_task(client.run())
 

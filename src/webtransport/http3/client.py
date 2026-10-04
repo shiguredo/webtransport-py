@@ -27,6 +27,11 @@ from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
 
+# 低レベル API の入力上限の写し (C++ 側は bindings/python_input.h の
+# kMaxPythonInputBytes)。リクエストボディをヘッダー送出前に検査するために
+# 持つ。C++ 側の値を変える場合はここも合わせて更新すること
+_MAX_PYTHON_INPUT_BYTES = 1024 * 1024
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -49,6 +54,9 @@ class Client:
         async with Client(host="example.com", port=443) as client:
             stream_id = await client.request("GET", "/")
             await client.run()
+
+    request() はヘッダー送信からリクエスト終端 (fin) までを一連で行うため、
+    終端を待って応答するサーバーでも応答が返る。
     """
 
     def __init__(
@@ -573,13 +581,24 @@ class Client:
         method: str,
         path: str,
         headers: list[tuple[str, str]] | None = None,
+        body: bytes | None = None,
     ) -> int:
         """HTTP リクエストを送信する
+
+        ヘッダー送信からリクエスト終端までを一連で行う。ボディの有無に
+        かかわらず send_data(..., fin=True) でストリームを終端するため、
+        呼び出し後に同じストリームへ send_data しても送出されない。HTTP/3 に
+        HTTP/2 の END_STREAM フラグは無く、終端は fin (NGHTTP3_DATA_FLAG_EOF)
+        で表現する (RFC 9114 Appendix A.2)。
+
+        分割送りが必要な場合は低レベル Connection.submit_request / send_data を
+        使う。状態が利用者の手元にある Sans-IO 層の方が分割送りに向く。
 
         Args:
             method: HTTP メソッド
             path: リクエストパス
             headers: 追加のヘッダー
+            body: リクエストボディ。 None のときは空ボディで終端する
 
         Returns:
             ストリーム ID。未接続の場合、ストリームを開けなかった場合 (同時
@@ -587,7 +606,18 @@ class Client:
             リクエストの登録に失敗した場合は -1。登録に失敗した場合は開設済みの
             QUIC ストリームをリセットしてから -1 を返す (リセットの送出は
             `run()` の送信ループに委ねられる)
+
+        Raises:
+            ValueError: body が 1 MiB 超の場合
         """
+        # ヘッダー送出後にボディで失敗するとストリームが未終端で残るため、
+        # 送信前に長さを検査する (低レベル API の入力上限と同値)。検査は
+        # 接続状態によらず入力の長さだけで決まる
+        if body is not None and len(body) > _MAX_PYTHON_INPUT_BYTES:
+            raise ValueError(
+                f"request body must be at most {_MAX_PYTHON_INPUT_BYTES} bytes: got {len(body)}"
+            )
+
         if self._quic_connection is None or self._http3_connection is None:
             return -1
 
@@ -617,11 +647,16 @@ class Client:
             self._quic_connection.reset_stream(stream_id, 0)
             return -1
 
-        await self._send_pending()
+        payload = b"" if body is None else body
+        await self.send_data(stream_id, payload, fin=True)
         return stream_id
 
     async def send_data(self, stream_id: int, data: bytes, fin: bool = False) -> None:
         """ストリームにデータを送信する
+
+        Client.request は呼び出し時にストリームを終端するため、request が
+        返した stream_id への追加送信は送出されない。チャンク送信が必要な
+        場合は低レベル Connection.submit_request / send_data を使う。
 
         Args:
             stream_id: ストリーム ID

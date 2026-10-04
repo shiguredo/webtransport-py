@@ -414,6 +414,20 @@ def test_http2_request_rejects_body_over_one_mib() -> None:
         asyncio.run(client.request("POST", "/", body=b"x" * (_ONE_MIB + 1)))
 
 
+def test_http3_request_rejects_body_over_one_mib() -> None:
+    """http3.Client.request が 1 MiB 超の body で送信前に ValueError になることを確認
+
+    request はヘッダー送出後にボディを送るため、ボディの検査が後れると
+    ストリームが未終端で残る。接続前でも送信前に拒否されることを固定する。
+    """
+    from webtransport.http3 import Client
+
+    client = Client(host="127.0.0.1", port=0)
+
+    with pytest.raises(ValueError, match=r"request body must be at most 1048576 bytes"):
+        asyncio.run(client.request("POST", "/", body=b"x" * (_ONE_MIB + 1)))
+
+
 def test_http2_ping_accepts_eight_bytes() -> None:
     """http2.Connection.ping が 8 バイトの入力を上限検査で拒否しないことを確認
 
@@ -513,9 +527,8 @@ async def test_http3_client_send_data_of_one_mib_reaches_server(test_certificate
     client_task = asyncio.create_task(run_client())
 
     try:
-        stream_id = await client.request("POST", "/")
+        stream_id = await client.request("POST", "/", body=payload)
         assert stream_id >= 0
-        await client.send_data(stream_id, payload, fin=True)
 
         await asyncio.wait_for(received_event.wait(), timeout=10.0)
         assert received == len(payload)
