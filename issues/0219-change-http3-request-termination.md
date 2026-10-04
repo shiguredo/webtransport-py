@@ -1,7 +1,7 @@
 # http3.Client.request() がリクエストを終端しない
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-04
 - Branch: feature/change-http3-request-termination
 - Polished: 2026-09-15
 
@@ -40,13 +40,16 @@
 
 ## 解決方法
 
-- `src/webtransport/http3/client.py` の `Client.request` に `body: bytes | None = None` を第 4 引数として追加し、`Client.send_data(stream_id, payload, fin=True)` を呼ぶ形に変更する (`payload` は `body` が `None` なら `b""`)
-- `Client.request` と `Client.send_data` の docstring、およびクラス docstring の Usage を新しい契約に書き換える (クラス docstring は現在 `request()` の後に `run()` を案内するだけで終端に触れていない)
-- `skills/webtransport-py/SKILL.md` の `http3.Client` の `request()` と、HTTP/2 節の比較文を更新する
-- `CHANGES.md` の `## develop` に `[CHANGE]` を追記する
-- `tests/test_e2e_http3.py` の既存テストを新しい契約に移行する
-  - `test_server_client_post_with_body` / `test_large_post_body` は `body=` で送る形に変更する
-  - `test_server_on_stream_end_fires_after_body` はクライアントが分割送り (`fin=False` を挟む) を検証しているため、Sans-IO の `http3.Connection.submit_request` / `http3.Connection.send_data` を使う形に移す。高レベルで分割送りが提供されないことを検証するテストは追加しない (契約上、追加送信は送出されない)
-  - `request()` の後に `send_data(stream_id, b"", fin=True)` を呼んでいる箇所 (二重終端) を削除する
-  - `tests/test_e2e_http3_throughput.py` の該当箇所も同様に移行する
-- `tests/test_e2e_http3.py` に GET とボディ付きリクエストのテストを追加する
+- `src/webtransport/http3/client.py` の `Client.request` に `body: bytes | None = None` を第 4 引数として追加し、`Client.send_data(stream_id, payload, fin=True)` で常に終端するようにした (`payload` は `body` が `None` なら `b""`)
+- 1 MiB 超の `body` はヘッダー送出前に `ValueError` で拒否する。送信後に失敗するとストリームが未終端で残るため、低レベル API の上限を写した `_MAX_PYTHON_INPUT_BYTES` を追加し、接続状態に依らず入力の長さだけで検査する (http2 と同じ位置)
+- `Client.request` / `Client.send_data` の docstring とクラス docstring を新しい契約に合わせた。終端後は同じストリームへ `send_data` しても送出されないこと、分割送りは Sans-IO の `http3.Connection.submit_request` / `send_data` を使うこと、HTTP/3 の終端は fin (`NGHTTP3_DATA_FLAG_EOF`) で表現することを明記した (RFC 9114 Appendix A.2)
+- `skills/webtransport-py/SKILL.md` の `http3.Client` の `request()` の引数と終端契約、1 MiB 超の `body` の拒否、HTTP/2 節の比較文を更新した
+- 既存テストを新しい契約へ移行した
+  - `tests/test_e2e_http3.py` の終端専用 `send_data(stream_id, b"", fin=True)` 8 箇所を削除した
+  - `test_server_client_post_with_body` / `test_server_on_stream_end_fires_after_body` / `test_large_post_body` / `test_large_post_body_with_datagram_loss` は `body=` で送る形に変更した
+  - `tests/test_e2e_http3_throughput.py` と `tests/test_python_input_size_limits.py` の該当箇所も同様に移行した
+- 分割送りの検証は低レベル `http3.Connection` の対に移した。`fin=False` → `fin=True` の 2 回で送り、相手側では 1 つのボディに連結されて届き、fin が立つチャンクが最後の 1 つだけであることを `tests/test_http3.py` で表明する
+- `tests/test_e2e_http3.py` に body 省略の GET と body 付きの POST を同じ接続で送るテストを追加し、どちらも `on_stream_end` が 1 回だけ発火し、POST のボディが全量サーバーへ届くことを表明した
+- `tests/test_python_input_size_limits.py` に `http3.Client.request` が 1 MiB 超の `body` を送信前に拒否するテストを追加した
+- ピア STOP_SENDING の転送テストは、終端済みのストリームへ送出された STOP_SENDING を ngtcp2 がアプリへ通知しないため、低レベル API で未終端のストリームを用意する形に更新した (転送の検証には書き込み側が開いたストリームが要る)
+- `CHANGES.md` は `CODEBASE.md` の「変更履歴を残さない」指示に従い更新していない
