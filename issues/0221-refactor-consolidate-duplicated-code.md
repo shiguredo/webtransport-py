@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-consolidate-duplicated-code
 - Polished: 2026-09-15
+- Updated: 2026-10-05
 
 ## 目的
 
-同一実装が複数箇所に存在し、仕様変更やバグ修正の影響範囲が広がっている。共通ヘルパーへ集約して保守性を高める。closed/0125 で URL パース・ヘッダー変換・セッション終了ガードなどの集約は完了しており、本 issue は 0125 が対象外とした残件のうち、下記の重複を扱う。
+同一実装が複数箇所に存在し、仕様変更やバグ修正の影響範囲が広がっている。共通ヘルパーへ集約して保守性を高める。closed/0125 で URL パース・ヘッダー変換・セッション終了ガードなどの集約は完了しており、本 issue は 0125 が対象外とした残件 (可変長整数のデコードと証明書生成) と、それ以前の集約が型・名前衝突を理由に対象外とした残件 (closed/0028 の `http3.Connection` 用 `_pump`、closed/0078 の h3 側 `_encode_capsule` など) を扱う。
 
 ## 現状
 
@@ -23,7 +24,7 @@ Python 側:
 - `_send_pending` が 5 箇所にあるが 3 形態ある。`quic/client.py` / `h3/client.py` / `http3/client.py` はソケットへ `loop.sock_sendto` で送るループ (戻り値 `int`)、`http2/client.py` は `asyncio` の `StreamWriter` へ write / drain するループ (戻り値 `None`)、`h2/client.py` は同じく `StreamWriter` への単発書き込みでループを持たない (戻り値 `None`)
 - `_resolve_remote` が `src/webtransport/quic/client.py` / `h3/client.py` / `http3/client.py` の 3 箇所に同一実装で存在する
 - DCID 索引を扱う `_refresh_dcid_index` と `_drop_dcid_index` が `quic/server.py` / `h3/server.py` / `http3/server.py` の 3 箇所に重複している。`_addr_of` は h3 / http3 の 2 箇所のみで、`quic/server.py` は `_conn_addr` による逆引きで同じ役割を担う (データ構造も計算量も異なる)
-- `_receive` は 5 箇所に残る (`h2` / `h3` / `http2` / `http3` / `quic` の client)。0209 が集約したのは受信待ち (`src/webtransport/_common.py` の `recv_datagram`) であり、読み切るループの本体は集約されていない。とくに `h3/client.py` と `http3/client.py` の `_receive` は参照する接続属性以外が同一である。`_receive` 本体の集約は本 issue の対象外とする
+- `_receive` は 5 箇所に残る (`h2` / `h3` / `http2` / `http3` / `quic` の client)。0209 が集約したのは受信待ち (`src/webtransport/_common.py` の `recv_datagram`) であり、読み切るループの本体は集約されていない。とくに `h3/client.py` と `http3/client.py` の `_receive` は本体が完全一致しており (行数・文字列とも差分なし)、集約時に引数化すべき差が無い。`_receive` 本体の集約は本 issue の対象外とする
 
 テスト側:
 
@@ -34,11 +35,11 @@ Python 側:
 
 ## 設計方針
 
-- C++ 側の共通化先は既存の `src/bindings/header_convert.h` を拡張するか、新たな共通ヘッダを設ける。名前は実態に合わせて一般化する。`is_valid_utf8` のコメントは層ごとの仕様参照が異なるため、共通ヘッダには一般的な説明を置き、層固有の参照は呼び出し側に残す
+- C++ 側の共通化先は、既存の `src/bindings/header_convert.h` を拡張するか、`src/bindings/python_input.h` (closed/0232 が新設し、0221 が扱う C++ 側の共通化の受け皿として拡張先に使う旨を同 issue の解決方法に明記している) を拡張するか、新たな共通ヘッダを設ける。名前は実態に合わせて一般化する。`is_valid_utf8` のコメントは層ごとの仕様参照が異なるため、共通ヘッダには一般的な説明を置き、層固有の参照は呼び出し側に残す
 - 可変長整数は「成功時の値と消費バイト数を返す共通ヘルパー」に寄せ、失敗の表現は呼び出し側に残す。`src/bindings/quic.cpp` の `decode_varint` は `consumed` 出力をやめて共通ヘルパーの戻り値を使う形に書き換える (パケットパースの呼び出し 2 箇所も合わせる)
 - WT_APPLICATION_ERROR の写像は片方から他方を呼ぶ形にしない (C++ は順方向のみで Python から呼べず、Python を C++ の送信経路から呼ぶのも現実的でない)。順方向が二重実装であることがリスクであるため、仕様の端点 (`0x52E4A40FA8DB` / `0x52E5AC983162`) と draft の式から期待値を独立に与え、両実装が一致することを PBT で検証する。C++ 側へは公開済みの `H3Session::map_send_error_code` を使う。既存の `tests/test_webtransport_h3_error_code_remap.py` のオラクル比較は維持する
 - Python 側の共通化先は `src/webtransport/_common.py` とする。既存の集約方針 (0125 の `_common.py` 新設) に従う。新規ヘルパーの型は `Any` ではなく `Protocol` で書く
-- `_timeout_seconds` はクライアント用とサーバー用の 2 つの形にする。クライアント用は `timeout_ns <= 0` で 0.0 を返す挙動を含めて共通化する。サーバー用は期限を返す接続集合を引数で受ける形にし、`_conn_addr` と `_clients` の差を吸収する
+- `_timeout_seconds` はクライアント用とサーバー用の 2 つの形にする。クライアント用は「タイマー無しは 0.1、それ以外は `min(max(timeout_ns / 1e9, 0.001), 0.1)`」を共通化し、`timeout_ns == 0` の扱い (`quic/client.py` は 0.0、`h3/client.py` と `http3/client.py` は 0.001) は呼び出し側に残して現行の戻り値を維持する (共通化で 0.0 に揃えると h3 / http3 の挙動が変わり、「挙動を変えない」と両立しない)。サーバー用は期限を返す接続集合を引数で受ける形にし、`_conn_addr` と `_clients` の差を吸収する
 - `_send_pending` は UDP 送信の 3 箇所のみを対象とする。`h2` / `http2` は戻り値の型も送信機構も異なるため対象外とする
 - 証明書生成は生成部分だけを共通化し、プロファイルとライフサイクルは呼び出し側に残す。`test_certificates` は SAN 付きプロファイルと `TemporaryDirectory` の後始末を維持し、`create_test_certificates` は現行のプロファイルと import 時の 1 回実行という性質を維持する。`CERTFILE` / `KEYFILE` のモジュール定数は残す
 - テスト側の共通化先は `tests/conftest.py` とし、closed/0028 / 0081 / 0202 と同じ方針で進める。`_create_connection_pair` は `set_max_client_streams_bidi(100)` を引数で切り替えられるようにする
