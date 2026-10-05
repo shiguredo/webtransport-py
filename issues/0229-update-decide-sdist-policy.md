@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-decide-sdist-policy
 - Polished: 2026-10-03
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -21,7 +22,7 @@ sdist がビルド・検証・公開のどの経路にも乗っておらず、�
   - `.github/workflows/e2e-test.yml` のビルド手順
   - `Makefile` の `wheel` ターゲット
 - 公開されるのは wheel のみである (`publish_wheel` ジョブが wheelhouse の wheel を PyPI へ送り、`create-release` ジョブも GitHub Release に wheel のみを添付する)
-- 配布物は CMake ExternalProject で ngtcp2 / nghttp3 / nghttp2 / AWS-LC を GitHub から取得してビルドするため、sdist からのビルドはネットワークとビルドツール (nasm / go 等) を要求する
+- 配布物は CMake ExternalProject で ngtcp2 / nghttp3 / nghttp2 / AWS-LC を GitHub から取得してビルドするため、sdist からのビルドはネットワークと git、C++20 のコンパイラを要求する (AWS-LC には `-DDISABLE_GO=ON` / `-DDISABLE_PERL=ON` を渡しており go / perl は不要。nasm は Windows 向けで、本リポジトリのサポート対象は Linux / macOS である)
 
 ## 設計方針
 
