@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/remove-dead-code-and-stale-comments
 - Polished: 2026-09-15
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -13,16 +14,12 @@
 
 呼び出されない公開メソッド:
 
-- `src/webtransport/http2/server.py` の `Server.submit_response` と `Server.send_data` は、リポジトリ全体で呼び出しが無い。サーバーのコールバックは `ResponseWriter` を渡し、`ResponseWriter` 側が同等の機能を公開 API として持つ。両メソッドは `asyncio.StreamWriter` を引数に取るため高レベルの利用者からは扱いにくく、`SKILL.md` にも記載が無い。`http2.Connection` (`webtransport.http2` から公開) を使う場合は低レベル API を直接呼べるため、`Server` 側の同名メソッドを残す理由が無い
+- `src/webtransport/http2/server.py` の `Server.submit_response` と `Server.send_data` は、リポジトリ全体で呼び出しが無い。サーバーのコールバックは `ResponseWriter` を渡し、`ResponseWriter` 側が同等の機能を公開 API として持つ。両メソッドは `asyncio.StreamWriter` を引数に取るため高レベルの利用者からは扱いにくく、`SKILL.md` の API 一覧にも記載が無い (1 MiB 上限の説明で `http2.Server` の `send_data` を名指ししている 1 箇所だけが言及であり、削除すると存在しない API を案内し続ける。`tests/test_skill_api_consistency.py` は `module.Class.member` の連結表記のみを検査するため検出できない)。`http2.Connection` (`webtransport.http2` から公開) を使う場合は低レベル API を直接呼べるため、`Server` 側の同名メソッドを残す理由が無い
 
 未使用の型とメンバ:
 
 - `src/bindings/webtransport_h3.h` の `struct PendingData` と `H3Session::pending_sends_`、`src/bindings/http3.h` の `struct PendingStreamData` と `Http3Connection::pending_sends_` は、宣言とムーブ操作以外に読み書きが無い
 - `H2Session` / `H3Session` / `QuicConnection` のムーブコンストラクタとムーブ代入演算子は、いずれも `std::unique_ptr(new ...)` でしか生成されず一度もムーブされない。`H2Session` のムーブは `unconsumed_recv_bytes_` を移動しておらず、ムーブすると HTTP/2 の受信フロー制御の会計が失われる。`H3Session` は nghttp3 に `user_data` を差し替える API が無いため、ムーブするとコールバックが移動元を指す (`H2Session` は `nghttp2_session_set_user_data` で差し替えられるが、会計が失われる問題は残る)
-
-重複した include:
-
-- `src/bindings/webtransport_h2.cpp` が `#include "header_convert.h"` を 2 回書いている
 
 取り残されたコメント:
 
@@ -42,14 +39,15 @@
 ## 完了条件
 
 - 上記がすべて削除され、`make develop` で C++ 拡張を再ビルドしてコンパイルが通り、`ruff` / `ty` / `pytest` と prek の全フックが通過する
+- 削除した `http2.Server.submit_response` / `http2.Server.send_data` への言及が `skills/webtransport-py/SKILL.md` に残っていない
 - 削除対象は nanobind のバインディング定義に現れないため型スタブの生成物は変わらない。`make develop` の stub 一致検査で確認する
-- `CHANGES.md` の `## develop` に `[CHANGE]` が追記されている
+- `CHANGES.md` は変更しない (`CODEBASE.md` の「変更履歴を `CHANGES.md` に残さないこと」に従う)
 
 ## 解決方法
 
 - `src/webtransport/http2/server.py` から `Server.submit_response` と `Server.send_data` を削除する
+- `skills/webtransport-py/SKILL.md` の 1 MiB 上限の説明から `http2.Server` を外す (存在しなくなる `Server.send_data` の案内を残さない。`http2.Client` と `ResponseWriter` の説明は残す)
 - `src/bindings/webtransport_h3.h` / `http3.h` から `PendingData` / `PendingStreamData` / `pending_sends_` を削除し、ムーブ操作の参照も消す
 - `H2Session` / `H3Session` / `QuicConnection` のムーブコンストラクタとムーブ代入演算子を `= delete` する
-- `src/bindings/webtransport_h2.cpp` の重複 include を削除する
 - `src/bindings/http3.h` の `Http3Connection::goaway` / `Http3Connection::close_stream` / `Http3Connection::reset_stream` の直前に残る孤立 doc ブロックと、`src/bindings/webtransport_h3.h` の `H3Session::is_valid_local_uni_stream_id` 直前のコメントを削除する (現行のブロックは残し、`H3Session::bind_control_stream` にコメントを移す)
-- `CHANGES.md` の `## develop` に、公開メソッドの削除を `[CHANGE]` として追記する (削除された `http2.Server.submit_response` / `http2.Server.send_data` を示す)
+- `CHANGES.md` は変更しない (`CODEBASE.md` の「変更履歴を `CHANGES.md` に残さないこと」に従う)
