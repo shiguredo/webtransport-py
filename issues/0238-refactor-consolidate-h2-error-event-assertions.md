@@ -1,8 +1,10 @@
 # h2 のテストで WT_STREAM_STATE_ERROR の Error イベントを検証する表明をヘルパに集約する
 
 - Created: 2026-09-18
+- Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-consolidate-h2-error-event-assertions
 - Polished: 2026-10-03
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -30,11 +32,12 @@
 - ワイヤ検証とイベント検証が別々に書かれているため、検知経路を追加したときにワイヤだけ・イベントだけ
   を表明するテストが混在し得る (closed/0236 の追加で実際に、新規テストのヘルパ利用と既存テストの
   インライン残存という混在が生じた)
-- `_assert_error_event` は `server` から `_drain_events` する形だが、上記 8 箇所のうち 2 回目の
-  WT_STOP_SENDING 系の 3 箇所 (test_wt_stop_sending_second_sends_state_error /
+- `_assert_error_event` は `server` から `_drain_events` する形だが、上記 8 箇所のうち 2 回目の WT_STOP_SENDING 系の 3 箇所 (test_wt_stop_sending_second_sends_state_error /
   test_wt_stop_sending_duplicate_in_same_receive_sends_state_error /
   test_wt_stop_sending_unknown_stream_second_sends_state_error) は、1 回の `_drain_events` で取得した
-  リストから STOP_SENDING 非発火と ERROR 発火を同時に検証している
+  リストから STOP_SENDING の結果 (非発火、または同一 receive 内の 1 個目のみ発火) と ERROR 発火を同時に検証している
+  (非発火を表明するのは 2 箇所で、test_wt_stop_sending_duplicate_in_same_receive_sends_state_error は
+  1 個目の STOP_SENDING が発火することと error_code を表明する)
 - `tests/test_webtransport_h2_flow_control_capsule.py` の `h2.EventType.ERROR` 絞り込みは
   「Error イベントが発火しないこと」を表明する否定的表明であり、本 issue の対象とする 0x51 の
   3 点検証とは形が異なる。`tests/test_webtransport_h2_initiator_validation.py` と
@@ -60,6 +63,7 @@
 - ワイヤ検証のみで Error イベントの表明が無いテストへの、イベント表明の追加は行わない (本 issue は
   重複解消が目的であり、検証強化は対象外)
 - 挙動は変えない。表明の意味 (件数・`error_code`・`stream_id` の 3 点) は維持する
+- 0239 は同じ `tests/test_webtransport_h2_stream_state_error.py` の `_encode_wt_*_capsule` (カプセル種別のバイト列) を対象にするが、本 issue の対象 (テスト本体の表明と `_assert_error_event`) とは行が重ならない
 
 ## 完了条件
 
