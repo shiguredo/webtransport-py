@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-fix-convention-violations
 - Polished: 2026-09-15
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -22,7 +23,7 @@
 
 テストメッセージの言語 (`AGENTS.md` の「テストのログメッセージは全て日本語にすること」):
 
-- `tests/` 配下のメッセージ付き表明 234 件のうち、日本語を含まないものが 2 件ある
+- `tests/` 配下のメッセージ付き表明のうち、日本語を含まないものが 2 件ある
   - `tests/prop_quic_handshake.py` の `"Handshake should complete"`
   - `tests/test_e2e_http2.py` の `f"large response took {elapsed:.2f}s"`
 
@@ -34,7 +35,7 @@ issue 番号の混入 (`shiguredo-issues` の「issue 番号や issue への言�
   - `tests/prop_quic_stateful.py` (「issue 0146 (Config 値で assert に到達する経路) の回帰ピンとして」「(0146 の回帰ピン)」「issue 0146 は…」)
   - `tests/test_quic_stream_control.py` (「ピア側の ping_recv (0014 の接続統計) が増加する」)
   - `tests/test_webtransport_h3_reject_session.py` (「0104 の h2 側と同じ)」)
-  - `tests/test_e2e_webtransport_h3.py` (「issue の完了条件が例示する」)。番号は無いが issue への言及であり、参照先も特定できないため、何を前提にしているかを書く形に直す
+  - `tests/test_e2e_webtransport_h3.py` (「issue の完了条件が例示する」)。番号は無いが issue への言及であり、参照先は closed/0046 の完了条件 (blackhole IP `10.255.255.1` を例示している) だがソースコードに番号を書けないため、何を前提にしているかを書く形に直す
 - `src/` と `examples/` には issue 番号の参照は無い
 
 `assert` の本番利用 (`shiguredo-python` の「`assert` を本番の不変条件チェックに使わないこと」):
@@ -43,22 +44,18 @@ issue 番号の混入 (`shiguredo-issues` の「issue 番号や issue への言�
 - `src/webtransport/http3/server.py` の `Server._drain_quic_events` に `assert client.quic_connection is not None` と `assert client.http3_connection is not None` がある
 - src 配下で本番の `assert` を使っているのはこの 3 箇所のみである
 
-依存バージョンの指定 (`shiguredo-python` の「上限なしの `>=` 単独指定は禁止」):
-
-- `pyproject.toml` の `[build-system].requires` と `[dependency-groups].build` が `scikit-build-core>=1.0.3` を上限なしで指定している。`uv.lock` にも同じ指定子が記録されている
-
 prek の実行順 (`shiguredo-python` の「`priority` で `ruff-format` → `ruff-check` → `ty` → `pytest` の順に実行すること`):
 
 - `prek.toml` の ty フックに `priority` が無い。prek は未指定時にフック定義順の index を暗黙の priority にするため、ty の暗黙値は `ruff-check` (10) より後・pytest (30) より前になり、実行順は規約どおりである。ただし順序が設定に現れておらず、フックを増減すると変わり得る
 
 コミットメッセージ (`shiguredo-git` の「日本語で書くこと」「命令形「〜する」の形で書くこと」):
 
-- `dev.py` のリリース用バージョン更新処理が `[canary] Bump version to {version}` という英語のメッセージでコミットする
+- `dev.py` のリリース用バージョン更新処理が `[canary] Bump version to {new_version}` という英語のメッセージでコミットする
 - `[canary]` は時雨堂の複数リポジトリ共通の canary コミットの識別子であり、本リポジトリにもそれを解釈するコードは無い。識別子として残し、本文だけを日本語の命令形にする
 
 ## 設計方針
 
-- いずれも挙動を変えない。列挙した対象は規約が方針を定めているため、言い換えの判断で迷わない
+- 公開 API の通常実行時の挙動は変えない。`dev.py` のドライラン出力 (実メッセージに合わせる) と、`assert` を `if` + `raise` に置き換えることによる `python -O` 時の検査は意図的に変える。列挙した対象は規約が方針を定めているため、言い換えの判断で迷わない
 - 英語コメントは、英語の説明文と列挙ラベルを日本語に書き換える。`}  // namespace ...` と `#endif  // ...` の閉じラベル、仕様の英文引用、節参照のみのコメント、コードポイント名のみのコメントは対象外とする
 - `streamfrq` のコメントは、ngtcp2 の再送待ち送信フレームキューを指すことを日本語で補足する (内部名だけを残さない)
 - `assert` の置き換えは、呼び出し側で検査済みの型絞り込みであるため `if ...: raise RuntimeError(...)` にする
@@ -73,7 +70,6 @@ prek の実行順 (`shiguredo-python` の「`priority` で `ruff-format` → `ru
 - `tests/` 配下の表明メッセージ (2 件) が日本語になっている
 - 列挙した 6 ファイルに issue 番号の参照が残っていない
 - `src/` の本番 `assert` 3 箇所が `if` + `raise RuntimeError` になっている
-- `pyproject.toml` の 2 箇所が `scikit-build-core~=1.0.3` になり、`uv.lock` が再生成されている
 - `prek.toml` の ty フックに `priority = 20` がある
 - `dev.py` のコミットメッセージが `[canary] バージョンを {new_version} に上げる` の形になり、ドライラン出力が実際のメッセージと一致する
 - `ruff` / `ty` / `pytest` と prek の全フックが通過する
@@ -85,6 +81,5 @@ prek の実行順 (`shiguredo-python` の「`priority` で `ruff-format` → `ru
 - `tests/prop_quic_handshake.py` と `tests/test_e2e_http2.py` のメッセージを日本語にする
 - 列挙した 6 ファイルから issue 番号を削除し、回帰ピンの意図を「何が壊れると落ちるか」で書き直す
 - `src/webtransport/http2/server.py` の `Server._handle_client` と `src/webtransport/http3/server.py` の `Server._drain_quic_events` の `assert` を `if` + `raise RuntimeError` に置き換える
-- `pyproject.toml` の 2 箇所を `scikit-build-core~=1.0.3` にし、`uv lock` で `uv.lock` を再生成して同じコミットに含める
 - `prek.toml` の ty フックに `priority = 20` を追加する
 - `dev.py` のコミットメッセージを `[canary] バージョンを {new_version} に上げる` にし、ドライラン出力の文字列も同じメッセージを印字するように直す
