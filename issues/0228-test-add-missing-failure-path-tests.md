@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-add-missing-failure-path-tests
 - Polished: 2026-09-15
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -13,15 +14,15 @@
 
 http3 層の connect:
 
-- `src/webtransport/http3/client.py` の `Client.connect` が送出する例外は `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` の 3 種である。原因ごとの送出点は、名前解決失敗 (同 390-393 行目) と接続生成失敗 (同 468-474 行目) が `ConnectRefusedError`、ハンドシェイク完了前の CONNECTION_CLOSED (同 493-495 行目) が `HandshakeFailedError`、期限到達が `ConnectTimeoutError` (同 372 / 395 / 506 / 516 行目) である
+- `src/webtransport/http3/client.py` の `Client.connect` が送出する例外は、再入を拒否する `RuntimeError` と、原因別の `ConnectTimeoutError` / `ConnectRefusedError` / `HandshakeFailedError` である。原因ごとの送出点は、名前解決失敗 (`connect` の `_resolve_remote` を囲む `except OSError`) と接続生成失敗 (`_connect_one` の `create_client` を囲む `except RuntimeError`) が `ConnectRefusedError`、ハンドシェイク完了前の `CONNECTION_CLOSED` が `HandshakeFailedError`、期限到達は `ConnectTimeoutError` (試行前・候補 0 件・候補ループ末尾・試行内 deadline・`TimeoutError` 捕捉) である
 - このうち期限到達は `tests/test_connect_loss_recovery.py` の `test_http3_connect_blackhole_timeout` が、名前解決失敗は同 `test_http3_connect_refused_invalid_host` が検証している。残る未カバーは `HandshakeFailedError` と接続生成失敗の 2 経路である
-- 「候補 0 件」(同 394-395 行目) は `_resolve_remote` が空リストを返す場合に限られ、`getaddrinfo` が空リストを返す入力が無いためモック無しでは到達できない。本 issue の対象外とする
-- `tests/test_e2e_http3.py` に `pytest.raises` は 1 件も無い。ただし同ファイルは正常系の往復を扱うため、失敗経路の有無はこの件数では判定できない
+- 「候補 0 件」(`connect` の `if not candidates`) は `_resolve_remote` が空リストを返す場合に限られ、`getaddrinfo` が空リストを返す入力が無いためモック無しでは到達できない (実測)。本 issue の対象外とする
+- `tests/test_e2e_http3.py` に `pytest.raises` は 2 件あるが、いずれも `_assert_payload_matches` 自身の検証 (`test_assert_payload_matches_reports_mismatch_details`) であり、本番の失敗経路を対象にしたものではない。同ファイルは正常系の往復を扱うため、失敗経路の有無はこの件数では判定できない
 
 h3 層の connect:
 
-- `src/webtransport/h3/client.py` の `Client.connect` は、ハンドシェイク完了後に対向が WebTransport 対応の SETTINGS を送らないまま期限に達すると `ConnectTimeoutError` を送出する (同 572-575 行目)。この経路を検証するテストが無い。既存の h3 の connect 失敗テストは、ハンドシェイクの期限到達 (`tests/test_e2e_webtransport_h3.py` の `test_connect_timeout_on_blackhole`) とトランスポートパラメータ欠落・Origin 拒否を扱うのみである
-- 同 `Client.connect` は、CONNECT を送出した後に 2xx も非 2xx も届かないまま期限に達すると `ConnectTimeoutError` を送出する (同 677 行目)。`h3.Server` は `on_session_request` の戻り値で受理か拒否を決めるため (519-546 行目)、このコールバックが期限まで戻らなければこの経路に到達する (実測)。この経路を検証するテストも無い
+- `src/webtransport/h3/client.py` の `Client.connect` は、ハンドシェイク完了後に対向が WebTransport 対応の SETTINGS を送らないまま期限に達すると `ConnectTimeoutError` を送出する (`_connect_one` の `is_webtransport_ready()` 待ちループ脱出後)。この経路を検証するテストが無い。既存の h3 の connect 失敗テストは、ハンドシェイクの期限到達 (`tests/test_e2e_webtransport_h3.py` の `test_connect_timeout_on_blackhole`) とトランスポートパラメータ欠落・Origin 拒否を扱うのみである
+- 同 `Client.connect` は、CONNECT を送出した後に 2xx も非 2xx も届かないまま期限に達すると `ConnectTimeoutError` を送出する (`_connect_one` の `if not accepted` 分岐)。`h3.Server` は `on_session_request` の戻り値で受理か拒否を決めるため (`Server.run` の呼び出しブロック)、このコールバックが期限まで戻らなければこの経路に到達する (実測)。この経路を検証するテストも無い
 
 h2 層の connect:
 
@@ -35,7 +36,7 @@ h2 層の connect:
 その他:
 
 - `quic.Packet` の `local_host` / `local_port` を参照するテストが無い。`remote_host` / `remote_port` は高レベル層が使い e2e で踏まれるが、local 側はどこからも参照されない
-- Sans-IO の `quic.Connection.initiate_migration` を直接呼ぶテストが無く、高レベル `Client.migrate()` 経由でのみ実行される
+- Sans-IO の `quic.Connection.initiate_migration` を直接呼ぶテストは `tests/test_e2e_http3.py` に 1 件ある (0212 で追加) が、戻り値のみの検証であり、移行後の `send()` が返す `Packet` のローカルアドレスは検証していない
 
 ## 設計方針
 
@@ -56,7 +57,7 @@ h2 層の connect:
 - 2 スレッドが `threading.Barrier` で開始タイミングを揃え、同一の `Config` を共有するハンマーがある
 - ハンマーの `join` にタイムアウトが設定され、満了時にワーカーが残っていれば失敗する
 - `quic.Packet` の `local_host` / `local_port` が、Sans-IO の `create_client` に渡したローカルアドレスと一致することを検証するテストがある
-- Sans-IO の `initiate_migration` を直接呼ぶテストがあり、戻り値が True であることと、以後の `send()` が返す `Packet` のうち少なくとも 1 つが新しいローカルアドレスを持つことを検証している
+- Sans-IO の `initiate_migration` を直接呼ぶテストが、以後の `send()` が返す `Packet` のうち少なくとも 1 つが新しいローカルアドレスを持つことを検証している (戻り値の検証は既存テストにある)
 - 追加した各テストは、対象の分岐を潰すと失敗することを確認している
 - `uv run pytest tests/ --timeout=30` が通過する
 
