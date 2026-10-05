@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-fix-spec-references
 - Polished: 2026-09-15
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -15,7 +16,7 @@ draft の版数:
 
 - `draft-ietf-quic-reliable-stream-reset-09` を参照している箇所は 8 つある
   - `src/bindings/quic.cpp` の 5 箇所: `QuicConnection::setup_server_early_data` (early data context にも含めて恒常的に広告する旨)、`QuicConnection::initialize_client`、`QuicConnection::initialize_server`、`QuicConnection::initialize_server_from_packet`、`QuicConnection::reset_stream` (データ配信とロス時の再送の旨)
-  - `src/bindings/quic.h` の `QuicConnection::enable_reset_stream_at`
+  - `src/bindings/quic.h` の `QuicConfig::enable_reset_stream_at`
   - `tests/test_e2e_webtransport_h3_low_level.py` の 2 箇所 (Section 5.3 と Section 5)
   - `src/bindings/quic.cpp` の `reset_stream` はコメント中で `draft-ietf-quic-reliable-` と `stream-reset-09` に行折り返しされているため、`grep -rn "draft-ietf-quic-reliable-stream-reset-09"` では検出できない
 - `refs/quic/` に置いているのは `draft-ietf-quic-reliable-stream-reset-10.txt` のみである
@@ -34,25 +35,25 @@ RFC の節番号:
 
 `refs/` に実物が無い引用:
 
-- コードとドキュメントが参照している RFC のうち、次のものは `refs/` に一次資料が無いためローカルで裏取りできない。参照箇所数は実測値である
-  - RFC 9110 (17 箇所) / RFC 9113 (46 箇所) / RFC 9218 (17 箇所): HTTP/2 の実装と設定の根拠
-  - RFC 9297 (11 箇所): WebTransport over HTTP/2 の DATAGRAM (Capsule Protocol) の根拠
-  - RFC 3629 (4 箇所) / RFC 6454 (4 箇所) / RFC 7301 (2 箇所) / RFC 7541 (1 箇所) / RFC 8941 (1 箇所) / RFC 9220 (3 箇所): 個別の記述の根拠
+- コードとドキュメントが参照している RFC のうち、次のものは `refs/` に一次資料が無いためローカルで裏取りできない。参照箇所数は `RFC <番号>` の一致行を `src` / `tests` / `examples` で数えた実測値である (`skills/` は含めない)
+  - RFC 9110 (17 箇所) / RFC 9113 (64 箇所) / RFC 9218 (17 箇所): HTTP/2 の実装と設定の根拠
+  - RFC 9297 (41 箇所): WebTransport over HTTP/2 の DATAGRAM (Capsule Protocol) の根拠
+  - RFC 3629 (4 箇所) / RFC 6454 (4 箇所) / RFC 7301 (2 箇所) / RFC 7541 (2 箇所) / RFC 8941 (1 箇所) / RFC 9220 (3 箇所): 個別の記述の根拠
   - RFC 7540: コードからの引用は無く、nghttp2 の設定名 (`SETTINGS_NO_RFC7540_PRIORITIES`) に RFC 番号が含まれるだけである (引用は `skills/webtransport-py/SKILL.md` の 1 箇所のみ)
 
 ## 設計方針
 
-- 版数は `refs/` の実物に合わせる。`refs/` に無い版を参照し続けない
+- 版数は `refs/` の実物に合わせる。`refs/` に無い版を参照し続けない。`refs/quic/` は `-10` のままだが、上流は `-11` (2026-09-28) が出ているため、`-11` への追従は `update-refs` での `refs/` 更新 (ユーザー承認が必要) と一体で判断する
 - 版数を合わせるだけでなく、`-09` と `-10` で文面が変わった箇所 (0-RTT の記憶対象、Reliable Size 0 の等価の限定、Section 5.3 の遷移記述と flow control の参照) は、コメントの日本語記述を `-10` の文面に合わせて更新する
 - 節番号は `refs/` の実物に合わせる。RFC 9114 Section 6 の引用は、フレーミング境界の独立性の根拠として正しいため残し、フレームの定義を示す Section 7 / 7.1 を併記する
 - 引用文は逐語一致させる。要約として書く場合は引用符を使わない
 - `refs/` への追加は、HTTP/2 の実装と設定の根拠として複数箇所から参照されている RFC 9110 / 9113 / 9218 と、Capsule Protocol の根拠である RFC 9297 の 4 件を対象とする。個別の記述 1 〜 4 箇所の根拠にとどまる他の RFC は追加しない
-- 追加は `update-refs` の手順に従う。同スキルはユーザー承認なしのダウンロードを禁じているため、取得 URL と配置先を提示して承認を得る。承認が得られない場合は追加せず、その旨を解決方法に記録して本 issue を完了とする
+- 追加にあたっては `update-refs` の承認方針 (ユーザー承認なしにダウンロードしない) に従い、取得 URL と配置先を提示して承認を得る (`update-refs` は IETF draft の版更新と廃止 RFC の置き換え追加を手順化したものであり、現行 RFC の新規追加は対象外である)。承認が得られない場合は追加せず、その旨を解決方法に記録して本 issue を完了とする
 
 ## 完了条件
 
-- `src/` `tests/` `examples/` `skills/` を対象に、行折り返しを含む検索 (`grep -rn "reliable-stream-reset-"`) で `-09` の参照が 0 件になる (`issues/` と `refs/` は対象外)
-- `-10` の文面に合わせて、`-09` を参照していた 8 箇所の日本語記述が見直されている
+- `src/` `tests/` `examples/` `skills/` を対象に、行折り返しを含む検索 (`grep -rn -e "reliable-stream-reset-" -e "stream-reset-09"`) で `-09` の参照が 0 件になる (`issues/` と `refs/` は対象外)
+- `-10` の文面に合わせて、`-09` を参照していた 8 箇所の日本語記述が見直されている (`refs/quic/` を `-11` に更新する場合はその版に合わせる)
 - RFC 9204 の節番号が 4 箇所すべて Section 6 になる
 - RFC 9114 の引用が、Section 6 (フレーミング境界の独立性) を残したまま Section 7 / 7.1 (フレームの定義) を併記する形になる
 - `H3_GENERAL_PROTOCOL_ERROR` の引用が `refs/h3/rfc9114.txt` と逐語一致する
@@ -61,8 +62,7 @@ RFC の節番号:
 
 ## 解決方法
 
-- `src/bindings/quic.cpp` の 5 箇所 (`setup_server_early_data` / `initialize_client` / `initialize_server` / `initialize_server_from_packet` / `reset_stream`)、`src/bindings/quic.h` の `enable_reset_stream_at`、`tests/test_e2e_webtransport_h3_low_level.py` の 2 箇所の `-09` を `-10` に更新し、あわせて各コメントの日本語記述を `-10` の文面に合わせて見直す
+- `src/bindings/quic.cpp` の 5 箇所 (`setup_server_early_data` / `initialize_client` / `initialize_server` / `initialize_server_from_packet` / `reset_stream`)、`src/bindings/quic.h` の `enable_reset_stream_at`、`tests/test_e2e_webtransport_h3_low_level.py` の 2 箇所の `-09` を `-10` に更新し、あわせて各コメントの日本語記述を `-10` の文面に合わせて見直す (`refs/quic/` を `-11` に更新する場合は `-11` を同期先とする)
 - `src/webtransport/http3/constants.py` の 2 箇所と `src/bindings/http3.cpp` の 2 箇所 (doc コメントと 0x0200 のインラインコメント) の節番号を Section 6 に修正する
 - `src/webtransport/http3/client.py` / `server.py` の引用に Section 7 / 7.1 を併記する
-- `/update-refs refs/h3/` の手順で RFC 9110 / 9113 / 9218 / 9297 の現行版を確認し、取得 URL と配置先を提示して承認を得たうえで `refs/h3/` (Capsule Protocol は `refs/webtrans/` でもよい) に配置する。配置先は既存の `refs/` の構成に合わせる
-- `refs/` を追加した場合は、`issues/0229-update-decide-sdist-policy.md` の sdist 同梱物の記述 (refs/ の件数) が変わるため、同 issue の更新が必要である旨を申し送る
+- RFC 9110 / 9113 / 9218 / 9297 の取得 URL と配置先を提示して承認を得たうえで `refs/` に配置する。配置先は既存の `refs/` の構成に合わせ、`refs/h2/` のような新規グループを作る場合はユーザーに確認する (Capsule Protocol は `refs/webtrans/` でもよい)
