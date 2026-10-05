@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-fix-ineffective-assertions
 - Polished: 2026-09-15
+- Updated: 2026-10-05
 
 ## 目的
 
@@ -29,7 +30,7 @@
 stateful PBT の invariant:
 
 - `tests/prop_h2_stateful.py` はクラスの docstring で「クレジットが送信のたびに単調減少し、対向の WT_MAX_DATA 受信で回復することを invariant で観測する」と書いているが、invariant は `credit >= 0` と `credit <= h2.Config().wt_initial_max_data` のみを見ている。`last_credit` は代入だけで参照されていない
-- 同 invariant の上限表明は固定値 (既定 1048576) との比較であり、クレジットの実体 (そのときに受信した広告値から送信済みバイト数を引いた値) を反映していない。現状は state machine の送信量が 1 MiB に届かないため通っているが、回復経路を踏ませると正当な状態で落ちる
+- 同 invariant の上限表明は固定値 (既定 1048576) との比較であり、クレジットの実体 (そのときに受信した広告値から送信済みバイト数を引いた値) を反映していない。この固定値は対向が広告した値ではなく自身の `h2.Config().wt_initial_max_data` であるため、現状は双方が既定値のため通っているが、対向がより大きい値を広告すると正当な状態で落ちる
 - `tests/prop_quic_stateful.py` は docstring で「送受信バイト数が破綻しないことを見る」と書いているが、その invariant は存在しない。`sent_bytes` は代入だけで参照されていない
 - `tests/prop_h3_stateful.py` の `received_datagrams` / `client_sent_bytes` も参照されていない
 
@@ -61,7 +62,7 @@ stateful PBT の invariant:
 - stateful PBT の invariant が docstring の主張と一致し、未参照の状態変数が削除される。h2 のクレジットの invariant は固定値の上限比較を含まない
 - `prop_*.py` で `@given` を持たないのに収集される関数が 0 件になる (12 件の `test_` は `test_*.py` へ移り、13 件の `prop_` は PBT 化するか `test_*.py` へ移る)。判定は AST で `prop_*.py` のトップレベル関数のうち `@given` を持たず `test_` / `prop_` で始まるものを列挙して 0 件であることを確認する
 - 恒真の表明の置き換えは、対象の表明を意図的に破った状態で対応するテストが失敗することを確認している
-- 「その他」の各項目が処理されている。`tests/test_webtransport_h3_error_code_remap.py` の代表値版テストと `tests/test_udp_resolution.py` の `test_localhost_first_family_noted` が削除され、`tests/test_quic_pacing.py` の下限が到達しない根拠がコメントで残り、`tests/prop_http2_roundtrip.py` の 5 つのヘルパー関数が収集対象外になっている
+- 「その他」の各項目が処理されている。`tests/test_webtransport_h3_error_code_remap.py` の代表値版テストと `tests/test_udp_resolution.py` の `test_localhost_first_family_noted` が削除され、`tests/test_quic_pacing.py` の下限が到達しない根拠がコメントで残り、`tests/prop_http2_roundtrip.py` の 5 つのヘルパー関数が `tests/conftest.py` の既存ヘルパーへ集約されるか収集対象外の名前になっている (現状も接頭辞が無いため収集対象外である)
 - 全テストが通過する
 
 ## 解決方法
@@ -78,6 +79,6 @@ stateful PBT の invariant:
 - `tests/test_webtransport_h3_error_code_remap.py` の代表値版テストは削除する (hypothesis 版と端点テストが同じ値を包含している)
 - `tests/test_quic_pacing.py` の下限は到達しないため、その根拠をコメントに残す (上限は flaky 対策の 5 秒を維持する)
 - `tests/test_udp_resolution.py` の `test_localhost_first_family_noted` は削除する (記録の役割は `_first_family()` を使う `test_localhost_fallback_exercised` が担う)
-- `tests/prop_http2_roundtrip.py` の 5 つのヘルパー関数を `tests/conftest.py` へ移す (`_` 前置にすると収集対象外になるが、複数のテストファイルから使う想定なら conftest が適切)
+- `tests/prop_http2_roundtrip.py` の 5 つのヘルパー関数は、`tests/conftest.py` の既存ヘルパー (`_create_http2_pair` / `_exchange_http2_settings`) を再利用し、`valid_header_name` / `valid_header_value` は `_` 前置で conftest に追加する (conftest の QUIC 用 `create_client_server_pair` と同名にすると戻り値の形が異なり衝突するため、同名のまま移さない)
 - `@given` を持たない `prop_*` のテスト (13 件) は PBT 化するか `test_*.py` へ改名して移す
-- `tests/test_quic_free_threading.py` は別 issue (0228) も変更するため、競合した場合はリベースする
+- `tests/test_quic_free_threading.py` は 0228、`tests/prop_h2_stateful.py` / `prop_h3_stateful.py` / `prop_quic_stateful.py` は 0222、`tests/test_webtransport_h3_error_code_remap.py` / `prop_webtransport_h3.py` は 0221 も変更するため、競合した場合はリベースする
