@@ -27,8 +27,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from playwright.sync_api import Browser, Page, sync_playwright
 
-from webtransport.h2 import Server as H2Server
-from webtransport.h3 import Server as H3Server
+from webtransport import HTTPVersion, Server, Session
 
 
 class BrowserWebTransportServerBase(ABC):
@@ -163,10 +162,11 @@ class BrowserWebTransportServerBase(ABC):
 class BrowserWebTransportServer(BrowserWebTransportServerBase):
     """実ブラウザテスト用の WebTransport over HTTP/3 echo サーバー"""
 
-    def _create_server(self, certfile: str, keyfile: str) -> H3Server:
-        return H3Server(
+    def _create_server(self, certfile: str, keyfile: str) -> Server:
+        return Server(
             host="127.0.0.1",
             port=0,
+            http_version=HTTPVersion.HTTP3,
             certfile=certfile,
             keyfile=keyfile,
             allowed_origins=self._allowed_origins,
@@ -193,53 +193,38 @@ class BrowserWebTransportServer(BrowserWebTransportServerBase):
         self._server.on_stream_data(self._on_stream_data)
         self._server.on_datagram(self._on_datagram)
 
-    async def _on_session_ready(
-        self,
-        session_id: int,
-        addr: tuple[str, int],
-    ) -> None:
-        self._enqueue("session_ready", session_id, addr)
+    async def _on_session_ready(self, session: Session) -> None:
+        self._enqueue("session_ready", session.session_id, session.addr)
         # セッション確立をトリガーにサーバーからの単方向ストリームを 1 回送信する
         # (戻り値が 0 以上であることはテスト側で確認する)
-        stream_id = await self._server.open_stream(addr, session_id)
-        self._enqueue("server_stream_opened", stream_id, addr)
+        stream_id = await session.open_stream()
+        self._enqueue("server_stream_opened", stream_id, session.addr)
         if stream_id >= 0:
-            await self._server.send_stream_data(
-                addr,
+            await session.send_stream_data(
                 stream_id,
                 b"server-unidirectional-payload",
                 fin=True,
             )
-            self._enqueue("server_stream_sent", stream_id, addr)
+            self._enqueue("server_stream_sent", stream_id, session.addr)
 
-    async def _on_session_closed(
-        self,
-        session_id: int,
-        addr: tuple[str, int],
-    ) -> None:
-        self._enqueue("session_closed", session_id, addr)
+    async def _on_session_closed(self, session: Session) -> None:
+        self._enqueue("session_closed", session.session_id, session.addr)
 
     async def _on_stream_data(
         self,
-        session_id: int,
+        session: Session,
         stream_id: int,
         data: bytes,
-        addr: tuple[str, int],
     ) -> None:
-        self._enqueue("stream_data", session_id, stream_id, data, addr)
+        self._enqueue("stream_data", session.session_id, stream_id, data, session.addr)
         # 双方向ストリームのみエコーバックする
         if stream_id % 4 == 0:
-            await self._server.send_stream_data(addr, stream_id, data, fin=True)
+            await session.send_stream_data(stream_id, data, fin=True)
 
-    async def _on_datagram(
-        self,
-        session_id: int,
-        data: bytes,
-        addr: tuple[str, int],
-    ) -> None:
-        self._enqueue("datagram", session_id, data, addr)
+    async def _on_datagram(self, session: Session, data: bytes) -> None:
+        self._enqueue("datagram", session.session_id, data, session.addr)
         # エコーバックする
-        await self._server.send_datagram(addr, session_id, data)
+        await session.send_datagram(data)
 
 
 class BrowserWebTransportServerH2(BrowserWebTransportServerBase):
@@ -250,10 +235,11 @@ class BrowserWebTransportServerH2(BrowserWebTransportServerBase):
     不要である。
     """
 
-    def _create_server(self, certfile: str, keyfile: str) -> H2Server:
-        return H2Server(
+    def _create_server(self, certfile: str, keyfile: str) -> Server:
+        return Server(
             host="127.0.0.1",
             port=0,
+            http_version=HTTPVersion.HTTP2,
             certfile=certfile,
             keyfile=keyfile,
         )
@@ -269,38 +255,38 @@ class BrowserWebTransportServerH2(BrowserWebTransportServerBase):
         self._server.on_stream_data(self._on_stream_data)
         self._server.on_datagram(self._on_datagram)
 
-    async def _on_session_ready(self, session_writer) -> None:
-        self._enqueue("session_ready", session_writer.session_id)
+    async def _on_session_ready(self, session: Session) -> None:
+        self._enqueue("session_ready", session.session_id)
         # セッション確立をトリガーにサーバーからの単方向ストリームを 1 回送信する
         # (戻り値が 0 以上であることはテスト側で確認する)
-        stream_id = await session_writer.open_stream(unidirectional=True)
+        stream_id = await session.open_stream(unidirectional=True)
         self._enqueue("server_stream_opened", stream_id)
         if stream_id >= 0:
-            await session_writer.send_stream_data(
+            await session.send_stream_data(
                 stream_id,
                 b"server-unidirectional-payload",
                 fin=True,
             )
             self._enqueue("server_stream_sent", stream_id)
 
-    async def _on_session_closed(self, session_writer) -> None:
-        self._enqueue("session_closed", session_writer.session_id)
+    async def _on_session_closed(self, session: Session) -> None:
+        self._enqueue("session_closed", session.session_id)
 
     async def _on_stream_data(
         self,
+        session: Session,
         stream_id: int,
         data: bytes,
-        session_writer,
     ) -> None:
-        self._enqueue("stream_data", session_writer.session_id, stream_id, data)
+        self._enqueue("stream_data", session.session_id, stream_id, data)
         # 双方向ストリームのみエコーバックする
         if stream_id % 4 == 0:
-            await session_writer.send_stream_data(stream_id, data, fin=True)
+            await session.send_stream_data(stream_id, data, fin=True)
 
-    async def _on_datagram(self, data: bytes, session_writer) -> None:
-        self._enqueue("datagram", session_writer.session_id, data)
+    async def _on_datagram(self, session: Session, data: bytes) -> None:
+        self._enqueue("datagram", session.session_id, data)
         # エコーバックする
-        await session_writer.send_datagram(data)
+        await session.send_datagram(data)
 
 
 @pytest.fixture(scope="module")
