@@ -268,8 +268,6 @@ record = client.pending_record
 make wheel
 ```
 
-リリース時は `CHANGES.md` の `## develop` を `## <バージョン>` に変更し、`**リリース日**: YYYY-MM-DD` を追記する (`VERSION` の更新と `make wheel` によるビルドも併せて行う)。
-
 ## 開発ビルド
 
 ```bash
