@@ -1,7 +1,7 @@
 # QMux の asyncio クライアントとサーバーを追加する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/add-qmux-asyncio-client-server
 - Polished: {YYYY-MM-DD}
 
@@ -35,4 +35,11 @@ QMux v1 (draft-ietf-quic-qmux-02) を asyncio から使えるようにする。0
 
 ## 解決方法
 
-（実装後に追記）
+- `src/webtransport/qmux/client.py` に asyncio の `Client` を追加した。`connect(timeout=10.0)` は TCP (または TLS) 接続とトランスポートパラメータの交換まで待ち、`run()` が受信ループ、`close()` が CONNECTION_CLOSE を送る。`open_stream` / `send_stream_data` とコールバック (`on_connected` / `on_closed` / `on_stream_data` / `on_stream_reset` / `on_stop_sending`) を持つ
+- `src/webtransport/qmux/server.py` に asyncio の `Server` と `Session` を追加した。`start()` で待ち受け、`run()` で受け付け続け、`stop()` で接続ごと閉じる。コールバックは統一 Server と同じく `Session` ハンドルを受け取る
+- `src/webtransport/qmux/_connection.py` に接続ドライバを追加し、クライアントとサーバーで読み書き・タイマー・イベント配布を共有する。`Connection.pending_record` と `Connection.receive` は同じ接続を触るため `asyncio.Lock` で排他する
+- `src/webtransport/qmux/exceptions.py` を追加した (`QmuxError` 基底 / `QmuxConnectionError` / `QmuxProtocolError` / `QmuxLibraryErrorCode`)。dwnx の CLOSING / DRAINING / IDLE_CLOSE は正常な終了経路でも返るため `is_graceful_termination` で例外にしない
+- `ssl` を渡した場合は `alpn_protocols` を必須にし、`SSLContext` に設定する。交渉結果は接続後に `selected_alpn_protocol()` で確認し、選択されていなければ接続を閉じて `QmuxConnectionError` を送出する (draft Section 8.1)
+- `tests/test_qmux_asyncio.py` を追加した。TCP のエコー、サーバー起点の単方向ストリーム、クライアントのクローズ通知、ハンドシェイク完了、TLS + ALPN、引数の検証、複数接続の受け付けを実ソケットで検証する (モックなし)
+- ストリームのリセット (`reset_stream`) と送信停止 (`stop_sending`) は Sans-IO のバインディングが `dwnx_conn_shutdown_stream_write` / `dwnx_conn_shutdown_stream_read` を公開していないため、asyncio API にも入れていない。必要になったらバインディングの拡張と合わせて別 issue で追加する
+- `skills/webtransport-py/SKILL.md` と `README.md` を asyncio API に追従させた
