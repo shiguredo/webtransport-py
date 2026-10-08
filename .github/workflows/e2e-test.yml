@@ -39,7 +39,8 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('uv.lock') }}
+          # 導入するブラウザの構成が変わったらキャッシュを作り直す
+          key: ${{ runner.os }}-playwright-${{ hashFiles('uv.lock') }}-chromium-firefox-webkit
 
       - name: Install build dependencies
         run: |
@@ -55,7 +56,7 @@ jobs:
 
       - name: Install Playwright browsers
         run: |
-          uv run playwright install chromium webkit
+          uv run playwright install chromium firefox webkit
 
       - name: Run browser E2E tests
         run: |
