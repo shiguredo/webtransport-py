@@ -42,6 +42,50 @@ uv add webtransport-py
 
 `quic` / `http3` / `http2` には `get_version()` があり、それぞれ ngtcp2 / nghttp3 / nghttp2 のバージョン文字列を返す。
 
+## 統一クライアント
+
+WebTransport のクライアントは `webtransport.Client` を使う。プロトコルはモジュールではなく `HTTPVersion` で選ぶ (既定は HTTP/3)。
+
+```python
+import asyncio
+
+from webtransport import Client, HTTPVersion
+
+
+async def main() -> None:
+    client = Client(
+        url="https://localhost:4433/webtransport",
+        http_version=HTTPVersion.HTTP3,
+    )
+
+    async def on_stream_data(stream_id: int, data: bytes) -> None:
+        print(f"データ受信: {data}")
+
+    client.on_stream_data(on_stream_data)
+
+    await client.connect()
+    stream_id = await client.open_stream()
+    await client.send_stream_data(stream_id, b"Hello via stream!")
+    await client.send_datagram(b"Hello via datagram!")
+    await client.close()
+
+
+asyncio.run(main())
+```
+
+`Client(url, http_version=HTTPVersion.HTTP3, verify_peer=True, origin="", close_wait_timeout=3.0, idle_timeout_ns=30000000000, ca_file=None, verify_callback=None, quic_config=None, config=None)`。`idle_timeout_ns` / `ca_file` / `verify_callback` / `quic_config` は HTTP/3 のみ、`config` は HTTP/2 のみで、選択したバージョンと矛盾する引数を渡すと `ValueError` になる。`HTTPVersion` の値は ALPN の識別子と同じ `"h2"` / `"h3"` で、文字列からも作れる。
+
+共通 API は `url` / `host` / `port` / `is_connected` / `session_id` / `http_version` のプロパティと、`connect()` / `run()` / `close()` / `open_stream()` / `send_stream_data()` / `send_datagram()` / `reset_stream()`、コールバック登録の `on_session_ready` / `on_session_closed` / `on_stream_data` / `on_stream_reset` / `on_datagram` / `on_goaway` である。
+
+プロトコル固有の API は選択した側のハンドルから呼ぶ。選択していない側は None になる。
+
+| ハンドル | 使える API |
+|---|---|
+| `client.h3` | `close_stream(stream_id, error_code)` / `migrate()` / `initiate_key_update()` (HTTP/3 のクライアント) |
+| `client.h2` | `stop_sending(stream_id, error_code)` / `on_error(callback)` (HTTP/2 のクライアント) |
+
+`on_goaway` のコールバック引数は HTTP バージョンで異なる (HTTP/3 は `(goaway_id)`、HTTP/2 は `(last_stream_id, error_code)`)。`on_stream_reset` のエラーコードは HTTP/3 ではレンジ外のとき None になり得る。
+
 ## 例外
 
 例外は層ごとの `exceptions` サブモジュールにある。基底は `webtransport.exceptions.WebTransportError` で、接続の期限切れを表す `webtransport.exceptions.ConnectTimeoutError` と、名前解決の失敗のような接続前の失敗を表す `webtransport.exceptions.ConnectFailedError` はトップレベルから import できる。

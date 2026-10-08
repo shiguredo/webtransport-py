@@ -7,11 +7,12 @@ Capsule Protocol (RFC 9297) を使用して WebTransport ストリームと DATA
 from __future__ import annotations
 
 import asyncio
+import socket
 import ssl
 from typing import TYPE_CHECKING, Literal, Self
 
 from webtransport._common import parse_wt_url
-from webtransport.exceptions import ConnectTimeoutError, WebTransportError
+from webtransport.exceptions import ConnectFailedError, ConnectTimeoutError, WebTransportError
 from webtransport.h2.exceptions import (
     WebTransportProtocolError,
     WebTransportSessionClosedError,
@@ -371,6 +372,12 @@ class Client:
                 ) from exc
             except ConnectionRefusedError as exc:
                 raise Http2ConnectionError(0, f"connection refused: {exc}") from exc
+            except socket.gaierror as exc:
+                # 名前解決の失敗は層に依存しない失敗として扱う (h3 / http3 と
+                # 同じ扱い。socket.gaierror は OSError の派生なので先に受ける)
+                raise ConnectFailedError(
+                    f"failed to resolve {self._host}:{self._port}: {exc}"
+                ) from exc
             except OSError as exc:
                 raise Http2ConnectionError(
                     0, f"connection failed before TLS handshake: {exc}"

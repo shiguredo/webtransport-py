@@ -33,15 +33,19 @@ Usage:
 """
 
 from webtransport import h2, h3, http2, http3, quic
+from webtransport.client import Client
 from webtransport.exceptions import (
     ConnectFailedError,
     ConnectTimeoutError,
     WebTransportError,
 )
+from webtransport.http_version import HTTPVersion
 
 __all__ = [
+    "Client",
     "ConnectFailedError",
     "ConnectTimeoutError",
+    "HTTPVersion",
     "WebTransportError",
     "h2",
     "h3",
