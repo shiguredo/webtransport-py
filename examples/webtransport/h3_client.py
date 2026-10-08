@@ -6,13 +6,14 @@
 
 import asyncio
 
-from webtransport import WebTransportError, h3
+from webtransport import Client, HTTPVersion, WebTransportError
 
 
 async def main() -> None:
     """メイン関数"""
-    client = h3.Client(
+    client = Client(
         url="https://localhost:4433/webtransport",
+        http_version=HTTPVersion.HTTP3,
         verify_peer=False,
     )
 

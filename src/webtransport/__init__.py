@@ -40,12 +40,15 @@ from webtransport.exceptions import (
     WebTransportError,
 )
 from webtransport.http_version import HTTPVersion
+from webtransport.server import Server, Session
 
 __all__ = [
     "Client",
     "ConnectFailedError",
     "ConnectTimeoutError",
     "HTTPVersion",
+    "Server",
+    "Session",
     "WebTransportError",
     "h2",
     "h3",
