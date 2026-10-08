@@ -87,13 +87,13 @@ asyncio.run(main())
 
 `Client(url, http_version=HTTPVersion.HTTP3, verify_peer=True, origin="", close_wait_timeout=3.0, idle_timeout_ns=30000000000, ca_file=None, verify_callback=None, quic_config=None, config=None)`。`idle_timeout_ns` / `ca_file` / `verify_callback` / `quic_config` は HTTP/3 のみ、`config` は HTTP/2 のみで、選択したバージョンと矛盾する引数を渡すと `ValueError` になる。`HTTPVersion` の値は ALPN の識別子と同じ `"h2"` / `"h3"` で、文字列からも作れる。
 
-共通 API は `url` / `host` / `port` / `is_connected` / `session_id` / `http_version` のプロパティと、`connect()` / `run()` / `close()` / `open_stream()` / `send_stream_data()` / `send_datagram()` / `reset_stream()`、コールバック登録の `on_session_ready` / `on_session_closed` / `on_stream_data` / `on_stream_reset` / `on_datagram` / `on_goaway` である。
+共通 API は `url` / `host` / `port` / `is_connected` / `session_id` / `http_version` のプロパティと、`connect()` / `run()` / `close(error_code=0, error_message="")` / `open_stream()` / `send_stream_data()` / `send_datagram()` / `reset_stream()`、コールバック登録の `on_session_ready` / `on_session_closed` / `on_stream_data` / `on_stream_reset` / `on_datagram` / `on_goaway` である。`close()` の終了コードと理由は WT_CLOSE_SESSION でピアへ伝わる (1024 バイト超の理由は UTF-8 文字境界で切り詰められる)。
 
 プロトコル固有の API は選択した側のハンドルから呼ぶ。選択していない側は None になる。
 
 | ハンドル | 使える API |
 |---|---|
-| `client.h3` | `close_stream(stream_id, error_code)` / `migrate()` / `initiate_key_update()` (HTTP/3 のクライアント) |
+| `client.h3` | `close_stream(stream_id, error_code)` / `stop_sending(stream_id, error_code)` / `migrate()` / `initiate_key_update()` (HTTP/3 のクライアント) |
 | `client.h2` | `stop_sending(stream_id, error_code)` / `on_error(callback)` (HTTP/2 のクライアント) |
 
 `on_goaway` のコールバック引数は HTTP バージョンで異なる (HTTP/3 は `(goaway_id)`、HTTP/2 は `(last_stream_id, error_code)`)。`on_stream_reset` のエラーコードは HTTP/3 ではレンジ外のとき None になり得る。
@@ -147,7 +147,7 @@ asyncio.run(main())
 - `on_stop_sending(session, stream_id, error_code)`: HTTP/2 のみ
 - `on_error(session, error_code, error_message)`: HTTP/2 のみ
 
-`Session` の共通 API は `session_id` / `addr` / `http_version` プロパティと `open_stream(unidirectional=True)` / `send_stream_data(stream_id, data, fin=False)` / `send_datagram(data)` / `reset_stream(stream_id, error_code=0)` である。`addr` は取得できない場合 None になる。プロトコル固有の操作は具象クラスにあり、HTTP/3 は `close_stream()`、HTTP/2 は `stop_sending()` と `close_session()` を持つ。`server.h3` / `server.h2` で実装へ降りられる。
+`Session` の共通 API は `session_id` / `addr` / `http_version` プロパティと `open_stream(unidirectional=True)` / `send_stream_data(stream_id, data, fin=False)` / `send_datagram(data)` / `reset_stream(stream_id, error_code=0)` / `stop_sending(stream_id, error_code=0)` / `close_session(error_code=0, error_message="")` である。`close_session` は接続を閉じずにこの WebTransport セッションだけを終了コードと理由付きで閉じ、HTTP/2 と HTTP/3 のどちらでも使える。`addr` は取得できない場合 None になる。プロトコル固有の操作は具象クラスにあり、HTTP/3 は `close_stream()` を持つ。`server.h3` / `server.h2` で実装へ降りられる。
 
 サーバーの `run()` は接続ごとのエラーをコールバックで通知し、例外を送出しない。
 
@@ -352,6 +352,8 @@ async def send_stream_data(addr: tuple[str, int], stream_id: int, data: bytes, f
 async def send_datagram(addr: tuple[str, int], session_id: int, data: bytes) -> None
 async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
 async def close_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def stop_sending(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def close_session(addr: tuple[str, int], session_id: int, error_code: int = 0, error_message: str = "") -> None
 async def open_stream(addr: tuple[str, int], session_id: int, unidirectional: bool = True) -> int
 def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 async def start() -> None
@@ -359,7 +361,7 @@ async def run() -> None
 async def stop() -> None
 ```
 
-`close_stream` は `reset_stream` に委譲する同一実装 (RESET_STREAM 送出)。`open_stream` はデフォルト単方向で、双方向指定 (`unidirectional=False`) は `NotImplementedError`、失敗時は -1 を返す。`session_id` には `on_session_ready` で受け取った有効な値を渡す (サーバー起動の双方向ストリームは draft-ietf-webtrans-http3-16 Section 4.3 の "can" に基づく任意実装のため未実装。双方向ストリーム自体はクライアントから開ける)。起動は `async with server:` でも `start()` / `stop()` の明示呼び出しでも行え、`run()` がメインループである。
+`close_stream` は `reset_stream` に委譲する同一実装 (RESET_STREAM 送出)。`stop_sending` は QUIC STOP_SENDING を送出し、データストリームのエラーコードは WT_APPLICATION_ERROR レンジへリマップする (draft-ietf-webtrans-http3-16 Section 4.4 の MUST。`reset_stream` と違い nghttp3 の状態は変えない)。`close_session` は 1 セッションだけを終了コードと理由付きで閉じ (WT_CLOSE_SESSION)、接続と同一接続上の他セッションは継続する。セッション終了はピアからの WT_CLOSE_SESSION 受信と同じ経路で `on_session_closed` にも通知される。`open_stream` はデフォルト単方向で、双方向指定 (`unidirectional=False`) は `NotImplementedError`、失敗時は -1 を返す。`session_id` には `on_session_ready` で受け取った有効な値を渡す (サーバー起動の双方向ストリームは draft-ietf-webtrans-http3-16 Section 4.3 の "can" に基づく任意実装のため未実装。双方向ストリーム自体はクライアントから開ける)。起動は `async with server:` でも `start()` / `stop()` の明示呼び出しでも行え、`run()` がメインループである。
 
 送信系メソッドの `addr` は接続ごとのキーであり、コールバックで受け取った `addr` をそのまま渡す。キーに無い `addr` を渡した場合、エラーにならず処理が黙って捨てられる。`send_stream_data` / `send_datagram` は addr が登録済みで data が 1 MiB 超なら `ValueError` を送出する (addr の引き当てとセッション確認の後に走る C++ 側のローカル検査)。
 
@@ -425,14 +427,15 @@ async def send_stream_data(stream_id: int, data: bytes, fin: bool = False) -> No
 async def send_datagram(data: bytes) -> None
 async def reset_stream(stream_id: int, error_code: int = 0) -> None
 async def close_stream(stream_id: int, error_code: int = 0) -> None
+async def stop_sending(stream_id: int, error_code: int = 0) -> None
 async def migrate() -> bool  # Connection Migration (ローカル UDP ソケットを差し替える)
 async def run() -> None
-async def close() -> None
+async def close(error_code: int = 0, error_message: str = "") -> None
 ```
 
 `migrate()` は接続と上位層の状態を維持したまま送受信のソケットとアドレスを差し替える (`quic.Client.migrate` と同じ手順)。サーバー側は DCID で接続を照合してアドレスキーを張り替える (RFC 9000 Section 9)。
 
-`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、`close()` を挟まずに再度呼ぶと `RuntimeError` になる (`close()` の後は再度接続できる)。対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は原因となった層の具体例外 (`ConnectTimeoutError` / `ConnectFailedError` / `QuicConnectionError` / `QuicHandshakeError` / `WebTransportProtocolError` / `WebTransportSessionRejectedError` / `WebTransportSessionClosedError`) を送出する。`run()` が受信ループであり、接続またはセッションがエラーで終了した場合は `run()` がその原因の例外を送出して終了する (正常終了では送出しない)。`close()` でセッションと接続を閉じる、`close()` でセッションと接続を閉じる (`close()` は WT_CLOSE_SESSION 送出後にピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる)。`send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (h3 セッション未生成の `Client` は送信しないため例外にならない)。
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、`close()` を挟まずに再度呼ぶと `RuntimeError` になる (`close()` の後は再度接続できる)。対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は原因となった層の具体例外 (`ConnectTimeoutError` / `ConnectFailedError` / `QuicConnectionError` / `QuicHandshakeError` / `WebTransportProtocolError` / `WebTransportSessionRejectedError` / `WebTransportSessionClosedError`) を送出する。`run()` が受信ループであり、接続またはセッションがエラーで終了した場合は `run()` がその原因の例外を送出して終了する (正常終了では送出しない)。`close()` でセッションと接続を閉じる (`close(error_code, error_message)` は指定した終了コードと理由を持つ WT_CLOSE_SESSION を送出し、ピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる。1024 バイト超の理由は UTF-8 文字境界で切り詰められる。draft-ietf-webtrans-http3-16 Section 6)。`stop_sending(stream_id, error_code)` は QUIC STOP_SENDING を送出し、データストリームのエラーコードは WT_APPLICATION_ERROR レンジへリマップする (同 Section 4.4 の MUST)。`send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (h3 セッション未生成の `Client` は送信しないため例外にならない)。
 
 ### WebTransport over HTTP/2 (統一 API + `webtransport.h2` の Sans-IO)
 

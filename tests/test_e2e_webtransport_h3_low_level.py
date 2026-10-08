@@ -16,6 +16,7 @@ from webtransport import h3 as h3_low
 from webtransport import quic
 from webtransport._common import recv_datagram
 from webtransport._h3_server import Server
+from webtransport.h3._error_codes import webtransport_code_to_http_code
 
 # pacing の期限待ちで送信を再試行する上限 (ナノ秒)。これを超える期限 (PTO 等) は
 # 送信待ちではないため待たない
@@ -1014,5 +1015,215 @@ async def test_datagram_closed_session_id_discarded(test_certificates):
         assert datagram_event is not None
         assert datagram_event.session_id == second_session_id
         assert datagram_event.data == b"open-dg"
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+async def _wait_for_h3_event(
+    client: _LowLevelClient,
+    event_type: h3_low.EventType,
+    timeout: float = 5.0,
+) -> h3_low.Event:
+    """低レベルクライアントで指定種別の h3 イベントを待つ
+
+    セッション終了の終了コードと理由は低レベル `Session` の SESSION_CLOSED
+    イベントだけが持つ (高レベル Server の on_session_closed は session_id と
+    addr のみ)。他の種別のイベントは読み捨てる。
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        await client._receive()
+        if not client._process_quic_events():
+            break
+        while True:
+            event = client._h3_session.next_event()
+            if event is None:
+                break
+            if event.type == event_type:
+                return event
+        await client._pump()
+    raise AssertionError(f"{timeout} 秒以内に h3 イベント {event_type.name} を観測できませんでした")
+
+
+async def _wait_for_quic_event(
+    client: _LowLevelClient,
+    event_type: quic.EventType,
+    timeout: float = 5.0,
+) -> quic.Event:
+    """低レベルクライアントで指定種別の QUIC イベントを待つ
+
+    h3 層のイベント処理を通さずに QUIC フレームを直接観測する
+    (STOP_SENDING 等)。STREAM_DATA / DATAGRAM は h3 層へ流して受信状態を
+    保つ。接続が閉じた場合は、対象イベントを取り逃したことを失敗として
+    報告する。
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        await client._receive()
+        while True:
+            event = client._quic_connection.next_event()
+            if event is None:
+                break
+            if event.type == event_type:
+                return event
+            if event.type == quic.EventType.STREAM_DATA:
+                client._h3_session.receive_stream_data(
+                    event.stream_id,
+                    event.data,
+                    event.fin,
+                )
+            elif event.type == quic.EventType.DATAGRAM:
+                client._h3_session.receive_datagram(event.data)
+            elif event.type == quic.EventType.CONNECTION_CLOSED:
+                raise AssertionError(
+                    f"QUIC イベント {event_type.name} を観測する前に接続が閉じました"
+                )
+        await client._pump()
+    raise AssertionError(
+        f"{timeout} 秒以内に QUIC イベント {event_type.name} を観測できませんでした"
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_close_session_sends_error_code_and_message(test_certificates):
+    """close_session の終了コードと理由がピアの SESSION_CLOSED で観測される
+
+    高レベル Server の close_session が WT_CLOSE_SESSION を送出し
+    (draft-ietf-webtrans-http3-16 Section 6)、ピア側の低レベル Session の
+    SESSION_CLOSED イベントに Application Error Code とメッセージが載ることを
+    確認する。接続は閉じず、サーバー側の on_session_closed でも終了が通知される。
+    """
+    server, server_task, info = await _start_session_closed_server(
+        test_certificates, expected_sessions=1
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=5.0)
+        session_id = await asyncio.wait_for(client.establish_session(), timeout=5.0)
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        # サーバー側のクライアントアドレスを取得する (接続は 1 つだけ)
+        (client_addr,) = server._clients.keys()
+
+        await server.close_session(client_addr, session_id, 7, "protocol violation")
+
+        # ピア側では終了コードと理由を持つ SESSION_CLOSED として観測される
+        event = await _wait_for_h3_event(client, h3_low.EventType.SESSION_CLOSED)
+        assert event.session_id == session_id
+        assert event.error_code == 7
+        assert event.error_message == "protocol violation"
+
+        # サーバー側でもセッション終了が通知される
+        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        assert info.closed_session_ids == [session_id]
+
+        # 1 セッションだけを閉じるため、QUIC 接続は生存している
+        assert server._clients
+        assert client._quic_connection.is_closed() is False
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+async def test_server_close_session_keeps_other_session(test_certificates):
+    """同一接続上の 1 セッションを閉じても他のセッションが継続する
+
+    close_session は接続を閉じないため、同じ QUIC 接続上の 2 つ目のセッションで
+    データ通信が継続できることを確認する。
+    """
+    server, server_task, info = await _start_session_closed_server(
+        test_certificates, expected_sessions=2
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=5.0)
+        first_session_id, second_session_id = await client.establish_two_sessions()
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        (client_addr,) = server._clients.keys()
+
+        await server.close_session(client_addr, first_session_id, 3, "first closed")
+
+        # 閉じたのは 1 つ目だけである
+        event = await _wait_for_h3_event(client, h3_low.EventType.SESSION_CLOSED)
+        assert event.session_id == first_session_id
+        assert event.error_code == 3
+        assert event.error_message == "first closed"
+
+        # 2 つ目のセッションはデータ通信を継続できる
+        stream_id = await client.open_stream(second_session_id)
+        await client.send_stream_data(stream_id, b"second-alive")
+        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        assert info.data_session_id == second_session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+async def test_server_close_session_unknown_target_is_noop(test_certificates):
+    """未登録アドレスと未確立セッション ID への close_session が何もしない
+
+    send_datagram と同じ扱いで、例外にもならず既存セッションの通信も妨げない
+    ことを確認する。
+    """
+    server, server_task, info = await _start_session_closed_server(
+        test_certificates, expected_sessions=1
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=5.0)
+        session_id = await asyncio.wait_for(client.establish_session(), timeout=5.0)
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        (client_addr,) = server._clients.keys()
+
+        # 未登録アドレスと、確立済みセッションに無い ID の双方で何も起きない
+        await server.close_session(("127.0.0.1", 1), session_id, 1, "unknown addr")
+        await server.close_session(client_addr, session_id + 100, 1, "unknown session")
+
+        # セッションは終了せず、データ通信も継続する
+        assert client._h3_session.get_session_ids() == [session_id]
+        stream_id = await client.open_stream(session_id)
+        await client.send_stream_data(stream_id, b"still-alive")
+        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        assert info.data_session_id == session_id
+    finally:
+        await _cleanup_reset_test_server(server, server_task, client)
+
+
+@pytest.mark.asyncio
+async def test_server_stop_sending_remaps_error_code(test_certificates):
+    """stop_sending が WT_APPLICATION_ERROR レンジのコードで送出される
+
+    データストリームのアプリケーションエラーコードは WT_APPLICATION_ERROR
+    レンジへリマップしてワイヤに載せる (draft-ietf-webtrans-http3-16
+    Section 4.4 の MUST)。ピア側の QUIC STOP_SENDING イベントでリマップ後の
+    コードを観測する。
+    """
+    server, server_task, info = await _start_reset_test_server(
+        test_certificates, expected_sessions=1
+    )
+
+    client = _LowLevelClient(server.actual_port)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=5.0)
+        session_id = await asyncio.wait_for(client.establish_session(), timeout=5.0)
+        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+
+        (client_addr,) = server._clients.keys()
+
+        # サーバーが受信済みのデータストリームを対象にする
+        stream_id = await client.open_stream(session_id)
+        await client.send_stream_data(stream_id, b"payload")
+        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+
+        await server.stop_sending(client_addr, stream_id, 5)
+
+        event = await _wait_for_quic_event(client, quic.EventType.STOP_SENDING)
+        assert event.stream_id == stream_id
+        assert event.error_code == webtransport_code_to_http_code(5)
     finally:
         await _cleanup_reset_test_server(server, server_task, client)

@@ -747,13 +747,18 @@ class Client:
         if self._terminal_error is not None:
             raise self._terminal_error
 
-    async def close(self) -> None:
+    async def close(self, error_code: int = 0, error_message: str = "") -> None:
         """接続を閉じる
 
         draft-15 Section 6.12: WT_CLOSE_SESSION 後に CONNECT ストリームを
         half-close し、ピアの CONNECT ストリームクローズ (END_STREAM /
         RST_STREAM) を close_wait_timeout の上限まで待ってから TCP/TLS を
         閉じる。上限で打ち切った場合も閉じる処理へ進む。
+
+        Args:
+            error_code: セッション終了の Application Error Code
+            error_message: セッション終了の Application Error Message
+                (UTF-8)
         """
         self._running = False
         self._connected = False
@@ -764,7 +769,7 @@ class Client:
         try:
             if self._session is not None and self._session_id >= 0:
                 session_id = self._session_id
-                self._session.close_session(session_id)
+                self._session.close_session(session_id, error_code, error_message)
                 try:
                     await self._send_pending()
                 except OSError:

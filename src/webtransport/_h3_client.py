@@ -891,6 +891,33 @@ class Client:
         self._webtransport_session.reset_stream(stream_id, error_code)
         await self._send_pending()
 
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ピアに送信停止を要求する (QUIC STOP_SENDING)
+
+        データストリームのアプリケーションエラーコードは
+        WT_APPLICATION_ERROR レンジへリマップしてワイヤに載せる
+        (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)。CONNECT
+        ストリームはリマップしない。STOP_SENDING を受けたピアは
+        RFC 9000 Section 3.5 の MUST により RESET_STREAM を返す。
+        `reset_stream` がストリーム破棄を nghttp3 へ通知するのに対し、
+        本メソッドは受信の停止だけを要求し nghttp3 の状態は変えない。
+
+        Args:
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード (CONNECT 以外) または
+                HTTP/3 エラーコード (CONNECT)
+        """
+        if self._webtransport_session is None:
+            return
+
+        wire_error_code = self._webtransport_session.map_send_error_code(
+            stream_id,
+            error_code,
+        )
+        if self._quic_connection is not None:
+            self._quic_connection.stop_sending(stream_id, wire_error_code)
+        await self._send_pending()
+
     async def _process_quic_events(self) -> bool:
         """QUIC イベントを処理する
 
@@ -1217,7 +1244,7 @@ class Client:
         await self._send_pending()
         return True
 
-    async def close(self) -> None:
+    async def close(self, error_code: int = 0, error_message: str = "") -> None:
         """接続を閉じる
 
         WT_CLOSE_SESSION 送出後に CONNECT ストリームのピア側終了を
@@ -1225,6 +1252,12 @@ class Client:
         (draft-ietf-webtrans-http3-16 Section 6 の SHOULD による
         best-effort 配信)。上限で打ち切った場合も閉じる処理へ進む。
         待機中のユーザーコールバック例外時は後始末を終えてから送出する
+
+        Args:
+            error_code: セッション終了の Application Error Code (32 bit)
+            error_message: セッション終了の Application Error Message
+                (UTF-8)。1024 バイトを超える場合は UTF-8 文字境界で
+                切り詰められる (draft-ietf-webtrans-http3-16 Section 6)
         """
         # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
         # セッション ID で発火させないため)
@@ -1238,7 +1271,11 @@ class Client:
             if self._webtransport_session is not None and self._session_id >= 0:
                 # WT_CLOSE_SESSION カプセルを先に送出してから QUIC を閉じる
                 session_id = self._session_id
-                self._webtransport_session.close_session(session_id)
+                self._webtransport_session.close_session(
+                    session_id,
+                    error_code,
+                    error_message,
+                )
                 await self._send_pending()
                 self._session_id = -1
                 self._close_wait_session_id = session_id

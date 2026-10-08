@@ -84,6 +84,17 @@ class Session:
         """ストリームをリセットする"""
         raise NotImplementedError
 
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ピアに送信停止を要求する"""
+        raise NotImplementedError
+
+    async def close_session(self, error_code: int = 0, error_message: str = "") -> None:
+        """セッションを終了コードと理由付きで閉じる
+
+        接続は閉じず、この WebTransport セッションだけを終了する。
+        """
+        raise NotImplementedError
+
 
 class _H3Session(Session):
     """WebTransport over HTTP/3 のセッションハンドル
@@ -117,6 +128,17 @@ class _H3Session(Session):
         """
         await self._server.close_stream(self._h3_addr, stream_id, error_code)
 
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        await self._server.stop_sending(self._h3_addr, stream_id, error_code)
+
+    async def close_session(self, error_code: int = 0, error_message: str = "") -> None:
+        await self._server.close_session(
+            self._h3_addr,
+            self._session_id,
+            error_code,
+            error_message,
+        )
+
 
 class _H2Session(Session):
     """WebTransport over HTTP/2 のセッションハンドル
@@ -142,11 +164,11 @@ class _H2Session(Session):
         await self._writer.reset_stream(stream_id, error_code)
 
     async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
-        """送信の停止を要求する (HTTP/2 のみ)"""
+        """ピアに送信停止を要求する"""
         await self._writer.stop_sending(stream_id, error_code)
 
     async def close_session(self, error_code: int = 0, error_message: str = "") -> None:
-        """セッションを閉じる (HTTP/2 のみ)"""
+        """セッションを終了コードと理由付きで閉じる"""
         await self._writer.close_session(error_code, error_message)
 
 

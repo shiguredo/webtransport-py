@@ -728,6 +728,80 @@ class Server:
         """
         await self.reset_stream(addr, stream_id, error_code)
 
+    async def stop_sending(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """ピアに送信停止を要求する (QUIC STOP_SENDING)
+
+        データストリームのアプリケーションエラーコードは
+        WT_APPLICATION_ERROR レンジへリマップしてワイヤに載せる
+        (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)。CONNECT
+        ストリームはリマップしない。STOP_SENDING を受けたピアは
+        RFC 9000 Section 3.5 の MUST により RESET_STREAM を返す。
+        `reset_stream` がストリーム破棄を nghttp3 へ通知するのに対し、
+        本メソッドは受信の停止だけを要求し nghttp3 の状態は変えない。
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード (CONNECT 以外) または
+                HTTP/3 エラーコード (CONNECT)
+        """
+        client = self._clients.get(addr)
+        if client is None or client.webtransport_session is None:
+            return
+
+        # data stream のアプリコードはワイヤ用にリマップする。CONNECT
+        # ストリームの判定とリマップは低レベルに委ねる
+        wire_error_code = client.webtransport_session.map_send_error_code(
+            stream_id,
+            error_code,
+        )
+        if client.quic_connection is not None:
+            client.quic_connection.stop_sending(stream_id, wire_error_code)
+        await self._send_to(addr, client)
+
+    async def close_session(
+        self,
+        addr: tuple[str, int],
+        session_id: int,
+        error_code: int = 0,
+        error_message: str = "",
+    ) -> None:
+        """WebTransport セッションを終了コードと理由付きで閉じる
+
+        WT_CLOSE_SESSION カプセルを CONNECT ストリームへ送出する
+        (draft-ietf-webtrans-http3-16 Section 6)。CONNECT ストリームの
+        送信方向の FIN は低レベルが積む SESSION_CLOSED イベントを
+        `_process_webtransport_events` が処理して送る。接続は閉じないため、
+        同一接続上の他のセッションは継続する。セッション終了はピアからの
+        WT_CLOSE_SESSION 受信と同じ経路で `on_session_closed` にも通知される。
+        未登録の addr と、対象接続の確立済みセッションに無い session_id へは
+        何も送出せず、例外にもならない。
+
+        Args:
+            addr: クライアントアドレス
+            session_id: WebTransport セッション ID
+            error_code: セッション終了の Application Error Code (32 bit)
+            error_message: セッション終了の Application Error Message
+                (UTF-8)。1024 バイトを超える場合は UTF-8 文字境界で
+                切り詰められる (draft-ietf-webtrans-http3-16 Section 6)
+        """
+        client = self._clients.get(addr)
+        if client is None or client.webtransport_session is None:
+            return
+
+        # 確立済みセッション以外への送出は低レベルが黙って無視するため、
+        # 呼び出し側で不要な送信処理に入らないようここで弾く
+        if session_id not in client.webtransport_session.get_session_ids():
+            return
+
+        client.webtransport_session.close_session(session_id, error_code, error_message)
+        await self._send_to(addr, client)
+
     async def send_datagram(
         self,
         addr: tuple[str, int],

@@ -178,9 +178,18 @@ class Client:
         """
         await self._impl().run()
 
-    async def close(self) -> None:
-        """セッションと接続を閉じる"""
-        await self._impl().close()
+    async def close(self, error_code: int = 0, error_message: str = "") -> None:
+        """セッションと接続を閉じる
+
+        Args:
+            error_code: セッション終了の Application Error Code。
+                HTTP/3 は WT_CLOSE_SESSION、HTTP/2 は WT_CLOSE_SESSION
+                カプセルでピアへ伝わる
+            error_message: セッション終了の Application Error Message
+                (UTF-8)。1024 バイトを超える場合は UTF-8 文字境界で
+                切り詰められる
+        """
+        await self._impl().close(error_code, error_message)
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """WebTransport ストリームを開く
