@@ -12,12 +12,13 @@ import pytest
 from conftest import _encode_h3_goaway_frame, _large_binary_payload
 
 from webtransport import quic
-from webtransport.exceptions import (
-    ConnectRefusedError,
-    ConnectTimeoutError,
-    HandshakeFailedError,
-)
+from webtransport.exceptions import ConnectTimeoutError
 from webtransport.h3 import Server
+from webtransport.h3.exceptions import (
+    WebTransportProtocolError,
+    WebTransportSessionRejectedError,
+)
+from webtransport.quic.exceptions import QuicConnectionError
 
 
 def test_import_server_client():
@@ -350,7 +351,7 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
     allowed_origins に含まれない Origin ヘッダーを送るクライアントの接続は
     拒否され、サーバー側でセッションが確立されない (on_session_ready が
     発火しない)。クライアントの connect() は 403 拒否を検知して
-    HandshakeFailedError を送出する
+    WebTransportSessionRejectedError を送出する
     (低レベルの SessionRejected イベント、status_code 付き)。
     """
     from webtransport.h3 import Client
@@ -386,9 +387,10 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
     )
 
     # QUIC トランスポートの接続は成功するが、CONNECT リクエスト自体は拒否
-    # (403) されるため、connect() は HandshakeFailedError を送出する
+    # (403) されるため、connect() は WebTransportSessionRejectedError を
+    # 送出する
     # (draft-16 Section 3.2)
-    with pytest.raises(HandshakeFailedError):
+    with pytest.raises(WebTransportSessionRejectedError):
         await client.connect()
     assert client.is_connected is False
 
@@ -1998,8 +2000,8 @@ async def test_datagram_invalid_session_id_closes_connection_client(
     test_datagram_invalid_session_id_closes_connection
     (test_e2e_webtransport_h3_low_level.py) と対をなす検証で、
     C++ の receive_datagram が Error イベントを生成し、高レベル Client の
-    ERROR ハンドラが接続を閉じることを確認する。不正なセッション ID は
-    on_datagram に渡らない。
+    ERROR ハンドラが接続を閉じ、run() が WebTransportProtocolError を送出する
+    ことを確認する。不正なセッション ID は on_datagram に渡らない。
     """
     from webtransport.h3 import Client
 
@@ -2067,9 +2069,11 @@ async def test_datagram_invalid_session_id_closes_connection_client(
         server_client.quic_connection.send_datagram(varint + b"huge-quarter-stream-id")
         await server._send_to(client_addr, server_client)
 
-        # クライアントが H3_ID_ERROR で接続を閉じる。ERROR ハンドラが
-        # _running を False にするため run() が終了する
-        await asyncio.wait_for(client_task, timeout=5.0)
+        # クライアントが H3_ID_ERROR で接続を閉じる。ERROR ハンドラが記録した
+        # プロトコルエラーを run() が送出して終了する
+        with pytest.raises(WebTransportProtocolError) as exc_info:
+            await asyncio.wait_for(client_task, timeout=5.0)
+        assert exc_info.value.error_code == 0x0108
         assert client.is_connected is False
         # 不正なセッション ID のデータグラムは on_datagram に渡らない
         assert datagram_received.is_set() is False
@@ -2326,13 +2330,13 @@ async def test_client_connect_rejects_server_without_transport_params(
     test_certificates,
     missing,
 ):
-    """サーバーが transport parameter を欠落させていると Client.connect() が HandshakeFailedError を送出することを確認
+    """サーバーが transport parameter を欠落させていると Client.connect() が WebTransportProtocolError を送出することを確認
 
     draft-ietf-webtrans-http3-16 Section 3.1 の MUST (サーバーは
     max_datagram_frame_size > 0 を送ること) を満たさないサーバーとは
     セッションを確立しない。検証はハンドシェイク完了直後 (CONNECT 送出前)
-    に行われるため、クライアントは CONNECT を送らずに HandshakeFailedError
-    を送出する。サーバー側で SESSION_READY が発火しないことをあわせて検証し、
+    に行われるため、クライアントは CONNECT を送らずに
+    WebTransportProtocolError を送出する。サーバー側で SESSION_READY が発火しないことをあわせて検証し、
     CONNECT が送出されていないことを直接確認する。修正前は検証が
     無く、要件未達のサーバーとセッションが確立し得た。
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
@@ -2370,7 +2374,7 @@ async def test_client_connect_rejects_server_without_transport_params(
     )
 
     try:
-        with pytest.raises(HandshakeFailedError):
+        with pytest.raises(WebTransportProtocolError):
             await client.connect()
         assert client.is_connected is False
         # CONNECT が送出されていないため、サーバー側でセッション要求は来ない
@@ -2397,7 +2401,7 @@ async def test_server_rejects_client_without_transport_params(
     draft-ietf-webtrans-http3-16 Section 3.1 の MUST を満たさないクライアント
     に対し、サーバーは確立済み・新規の全セッションを malformed として扱い、
     H3_MESSAGE_ERROR (RFC 9114 Section 8.1) で接続を閉じる。connect() は
-    2xx 応答を待つため、拒否された場合は ConnectRefusedError を送出する。
+    2xx 応答を待つため、拒否された場合は QUIC の接続例外を送出する。
     例外送出と on_session_ready 不発火で検証する。
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
     このテストの対象外である。
@@ -2436,10 +2440,10 @@ async def test_server_rejects_client_without_transport_params(
 
     try:
         # 要件未達のクライアントの CONNECT はサーバーが H3_MESSAGE_ERROR
-        # で拒否する。connect() は応答待ちで ConnectRefusedError を送出す
-        # ることが期待される (draft-16 Section 3.2。ハンドシェイク完了後の
-        # CONNECTION_CLOSED 受信による拒否)
-        with pytest.raises(ConnectRefusedError):
+        # で拒否する。connect() は応答待ちで QUIC の接続例外を送出すること
+        # が期待される (draft-16 Section 3.2。ハンドシェイク完了後の
+        # CONNECTION_CLOSE 受信による拒否)
+        with pytest.raises(QuicConnectionError):
             await asyncio.wait_for(client.connect(), timeout=5.0)
         assert client.is_connected is False
         # 要件未達のクライアントのセッションは確立されない
@@ -3074,7 +3078,7 @@ async def test_on_session_request_rejects_with_non_2xx(test_certificates):
 
     draft-ietf-webtrans-http3-16 Section 3.2 の 403 SHOULD をアプリの
     コールバックから発行できる。on_session_ready は発火せず、クライアントの
-    connect() は HandshakeFailedError を送出する。
+    connect() は WebTransportSessionRejectedError を送出する。
     """
     from webtransport.h3 import Client, Server
 
@@ -3112,7 +3116,7 @@ async def test_on_session_request_rejects_with_non_2xx(test_certificates):
         verify_peer=False,
     )
     try:
-        with pytest.raises(HandshakeFailedError):
+        with pytest.raises(WebTransportSessionRejectedError):
             await client.connect()
         assert client.is_connected is False
         assert reject_statuses == [403]

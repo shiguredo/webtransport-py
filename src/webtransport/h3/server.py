@@ -21,7 +21,7 @@ from webtransport._common import (
 )
 from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
-from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
+from webtransport.http3.exceptions import Http3ErrorCode
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -998,7 +998,7 @@ class Server:
         if client.webtransport_session is not None and client.webtransport_session.is_closed():
             if client.quic_connection is not None and not client.quic_connection.is_closed():
                 client.quic_connection.close(
-                    H3_GENERAL_PROTOCOL_ERROR,
+                    Http3ErrorCode.GENERAL_PROTOCOL_ERROR,
                     "webtransport over http/3 protocol error",
                 )
                 await self._send_to(addr, client)

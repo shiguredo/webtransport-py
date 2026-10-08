@@ -18,12 +18,17 @@ from webtransport._common import (
     recv_datagram,
 )
 from webtransport.exceptions import (
-    ConnectRefusedError,
+    ConnectFailedError,
     ConnectTimeoutError,
-    HandshakeFailedError,
-    WebTransportConnectError,
+    WebTransportError,
 )
-from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
+from webtransport.http3.exceptions import Http3ConnectionError, Http3ErrorCode
+from webtransport.quic.exceptions import (
+    QuicConnectionError,
+    QuicHandshakeError,
+    connection_error,
+    quic_terminal_error,
+)
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
 
@@ -96,6 +101,8 @@ class Client:
         self._connected = False
         # connect() 実行中フラグ (実行中の再入を拒否する)
         self._connecting = False
+        # 接続がエラーで終了した場合の原因 (run() が送出する)
+        self._terminal_error: WebTransportError | None = None
         self._control_stream_id = -1
 
         self._on_headers: Callable[[int, list[tuple[str, str]]], Awaitable[None]] | None = None
@@ -104,7 +111,7 @@ class Client:
         self._on_connection_error: Callable[[int, str], Awaitable[None]] | None = None
         # 直前の Error イベントで得た H3 ワイヤーエラーコードとメッセージ。
         # _close_on_h3_error が QUIC CONNECTION_CLOSE に載せる
-        self._h3_error_code: int = H3_GENERAL_PROTOCOL_ERROR
+        self._h3_error_code: int = Http3ErrorCode.GENERAL_PROTOCOL_ERROR
         self._h3_error_message: str = "http3 protocol error"
         self._on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
         # 受信待ちの上限 (秒)。run() が QUIC のタイマー期限に合わせて更新する
@@ -272,7 +279,7 @@ class Client:
         QUIC CONNECTION_CLOSE を送出したうえで _running を落とす。
         error_code は直前の Error イベントで得た RFC 9114 Section 8.1 の
         H3 ワイヤーコードを使う。Error イベントを経ずに閉じた場合
-        (テスト専用の強制クローズ等) は H3_GENERAL_PROTOCOL_ERROR を使う。
+        (テスト専用の強制クローズ等) は Http3ErrorCode.GENERAL_PROTOCOL_ERROR を使う。
         """
         if self._quic_connection is not None and not self._quic_connection.is_closed():
             self._quic_connection.close(self._h3_error_code, self._h3_error_message)
@@ -392,11 +399,10 @@ class Client:
                 後は再度接続できる)
             ConnectTimeoutError: 待機中にハンドシェイク完了イベントが届かず
                 deadline に達した場合
-            ConnectRefusedError: 生成失敗時・確立中の OSError 時など、前段
-                での接続拒否の場合
-            HandshakeFailedError: 待機中に QUIC 側の明示的な
-                `CONNECTION_CLOSE` が届いた場合 (ハンドシェイク完了前の
-                失敗は TLS 由来とみなす)
+            ConnectFailedError: 名前解決に失敗した場合
+            QuicConnectionError: 待機中に QUIC の接続が終了した場合
+            QuicHandshakeError: ハンドシェイク完了前に接続が終了した場合
+                (TLS 由来とみなす)
         """
         # ピアのセッション終了を run() が観測すると _connected は False に
         # なるが transport は残る。その状態での再入も拒否する (close() が
@@ -405,6 +411,7 @@ class Client:
             raise RuntimeError("connect() has already been called")
 
         self._connecting = True
+        self._terminal_error = None
         try:
             if timeout <= 0:
                 raise ConnectTimeoutError(
@@ -428,7 +435,7 @@ class Client:
             try:
                 candidates = await self._resolve_remote(self._host, self._port)
             except OSError as exc:
-                raise ConnectRefusedError(
+                raise ConnectFailedError(
                     f"failed to resolve {self._host}:{self._port}: {exc}"
                 ) from exc
             if not candidates:
@@ -516,11 +523,11 @@ class Client:
                 )
                 self._http3_connection = http3_low.Connection.create_client(http3_config)
             except RuntimeError as exc:
-                # 生成自体の失敗は接続拒否に寄せる (アドレス解決失敗などの
-                # TLS ハンドシェイク前段での接続拒否。内部生成 Config は
+                # 生成自体の失敗は QUIC 層の接続例外に寄せる (アドレス解決
+                # 失敗などの TLS ハンドシェイク前段の失敗。内部生成 Config は
                 # 固定値のため、実質的にはアドレス起因である)
-                raise ConnectRefusedError(
-                    f"failed to create QUIC client connection: {exc}"
+                raise QuicConnectionError(
+                    0, f"failed to create QUIC client connection: {exc}"
                 ) from exc
 
             await self._send_pending()
@@ -542,7 +549,7 @@ class Client:
 
                     elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
                         self._running = False
-                        raise HandshakeFailedError("QUIC handshake failed before completion")
+                        raise QuicHandshakeError("QUIC handshake failed before completion")
 
                 await self._send_pending()
                 # 損失検出タイマーを駆動する (h3 の connect と同形)。送受信だけでは
@@ -566,15 +573,17 @@ class Client:
             raise ConnectTimeoutError(
                 f"QUIC handshake did not complete within {timeout} seconds"
             ) from exc
-        except (OSError, WebTransportConnectError) as exc:
-            # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は
-            # ConnectRefusedError に寄せて具体例外の契約を保つ。参照の破棄
-            # は _abandon_attempt と同形に行い、完全な切断は呼び出し側の
+        except (OSError, WebTransportError) as exc:
+            # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は QUIC 層の
+            # 接続例外に寄せて具体例外の契約を保つ。参照の破棄は
+            # _abandon_attempt と同形に行い、完全な切断は呼び出し側の
             # close() が担う
             await self._abandon_attempt()
-            if isinstance(exc, WebTransportConnectError):
+            if isinstance(exc, WebTransportError):
                 raise
-            raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
+            raise connection_error(
+                self._quic_connection, f"connection failed during establishment: {exc}"
+            ) from exc
 
     async def request(
         self,
@@ -688,7 +697,9 @@ class Client:
     async def run(self) -> None:
         """メインループを実行する
 
-        接続が終了するまでブロックする。
+        接続が終了するまでブロックする。接続がエラーで終了した場合は、
+        その原因を表す例外を送出して終了する (正常終了とローカルからの
+        close() では送出しない)。
         """
         if self._quic_connection is None or self._http3_connection is None:
             raise RuntimeError("client is not connected")
@@ -743,6 +754,13 @@ class Client:
                 elif quic_event.type == quic_low.EventType.CONNECTION_CLOSED:
                     self._running = False
                     self._connected = False
+                    # エラーで終了した場合は run() の終端で例外にする
+                    # (正常終了では None のまま)
+                    self._terminal_error = quic_terminal_error(
+                        self._quic_connection,
+                        quic_event.error_code,
+                        quic_event.reason,
+                    )
 
             while True:
                 http3_event = self._http3_connection.next_event()
@@ -773,6 +791,10 @@ class Client:
                     # error_code を後段の _close_on_h3_error で使うため記録する
                     self._h3_error_code = http3_event.error_code
                     self._h3_error_message = http3_event.error_message
+                    # run() の終端で送出する例外としても記録する
+                    self._terminal_error = Http3ConnectionError(
+                        http3_event.error_code, http3_event.error_message
+                    )
                     if self._on_connection_error is not None:
                         await self._on_connection_error(
                             http3_event.error_code,
@@ -829,6 +851,10 @@ class Client:
             # 即座に戻ってきた場合だけ他のタスクへ 1 回譲る
             if received == 0 and sent == 0:
                 await asyncio.sleep(0)
+
+        # 接続がエラーで終了した場合は、その原因を送出する
+        if self._terminal_error is not None:
+            raise self._terminal_error
 
     def initiate_key_update(self) -> bool:
         """TLS 鍵更新 (RFC 9001 Section 6) を開始する

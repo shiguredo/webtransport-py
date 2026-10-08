@@ -119,6 +119,19 @@ enum class QuicEventType {
 };
 
 /**
+ * 受信した CONNECTION_CLOSE のエラー種別
+ *
+ * ngtcp2 の ccerr の種別に対応する。ピアが CONNECTION_CLOSE (type 0x1c) を
+ * 送った場合は Transport、APPLICATION_CLOSE (type 0x1d) を送った場合は
+ * Application になる (RFC 9000 Section 19.19)。
+ */
+enum class QuicConnectionErrorType {
+  Transport,
+  Application,
+  IdleClose,
+};
+
+/**
  * QUIC イベント
  */
 struct QuicEvent {
@@ -581,6 +594,25 @@ class QuicConnection {
    * surrogateescape でデコードする。
    */
   std::optional<std::string> reason() const;
+
+  /**
+   * 受信した CONNECTION_CLOSE のエラー種別を取得
+   *
+   * ピアが CONNECTION_CLOSE (type 0x1c) を送った場合は Transport、
+   * APPLICATION_CLOSE (type 0x1d) を送った場合は Application を返す
+   * (RFC 9000 Section 19.19)。ccerr の既定値は NO_ERROR のトランスポート
+   * エラーであるため、error_code が 0 の場合は「受信していない」と
+   * 区別できない。error_code が 0 以外のときだけ意味を持つ。
+   */
+  std::optional<QuicConnectionErrorType> error_code_type() const;
+
+  /**
+   * エラーを引き起こしたフレーム種別を取得
+   *
+   * ピアがトランスポートエラーで接続を閉じた場合、その原因になったフレームの
+   * 種別 (RFC 9000 Section 19) を返す。不明な場合は 0。
+   */
+  uint64_t error_frame_type() const;
 
   /**
    * TLS 処理時に ngtcp2 が記録した内部エラーコードを取得

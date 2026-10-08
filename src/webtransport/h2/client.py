@@ -11,12 +11,13 @@ import ssl
 from typing import TYPE_CHECKING, Literal, Self
 
 from webtransport._common import parse_wt_url
-from webtransport.exceptions import (
-    ConnectRefusedError,
-    ConnectTimeoutError,
-    HandshakeFailedError,
-    WebTransportConnectError,
+from webtransport.exceptions import ConnectTimeoutError, WebTransportError
+from webtransport.h2.exceptions import (
+    WebTransportProtocolError,
+    WebTransportSessionClosedError,
+    WebTransportSessionRejectedError,
 )
+from webtransport.http2.exceptions import Http2ConnectionError, Http2HandshakeError
 from webtransport.webtransport_ext import h2 as h2_low
 
 if TYPE_CHECKING:
@@ -78,6 +79,8 @@ class Client:
         self._connected = False
         # connect() 実行中フラグ (実行中の再入を拒否する)
         self._connecting = False
+        # セッションまたは接続がエラーで終了した場合の原因 (run() が送出する)
+        self._terminal_error: WebTransportError | None = None
         self._session_id = -1
         # close() の待機で観測するピアの CONNECT ストリームクローズ記録。
         # run() と close() のどちらが観測しても記録する
@@ -302,11 +305,15 @@ class Client:
                 後は再度接続できる)
             ConnectTimeoutError: 待機中に成否を決めるイベントが届かず
                 deadline に達した場合
-            ConnectRefusedError: 待機中に接続リセット (TCP RST) が届いた
+            Http2ConnectionError: 待機中に接続リセット (TCP RST) が届いた
                 場合 (TLS バージョン不一致が接続リセットとして観測される
                 環境を含む)
-            HandshakeFailedError: TLS 検証失敗、TLS アラート (TLS バージョン
-                不一致や ALPN 不一致) の受信、非 2xx 応答の場合
+            Http2HandshakeError: TLS 検証失敗、TLS アラート (TLS バージョン
+                不一致や ALPN 不一致) の受信
+            WebTransportSessionRejectedError: 非 2xx 応答でセッションが
+                拒否された場合
+            WebTransportSessionClosedError: 応答前にセッションが終了した
+                場合
             ValueError: Config の上限値 (2^32 - 1) を超えるためセッション
                 生成に失敗した場合
         """
@@ -327,6 +334,7 @@ class Client:
         self._close_wait_result = "none"
 
         self._connecting = True
+        self._terminal_error = None
         try:
             if self._verify_peer:
                 ssl_context = ssl.create_default_context()
@@ -353,18 +361,20 @@ class Client:
                     timeout=max(0.0, remaining),
                 )
             except ssl.SSLError as exc:
-                # builtin の ConnectionRefusedError と自前の ConnectRefusedError
-                # (綴りが 3 文字違い) を取り違えないこと。前者は OSError 派生の
-                # 標準例外で __cause__ に保持し、後者を送出する
-                raise HandshakeFailedError(f"TLS handshake failed: {exc}") from exc
+                # TCP の RST (OSError 派生) と区別し、TLS ハンドシェイクの
+                # 失敗として扱う。RST の方は下の OSError で受けて HTTP/2 層の
+                # 接続例外にする
+                raise Http2HandshakeError(f"TLS handshake failed: {exc}") from exc
             except TimeoutError as exc:
                 raise ConnectTimeoutError(
                     f"TCP connection did not complete within {timeout} seconds"
                 ) from exc
             except ConnectionRefusedError as exc:
-                raise ConnectRefusedError(f"connection refused: {exc}") from exc
+                raise Http2ConnectionError(0, f"connection refused: {exc}") from exc
             except OSError as exc:
-                raise ConnectRefusedError(f"connection failed before TLS handshake: {exc}") from exc
+                raise Http2ConnectionError(
+                    0, f"connection failed before TLS handshake: {exc}"
+                ) from exc
 
             try:
                 # H2Session は Config を値コピーする。呼び出し元のオブジェクトは
@@ -390,7 +400,7 @@ class Client:
                         # _receive が EOF を検知して停止した場合は接続喪失として
                         # 拒否に寄せる (2xx 待ちの EOF 扱いと同型)
                         self._connected = False
-                        raise ConnectRefusedError("connection lost while waiting for SETTINGS")
+                        raise Http2ConnectionError(0, "connection lost while waiting for SETTINGS")
                     self._running = False
                     raise ConnectTimeoutError(
                         f"HTTP/2 SETTINGS not received within {timeout} seconds"
@@ -399,7 +409,7 @@ class Client:
                 self._session_id = self._session.connect(self._url, self._origin)
                 if self._session_id < 0:
                     self._running = False
-                    raise HandshakeFailedError("failed to send Extended CONNECT request")
+                    raise Http2ConnectionError(0, "failed to send Extended CONNECT request")
 
                 await self._send_pending()
 
@@ -430,11 +440,14 @@ class Client:
                         ):
                             self._connected = False
                             self._running = False
-                            raise HandshakeFailedError("session closed before 2xx response")
+                            raise WebTransportSessionClosedError(
+                                0, "session closed before 2xx response"
+                            )
 
                         # 非 2xx 拒否 (draft-15 Section 3.2: 2xx 以外はセッション未確立)。
                         # SESSION_READY / SESSION_CLOSED のどちらも発火しないため、
-                        # 待たずに HandshakeFailedError を送出して終了する。
+                        # 待たずに WebTransportSessionRejectedError を送出して
+                        # 終了する。
                         # bindings は 2xx 全般 (先頭文字が '2') を確立とみなすため、
                         # 2xx 非 200 (201 等) でも SESSION_READY が発火する
                         if (
@@ -443,13 +456,13 @@ class Client:
                         ):
                             self._connected = False
                             self._running = False
-                            raise HandshakeFailedError(
-                                "server rejected session with non-2xx response"
-                            )
+                            raise WebTransportSessionRejectedError(event.status_code)
 
                     if not self._running:
                         self._connected = False
-                        raise ConnectRefusedError("connection lost while waiting for 2xx response")
+                        raise Http2ConnectionError(
+                            0, "connection lost while waiting for 2xx response"
+                        )
 
                     await asyncio.sleep(0.001)
 
@@ -468,19 +481,21 @@ class Client:
                 raise ConnectTimeoutError(
                     f"connection attempt did not complete within {timeout} seconds"
                 ) from exc
-            except (OSError, WebTransportConnectError) as exc:
-                # 確立中の素の OSError (drain 時の RST 等) は ConnectRefusedError
-                # に寄せて具体例外の契約を保つ。失敗パスの後始末は best-effort
-                # であり、完全な切断 (close_session 送出等) は呼び出し側の
-                # close() が担う
+            except (OSError, WebTransportError) as exc:
+                # 確立中の素の OSError (drain 時の RST 等) は HTTP/2 層の接続
+                # 例外に寄せて具体例外の契約を保つ。失敗パスの後始末は
+                # best-effort であり、完全な切断 (close_session 送出等) は
+                # 呼び出し側の close() が担う
                 self._running = False
                 self._connected = False
                 if self._writer is not None:
                     self._writer.close()
                     self._writer = None
-                if isinstance(exc, WebTransportConnectError):
+                if isinstance(exc, WebTransportError):
                     raise
-                raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
+                raise Http2ConnectionError(
+                    0, f"connection failed during establishment: {exc}"
+                ) from exc
         except BaseException:
             # 失敗時は開いた接続を閉じて状態を戻す (同じインスタンスで
             # 再試行できるようにする)
@@ -616,7 +631,9 @@ class Client:
     async def run(self) -> None:
         """メインループを実行する
 
-        接続が終了するまでブロックする。
+        接続が終了するまでブロックする。セッションがエラーで終了した場合は、
+        その原因を表す例外を送出して終了する (正常終了とローカルからの
+        close() では送出しない)。
         """
         if self._session is None:
             raise RuntimeError("client is not connected")
@@ -650,6 +667,12 @@ class Client:
                         # close() の待機でも参照するため、コールバックとは別に記録する
                         self._peer_closed_session_ids.add(event.session_id)
                         self._connected = False
+                        # エラーコード付きの終了は run() の終端で例外にする
+                        # (0 は正常終了として扱う)
+                        if event.error_code != 0:
+                            self._terminal_error = WebTransportSessionClosedError(
+                                event.error_code, event.error_message
+                            )
                         if self._on_session_closed is not None:
                             await self._invoke_callback(self._on_session_closed, event.session_id)
 
@@ -687,15 +710,20 @@ class Client:
                                 self._on_goaway, event.last_stream_id, event.error_code
                             )
 
-                    # WT_FLOW_CONTROL_ERROR のみ on_error へ渡す
-                    elif (
-                        event.type == h2_low.EventType.ERROR
-                        and event.error_code == h2_low.WtErrorCode.WT_FLOW_CONTROL_ERROR.value
-                        and self._on_error is not None
-                    ):
-                        await self._invoke_callback(
-                            self._on_error, event.error_code, event.error_message
+                    elif event.type == h2_low.EventType.ERROR:
+                        # プロトコルエラーによるセッション終了。run() の終端で
+                        # 送出する例外として記録する
+                        self._terminal_error = WebTransportProtocolError(
+                            event.error_code, event.error_message
                         )
+                        # WT_FLOW_CONTROL_ERROR のみ on_error へ渡す
+                        if (
+                            event.error_code == h2_low.WtErrorCode.WT_FLOW_CONTROL_ERROR.value
+                            and self._on_error is not None
+                        ):
+                            await self._invoke_callback(
+                                self._on_error, event.error_code, event.error_message
+                            )
 
                 if self._session.is_closed():
                     self._running = False
@@ -707,6 +735,10 @@ class Client:
                 await asyncio.sleep(0)
         finally:
             self._run_active = False
+
+        # セッションがエラーで終了した場合は、その原因を送出する
+        if self._terminal_error is not None:
+            raise self._terminal_error
 
     async def close(self) -> None:
         """接続を閉じる

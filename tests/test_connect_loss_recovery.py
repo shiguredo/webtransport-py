@@ -169,18 +169,18 @@ async def test_http3_connect_blackhole_timeout() -> None:
 @pytest.mark.asyncio
 async def test_http3_connect_refused_invalid_host() -> None:
     """http3 の connect() が名前解決失敗で拒否される"""
-    from webtransport.exceptions import ConnectRefusedError
+    from webtransport.exceptions import ConnectFailedError
     from webtransport.http3 import Client
 
     # 解決不能な宛先に接続する (名前解決失敗は生成失敗として送出され、
-    # ConnectRefusedError に寄せられる)
+    # ConnectFailedError に寄せられる)
     client = Client(
         host="nonexistent.invalid",
         port=443,
         verify_peer=False,
     )
     try:
-        with pytest.raises(ConnectRefusedError) as exc_info:
+        with pytest.raises(ConnectFailedError) as exc_info:
             await client.connect(timeout=6.0)
         assert isinstance(exc_info.value.__cause__, OSError)
         assert client.is_connected is False
@@ -191,7 +191,7 @@ async def test_http3_connect_refused_invalid_host() -> None:
 @pytest.mark.asyncio
 async def test_h3_connect_refused_invalid_host() -> None:
     """h3 の connect() が名前解決失敗で拒否される"""
-    from webtransport.exceptions import ConnectRefusedError
+    from webtransport.exceptions import ConnectFailedError
     from webtransport.h3 import Client
 
     # 解決不能な宛先に接続する (http3 と対称の振る舞い)
@@ -200,7 +200,7 @@ async def test_h3_connect_refused_invalid_host() -> None:
         verify_peer=False,
     )
     try:
-        with pytest.raises(ConnectRefusedError) as exc_info:
+        with pytest.raises(ConnectFailedError) as exc_info:
             await client.connect(timeout=6.0)
         assert isinstance(exc_info.value.__cause__, OSError)
         assert client.is_connected is False

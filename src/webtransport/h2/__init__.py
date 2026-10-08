@@ -21,6 +21,7 @@ Usage:
     from webtransport.h2 import Server, Client
 """
 
+from webtransport.h2 import exceptions
 from webtransport.h2.client import Client
 from webtransport.h2.server import Server, SessionWriter
 from webtransport.webtransport_ext.h2 import (
@@ -40,4 +41,5 @@ __all__ = [
     "Session",
     "SessionWriter",
     "WtErrorCode",
+    "exceptions",
 ]

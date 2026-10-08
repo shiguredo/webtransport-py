@@ -5,10 +5,7 @@ from __future__ import annotations
 from conftest import _drain_events
 
 from webtransport import http3
-from webtransport.http3.constants import (
-    H3_NO_ERROR,
-    H3_REQUEST_CANCELLED,
-)
+from webtransport.http3.exceptions import Http3ErrorCode
 
 
 def _pump(src: http3.Connection, dst: http3.Connection) -> None:
@@ -456,8 +453,8 @@ def test_http3_close_stream_default_error_code() -> None:
     stream_end_events = [e for e in _drain_events(client) if e.type == http3.EventType.STREAM_END]
     assert len(stream_end_events) == 1
     assert stream_end_events[0].stream_id == 0
-    assert stream_end_events[0].error_code == H3_NO_ERROR
-    assert H3_NO_ERROR == 0x0100
+    assert stream_end_events[0].error_code == Http3ErrorCode.NO_ERROR
+    assert Http3ErrorCode.NO_ERROR == 0x0100
 
 
 def test_http3_close_stream_explicit_error_code() -> None:
@@ -467,11 +464,11 @@ def test_http3_close_stream_explicit_error_code() -> None:
     assert client.submit_request(0, _request_headers()) is True
     _pump(client, server)
 
-    client.close_stream(0, H3_REQUEST_CANCELLED)
+    client.close_stream(0, Http3ErrorCode.REQUEST_CANCELLED)
 
     stream_end_events = [e for e in _drain_events(client) if e.type == http3.EventType.STREAM_END]
     assert len(stream_end_events) == 1
-    assert stream_end_events[0].error_code == H3_REQUEST_CANCELLED
+    assert stream_end_events[0].error_code == Http3ErrorCode.REQUEST_CANCELLED
 
 
 def test_http3_reset_stream_default_error_code_stays_zero() -> None:

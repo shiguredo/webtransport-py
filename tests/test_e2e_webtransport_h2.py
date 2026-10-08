@@ -9,12 +9,10 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from webtransport import http2
-from webtransport.exceptions import (
-    ConnectRefusedError,
-    ConnectTimeoutError,
-    HandshakeFailedError,
-)
+from webtransport.exceptions import ConnectTimeoutError
 from webtransport.h2 import Server
+from webtransport.h2.exceptions import WebTransportSessionRejectedError
+from webtransport.http2.exceptions import Http2ConnectionError
 from webtransport.webtransport_ext import h2 as h2_low
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
@@ -1257,13 +1255,13 @@ async def test_h2_server_on_session_closed_after_pre_accept_end_stream(test_cert
 
 @pytest.mark.asyncio
 async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
-    """on_session_request が 403 を返すと Client.connect() が HandshakeFailedError を送出することを確認
+    """on_session_request が 403 を返すと Client.connect() が WebTransportSessionRejectedError を送出することを確認
 
     draft-15 Section 3.2 により、非 2xx 応答はセッション未確立を意味する。
     bindings は拒否時に SESSION_REJECTED のみを発火し、SESSION_READY /
     SESSION_CLOSED は発火しない。connect() の待機ループが
     SESSION_REJECTED を検知しないと永久ブロックするため、実 Server と実
-    Client を組み合わせて有限時間で HandshakeFailedError が送出されることを
+    Client を組み合わせて有限時間で WebTransportSessionRejectedError が送出されることを
     検証する (修正前は wait_for のタイムアウトで失敗する)。
     """
     from webtransport.h2 import Client, Server
@@ -1286,7 +1284,7 @@ async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
     )
 
     try:
-        with pytest.raises(HandshakeFailedError):
+        with pytest.raises(WebTransportSessionRejectedError):
             await asyncio.wait_for(client.connect(), timeout=5.0)
         assert client.is_connected is False
     finally:
@@ -1508,11 +1506,11 @@ async def test_connect_timeout_on_listen_only_server():
 
 @pytest.mark.asyncio
 async def test_connect_refused_on_closed_port():
-    """閉じたポートに対して connect() が ConnectRefusedError を送出することを確認する
+    """閉じたポートに対して connect() が Http2ConnectionError を送出することを確認する
 
     前提: 127.0.0.1:1 は閉じており TCP RST が返る。
     期待値: Python 標準の ConnectionRefusedError を原因として保持する
-    ConnectRefusedError が即座に送出される。
+    Http2ConnectionError が即座に送出される。
     """
     from webtransport.h2 import Client
 
@@ -1521,9 +1519,9 @@ async def test_connect_refused_on_closed_port():
         verify_peer=False,
     )
     try:
-        with pytest.raises(ConnectRefusedError) as exc_info:
+        with pytest.raises(Http2ConnectionError) as exc_info:
             await client.connect(timeout=5.0)
-        # 自前の ConnectRefusedError ではなく builtin の ConnectionRefusedError
+        # HTTP/2 層の接続例外ではなく builtin の ConnectionRefusedError
         # (綴りが 3 文字違い) が __cause__ に保持される
         assert isinstance(exc_info.value.__cause__, ConnectionRefusedError)
         assert client.is_connected is False

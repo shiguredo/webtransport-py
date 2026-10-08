@@ -21,6 +21,7 @@ Usage:
     from webtransport.h3 import Server, Client
 """
 
+from webtransport.h3 import exceptions
 from webtransport.h3.client import Client
 from webtransport.h3.server import Server
 from webtransport.webtransport_ext.h3 import (
@@ -39,4 +40,5 @@ __all__ = [
     "Server",
     "Session",
     "StreamInfo",
+    "exceptions",
 ]

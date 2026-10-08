@@ -20,14 +20,24 @@ from webtransport._common import (
     recv_datagram,
 )
 from webtransport.exceptions import (
-    ConnectRefusedError,
+    ConnectFailedError,
     ConnectTimeoutError,
-    HandshakeFailedError,
-    WebTransportConnectError,
+    WebTransportError,
 )
 from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
-from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
+from webtransport.h3.exceptions import (
+    WebTransportProtocolError,
+    WebTransportSessionClosedError,
+    WebTransportSessionRejectedError,
+)
+from webtransport.http3.exceptions import Http3ErrorCode
+from webtransport.quic.exceptions import (
+    QuicConnectionError,
+    QuicHandshakeError,
+    connection_error,
+    quic_terminal_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -100,6 +110,8 @@ class Client:
         self._connected = False
         # connect() 実行中フラグ (実行中の再入を拒否する)
         self._connecting = False
+        # 接続またはセッションがエラーで終了した場合の原因 (run() が送出する)
+        self._terminal_error: WebTransportError | None = None
         # connect() が SESSION_READY を消費したときの引き継ぎバッファ。
         # run() のイベントループ開始時に先に処理し、コールバック登録の
         # 順序に依存せず on_session_ready を発火させる
@@ -392,10 +404,14 @@ class Client:
                 後は再度接続できる)
             ConnectTimeoutError: 待機中に成否を決めるイベントが届かず
                 deadline に達した場合
-            ConnectRefusedError: 待機中に QUIC 側の明示的な
-                `CONNECTION_CLOSE` が届いた場合
-            HandshakeFailedError: TLS 由来のクローズ・transport parameter
-                の要件未達・非 2xx 応答の場合
+            ConnectFailedError: 名前解決に失敗した場合
+            QuicConnectionError: 待機中に QUIC の接続が終了した場合
+            QuicHandshakeError: TLS ハンドシェイクが失敗した場合
+            WebTransportProtocolError: 対向の transport parameter が
+                WebTransport の要件を満たさない場合
+            WebTransportSessionRejectedError: 非 2xx 応答でセッションが
+                拒否された場合
+            WebTransportSessionClosedError: 応答前にセッションが終了した場合
         """
         # ピアのセッション終了を run() が観測すると _connected は False に
         # なるが transport は残る。QUIC の接続断では _connected は True の
@@ -405,6 +421,7 @@ class Client:
             raise RuntimeError("connect() has already been called")
 
         self._connecting = True
+        self._terminal_error = None
         try:
             if timeout <= 0:
                 raise ConnectTimeoutError("connection attempt timed out immediately")
@@ -434,7 +451,7 @@ class Client:
             try:
                 candidates = await self._resolve_remote(self._host, self._port)
             except OSError as exc:
-                raise ConnectRefusedError(
+                raise ConnectFailedError(
                     f"failed to resolve {self._host}:{self._port}: {exc}"
                 ) from exc
             if not candidates:
@@ -526,8 +543,8 @@ class Client:
             except RuntimeError as exc:
                 # アドレス解決失敗など、生成自体の失敗は接続拒否に寄せる
                 # (TLS ハンドシェイク前段での接続拒否)
-                raise ConnectRefusedError(
-                    f"failed to create QUIC client connection: {exc}"
+                raise QuicConnectionError(
+                    0, f"failed to create QUIC client connection: {exc}"
                 ) from exc
             self._webtransport_session = h3_low.Session.create_client(webtransport_config)
 
@@ -548,7 +565,7 @@ class Client:
                         break
                     elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                         self._running = False
-                        raise HandshakeFailedError("QUIC handshake failed before completion")
+                        raise QuicHandshakeError("QUIC handshake failed before completion")
 
                 await self._send_pending()
                 # 損失検出タイマーを駆動する (run() と同形)。送受信だけでは
@@ -573,8 +590,8 @@ class Client:
                 self._quic_connection
             ):
                 self._running = False
-                raise HandshakeFailedError(
-                    "server transport parameters do not meet WebTransport requirements"
+                raise WebTransportProtocolError(
+                    0, "server transport parameters do not meet WebTransport requirements"
                 )
 
             self._setup_streams()
@@ -605,8 +622,9 @@ class Client:
                         )
                     elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                         self._running = False
-                        raise ConnectRefusedError(
-                            "QUIC connection closed while waiting for SETTINGS"
+                        raise connection_error(
+                            self._quic_connection,
+                            "QUIC connection closed while waiting for SETTINGS",
                         )
 
                 await self._send_pending()
@@ -632,7 +650,7 @@ class Client:
                 # 「From the client's perspective, a WebTransport session is
                 # established when the client receives a 2xx response」)。
                 # SESSION_READY (2xx 全般) で復帰し、SESSION_REJECTED (非 2xx。
-                # 1xx を含む) で HandshakeFailedError を送出する (h2 側の
+                # 1xx を含む) で WebTransportSessionRejectedError を送出する (h2 側の
                 # connect と同型)。SESSION_READY は run() のコールバック経路を
                 # 確保するため未配信バッファへ引き継ぐ
                 accepted = False
@@ -664,22 +682,21 @@ class Client:
                         if event.type == h3_low.EventType.SESSION_REJECTED:
                             self._connected = False
                             self._running = False
-                            raise HandshakeFailedError(
-                                "server rejected WebTransport session with non-2xx response"
-                            )
+                            raise WebTransportSessionRejectedError(event.status_code)
                         if event.type == h3_low.EventType.SESSION_CLOSED:
                             self._connected = False
                             self._running = False
-                            raise HandshakeFailedError(
-                                "session closed before establishment completed"
+                            raise WebTransportSessionClosedError(
+                                event.error_code, event.error_message
                             )
                     if accepted:
                         break
                     if self._quic_connection.is_closed():
                         self._connected = False
                         self._running = False
-                        raise ConnectRefusedError(
-                            "QUIC connection closed while waiting for 2xx response"
+                        raise connection_error(
+                            self._quic_connection,
+                            "QUIC connection closed while waiting for 2xx response",
                         )
                     # 受信した QUIC イベントを WebTransport セッションへ流す。
                     # run() の _process_quic_events が処理する変換のうち、
@@ -706,8 +723,9 @@ class Client:
                         elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
                             self._connected = False
                             self._running = False
-                            raise ConnectRefusedError(
-                                "QUIC connection closed while waiting for 2xx response"
+                            raise connection_error(
+                                self._quic_connection,
+                                "QUIC connection closed while waiting for 2xx response",
                             )
                     await self._send_pending()
                     # 損失検出タイマーを駆動する (run() と同形)。送受信だけでは
@@ -729,7 +747,7 @@ class Client:
 
             self._connected = False
             self._running = False
-            raise HandshakeFailedError("failed to send CONNECT request")
+            raise connection_error(self._quic_connection, "failed to send CONNECT request")
 
         except TimeoutError as exc:
             # 現状 try 内で wait_for を使うのは _receive のみであり、そこは
@@ -743,15 +761,17 @@ class Client:
             raise ConnectTimeoutError(
                 f"connection attempt did not complete within {timeout} seconds"
             ) from exc
-        except (OSError, WebTransportConnectError) as exc:
-            # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は
-            # ConnectRefusedError に寄せて具体例外の契約を保つ。参照の破棄
-            # は _abandon_attempt と同形に行い、完全な切断は呼び出し側の
+        except (OSError, WebTransportError) as exc:
+            # 確立中の素の OSError (DNS 失敗・sendto 失敗等) は QUIC 層の
+            # 接続例外に寄せて具体例外の契約を保つ。参照の破棄は
+            # _abandon_attempt と同形に行い、完全な切断は呼び出し側の
             # close() が担う
             await self._abandon_attempt()
-            if isinstance(exc, WebTransportConnectError):
+            if isinstance(exc, WebTransportError):
                 raise
-            raise ConnectRefusedError(f"connection failed during establishment: {exc}") from exc
+            raise connection_error(
+                self._quic_connection, f"connection failed during establishment: {exc}"
+            ) from exc
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """WebTransport ストリームを開く
@@ -919,6 +939,11 @@ class Client:
                         ),
                     )
             elif quic_event.type == quic.EventType.CONNECTION_CLOSED:
+                # エラーで終了した場合は run() の終端で例外にする (正常終了
+                # では None のまま)
+                self._terminal_error = quic_terminal_error(
+                    self._quic_connection, quic_event.error_code, quic_event.reason
+                )
                 return False
 
         return True
@@ -939,6 +964,13 @@ class Client:
 
             elif webtransport_event.type == h3_low.EventType.SESSION_CLOSED:
                 self._connected = False
+                # エラーコード付きの終了は run() の終端で例外にする
+                # (0 は正常終了として扱う)
+                if webtransport_event.error_code != 0:
+                    self._terminal_error = WebTransportSessionClosedError(
+                        webtransport_event.error_code,
+                        webtransport_event.error_message,
+                    )
                 if self._on_session_closed is not None:
                     await self._on_session_closed(webtransport_event.session_id)
 
@@ -989,6 +1021,12 @@ class Client:
                 # エラー (error_code が 0x0108 でない) は対象外
                 if webtransport_event.error_code != 0x0108:
                     continue
+                # プロトコルエラーによる接続クローズ。run() の終端で送出する
+                # 例外として記録する
+                self._terminal_error = WebTransportProtocolError(
+                    webtransport_event.error_code,
+                    webtransport_event.error_message,
+                )
                 self._quic_connection.close(
                     webtransport_event.error_code,
                     webtransport_event.error_message,
@@ -1006,18 +1044,20 @@ class Client:
 
         RFC 9114 Section 5.3 (Immediate Application Closure) に沿って
         QUIC CONNECTION_CLOSE を送出する。error_code は
-        H3_GENERAL_PROTOCOL_ERROR (RFC 9114 Section 8.1)。
+        Http3ErrorCode.GENERAL_PROTOCOL_ERROR (RFC 9114 Section 8.1)。
         """
         if self._quic_connection is not None and not self._quic_connection.is_closed():
             self._quic_connection.close(
-                H3_GENERAL_PROTOCOL_ERROR, "webtransport over http/3 protocol error"
+                Http3ErrorCode.GENERAL_PROTOCOL_ERROR, "webtransport over http/3 protocol error"
             )
         await self._send_pending()
 
     async def run(self) -> None:
         """メインループを実行する
 
-        接続が終了するまでブロックする。
+        接続が終了するまでブロックする。接続またはセッションがエラーで
+        終了した場合は、その原因を表す例外を送出して終了する (正常終了と
+        ローカルからの close() では送出しない)。
         """
         if self._quic_connection is None:
             raise RuntimeError("client is not connected")
@@ -1068,6 +1108,10 @@ class Client:
             # 即座に戻ってきた場合だけ他のタスクへ 1 回譲る
             if received == 0 and sent == 0:
                 await asyncio.sleep(0)
+
+        # 接続またはセッションがエラーで終了した場合は、その原因を送出する
+        if self._terminal_error is not None:
+            raise self._terminal_error
 
     def _is_closing_connect_stream(self, stream_id: int) -> bool:
         """ピア側終了の観測対象 CONNECT ストリームかどうか

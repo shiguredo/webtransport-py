@@ -6,7 +6,7 @@
 
 import asyncio
 
-from webtransport import WebTransportConnectError, h3
+from webtransport import WebTransportError, h3
 
 
 async def main() -> None:
@@ -35,7 +35,7 @@ async def main() -> None:
 
     try:
         await client.connect()
-    except WebTransportConnectError as exc:
+    except WebTransportError as exc:
         print(f"接続失敗: {exc}")
         await client.close()
         return

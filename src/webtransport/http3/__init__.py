@@ -20,8 +20,9 @@ Usage:
     from webtransport.http3 import Server, Client
 """
 
+from webtransport.http3 import exceptions
 from webtransport.http3.client import Client
-from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
+from webtransport.http3.exceptions import Http3ErrorCode
 from webtransport.http3.server import Server
 from webtransport.webtransport_ext.http3 import (
     Config,
@@ -33,13 +34,14 @@ from webtransport.webtransport_ext.http3 import (
 )
 
 __all__ = [
-    "H3_GENERAL_PROTOCOL_ERROR",
     "Client",
     "Config",
     "Connection",
     "Event",
     "EventType",
+    "Http3ErrorCode",
     "Server",
+    "exceptions",
     "get_version",
     "parse_priority",
 ]

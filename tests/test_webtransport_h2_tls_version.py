@@ -13,8 +13,8 @@ import ssl
 
 import pytest
 
-from webtransport.exceptions import ConnectRefusedError, HandshakeFailedError
 from webtransport.h2 import Client, Server
+from webtransport.http2.exceptions import Http2ConnectionError, Http2HandshakeError
 
 
 @pytest.mark.asyncio
@@ -53,10 +53,10 @@ async def test_h2_client_rejects_tls_1_2_only_server(test_certificates):
     """TLS 1.2 のみのサーバーへの h2.Client.connect が拒否されることを確認
 
     対向は生 asyncio サーバーで TLS 1.2 のみを許可する。TLS バージョン不一致で
-    ハンドシェイクが失敗し、ConnectRefusedError または HandshakeFailedError が
+    ハンドシェイクが失敗し、Http2ConnectionError または Http2HandshakeError が
     送出される。ハンドシェイクが成立してしまった場合 (退行) は接続を保持して
     HTTP/2 SETTINGS を送らないため、ConnectTimeoutError になり本テストは失敗
-    する (即切断による ConnectRefusedError の偽陽性を避ける)。
+    する (即切断による Http2ConnectionError の偽陽性を避ける)。
     """
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -80,7 +80,7 @@ async def test_h2_client_rejects_tls_1_2_only_server(test_certificates):
     port = server.sockets[0].getsockname()[1]
     client = Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
     try:
-        with pytest.raises((ConnectRefusedError, HandshakeFailedError)):
+        with pytest.raises((Http2ConnectionError, Http2HandshakeError)):
             await client.connect(timeout=3.0)
     finally:
         await client.close()

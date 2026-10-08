@@ -81,6 +81,20 @@ def _load_api() -> dict[str, dict[str, set[str]]]:
         )
         for path in sorted((SOURCE_DIR / module).glob("*.py")):
             _collect_members(ast.parse(path.read_text(encoding="utf-8")), table)
+        exceptions_path = SOURCE_DIR / module / "exceptions.py"
+        if exceptions_path.is_file():
+            # 層ごとの exceptions サブモジュールは公開 API の一部である。SKILL は
+            # `quic.exceptions` と `quic.exceptions.QuicError` の両方の形で参照
+            # するため、サブモジュール名をキーにした表にも同じメンバーを入れる
+            collected: dict[str, set[str]] = {}
+            _collect_members(ast.parse(exceptions_path.read_text(encoding="utf-8")), collected)
+            # クラス名 (キー) とメンバー名 (値)、モジュール直下の関数名を
+            # すべて解決対象にする
+            entries: set[str] = set(collected)
+            for members in collected.values():
+                entries |= members
+            entries.discard("")
+            table["exceptions"] = entries
         api[module] = table
     return api
 

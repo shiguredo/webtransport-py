@@ -13,7 +13,7 @@ import socket
 import pytest
 
 from webtransport import h2, h3, http2, http3, quic
-from webtransport.exceptions import WebTransportConnectError
+from webtransport.exceptions import WebTransportError
 
 # 5 層のサーバーのいずれか (起動と停止だけを共通化する)
 _Server = quic.Server | h3.Server | http3.Server | h2.Server | http2.Server
@@ -263,7 +263,7 @@ async def test_h3_connect_retry_after_failure(test_certificates) -> None:
     """
     port = _reserve_port(socket.SOCK_DGRAM)
     client = h3.Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
-    with pytest.raises(WebTransportConnectError):
+    with pytest.raises(WebTransportError):
         await client.connect(timeout=0.3)
 
     server = h3.Server(
@@ -286,7 +286,7 @@ async def test_http3_connect_retry_after_failure(test_certificates) -> None:
     """http3.Client が connect() 失敗後に同じインスタンスで再試行できることを確認する"""
     port = _reserve_port(socket.SOCK_DGRAM)
     client = http3.Client(host="127.0.0.1", port=port, verify_peer=False)
-    with pytest.raises(WebTransportConnectError):
+    with pytest.raises(WebTransportError):
         await client.connect(timeout=0.3)
 
     server = http3.Server(
@@ -311,7 +311,7 @@ async def test_h2_connect_retry_after_failure(test_certificates) -> None:
     """
     port = _reserve_port(socket.SOCK_STREAM)
     client = h2.Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
-    with pytest.raises(WebTransportConnectError):
+    with pytest.raises(WebTransportError):
         await client.connect(timeout=1.0)
 
     server = h2.Server(

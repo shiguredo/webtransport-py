@@ -2101,7 +2101,7 @@ async def test_server_on_connection_error_fires_on_protocol_error(test_certifica
     直接注入する (負値経路はワイヤからは誘発困難なため)。
     """
     from webtransport.http3 import Client, Server
-    from webtransport.http3.constants import H3_FRAME_UNEXPECTED
+    from webtransport.http3.exceptions import Http3ErrorCode
 
     received: list[tuple[int, str]] = []
     error_received = asyncio.Event()
@@ -2151,7 +2151,7 @@ async def test_server_on_connection_error_fires_on_protocol_error(test_certifica
         server_client.http3_connection.receive_stream_data(0, frame, False)
 
         await asyncio.wait_for(error_received.wait(), timeout=5.0)
-        assert received[0][0] == H3_FRAME_UNEXPECTED
+        assert received[0][0] == Http3ErrorCode.FRAME_UNEXPECTED
         assert received[0][1] != ""
         assert "FRAME_UNEXPECTED" in received[0][1]
 
@@ -2174,14 +2174,15 @@ async def test_client_on_connection_error_fires_on_protocol_error(test_certifica
 
     クライアント側の HTTP/3 層に不正フレームを注入し、Error イベント経由で
     コールバックが H3 ワイヤーコードとメッセージを受け取ること、run() が
-    QUIC CONNECTION_CLOSE を送出して終了することを検証する。
+    QUIC CONNECTION_CLOSE を送出し、原因を Http3ConnectionError として
+    送出して終了することを検証する。
 
     クライアント起動の双方向ストリーム 0 へサーバーが応答する形になるため、
     nghttp3 は H3_STREAM_CREATION_ERROR (0x0103) を返す
     (RFC 9114 Section 8.1: ピアが受け入れないストリームを作成した)。
     """
     from webtransport.http3 import Client, Server
-    from webtransport.http3.constants import H3_STREAM_CREATION_ERROR
+    from webtransport.http3.exceptions import Http3ConnectionError, Http3ErrorCode
 
     received: list[tuple[int, str]] = []
     error_received = asyncio.Event()
@@ -2224,11 +2225,14 @@ async def test_client_on_connection_error_fires_on_protocol_error(test_certifica
     client._http3_connection.receive_stream_data(0, frame, False)
 
     await asyncio.wait_for(error_received.wait(), timeout=5.0)
-    assert received[0][0] == H3_STREAM_CREATION_ERROR
+    assert received[0][0] == Http3ErrorCode.STREAM_CREATION_ERROR
     assert received[0][1] != ""
 
-    # run() は CONNECTION_CLOSE を送出して終了する
-    await asyncio.wait_for(run_task, timeout=5.0)
+    # run() は CONNECTION_CLOSE を送出し、HTTP/3 層のエラーを例外として
+    # 送出して終了する
+    with pytest.raises(Http3ConnectionError) as exc_info:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    assert exc_info.value.error_code == Http3ErrorCode.STREAM_CREATION_ERROR
     assert run_task.done() is True
 
     server_task.cancel()

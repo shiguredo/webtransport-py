@@ -123,7 +123,7 @@ if __name__ == "__main__":
 import asyncio
 
 from webtransport import h3
-from webtransport.exceptions import WebTransportConnectError
+from webtransport import WebTransportError
 
 
 async def main() -> None:
@@ -143,7 +143,7 @@ async def main() -> None:
 
     try:
         await client.connect()
-    except WebTransportConnectError as exc:
+    except WebTransportError as exc:
         print(f"接続失敗: {exc}")
         return
 
@@ -222,7 +222,7 @@ if __name__ == "__main__":
 import asyncio
 
 from webtransport import h2
-from webtransport.exceptions import WebTransportConnectError
+from webtransport import WebTransportError
 
 
 async def main() -> None:
@@ -242,7 +242,7 @@ async def main() -> None:
 
     try:
         await client.connect()
-    except WebTransportConnectError as exc:
+    except WebTransportError as exc:
         print(f"接続失敗: {exc}")
         return
 

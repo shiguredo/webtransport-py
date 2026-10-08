@@ -15,7 +15,7 @@ from webtransport._common import (
     recv_datagram,
     validate_cert_key_files,
 )
-from webtransport.http3.constants import H3_GENERAL_PROTOCOL_ERROR
+from webtransport.http3.exceptions import Http3ErrorCode
 from webtransport.webtransport_ext import http3 as http3_low
 from webtransport.webtransport_ext import quic as quic_low
 
@@ -38,7 +38,7 @@ class ClientConnection:
         self.http3_streams_setup: bool = False
         # 直前の Error イベントで得た H3 ワイヤーエラーコードとメッセージ。
         # _close_client_connection_on_h3_error が CONNECTION_CLOSE に載せる
-        self.h3_error_code: int = H3_GENERAL_PROTOCOL_ERROR
+        self.h3_error_code: int = Http3ErrorCode.GENERAL_PROTOCOL_ERROR
         self.h3_error_message: str = "http3 protocol error"
         # 受信 FIN が立った双方向ストリーム (on_stream_end 通知用)。
         # 受信経路とタイマー経路のどちらで QUIC イベントを取り出しても
@@ -440,7 +440,7 @@ class Server:
         """
         if client.quic_connection is not None and not client.quic_connection.is_closed():
             # Error イベントを経ていればその H3 ワイヤーコード、経ていなければ
-            # H3_GENERAL_PROTOCOL_ERROR を載せる
+            # Http3ErrorCode.GENERAL_PROTOCOL_ERROR を載せる
             client.quic_connection.close(client.h3_error_code, client.h3_error_message)
             await self._drain_all_to(addr, client)
         self._remove_client(addr)
