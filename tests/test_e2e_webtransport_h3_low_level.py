@@ -88,6 +88,21 @@ class _LowLevelClient:
         """
         await self._send_packet()
 
+    async def _advance_timers(self) -> None:
+        """満了した QUIC タイマーを進めて送信待ちを掃く
+
+        ngtcp2 のタイマー (pacing / PTO / idle) は handle_timeout() で明示的に
+        進める契約である。ライブラリ本体の Client.run も満了したタイマーを
+        進めてから再度送信しており、進めないと pacing で止まったパケットが
+        送信キューに残ったままになる (send() は満了前のタイマーを待つ間
+        パケットを返さない)。
+        """
+        timeout_ns = self._quic_connection.get_timeout()
+        if timeout_ns is None or timeout_ns > 0:
+            return
+        self._quic_connection.handle_timeout()
+        await self._send_packet()
+
     async def _receive(self) -> None:
         """QUIC パケットを 1 件受信して処理する (タイムアウト時は何もしない)
 
@@ -833,18 +848,23 @@ async def test_datagram_invalid_session_id_closes_connection(
         # send() はストリームデータの後にデータグラムを書き込む (残留データが
         # あると ngtcp2 の MORE 契約により同一パケットに同梱される) ため、
         # 通常は 1 回のフラッシュで届く。残留ストリームデータの掃き出しを
-        # 確実にする防御として複数回フラッシュする
+        # 確実にする防御として複数回フラッシュする。send() は pacing の待ちの
+        # 間パケットを返さないため、満了したタイマーも進める
         for _ in range(8):
             await client._send_packet()
+            await client._advance_timers()
 
         # サーバーが H3_ID_ERROR で接続を閉じる。CONNECTION_CLOSE を受信して
-        # error_code() が 0x0108 になるまで待つ
+        # error_code() が 0x0108 になるまで待つ。待機中も満了したタイマーを
+        # 進める (進めないと pacing で止まったデータグラムが送信キューのまま
+        # 残り、サーバーが接続を閉じない)
         connection_closed = False
         for _ in range(100):
             await client._receive()
             if not client._process_quic_events():
                 connection_closed = True
                 break
+            await client._advance_timers()
             await asyncio.sleep(0.01)
         assert connection_closed is True
         assert client._quic_connection.error_code == 0x0108
