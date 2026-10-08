@@ -17,6 +17,10 @@ from webtransport import quic
 from webtransport._common import recv_datagram
 from webtransport.h3 import Server
 
+# pacing の期限待ちで送信を再試行する上限 (ナノ秒)。これを超える期限 (PTO 等) は
+# 送信待ちではないため待たない
+_PACING_WAIT_LIMIT_NS = 10_000_000
+
 
 class _LowLevelClient:
     """低レベル API (quic.Connection + h3.Session) で構築するクライアント
@@ -73,11 +77,65 @@ class _LowLevelClient:
             return
         await loop.sock_sendto(self._socket, packet.data, self._server_addr)
 
+    async def _next_packet_with_pacing(self, attempts: int = 20) -> quic.Packet | None:
+        """pacing の期限待ちを挟んで、送出可能なパケットを 1 つ取り出す
+
+        ngtcp2 の send() は pacing の期限が来るまでパケットを返さない。期限待ちを
+        挟まずに空振りすると、そのパケット (RESET_STREAM_AT / FIN 等) がワイヤに
+        出ないまま検証がタイムアウトする。期限待ちは sleep のみで行う
+        (tests/conftest.py の wait_pacing_timeout と同じ。pacing は期限経過だけで
+        送出可能になる)。満了済みのタイマーは handle_timeout() で進める
+        (PTO の再送を促す。ライブラリ本体の Client.run と同じ駆動)。
+
+        Returns:
+            パケット。送信待ちが無い、または期限が遠い (PTO 等) 場合は None
+        """
+        for _ in range(attempts):
+            packet = self._quic_connection.send()
+            if packet is not None:
+                return packet
+            timeout_ns = self._quic_connection.get_timeout()
+            # 期限なし、または pacing とは考えられない遠い期限は送信待ちなしとみなす
+            if timeout_ns is None or timeout_ns > _PACING_WAIT_LIMIT_NS:
+                return None
+            if timeout_ns > 0:
+                await asyncio.sleep(timeout_ns / 1e9)
+            else:
+                self._quic_connection.handle_timeout()
+        return None
+
+    async def _send_packet_with_pacing(self) -> bool:
+        """pacing の期限待ちを挟んでパケットを 1 つ送出する
+
+        Returns:
+            送出した場合は True
+        """
+        packet = await self._next_packet_with_pacing()
+        if packet is None:
+            return False
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(self._socket, packet.data, self._server_addr)
+        return True
+
     async def _pump(self) -> None:
         """h3 層の送信データを QUIC に渡して送信する"""
         for stream_id, stream_data, fin in self._h3_session.get_streams_to_send():
             self._quic_connection.send_stream_data(stream_id, stream_data, fin)
         await self._send_packet()
+
+    async def _drain_pending(self, attempts: int = 8) -> None:
+        """送信待ちのデータを掃く (pacing の期限待ちを挟む)
+
+        保留パケットを生成する前に送信待ちを掃かないと、send() がストリーム ID
+        昇順で他のストリームを優先し、対象ストリームのデータが送信キューに残る。
+        そのままリセットすると未送信データは破棄され、RESET_STREAM_AT の
+        Reliable Size が 0 になってピアがセッション ID を復元できなくなる。
+        """
+        for _ in range(attempts):
+            for stream_id, stream_data, fin in self._h3_session.get_streams_to_send():
+                self._quic_connection.send_stream_data(stream_id, stream_data, fin)
+            if not await self._send_packet_with_pacing():
+                return
 
     async def _send_quic_only(self) -> None:
         """QUIC 層の送信だけを実行する
@@ -86,7 +144,7 @@ class _LowLevelClient:
         WT ヘッダーはワイヤに出ない。データ未受信のままリセットする
         検証で使う
         """
-        await self._send_packet()
+        await self._send_packet_with_pacing()
 
     async def _advance_timers(self) -> None:
         """満了した QUIC タイマーを進めて送信待ちを掃く
@@ -263,17 +321,20 @@ class _LowLevelClient:
         QUIC 層 (ngtcp2) にデータを書き込み済み (tx offset が前進) にする一方、
         ワイヤには出さない。データがリセットより先に届かない順序を作る
         RESET_STREAM_AT の検証で使う。1 回の send() は 1 パケットしか返さない
-        ため、データは 1 パケットに収まるサイズを渡すこと。この検証の決定的性
-        は、データストリームより小さい ID のストリーム (CONNECT リクエスト /
-        制御ストリーム) に残留データがないことにも依存する (send() は
-        stream_buffers_ をストリーム ID 昇順で処理するため、残留があると
-        データストリームのパケットが生成されず、データが stream_buffers_ に
-        残ったままリセットで破棄される)
+        ため、データは 1 パケットに収まるサイズを渡すこと。
+
+        保留パケットを生成する前に送信待ちを掃く (_drain_pending)。send() は
+        stream_buffers_ をストリーム ID 昇順で処理するため、データストリームより
+        小さい ID のストリーム (CONNECT リクエスト / 制御ストリーム) に残留
+        データがあると、このデータがパケットに含まれず stream_buffers_ に残り、
+        リセットで破棄される (RESET_STREAM_AT の Reliable Size が 0 になり、
+        ピアがセッション ID を復元できなくなる)。
         """
+        await self._drain_pending()
         self._h3_session.send_stream_data(stream_id, data)
         for stream_id_to_send, stream_data, fin in self._h3_session.get_streams_to_send():
             self._quic_connection.send_stream_data(stream_id_to_send, stream_data, fin)
-        packet = self._quic_connection.send()
+        packet = await self._next_packet_with_pacing()
         # パケットが生成されない場合 (cwnd 枯渇等) は、データが stream_buffers_
         # に残ったままリセットで破棄され、失敗モードが不明瞭になるため
         # ここで明示的に失敗させる
