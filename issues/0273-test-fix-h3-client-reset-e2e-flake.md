@@ -1,7 +1,7 @@
 # h3 の client reset e2e テストが終端済みストリームへ reset して CI で失敗する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/test-fix-h3-client-reset-e2e-flake
 - Reporter: @voluntas
 
@@ -51,3 +51,14 @@ ubuntu-26.04 x86_64 (3.14) と macos-26_arm64 (3.14t) の 2 ジョブが同じ�
 - CI が緑に戻る
 
 ## 解決方法
+
+- `tests/test_e2e_http3.py` の `test_client_resets_http3_stream` を、送信側が開いたままの
+  ストリームを reset する形へ移行した。1 本目は `Client.request` で送って HTTP/3 の
+  制御・QPACK ストリームの設定を済ませ、2 本目は `Client._quic_connection` の
+  `open_stream` と `Client._http3_connection` の `submit_request` で終端せずに開き、
+  その stream_id を `Client.reset_stream` で reset してサーバーの `on_stream_reset` を
+  検証する
+- テストの docstring に、終端済みストリームへの reset が送出されない理由 (RFC 9000
+  Section 3.1 の送信側の状態遷移と ngtcp2 の `ngtcp2_strm_is_all_tx_data_fin_acked`) を
+  記録した
+- 修正後のテストは 30 回連続実行で失敗せず、全テスト (1347 件) が通過した
