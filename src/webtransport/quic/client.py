@@ -1377,8 +1377,22 @@ class Client:
         if self._terminal_error is not None:
             raise self._terminal_error
 
-    async def close(self) -> int:
+    async def close(self, error_code: int = 0, reason: str = "") -> int:
         """接続を閉じる
+
+        低レベル `Connection.close(error_code, reason)` へそのまま渡し、
+        CONNECTION_CLOSE (RFC 9000 Section 19.19) を送出する。RFC 9000 は
+        将来改訂される可能性がある。引数を省略した場合は終了コード 0・空の
+        理由で従来どおり動作する。
+
+        ハンドシェイク完了前の終了は ngtcp2 が終了コードを APPLICATION_ERROR
+        に置換して理由を落とす (RFC 9000 Section 10.2.3。将来改訂される
+        可能性がある)。終了コードと理由がピアへ伝わるのはハンドシェイク
+        完了後である。
+
+        Args:
+            error_code: アプリケーションエラーコード
+            reason: 終了理由
 
         Returns:
             close() 中に送出できたパケット数。CONNECTION_CLOSE の送出に
@@ -1404,7 +1418,7 @@ class Client:
         sent = 0
         try:
             if self._connection is not None:
-                self._connection.close()
+                self._connection.close(error_code, reason)
                 try:
                     sent += await self._send_pending()
                 except OSError as exc:

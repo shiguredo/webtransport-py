@@ -480,7 +480,7 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 
 `quic.Server.__init__(host, port, certfile=None, keyfile=None, alpn_protocols=None, idle_timeout_ns=30_000_000_000)`。`alpn_protocols` の既定は `["h3"]`。
 
-`quic.Client` / `quic.Server` の `send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。
+`quic.Server` / `quic.Client` の `send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (接続・addr が未確立のときは送信しないため例外にならない)。
 
 ```python
 # サーバーコールバック
@@ -488,13 +488,22 @@ async def close_session(error_code: int = 0, error_message: str = "") -> None
 # on_stream_data(stream_id: int, data: bytes, fin: bool, addr: tuple[str, int])
 # on_datagram(data: bytes, addr: tuple[str, int])
 # on_stop_sending(stream_id: int, error_code: int, addr: tuple[str, int])
+# on_stream_reset(stream_id: int, error_code: int, addr: tuple[str, int])
+#   ピアが送信側を中断した RESET_STREAM (RFC 9000 Section 19.4) の通知。
+#   待たずに通知する (待機は Client.wait_for_stream_reset)
 # on_connection_closed(addr: tuple[str, int])
 
 async def open_stream(addr: tuple[str, int], bidirectional: bool = True) -> int
 async def send_stream_data(addr: tuple[str, int], stream_id: int, data: bytes, fin: bool = False) -> None
 async def send_datagram(addr: tuple[str, int], data: bytes) -> None
+async def shutdown_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def reset_stream(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def stop_sending(addr: tuple[str, int], stream_id: int, error_code: int = 0) -> None
+async def close(addr: tuple[str, int], error_code: int = 0, reason: str = "") -> None
 def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
+
+`shutdown_stream` は双方向ストリームでは RESET_STREAM と STOP_SENDING の両方を、単方向ストリームでは ngtcp2 が決める側だけを shutdown する (`quic.Client.shutdown_stream` と同じ意味)。`reset_stream` / `stop_sending` は片方だけを送る QUIC フレーム層の操作である。`close` は指定したクライアントへ終了コードと理由付きの CONNECTION_CLOSE を送出し、接続は `stop()` を呼ばずに 1 つだけ閉じられる (ローカル起点の終了として `on_connection_closed` は発火しない。他クライアントは継続する)。終了コードと理由がピアへ伝わるのはハンドシェイク完了後である (RFC 9000 Section 10.2.3)。
 
 `quic.Client`:
 
@@ -535,7 +544,7 @@ async def send_datagram(data: bytes) -> None
 async def migrate() -> bool  # Connection Migration
 def initiate_key_update() -> bool  # TLS 鍵更新 (RFC 9001 Section 6) を開始
 async def run() -> None  # バックグラウンド受信タスクの完了 (接続終了) まで待つ
-async def close() -> int  # 接続を閉じ、close() 中に送出できたパケット数を返す (未接続時は 0)
+async def close(error_code: int = 0, reason: str = "") -> int  # 接続を閉じ、close() 中に送出できたパケット数を返す (未接続時は 0)
 def register_early_data(data: bytes, fin: bool = False) -> None  # 0-RTT として送信するデータを登録 (connect() の前のみ。1 MiB 超は ValueError。登録ごとに双方向ストリームを 1 本開く)
 def export_session_ticket() -> bytes
 def export_0rtt_transport_params() -> bytes

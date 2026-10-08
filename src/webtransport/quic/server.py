@@ -99,6 +99,7 @@ class Server:
         ) = None
         self._on_datagram: Callable[[bytes, tuple[str, int]], Awaitable[None]] | None = None
         self._on_stop_sending: Callable[[int, int, tuple[str, int]], Awaitable[None]] | None = None
+        self._on_stream_reset: Callable[[int, int, tuple[str, int]], Awaitable[None]] | None = None
         self._on_connection_closed: Callable[[tuple[str, int]], Awaitable[None]] | None = None
 
     def on_stop_sending(
@@ -111,6 +112,22 @@ class Server:
             callback: async def callback(stream_id: int, error_code: int, addr: tuple[str, int]) -> None
         """
         self._on_stop_sending = callback
+
+    def on_stream_reset(
+        self,
+        callback: Callable[[int, int, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """ピアからの RESET_STREAM 受信時のコールバックを設定する
+
+        ピアが送信側のストリームを中断したときに、そのアプリケーション
+        エラーコードとともに呼ばれる (RFC 9000 Section 19.4。将来改訂される
+        可能性がある)。`quic.Client.wait_for_stream_reset` と異なり待機せずに
+        通知する。未登録の場合は通知しない。
+
+        Args:
+            callback: async def callback(stream_id: int, error_code: int, addr: tuple[str, int]) -> None
+        """
+        self._on_stream_reset = callback
 
     @property
     def host(self) -> str:
@@ -392,6 +409,9 @@ class Server:
         elif event.type == quic_low.EventType.DATAGRAM:
             if self._on_datagram is not None:
                 await self._on_datagram(event.data, addr)
+        elif event.type == quic_low.EventType.STREAM_RESET:
+            if self._on_stream_reset is not None:
+                await self._on_stream_reset(event.stream_id, event.error_code, addr)
         elif event.type == quic_low.EventType.STOP_SENDING:
             if self._on_stop_sending is not None:
                 await self._on_stop_sending(event.stream_id, event.error_code, addr)
@@ -552,6 +572,129 @@ class Server:
             return
 
         connection.send_datagram(data)
+        await self._send_to(addr, connection)
+
+    async def shutdown_stream(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """ストリームを中断する
+
+        低レベル `Connection.close_stream` を呼び、RESET_STREAM
+        (RFC 9000 Section 19.4) と STOP_SENDING (Section 19.5) をスケジュール
+        して `_send_to` で送出する。フレームの実際の送出は `_send_to` が担う
+        (既存の `send_stream_data` と同じパターン)。RFC 9000 は将来改訂される
+        可能性がある。双方向ストリームでは両方を送出する。単方向ストリームでは
+        `ngtcp2_conn_shutdown_stream` がローカル単方向なら write 側
+        (RESET_STREAM) のみ、リモート単方向なら read 側 (STOP_SENDING) のみを
+        shutdown する。
+
+        意味は `quic.Client.shutdown_stream` と同じである。片方だけを送る
+        操作は `reset_stream` / `stop_sending` を使う。未登録の `addr` では
+        何もしない。
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        connection = self._connections.get(addr)
+        if connection is None:
+            return
+
+        connection.close_stream(stream_id, error_code)
+        await self._send_to(addr, connection)
+
+    async def reset_stream(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """RESET_STREAM を送出してストリームの送信側を中断する
+
+        低レベル `Connection.reset_stream` を呼び、RESET_STREAM
+        (RFC 9000 Section 19.4) をスケジュールして `_send_to` で送出する。
+        自身の送信側だけを中断する QUIC フレーム層の操作であり、ピアの送信側
+        は止まらない。ピアの送信側も止める場合は `stop_sending` を併用する。
+        `h2` 層の同名 API はセッションを閉じ込めた層の操作であるのに対し、
+        本層は接続とストリームを指定するフレーム層の操作である。RFC 9000 は
+        将来改訂される可能性がある。未登録の `addr` では何もしない。
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        connection = self._connections.get(addr)
+        if connection is None:
+            return
+
+        connection.reset_stream(stream_id, error_code)
+        await self._send_to(addr, connection)
+
+    async def stop_sending(
+        self,
+        addr: tuple[str, int],
+        stream_id: int,
+        error_code: int = 0,
+    ) -> None:
+        """STOP_SENDING を送出してピアの送信側の停止を要求する
+
+        低レベル `Connection.stop_sending` を呼び、STOP_SENDING
+        (RFC 9000 Section 19.5) をスケジュールして `_send_to` で送出する。
+        ピアの送信側だけを止める QUIC フレーム層の操作であり、自身の送信側は
+        止まらない。`h2` 層の同名 API はセッションを閉じ込めた層の操作で
+        あるのに対し、本層は接続とストリームを指定するフレーム層の操作で
+        ある。RFC 9000 は将来改訂される可能性がある。未登録の `addr` では
+        何もしない。
+
+        Args:
+            addr: クライアントアドレス
+            stream_id: ストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        connection = self._connections.get(addr)
+        if connection is None:
+            return
+
+        connection.stop_sending(stream_id, error_code)
+        await self._send_to(addr, connection)
+
+    async def close(
+        self,
+        addr: tuple[str, int],
+        error_code: int = 0,
+        reason: str = "",
+    ) -> None:
+        """指定したクライアントとの接続を終了コードと理由付きで閉じる
+
+        低レベル `Connection.close(error_code, reason)` を呼び、
+        CONNECTION_CLOSE (RFC 9000 Section 19.19) を `_send_to` で送出する。
+        RFC 9000 は将来改訂される可能性がある。ローカル起点の終了として扱い
+        `on_connection_closed` は発火しない (`quic.Client.close()` と同じ
+        契約)。`stop()` を呼ばずに 1 接続だけを閉じられる。接続の登録解除は
+        `run()` の回収経路 (`connection.is_closed()` →
+        `_discard_connection`) が行うため、本メソッドの直後はまだ登録が
+        残っている。他の接続の通信は継続する。未登録の `addr` では何もしない。
+
+        ハンドシェイク完了前の終了は ngtcp2 が終了コードを APPLICATION_ERROR
+        に置換して理由を落とす (RFC 9000 Section 10.2.3。将来改訂される
+        可能性がある)。終了コードと理由がピアへ伝わるのはハンドシェイク
+        完了後である。
+
+        Args:
+            addr: クライアントアドレス
+            error_code: アプリケーションエラーコード
+            reason: 終了理由
+        """
+        connection = self._connections.get(addr)
+        if connection is None:
+            return
+
+        connection.close(error_code, reason)
         await self._send_to(addr, connection)
 
     async def run(self) -> None:
