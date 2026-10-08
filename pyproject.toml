@@ -517,11 +517,12 @@ pythonpath = ["src"]
 # Property-Based Testing (PBT) は prop_ prefix を使用する
 python_files = ["test_*.py", "prop_*.py"]
 python_functions = ["test_*", "prop_*"]
-# 実ブラウザ (Chromium) を使うテストは playwright 未導入の CI では実行しない
-# ため、collection 対象から除外する (marker の -m だけでは import を防げない)
+# 実ブラウザ (Chromium / Firefox / WebKit) を使うテストは playwright 未導入の
+# CI では実行しないため、collection 対象から除外する (marker の -m だけでは
+# import を防げない)
 addopts = ["--ignore=tests/browser"]
 markers = [
-  "browser: 実ブラウザ (Chromium) を使う E2E テスト",
+  "browser: 実ブラウザ (Chromium / Firefox / WebKit) を使う E2E テスト",
 ]
 
 # ty-pre-commit は全体検査のため、診断対象をパッケージ本体に絞る

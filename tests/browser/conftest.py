@@ -1,4 +1,4 @@
-"""実ブラウザ (Chromium / WebKit) を使った WebTransport E2E テスト用フィクスチャ
+"""実ブラウザ (Chromium / Firefox / WebKit) を使った WebTransport E2E テスト用フィクスチャ
 
 pytest-playwright の同期 API から asyncio ベースの Server を扱うため、
 サーバーは別スレッドで asyncio.run() により起動する。ティアダウンでは
@@ -325,6 +325,22 @@ def chromium_browser() -> Iterator[Browser]:
 
 
 @pytest.fixture(scope="module")
+def firefox_browser() -> Iterator[Browser]:
+    """Firefox ブラウザを起動する
+
+    Firefox 153 の Local Network Access (LNA) は公開サイトからローカルアドレスへの
+    接続を権限プロンプトで確認する。ヘッドレスではプロンプトに応答できないため
+    接続が確立しない (`network.lna.prompt.timeout` の既定 300000 ms まで待って
+    拒否される)。LNA の回避はページ用 fixture (firefox_page) で
+    `local-network-access` 権限を事前付与して行うため、起動時の pref 指定は不要である。
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.firefox.launch(headless=True)
+        yield browser
+        browser.close()
+
+
+@pytest.fixture(scope="module")
 def webkit_browser() -> Iterator[Browser]:
     """WebKit (Safari) ブラウザを起動する
 
@@ -343,6 +359,22 @@ def chromium_page(chromium_browser: Browser) -> Iterator[Page]:
     page = chromium_browser.new_page()
     yield page
     page.close()
+
+
+@pytest.fixture
+def firefox_page(firefox_browser: Browser) -> Iterator[Page]:
+    """Firefox の新しいページを返す
+
+    Playwright の `local-network-access` 権限は Firefox の `local-network` /
+    `loopback-network` 権限へ対応付けられており、事前付与すると LNA のプロンプトが
+    出ずに公開サイトからローカルアドレスへ接続できる。Chromium で
+    `--disable-features=LocalNetworkAccessChecks` を指定するのと同じ目的だが、
+    LNA のチェック自体は有効のまま明示的に許可する。
+    """
+    context = firefox_browser.new_context(permissions=["local-network-access"])
+    page = context.new_page()
+    yield page
+    context.close()
 
 
 @pytest.fixture
@@ -395,6 +427,10 @@ def browser_server_h2(test_certificates):
     対応しており、TCP/TLS (ALPN h2) の https:// URL へ接続すると HTTP/2 が
     選択される。Origin ヘッダーの検証は h2 Server に未実装のため、h3 サーバー
     のような allowed_origins の指定は不要である。
+
+    Firefox は WebTransport over HTTP/2 に対応していない (HTTP/3 のみ。実測でも
+    接続時に TCP コネクションを張らず QUIC だけを試行する) ため、この fixture を
+    使うテストは WebKit 専用である。
     """
     server = BrowserWebTransportServerH2(
         certfile=test_certificates["certfile"],
