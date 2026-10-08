@@ -1,7 +1,7 @@
 # h3 低レベル e2e の RESET_STREAM_AT テストが pacing と送信待ちの残留で CI で失敗する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/test-fix-stream-reset-at-flakiness
 - Reporter: @voluntas
 
@@ -50,3 +50,15 @@ CI が `tests/test_e2e_webtransport_h3_low_level.py` の
 - CI が緑に戻る
 
 ## 解決方法
+
+- `_LowLevelClient` に `_next_packet_with_pacing` と `_send_packet_with_pacing` を追加した。
+  `send()` が None を返したときは、pacing とみなせる近い期限 (10 ms 以下) まで sleep して
+  再試行し、満了済みのタイマーは `handle_timeout()` で進める。期限なし、または遠い期限
+  (PTO 等) は送信待ちなしとして打ち切る
+- `_send_quic_only` を pacing 対応にした。リセットのパケットが確実にワイヤへ出るため、
+  `info.reset_received` の待ちがタイムアウトしなくなる (種類 1 の解消)
+- `_drain_pending` を追加し、`send_stream_data_withheld` の先頭で呼ぶようにした。
+  保留パケットにデータが確実に含まれ、リセットで未送信データが破棄されなくなる
+  (種類 2 の解消)
+- 修正後の `test_stream_reset_at_recovers_session_id` は 30000 回連続実行で失敗せず
+  (修正前は 7 回失敗)、同ファイルの 9 テストと全テスト (1347 件) が通過した
