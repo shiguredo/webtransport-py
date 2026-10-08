@@ -1,7 +1,7 @@
 # 層ごとの例外階層とエラーコード enum を用意する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/change-api-and-add-qmux
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,12 @@
 - 全テストが通過する
 
 ## 解決方法
+
+- `src/webtransport/quic/exceptions.py` / `http2` / `http3` / `h2` / `h3` に層ごとの例外とエラーコードの `IntEnum` を追加した。基底は `webtransport.exceptions.WebTransportError` で、接続の期限切れを表す `ConnectTimeoutError` と、名前解決の失敗のような接続前の失敗を表す `ConnectFailedError` はトップレベルに置いた
+- 旧 `WebTransportConnectError` / `ConnectRefusedError` / `HandshakeFailedError` を廃止し、`h3.Client.connect()` / `h2.Client.connect()` / `http3.Client.connect()` が原因となった層の例外 (`QuicConnectionError` / `QuicHandshakeError` / `Http2ConnectionError` / `Http2HandshakeError` / `WebTransportProtocolError` / `WebTransportSessionRejectedError` / `WebTransportSessionClosedError`) を送出するようにした
+- `quic.Client.run()` / `http3.Client.run()` / `h3.Client.run()` / `h2.Client.run()` が、接続またはセッションがエラーで終了したときにその原因の例外を送出して終了するようにした。正常終了 (NO_ERROR のクローズ・アイドルタイムアウト・ローカルからの `close()`) では送出しない
+- `src/bindings/quic.cpp` / `src/bindings/quic.h` に `error_code_type` と `error_frame_type` を追加し、受信した CONNECTION_CLOSE の種別 (transport / application) と原因フレームを取れるようにした。`QuicTransportError` と `QuicApplicationError` はこれで作り分ける
+- `src/webtransport/http3/constants.py` の `H3_*` 定数を `Http3ErrorCode` に統合し、`webtransport.http3.constants` を削除した
+- 設計方針に挙げた例外のうち、観測できないものはクラスとして定義しなかった。ストリーム単位のエラー (RESET_STREAM / STOP_SENDING) と GOAWAY は低レベルのイベントと `on_stream_reset` / `on_goaway` で通知する (接続を終わらせず同じ接続で回復できるため)。ステートレスリセット・バージョン不一致・アイドルタイムアウトは ngtcp2 の ccerr から区別できないため、`QuicConnectionError` の理由とイベントで表す
+- `tests/test_exceptions.py` を追加し、基底関係・エラーコードの値 (RFC / draft と照合)・属性・`str()`・CONNECTION_CLOSE の有無による種別の切り替えを検証した。既存テストは connect 失敗とプロトコルエラーによる `run()` 終了の期待値を新しい例外へ移行した
+- `skills/webtransport-py/SKILL.md` に「例外」節を追加し、階層・エラーコード・属性・送出経路を明記した
