@@ -1,7 +1,7 @@
 # CI の browser E2E ジョブに Playwright Firefox のインストールが無い
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/fix-ci-install-playwright-firefox
 - Reporter: @voluntas
 
@@ -35,3 +35,10 @@ Firefox の実ブラウザ E2E を CI で実行できる状態に戻す。
 - e2e-test ワークフローが緑に戻る
 
 ## 解決方法
+
+- `.github/workflows/e2e-test.yml` の `Install Playwright browsers` に `firefox` を
+  追加した
+- `Cache Playwright browsers` のキーに導入するブラウザの構成
+  (`-chromium-firefox-webkit`) を含め、構成を変えたときにキャッシュを作り直せるようにした
+- push 後の e2e-test ワークフロー (macos-26_arm64 / 3.14) で Firefox を含む全 32 検証が
+  通過し、wheel ワークフローも全ジョブが通過した
