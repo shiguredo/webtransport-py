@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 
 webtransport-py は Sans I/O アーキテクチャを採用した WebTransport の Python ライブラリです。WebTransport over HTTP/3 と WebTransport over HTTP/2 の両方に対応しています。
 
-また、WebTransport だけでなく QUIC、HTTP/3、HTTP/2 を単体のプロトコルとしても利用できます。QMux も Sans I/O API と asyncio API の両方を提供しています。asyncio、スレッド、独自のイベントループなど、任意の I/O フレームワークと組み合わせて利用できます。
+また、WebTransport だけでなく QUIC、HTTP/3、HTTP/2 を単体のプロトコルとしても利用できます。asyncio、スレッド、独自のイベントループなど、任意の I/O フレームワークと組み合わせて利用できます。おまけとして QMux も Sans I/O API と asyncio API の両方を提供しています。
 
 ## 特徴
 
@@ -225,6 +225,187 @@ async def main() -> None:
     async with server:
         print(f"サーバー開始: {server.host}:{server.actual_port}")
         await server.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### HTTP/3
+
+#### クライアント
+
+```python
+import asyncio
+
+from webtransport import http3
+
+
+async def main() -> None:
+    client = http3.Client(
+        host="localhost",
+        port=4433,
+        verify_peer=False,
+    )
+
+    async def on_headers(stream_id: int, headers: list[tuple[str, str]]) -> None:
+        print(f"ヘッダー受信 (stream_id={stream_id}): {headers}")
+
+    async def on_data(stream_id: int, data: bytes) -> None:
+        print(f"データ受信: {data}")
+
+    client.on_headers(on_headers)
+    client.on_data(on_data)
+
+    await client.connect()
+    await client.request("GET", "/")
+
+    try:
+        await asyncio.wait_for(client.run(), timeout=5.0)
+    except TimeoutError:
+        pass
+
+    await client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+#### サーバー
+
+```python
+import asyncio
+
+from webtransport import http3
+
+
+async def main() -> None:
+    server = http3.Server(
+        host="0.0.0.0",
+        port=4433,
+        certfile="cert.pem",
+        keyfile="key.pem",
+    )
+
+    async def on_request(
+        stream_id: int,
+        headers: list[tuple[str, str]],
+        addr: tuple[str, int],
+    ) -> None:
+        print(f"リクエスト受信 (stream_id={stream_id}): {headers}")
+
+    async def on_stream_end(stream_id: int, addr: tuple[str, int]) -> None:
+        response_headers: list[tuple[str, str]] = [
+            (":status", "200"),
+            ("content-type", "text/plain"),
+        ]
+        await server.submit_response(addr, stream_id, response_headers)
+        await server.send_data(addr, stream_id, b"Hello from HTTP/3 server!", fin=True)
+
+    server.on_request(on_request)
+    server.on_stream_end(on_stream_end)
+
+    async with server:
+        print("Ctrl+C で終了")
+        try:
+            await server.run()
+        except KeyboardInterrupt:
+            pass
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### HTTP/2
+
+#### クライアント
+
+```python
+import asyncio
+
+from webtransport import http2
+
+
+async def main() -> None:
+    client = http2.Client(
+        host="localhost",
+        port=8443,
+        verify_peer=False,
+    )
+
+    async def on_headers(stream_id: int, headers: list[tuple[str, str]]) -> None:
+        print(f"ヘッダー受信 (stream_id={stream_id}): {headers}")
+
+    async def on_data(stream_id: int, data: bytes) -> None:
+        print(f"データ受信: {data}")
+
+    client.on_headers(on_headers)
+    client.on_data(on_data)
+
+    await client.connect()
+    await client.request("GET", "/")
+
+    try:
+        await asyncio.wait_for(client.run(), timeout=5.0)
+    except TimeoutError:
+        pass
+
+    await client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+#### サーバー
+
+```python
+import asyncio
+
+from webtransport import http2
+
+
+async def main() -> None:
+    server = http2.Server(
+        host="0.0.0.0",
+        port=8443,
+        certfile="cert.pem",
+        keyfile="key.pem",
+    )
+
+    async def on_request(
+        stream_id: int,
+        headers: list[tuple[str, str]],
+        response_writer: http2.ResponseWriter,
+    ) -> None:
+        print(f"リクエスト受信 (stream_id={stream_id}): {headers}")
+
+    async def on_stream_end(
+        stream_id: int,
+        response_writer: http2.ResponseWriter,
+    ) -> None:
+        response_headers: list[tuple[str, str]] = [
+            (":status", "200"),
+            ("content-type", "text/plain"),
+        ]
+        await response_writer.send_headers(stream_id, response_headers)
+        await response_writer.send_data(
+            stream_id,
+            b"Hello from HTTP/2 server!",
+            end_stream=True,
+        )
+
+    server.on_request(on_request)
+    server.on_stream_end(on_stream_end)
+
+    async with server:
+        print("Ctrl+C で終了")
+        try:
+            await server.run()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
