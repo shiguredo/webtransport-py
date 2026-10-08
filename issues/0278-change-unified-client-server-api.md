@@ -1,7 +1,7 @@
 # HTTPVersion enum で WebTransport の統一 Client / Server を選べるようにする
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/change-api-and-add-qmux
 - Polished: {YYYY-MM-DD}
 
@@ -40,3 +40,12 @@ WebTransport を使い始める経路を `webtransport.Client(http_version=HTTPV
 - 全テストが通過する
 
 ## 解決方法
+
+- `src/webtransport/http_version.py` に `HTTPVersion` (`HTTP2 = "h2"` / `HTTP3 = "h3"`) を追加し、`webtransport.Client` / `webtransport.Server` を `http_version` で実装を選ぶファサードとして実装した (既定は `HTTP3`)。enum の値は ALPN の識別子と同じにしてあるため、`HTTPVersion("h3")` のように文字列からも作れる
+- `webtransport.Client` は共通 API (`connect` / `run` / `close` / `open_stream` / `send_stream_data` / `send_datagram` / `reset_stream` とコールバック登録) を実装へ明示的に委譲する。選択したバージョンと矛盾する引数 (`HTTP/2` に `ca_file` / `quic_config` など、`HTTP/3` に `config`) は `ValueError` にする
+- `webtransport.Server` はコールバックをセッションハンドル `Session` で統一した。h3 は `addr` と `session_id`、h2 は `SessionWriter` をハンドルで包み、送信のたびに `addr` を渡す非対称を吸収する。`Session` は `session_id` / `addr` / `http_version` と `open_stream` / `send_stream_data` / `send_datagram` / `reset_stream` を持ち、固有操作 (`close_stream` は HTTP/3、`stop_sending` と `close_session` は HTTP/2) は具象クラスに置いた
+- 高レベル実装を `src/webtransport/_h3_client.py` / `_h3_server.py` / `_h2_client.py` / `_h2_server.py` へ移し、`webtransport.h3` / `webtransport.h2` は Sans-IO 専用 (`Session` / `Config` / `Event` / `EventType` / `StreamInfo` / `WtErrorCode` と `exceptions`) に縮小した
+- プロトコル固有 API (`migrate` / `initiate_key_update` / `close_stream` / `stop_sending` / `on_error` / `on_goaway` の層ごとのシグネチャ) はファサードに載せず、`client.h3` / `client.h2` / `server.h3` / `server.h2` 経由にした
+- `tests/test_unified_client.py` (構築・引数検証・委譲) と `tests/test_unified_api_e2e.py` (`http_version` の切り替えだけで h2 / h3 の両方でデータグラムのエコーとセッション拒否が動く 4 テスト) を追加した
+- 既存テストが `webtransport.h3` / `h2` から高レベルクラスを import していた箇所を内部モジュールへ向け直した。`tests/test_skill_api_consistency.py` は統一 API (`webtransport.Client` / `Server` / `Session`) のクラス名も解決するように拡張した
+- `examples/webtransport/` と `skills/webtransport-py/SKILL.md` を統一 API へ追従させた
