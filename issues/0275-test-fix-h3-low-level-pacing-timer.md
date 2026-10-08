@@ -1,7 +1,7 @@
 # 巨大 Quarter Stream ID の DATAGRAM テストが pacing で送出が詰まり CI で失敗する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/test-fix-h3-low-level-pacing-timer
 - Reporter: @voluntas
 
@@ -45,3 +45,12 @@ CI が `tests/test_e2e_webtransport_h3_low_level.py` の
 - CI が緑に戻る
 
 ## 解決方法
+
+- `_LowLevelClient` に `_advance_timers` を追加した。`get_timeout()` が満了
+  (0 以下) していれば `handle_timeout()` を呼び、送信待ちを 1 パケット掃く
+  (ライブラリ本体の `Client.run` と同じ駆動)
+- `test_datagram_invalid_session_id_closes_connection` の `send_datagram` 後の
+  フラッシュループと CONNECTION_CLOSE の待機ループの両方で `_advance_timers` を
+  呼ぶようにした。待機ループの 1 周目 (受信タイムアウト 0.1 秒の後) には pacing の
+  タイマーが満了しているため、送信キューに残ったデータグラムが確実にワイヤへ出る
+- 修正後のテストは 60 回連続実行で失敗せず、全テスト (1347 件) を 2 回連続で通過した
