@@ -227,9 +227,14 @@ endif()
 # --enable-lib-only でライブラリだけを作れる (examples の libev / TLS / nghttp3
 # は不要)。autotools は in-source ビルドが前提のため BINARY_DIR をソース
 # ディレクトリと同じにする。
+# ビルド条件を変えたときは flavor を上げる。CI は _deps をキャッシュしており、
+# キーが外れたときに restore-keys で古いキャッシュが復元されることがあるため、
+# 条件をパスに含めて古いビルド成果物を再利用しないようにする
+set(DWNX_BUILD_FLAVOR "lib-only-fpic1")
+set(DWNX_BUILD_DIR "${DEPS_DIR}/dwnx/${DWNX_VERSION}-${DWNX_BUILD_FLAVOR}")
 message(STATUS "Setting up dwnx...")
-set(DWNX_SOURCE_DIR "${DEPS_DIR}/dwnx/${DWNX_VERSION}/source")
-set(DWNX_INSTALL_DIR "${DEPS_DIR}/dwnx/${DWNX_VERSION}/install")
+set(DWNX_SOURCE_DIR "${DWNX_BUILD_DIR}/source")
+set(DWNX_INSTALL_DIR "${DWNX_BUILD_DIR}/install")
 set(DWNX_LIB ${DWNX_INSTALL_DIR}/lib/libdwnx.a)
 
 if(EXISTS ${DWNX_LIB})
@@ -248,12 +253,12 @@ else()
     # autotools は in-source ビルドのため BINARY_DIR はソースと同じにするが、
     # stamp / tmp はソース外に置く (git clone がソースを消して作り直すため、
     # ソース内に置くと clone 直後に stamp を失う)
-    STAMP_DIR ${DEPS_DIR}/dwnx/${DWNX_VERSION}/stamp
-    TMP_DIR ${DEPS_DIR}/dwnx/${DWNX_VERSION}/tmp
+    STAMP_DIR ${DWNX_BUILD_DIR}/stamp
+    TMP_DIR ${DWNX_BUILD_DIR}/tmp
     UPDATE_COMMAND ""
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     CONFIGURE_COMMAND
-      sh -c "autoreconf -i && ./configure --enable-lib-only --prefix=${DWNX_INSTALL_DIR}"
+      sh -c "autoreconf -i && ./configure --enable-lib-only --disable-shared CFLAGS='-g -O2 -fPIC' --prefix=${DWNX_INSTALL_DIR}"
     BUILD_COMMAND make --jobs=${PARALLEL_JOBS}
     INSTALL_COMMAND make install
     BUILD_BYPRODUCTS ${DWNX_LIB}

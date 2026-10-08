@@ -90,7 +90,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install nasm go
+          # dwnx は autotools でビルドするため、macOS ランナーへ autotools を入れる
+          brew install nasm go autoconf automake libtool pkg-config
 
       - run: uv build --wheel --out-dir wheelhouse
       - name: Upload Artifact
