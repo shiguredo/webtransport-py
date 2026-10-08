@@ -96,12 +96,16 @@ async def test_datagram_echo_over_unified_api(
     finally:
         if client_task is not None:
             client_task.cancel()
+        # クライアントを先に閉じる。HTTP/2 の Server.run() はキャンセル時に
+        # wait_closed() で接続中ハンドラの終了を待つため、接続を残したまま
+        # server_task を cancel すると後片付けが完了しない
+        # (_h2_server.Server.stop() は close_clients() で先に接続を閉じる)
+        await client.close()
         server_task.cancel()
         await asyncio.gather(
             *[task for task in (client_task, server_task) if task is not None],
             return_exceptions=True,
         )
-        await client.close()
         await server.stop()
 
 
