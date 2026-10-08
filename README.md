@@ -20,7 +20,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 
 webtransport-py は Sans I/O アーキテクチャを採用した WebTransport の Python ライブラリです。WebTransport over HTTP/3 と WebTransport over HTTP/2 の両方に対応しています。
 
-また、WebTransport だけでなく QUIC、HTTP/3、HTTP/2 を単体のプロトコルとしても利用できます。QMux の Sans I/O API も提供しています。asyncio、スレッド、独自のイベントループなど、任意の I/O フレームワークと組み合わせて利用できます。
+また、WebTransport だけでなく QUIC、HTTP/3、HTTP/2 を単体のプロトコルとしても利用できます。QMux も Sans I/O API と asyncio API の両方を提供しています。asyncio、スレッド、独自のイベントループなど、任意の I/O フレームワークと組み合わせて利用できます。
 
 ## 特徴
 
@@ -51,7 +51,7 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
   - [nghttp2](https://github.com/nghttp2/nghttp2) を採用
 - QMux
   - 任意の双方向バイトストリーム上でストリーム多重化を提供
-  - Sans I/O API のみを提供 (asyncio API は未対応)
+  - Sans I/O API と asyncio API の両方を提供
   - [dwnx](https://github.com/ngtcp2/dwnx) を採用
   - DATAGRAM は未対応
 - 依存ライブラリは [deps.json](deps.json) で特定のタグ / コミットに固定する
