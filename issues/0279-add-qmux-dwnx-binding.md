@@ -1,7 +1,7 @@
 # QMux (dwnx) の Sans-IO バインディングを追加する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/change-api-and-add-qmux
 - Polished: {YYYY-MM-DD}
 
@@ -41,3 +41,13 @@ QMux v1 (draft-ietf-quic-qmux-02) を `webtransport.qmux` として使えるよ�
 - 全テストが通過する
 
 ## 解決方法
+
+- `deps.json` に dwnx を ref 固定 (85c43b506e48f268029e98514d26fe65c8ff749e) で追加し、`CMakeLists.txt` に autotools の ExternalProject を追加した。dwnx は CMakeLists.txt を持たないため `autoreconf -i` と `./configure --enable-lib-only` を回す (外部ライブラリは不要)。autotools は in-source ビルドのため BINARY_DIR はソースと同じにし、stamp / tmp はソース外へ置く (git clone がソースを消して作り直すため)。ビルドは CMake の generator が ninja でも動くよう `make` を明示する
+- `src/bindings/qmux.h` / `qmux.cpp` を追加し、`webtransport_ext.qmux` として `Config` / `Connection` / `Event` / `EventType` / `get_version()` を公開した。バイトストリーム型なので `receive(data) -> int` と `pending_record -> bytes | None` とし、UDP の `Packet` や `ReceiveResult` は持たない
+- `Connection` は `create_client` / `create_server` / `receive` / `pending_record` / `timeout` / `handle_timeout` / `open_stream` / `send_stream_data` / `close` / `next_event` を持つ。送信は `dwnx_conn_writev_stream` の契約 (0 か正値が返るまで呼ぶ、`DWNX_ERR_WRITE_MORE` は同じレコードへ追記、`DWNX_ERR_STREAM_DATA_BLOCKED` と `DWNX_ERR_STREAM_SHUT_WR` はデータを破棄) に沿って組み立てる
+- `src/webtransport/qmux/__init__.py` を追加し、`from webtransport import qmux` で使えるようにした
+- `tests/test_qmux.py` を追加した。2 つの接続をメモリ上のバイト列で直結し、ハンドシェイク、双方向 / 単方向ストリーム (データが重複しないこと)、レコードを 1 バイトずつ渡した場合、レコード長を超えるデータの分割、タイマー、`close()` の CONNECTION_CLOSE を検証する。モックは使っていない
+- CODEBASE.md の C コールバック境界の方針に従い、QMux のコールバック 5 つに `noexcept` を付与した。`tests/test_type_stub_layout.py` の拡張モジュール一覧に `qmux` を追加した
+- `refs/qmux/` に draft-ietf-quic-qmux-02 を追加し、`THIRD_PARTY_LICENSES.md` に dwnx の MIT ライセンスを追記、`skills/webtransport-py/SKILL.md` に QMux の節を追加した
+- DATAGRAM (Unreliable Datagram Extension) は dwnx が未実装のため対応していない。CODEBASE.md の「ngtcp2 / nghttp3 / nghttp2 をフォークしない」方針に従い、上流の対応を待つ
+- TLS/TCP 上で動かす asyncio API は別 issue とした。そのため `webtransport.qmux.exceptions` は作らず、エラーは `receive()` の戻り値 (dwnx のライブラリエラーコード) として返す。asyncio 層を足すときに、その層の例外として用意する
