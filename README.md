@@ -77,33 +77,7 @@ uv add webtransport-py
 
 `HTTPVersion` で HTTP/2 (TCP + TLS) と HTTP/3 (UDP + QUIC) を選ぶ。既定は HTTP/3。
 
-```python
-import asyncio
-
-from webtransport import Client, HTTPVersion, Server, Session
-
-
-async def main() -> None:
-    server = Server(
-        host="0.0.0.0",
-        port=4433,
-        http_version=HTTPVersion.HTTP3,
-        certfile="cert.pem",
-        keyfile="key.pem",
-    )
-
-    async def on_datagram(session: Session, data: bytes) -> None:
-        # セッションハンドル経由で返す
-        await session.send_datagram(data)
-
-    server.on_datagram(on_datagram)
-
-    async with server:
-        await server.run()
-
-
-asyncio.run(main())
-```
+#### クライアント
 
 ```python
 import asyncio
@@ -143,11 +117,78 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+#### サーバー
+
+```python
+import asyncio
+
+from webtransport import Client, HTTPVersion, Server, Session
+
+
+async def main() -> None:
+    server = Server(
+        host="0.0.0.0",
+        port=4433,
+        http_version=HTTPVersion.HTTP3,
+        certfile="cert.pem",
+        keyfile="key.pem",
+    )
+
+    async def on_datagram(session: Session, data: bytes) -> None:
+        # セッションハンドル経由で返す
+        await session.send_datagram(data)
+
+    server.on_datagram(on_datagram)
+
+    async with server:
+        await server.run()
+
+
+asyncio.run(main())
+```
+
 `http_version` に `HTTPVersion.HTTP2` を渡すと WebTransport over HTTP/2 になる (`certfile` / `keyfile` が必須)。プロトコル固有の API は `client.h3` / `client.h2` / `server.h3` / `server.h2` から呼ぶ。
 
 低レベル (Sans-IO) API と全 API のリファレンスは `skills/webtransport-py/SKILL.md` を参照。
 
 ### QUIC
+
+#### クライアント
+
+```python
+import asyncio
+
+from webtransport import quic
+
+
+async def main() -> None:
+    client = quic.Client(
+        host="localhost",
+        port=4433,
+        verify_peer=False,
+    )
+
+    if not await client.connect():
+        print("接続失敗")
+        return
+
+    # 双方向ストリームを開いてデータ送信 (FIN でストリームを閉じる)
+    stream_id = await client.open_stream(bidirectional=True)
+    await client.send_stream_data(stream_id, b"Hello, QUIC!", fin=True)
+
+    # サーバーからのエコーを FIN まで受信する
+    try:
+        data, _ = await client.recv_stream_data(stream_id, timeout=5.0)
+        print(f"データ受信: {data}")
+    except TimeoutError:
+        print("受信タイムアウト")
+
+    await client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
 
 #### サーバー
 
@@ -184,43 +225,6 @@ async def main() -> None:
     async with server:
         print(f"サーバー開始: {server.host}:{server.actual_port}")
         await server.run()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-#### クライアント
-
-```python
-import asyncio
-
-from webtransport import quic
-
-
-async def main() -> None:
-    client = quic.Client(
-        host="localhost",
-        port=4433,
-        verify_peer=False,
-    )
-
-    if not await client.connect():
-        print("接続失敗")
-        return
-
-    # 双方向ストリームを開いてデータ送信 (FIN でストリームを閉じる)
-    stream_id = await client.open_stream(bidirectional=True)
-    await client.send_stream_data(stream_id, b"Hello, QUIC!", fin=True)
-
-    # サーバーからのエコーを FIN まで受信する
-    try:
-        data, _ = await client.recv_stream_data(stream_id, timeout=5.0)
-        print(f"データ受信: {data}")
-    except TimeoutError:
-        print("受信タイムアウト")
-
-    await client.close()
 
 
 if __name__ == "__main__":
