@@ -1,7 +1,7 @@
 # 実ブラウザ E2E に Playwright Firefox を追加する
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/test-add-firefox-browser-e2e
 - Reporter: @voluntas
 
@@ -60,3 +60,16 @@ Firefox 153.0 から webtransport-py の h3 サーバーへ接続し、既存ヘ
 - 通常の `make test` と CI の collection 対象外のままである (`--ignore=tests/browser`)
 
 ## 解決方法
+
+- `tests/browser/conftest.py` に `firefox_browser` / `firefox_page` fixture を追加した。
+  `firefox_page` は `new_context(permissions=["local-network-access"])` で LNA の権限を
+  事前付与する。Chromium で `--disable-features=LocalNetworkAccessChecks` を指定するのと
+  同じ目的だが、LNA のチェックは有効のまま明示的に許可する形にした
+- `tests/browser/test_webtransport_firefox.py` を追加し、`tests/browser/helpers.py` の
+  8 検証 (接続確立・双方向 / 単方向ストリーム・データグラム・close) を Firefox で実行する。
+  Firefox の 8 検証は 3 回連続で成功し、ブラウザテスト全体 (32 件) も通過した
+- LNA がハングする理由と回避方法を `firefox_browser` / `firefox_page` の docstring に、
+  Firefox が WebTransport over HTTP/2 に対応していないことを `browser_server_h2` の
+  docstring に記録した
+- ブラウザ一覧を持つ docstring (`tests/browser/conftest.py` / `tests/browser/helpers.py`) と
+  `pyproject.toml` の marker 説明を Firefox 込みに更新した
