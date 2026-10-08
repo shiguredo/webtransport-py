@@ -32,7 +32,7 @@ SOURCE_DIR = REPO_ROOT / "src" / "webtransport"
 # 拡張モジュール (nanobind) のスタブパッケージ
 STUB_DIR = SOURCE_DIR / "webtransport_ext"
 # 拡張モジュールが公開する低レベル API のモジュール名
-MODULES = ("quic", "http3", "h3", "http2", "h2")
+MODULES = ("quic", "http3", "h3", "http2", "h2", "qmux")
 # スタブパッケージ自身がトップレベルに存在しないため、この絶対 import は解決できない
 UNRESOLVABLE_PREFIX = "webtransport_ext"
 

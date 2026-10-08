@@ -54,6 +54,9 @@ parse_deps_git_ref("${DEPS_JSON}" ngtcp2 NGTCP2_GIT_REPOSITORY NGTCP2_GIT_TAG NG
 # nghttp3 の設定を解析
 parse_deps_git_ref("${DEPS_JSON}" nghttp3 NGHTTP3_GIT_REPOSITORY NGHTTP3_GIT_TAG NGHTTP3_USE_SHALLOW NGHTTP3_VERSION)
 
+# dwnx (QMux) の設定を解析
+parse_deps_git_ref("${DEPS_JSON}" dwnx DWNX_GIT_REPOSITORY DWNX_GIT_TAG DWNX_USE_SHALLOW DWNX_VERSION)
+
 # nghttp2 の設定を解析
 parse_deps_git_ref("${DEPS_JSON}" nghttp2 NGHTTP2_GIT_REPOSITORY NGHTTP2_GIT_TAG NGHTTP2_USE_SHALLOW NGHTTP2_VERSION)
 
@@ -219,6 +222,44 @@ else()
   )
 endif()
 
+# ========== dwnx (QMux) ==========
+# dwnx は autotools のみでビルドする (CMakeLists.txt を持たない)。依存は無く、
+# --enable-lib-only でライブラリだけを作れる (examples の libev / TLS / nghttp3
+# は不要)。autotools は in-source ビルドが前提のため BINARY_DIR をソース
+# ディレクトリと同じにする。
+message(STATUS "Setting up dwnx...")
+set(DWNX_SOURCE_DIR "${DEPS_DIR}/dwnx/${DWNX_VERSION}/source")
+set(DWNX_INSTALL_DIR "${DEPS_DIR}/dwnx/${DWNX_VERSION}/install")
+set(DWNX_LIB ${DWNX_INSTALL_DIR}/lib/libdwnx.a)
+
+if(EXISTS ${DWNX_LIB})
+  message(STATUS "dwnx already built: ${DWNX_LIB}")
+  add_custom_target(dwnx_build)
+else()
+  message(STATUS "Building dwnx...")
+
+  ExternalProject_Add(
+    dwnx_build
+    GIT_REPOSITORY ${DWNX_GIT_REPOSITORY}
+    GIT_TAG ${DWNX_GIT_TAG}
+    GIT_SHALLOW ${DWNX_USE_SHALLOW}
+    SOURCE_DIR ${DWNX_SOURCE_DIR}
+    BINARY_DIR ${DWNX_SOURCE_DIR}
+    # autotools は in-source ビルドのため BINARY_DIR はソースと同じにするが、
+    # stamp / tmp はソース外に置く (git clone がソースを消して作り直すため、
+    # ソース内に置くと clone 直後に stamp を失う)
+    STAMP_DIR ${DEPS_DIR}/dwnx/${DWNX_VERSION}/stamp
+    TMP_DIR ${DEPS_DIR}/dwnx/${DWNX_VERSION}/tmp
+    UPDATE_COMMAND ""
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    CONFIGURE_COMMAND
+      sh -c "autoreconf -i && ./configure --enable-lib-only --prefix=${DWNX_INSTALL_DIR}"
+    BUILD_COMMAND make --jobs=${PARALLEL_JOBS}
+    INSTALL_COMMAND make install
+    BUILD_BYPRODUCTS ${DWNX_LIB}
+  )
+endif()
+
 # ========== nghttp2 ==========
 message(STATUS "Setting up nghttp2...")
 set(NGHTTP2_SOURCE_DIR "${DEPS_DIR}/nghttp2/${NGHTTP2_VERSION}/source")
@@ -270,6 +311,7 @@ nanobind_add_module(webtransport_ext
   FREE_THREADED
   src/webtransport_ext.cpp
   src/bind_webtransport.cpp
+  src/bindings/qmux.cpp
   src/bindings/quic.cpp
   src/bindings/http2.cpp
   src/bindings/http3.cpp
@@ -278,7 +320,7 @@ nanobind_add_module(webtransport_ext
 )
 
 # ビルド順序を保証するため依存関係を追加
-add_dependencies(webtransport_ext aws_lc_build ngtcp2_build nghttp3_build nghttp2_build)
+add_dependencies(webtransport_ext aws_lc_build ngtcp2_build nghttp3_build nghttp2_build dwnx_build)
 
 # インクルードディレクトリ
 target_include_directories(webtransport_ext PRIVATE
@@ -286,6 +328,7 @@ target_include_directories(webtransport_ext PRIVATE
   ${NGTCP2_INSTALL_DIR}/include
   ${NGHTTP3_INSTALL_DIR}/include
   ${NGHTTP2_INSTALL_DIR}/include
+  ${DWNX_INSTALL_DIR}/include
   ${AWS_LC_SOURCE_DIR}/include
 )
 
@@ -295,6 +338,7 @@ target_link_libraries(webtransport_ext PRIVATE
   ${NGTCP2_LIB}
   ${NGHTTP3_LIB}
   ${NGHTTP2_LIB}
+  ${DWNX_LIB}
   ${AWS_LC_SSL_LIB}
   ${AWS_LC_CRYPTO_LIB}
 )
@@ -329,6 +373,7 @@ nanobind_add_stub(
   OUTPUT
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/__init__.pyi
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/quic.pyi
+    ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/qmux.pyi
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/http2.pyi
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/http3.pyi
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/h3.pyi

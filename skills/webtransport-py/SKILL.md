@@ -50,6 +50,7 @@ uv add webtransport-py
 | `webtransport.quic` | QUIC 単体 | `Connection` | `Server` / `Client` | UDP |
 | `webtransport.http3` | HTTP/3 単体 | `Connection` | `Server` / `Client` | UDP + QUIC |
 | `webtransport.http2` | HTTP/2 単体 | `Connection` | `Server` / `Client` / `ResponseWriter` | TCP + TLS |
+| `webtransport.qmux` | QMux (Sans-IO、draft-ietf-quic-qmux) | `Connection` | (未対応) | 任意のバイトストリーム (TLS/TCP など) |
 
 `quic` / `http3` / `http2` には `get_version()` があり、それぞれ ngtcp2 / nghttp3 / nghttp2 のバージョン文字列を返す。
 
@@ -149,6 +150,33 @@ asyncio.run(main())
 `Session` の共通 API は `session_id` / `addr` / `http_version` プロパティと `open_stream(unidirectional=True)` / `send_stream_data(stream_id, data, fin=False)` / `send_datagram(data)` / `reset_stream(stream_id, error_code=0)` である。`addr` は取得できない場合 None になる。プロトコル固有の操作は具象クラスにあり、HTTP/3 は `close_stream()`、HTTP/2 は `stop_sending()` と `close_session()` を持つ。`server.h3` / `server.h2` で実装へ降りられる。
 
 サーバーの `run()` は接続ごとのエラーをコールバックで通知し、例外を送出しない。
+
+## QMux (`webtransport.qmux`)
+
+QMux は TLS/TCP のような双方向バイトストリーム上で QUIC v1 相当のストリームと多重化を提供するプロトコル (draft-ietf-quic-qmux-02) で、dwnx で実装している。QUIC のパケット層を持たないため、Sans-IO はレコード (varint の長さ + QUIC フレーム列) をバイト列として入出力する。
+
+```python
+from webtransport import qmux
+
+config = qmux.Config()
+client = qmux.Connection.create_client(config)
+server = qmux.Connection.create_server(config)
+
+# 受け取ったバイト列を渡し、送信すべきレコードを取り出す
+client.receive(record_from_peer)
+record = client.pending_record
+```
+
+- `Config`: `initial_max_streams_bidi` / `initial_max_streams_uni` / `initial_max_data` / `initial_max_stream_data_bidi_local` / `initial_max_stream_data_bidi_remote` / `initial_max_stream_data_uni` / `max_idle_timeout_ns` / `max_record_size`
+- `Connection.create_client(config)` / `Connection.create_server(config)`: 接続を作る。トランスポートパラメータは帯域内で交換するため、TLS が無くても 2 つの接続をバイト列で直結すればハンドシェイクできる
+- `receive(data) -> int`: 受信したバイト列を処理する。0 以上は成功、負値は dwnx のライブラリエラー。ピアの CONNECTION_CLOSE を受けた後は -224 (DWNX_ERR_DRAINING) を返す
+- `pending_record -> bytes | None`: 送信すべき 1 レコード。無い場合は None
+- `timeout -> int | None` / `handle_timeout()`: 次のタイマー期限 (ナノ秒) とその処理
+- `open_stream(bidirectional) -> int` / `send_stream_data(stream_id, data, fin=False)` / `close(error_code=0, reason="")`
+- `next_event() -> Event | None`: `TRANSPORT_PARAMS_RECEIVED` / `STREAM_DATA` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING`
+- `get_version()`: dwnx のバージョン文字列
+
+TLS/TCP 上で動かす asyncio API と DATAGRAM (Unreliable Datagram Extension) は未対応である。DATAGRAM は dwnx が未実装のため、上流の対応を待つ。
 
 ## 例外
 
