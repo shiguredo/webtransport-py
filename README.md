@@ -68,91 +68,64 @@ uv add webtransport-py
 
 ## 使い方
 
-### WebTransport over HTTP/3
+### WebTransport
 
-#### サーバー
+`HTTPVersion` で HTTP/2 (TCP + TLS) と HTTP/3 (UDP + QUIC) を選ぶ。既定は HTTP/3。
 
 ```python
 import asyncio
 
-from webtransport import h3
+from webtransport import Client, HTTPVersion, Server, Session
 
 
 async def main() -> None:
-    server = h3.Server(
+    server = Server(
         host="0.0.0.0",
         port=4433,
+        http_version=HTTPVersion.HTTP3,
         certfile="cert.pem",
         keyfile="key.pem",
     )
 
-    async def on_session_ready(session_id: int, addr: tuple[str, int]) -> None:
-        print(f"セッション確立: {session_id} from {addr}")
+    async def on_datagram(session: Session, data: bytes) -> None:
+        # セッションハンドル経由で返す
+        await session.send_datagram(data)
 
-    async def on_stream_data(
-        session_id: int,
-        stream_id: int,
-        data: bytes,
-        addr: tuple[str, int],
-    ) -> None:
-        print(f"データ受信: {data}")
-        # エコーバック
-        await server.send_stream_data(addr, stream_id, data)
-
-    async def on_datagram(session_id: int, data: bytes, addr: tuple[str, int]) -> None:
-        print(f"データグラム受信: {data}")
-        # エコーバック
-        await server.send_datagram(addr, session_id, data)
-
-    server.on_session_ready(on_session_ready)
-    server.on_stream_data(on_stream_data)
     server.on_datagram(on_datagram)
 
     async with server:
-        print(f"サーバー開始: {server.host}:{server.actual_port}")
         await server.run()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
-
-#### クライアント
 
 ```python
 import asyncio
 
-from webtransport import h3
-from webtransport import WebTransportError
+from webtransport import Client, HTTPVersion, WebTransportError
 
 
 async def main() -> None:
-    client = h3.Client(
+    client = Client(
         url="https://localhost:4433/webtransport",
+        http_version=HTTPVersion.HTTP3,
         verify_peer=False,
     )
-
-    async def on_stream_data(stream_id: int, data: bytes) -> None:
-        print(f"データ受信: {data}")
 
     async def on_datagram(data: bytes) -> None:
         print(f"データグラム受信: {data}")
 
-    client.on_stream_data(on_stream_data)
     client.on_datagram(on_datagram)
 
     try:
         await client.connect()
     except WebTransportError as exc:
         print(f"接続失敗: {exc}")
+        await client.close()
         return
 
-    # ストリームでデータ送信
-    stream_id = await client.open_stream()
-    await client.send_stream_data(stream_id, b"Hello via stream!")
-
-    # データグラムでデータ送信
-    await client.send_datagram(b"Hello via datagram!")
+    await client.send_datagram(b"Hello, WebTransport!")
 
     try:
         await asyncio.wait_for(client.run(), timeout=5.0)
@@ -162,108 +135,12 @@ async def main() -> None:
     await client.close()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
-### WebTransport over HTTP/2
+`http_version` に `HTTPVersion.HTTP2` を渡すと WebTransport over HTTP/2 になる (`certfile` / `keyfile` が必須)。プロトコル固有の API は `client.h3` / `client.h2` / `server.h3` / `server.h2` から呼ぶ。
 
-`h2.Client` / `h2.Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
-
-#### サーバー
-
-```python
-import asyncio
-
-from webtransport import h2
-
-
-async def main() -> None:
-    server = h2.Server(
-        host="0.0.0.0",
-        port=8443,
-        certfile="cert.pem",
-        keyfile="key.pem",
-    )
-
-    async def on_session_ready(session_writer: h2.SessionWriter) -> None:
-        print(f"セッション確立: {session_writer.session_id}")
-
-    async def on_stream_data(
-        stream_id: int,
-        data: bytes,
-        session_writer: h2.SessionWriter,
-    ) -> None:
-        print(f"データ受信: {data}")
-        # エコーバック
-        await session_writer.send_stream_data(stream_id, data)
-
-    async def on_datagram(data: bytes, session_writer: h2.SessionWriter) -> None:
-        print(f"データグラム受信: {data}")
-        # エコーバック
-        await session_writer.send_datagram(data)
-
-    server.on_session_ready(on_session_ready)
-    server.on_stream_data(on_stream_data)
-    server.on_datagram(on_datagram)
-
-    async with server:
-        print(f"サーバー開始: {server.host}:{server.actual_port}")
-        await server.run()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-#### クライアント
-
-```python
-import asyncio
-
-from webtransport import h2
-from webtransport import WebTransportError
-
-
-async def main() -> None:
-    client = h2.Client(
-        url="https://localhost:8443/webtransport",
-        verify_peer=False,
-    )
-
-    async def on_stream_data(stream_id: int, data: bytes) -> None:
-        print(f"データ受信: {data}")
-
-    async def on_datagram(data: bytes) -> None:
-        print(f"データグラム受信: {data}")
-
-    client.on_stream_data(on_stream_data)
-    client.on_datagram(on_datagram)
-
-    try:
-        await client.connect()
-    except WebTransportError as exc:
-        print(f"接続失敗: {exc}")
-        return
-
-    # ストリームでデータ送信
-    stream_id = await client.open_stream()
-    await client.send_stream_data(stream_id, b"Hello via stream!")
-
-    # データグラムでデータ送信
-    await client.send_datagram(b"Hello via datagram!")
-
-    try:
-        await asyncio.wait_for(client.run(), timeout=5.0)
-    except TimeoutError:
-        pass
-
-    await client.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
+低レベル (Sans-IO) API と全 API のリファレンスは `skills/webtransport-py/SKILL.md` を参照。
 
 ### QUIC
 

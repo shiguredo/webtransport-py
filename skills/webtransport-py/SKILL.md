@@ -30,6 +30,17 @@ uv add webtransport-py
 
 ## モジュール構成
 
+このライブラリは層で構成されている。上から順に、WebTransport (アプリケーション) → HTTP/2・HTTP/3 → QUIC → TLS / TCP・UDP である。
+
+| やりたいこと | 使うもの |
+|---|---|
+| すぐに WebTransport の通信をしたい | `webtransport.Client` / `webtransport.Server` (`http_version` で HTTP/2 と HTTP/3 を選ぶ) |
+| HTTP/3 や HTTP/2 を単体で使いたい | `webtransport.http3` / `webtransport.http2` |
+| QUIC を単体で使いたい | `webtransport.quic` |
+| I/O を持たない層を自分で駆動したい (E2E テストの異常系再現など) | `webtransport.h3` / `webtransport.h2` / `webtransport.http3` / `webtransport.http2` / `webtransport.quic` の `Session` / `Connection` |
+
+`webtransport.h3` は「WebTransport over HTTP/3」、`webtransport.http3` は「HTTP/3 単体」である。名前が似ているが層が違う。`h3` / `h2` は WebTransport のセッション層だけを持ち、I/O を持たないため、`webtransport.quic.Connection` と自分で結線して使う (「Sans I/O API」参照)。asyncio で使う場合は統一 API の `Client` / `Server` に `HTTPVersion` を渡す。
+
 トップレベル `webtransport` パッケージが公開するサブモジュールは次の 5 つ。例外は層ごとの `exceptions` サブモジュール (`webtransport.quic.exceptions` など) にあり、基底の `WebTransportError` と接続の期限切れを表す `ConnectTimeoutError` はトップレベルから import できる。
 
 | モジュール | 提供内容 | Sans I/O の主クラス | asyncio API | トランスポート |
