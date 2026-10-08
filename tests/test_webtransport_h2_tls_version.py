@@ -13,7 +13,8 @@ import ssl
 
 import pytest
 
-from webtransport.h2 import Client, Server
+from webtransport._h2_client import Client
+from webtransport._h2_server import Server
 from webtransport.http2.exceptions import Http2ConnectionError, Http2HandshakeError
 
 

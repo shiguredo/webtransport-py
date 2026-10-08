@@ -208,7 +208,8 @@ async def test_reset_stream_rejects_out_of_uint32(test_certificates) -> None:
     """高レベル reset_stream が 32bit 超過のエラーコードを拒否することを確認する"""
     import asyncio
 
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     session_ready_event = asyncio.Event()
     client_addr = None
@@ -300,7 +301,8 @@ async def test_connect_stream_reset_is_not_remapped(test_certificates) -> None:
     """
     import asyncio
 
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     session_ready_event = asyncio.Event()
     reset_received = asyncio.Event()
@@ -387,7 +389,8 @@ async def test_session_map_send_error_code_registered_data_stream(
     """登録済みデータストリームでは map_send_error_code がリマップすることを確認する"""
     import asyncio
 
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
     from webtransport.h3._error_codes import webtransport_code_to_http_code
 
     session_ready_event = asyncio.Event()

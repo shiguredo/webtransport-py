@@ -93,7 +93,8 @@ async def _relayed_server(server: Any) -> AsyncIterator[UdpRelay]:
 @pytest.mark.asyncio
 async def test_h3_connect_recovers_single_loss(test_certificates) -> None:
     """h3 の connect() が 1 パケットのロスから回復する"""
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -191,8 +192,8 @@ async def test_http3_connect_refused_invalid_host() -> None:
 @pytest.mark.asyncio
 async def test_h3_connect_refused_invalid_host() -> None:
     """h3 の connect() が名前解決失敗で拒否される"""
+    from webtransport._h3_client import Client
     from webtransport.exceptions import ConnectFailedError
-    from webtransport.h3 import Client
 
     # 解決不能な宛先に接続する (http3 と対称の振る舞い)
     client = Client(

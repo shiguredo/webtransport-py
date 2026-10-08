@@ -62,7 +62,8 @@ async def test_quic_localhost_connects(test_certificates) -> None:
 @pytest.mark.asyncio
 async def test_h3_localhost_connects(test_certificates) -> None:
     """h3.Client が localhost で接続できる"""
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     server = Server(
         host="127.0.0.1",

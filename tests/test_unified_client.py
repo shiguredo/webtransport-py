@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from webtransport import Client, HTTPVersion, h2, h3
+from webtransport import Client, HTTPVersion, h2
+from webtransport._h2_client import Client as H2ClientImpl
+from webtransport._h3_client import Client as H3ClientImpl
 from webtransport.exceptions import ConnectFailedError
 
 
@@ -17,7 +19,7 @@ def test_default_http_version_is_http3() -> None:
     """http_version を省略すると HTTP/3 になる"""
     client = Client(url="https://localhost:4433/webtransport")
     assert client.http_version is HTTPVersion.HTTP3
-    assert isinstance(client.h3, h3.Client)
+    assert isinstance(client.h3, H3ClientImpl)
     assert client.h2 is None
 
 
@@ -28,7 +30,7 @@ def test_select_http2() -> None:
         http_version=HTTPVersion.HTTP2,
     )
     assert client.http_version is HTTPVersion.HTTP2
-    assert isinstance(client.h2, h2.Client)
+    assert isinstance(client.h2, H2ClientImpl)
     assert client.h3 is None
     # 実装が URL を解析してプロパティを持つ
     assert client.url == "https://localhost:4433/webtransport"

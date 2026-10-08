@@ -12,8 +12,8 @@ import pytest
 from conftest import _encode_h3_goaway_frame, _large_binary_payload
 
 from webtransport import quic
+from webtransport._h3_server import Server
 from webtransport.exceptions import ConnectTimeoutError
-from webtransport.h3 import Server
 from webtransport.h3.exceptions import (
     WebTransportProtocolError,
     WebTransportSessionRejectedError,
@@ -23,7 +23,7 @@ from webtransport.quic.exceptions import QuicConnectionError
 
 def test_import_server_client():
     """Server と Client がインポートできることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     assert Server is not None
     assert Client is not None
@@ -31,14 +31,8 @@ def test_import_server_client():
 
 def test_import_all():
     """全ての公開 API がインポートできることを確認"""
-    from webtransport.h3 import (
-        Client,
-        Config,
-        Event,
-        EventType,
-        Session,
-        StreamInfo,
-    )
+    from webtransport._h3_client import Client
+    from webtransport.h3 import Config, Event, EventType, Session, StreamInfo
 
     assert Server is not None
     assert Client is not None
@@ -73,7 +67,7 @@ def test_server_init_with_options():
 
 def test_client_init():
     """Client が初期化できることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(url="https://localhost:4433/webtransport")
     assert client.url == "https://localhost:4433/webtransport"
@@ -85,7 +79,7 @@ def test_client_init():
 
 def test_client_init_url_parse():
     """Client が URL を正しくパースできることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(url="https://example.com:443/wt/session")
     assert client.host == "example.com"
@@ -94,7 +88,7 @@ def test_client_init_url_parse():
 
 def test_client_init_url_default_port():
     """Client がデフォルトポートで URL をパースできることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(url="https://example.com/webtransport")
     assert client.host == "example.com"
@@ -103,7 +97,7 @@ def test_client_init_url_default_port():
 
 def test_client_init_url_no_path():
     """Client がパスなし URL をパースできることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(url="https://example.com:8443")
     assert client.host == "example.com"
@@ -112,7 +106,7 @@ def test_client_init_url_no_path():
 
 def test_client_init_with_options():
     """Client がオプション付きで初期化できることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(
         url="https://example.com:8443/wt",
@@ -193,7 +187,7 @@ def test_server_callbacks():
 
 def test_client_callbacks():
     """Client のコールバック設定ができることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(url="https://localhost:4433/webtransport")
 
@@ -222,7 +216,7 @@ def test_client_callbacks():
 
 def test_client_properties():
     """Client のプロパティが正しく設定されることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(url="https://www.example.com:9443/wt")
     assert client.url == "https://www.example.com:9443/wt"
@@ -285,7 +279,7 @@ async def test_origin_verification_accepts_allowed_origin(test_certificates):
     受理され、クライアント側の SESSION_READY (2xx 応答の受信) とサーバー
     側のセッション確立の両方が発生する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_session_ready = asyncio.Event()
     client_session_ready = asyncio.Event()
@@ -354,7 +348,7 @@ async def test_origin_verification_rejects_disallowed_origin(test_certificates):
     WebTransportSessionRejectedError を送出する
     (低レベルの SessionRejected イベント、status_code 付き)。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
 
@@ -408,7 +402,7 @@ async def test_origin_verification_accepts_without_origin(test_certificates):
     仕様上 Origin ヘッダーは非ブラウザクライアントでは OPTIONAL であり、
     Origin ヘッダーが無いリクエストは従来どおり受理する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
 
@@ -465,7 +459,7 @@ async def test_origin_verification_accepts_without_allowed_origins(test_certific
 
     許可リストが未設定 (空) の場合は従来どおり全オリジンを受理する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
 
@@ -519,7 +513,7 @@ async def test_origin_verification_accepts_without_allowed_origins(test_certific
 @pytest.mark.asyncio
 async def test_server_client_communication(test_certificates):
     """Server と Client 間で WebTransport 通信ができることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client_received_data = []
     server_received_data = []
@@ -608,7 +602,7 @@ async def test_large_echo_over_initial_recv_window(test_certificates):
     初期ウィンドウ (1 MiB) に収まるため、本テストでは検証しない
     (test_quic_recv_flow_control.py で検証する)
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     payload = b"x" * (512 * 1024)
     server_received = 0
@@ -704,7 +698,7 @@ async def test_server_client_datagram_communication(test_certificates):
     Quarter Stream ID のエンコード / デコード込みで、ペイロードだけが
     コールバックに届くことを検証する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client_received_data = []
     server_received_data = []
@@ -782,7 +776,7 @@ async def test_server_client_datagram_communication(test_certificates):
 @pytest.mark.asyncio
 async def test_multiple_streams_communication(test_certificates):
     """同一セッションで複数 bidi ストリームが独立して送受信できることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     # stream_id -> 受信データ
     server_received = {}
@@ -872,7 +866,7 @@ async def test_multiple_streams_communication(test_certificates):
 @pytest.mark.asyncio
 async def test_session_close_notifies_server(test_certificates):
     """Client の close で Server 側に SESSION_CLOSED が届くことを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     session_closed_event = asyncio.Event()
@@ -943,7 +937,7 @@ async def test_session_close_notifies_server(test_certificates):
 @pytest.mark.asyncio
 async def test_server_resets_client_stream(test_certificates):
     """Server がアプリコードで reset_stream すると Client の on_stream_reset が受信側で復元した値を受け取ることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     server_data_received = asyncio.Event()
@@ -1024,7 +1018,7 @@ async def test_server_resets_client_stream(test_certificates):
 @pytest.mark.asyncio
 async def test_client_resets_server_stream(test_certificates):
     """Client がアプリコードで reset_stream すると Server の on_stream_reset が受信側で復元した値を受け取ることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     server_data_received = asyncio.Event()
@@ -1126,7 +1120,7 @@ async def test_chunked_stream_data(test_certificates):
     高レベル API の STREAM_DATA コールバックは fin を渡さないため、
     固定長プロトコルで完了を判定する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     expected_payload = b"AAAA" + b"BBBB" + b"CCCC"
     server_buffer = bytearray()
@@ -1215,7 +1209,7 @@ async def test_chunked_stream_data(test_certificates):
 @pytest.mark.asyncio
 async def test_multiple_datagrams(test_certificates):
     """同一セッションで複数データグラムが独立して送受信できることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     expected_count = 5
     server_received = []
@@ -1297,7 +1291,7 @@ async def test_multiple_datagrams(test_certificates):
 @pytest.mark.asyncio
 async def test_stream_and_datagram_combined(test_certificates):
     """同一セッションでストリームとデータグラムを同時に送れることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_stream_data = []
     server_datagrams = []
@@ -1396,7 +1390,7 @@ async def test_stream_and_datagram_combined(test_certificates):
 @pytest.mark.asyncio
 async def test_unidirectional_stream(test_certificates):
     """クライアント起点の単方向ストリームがサーバーに届くことを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_received = []
     session_ready_event = asyncio.Event()
@@ -1467,7 +1461,7 @@ async def test_server_unidirectional_stream(test_certificates):
 
     test_unidirectional_stream の逆方向。クライアント側の変更は伴わない。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client_received = []
     opened_stream_id = None
@@ -1566,7 +1560,7 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
     h3 側の登録失敗時は開いた QUIC ストリームを閉じるため、クライアントは
     RESET_STREAM を受けて接続を維持でき、後続のストリーム送信も機能する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client_received = []
     client_resets = []
@@ -1660,7 +1654,7 @@ async def test_server_open_stream_invalid_session_id(test_certificates):
 @pytest.mark.asyncio
 async def test_large_stream_payload(test_certificates):
     """比較的大きなストリームペイロードが往復することを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     # 32 KiB。QUIC パケット境界をまたぐサイズを選ぶ。256 バイトの倍数の
     # ずれも検出できるよう、周期 256 ではなく周期 65536 のパターンを使う
@@ -1744,7 +1738,7 @@ async def test_large_stream_payload(test_certificates):
 @pytest.mark.asyncio
 async def test_client_session_ready_callback(test_certificates):
     """Client 側の on_session_ready が正しい session_id で呼ばれることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_session_ids = []
     client_session_ids = []
@@ -1821,7 +1815,7 @@ async def test_server_resets_client_connect_stream_closes_session(test_certifica
     is_connected が False になることを確認する。旧実装では CONNECT ストリームの
     リセットで SessionClosed が発火せず、is_connected が True のまま残っていた
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     client_session_closed_event = asyncio.Event()
@@ -1904,7 +1898,7 @@ async def test_server_fin_closes_client_session(test_certificates):
     でセッション終了を検知する。旧実装では FIN 経路のセッション終了検知が
     無く、 SessionClosed が発火せず is_connected が True のまま残っていた
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     client_session_closed_event = asyncio.Event()
@@ -2003,7 +1997,7 @@ async def test_datagram_invalid_session_id_closes_connection_client(
     ERROR ハンドラが接続を閉じ、run() が WebTransportProtocolError を送出する
     ことを確認する。不正なセッション ID は on_datagram に渡らない。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     client_addr = None
@@ -2101,7 +2095,7 @@ async def test_datagram_invalid_session_id_closes_connection_client(
 @pytest.mark.asyncio
 async def test_server_stop_delivers_connection_close(test_certificates):
     """サーバー stop() が CONNECTION_CLOSE を送出してクライアントが終了を検知する"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     client_finished_event = asyncio.Event()
@@ -2186,7 +2180,7 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
     アプリにはエラーコードなし (None) として配信される
     (draft-ietf-webtrans-http3-16 Section 4.4)。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client_addr = None
     client_session_id = None
@@ -2292,7 +2286,7 @@ async def test_client_open_stream_before_connect_returns_minus_one():
     接続が確立されていない状態では既存ガード (_quic_connection が None) で
     -1 を返す。回帰確認。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     client = Client(
         url="https://127.0.0.1:4433/webtransport",
@@ -2342,7 +2336,7 @@ async def test_client_connect_rejects_server_without_transport_params(
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
     このテストの対象外である。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_session_ready_called = False
 
@@ -2406,7 +2400,7 @@ async def test_server_rejects_client_without_transport_params(
     reset_stream_at の欠落は必須としない (実ブラウザ互換) ため、
     このテストの対象外である。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_session_ready_called = False
 
@@ -2468,7 +2462,7 @@ async def test_client_connect_accepts_server_without_reset_stream_at(
     ため)。reset_stream_at を欠落させたサーバーとセッションが確立できる
     ことを検証する。max_datagram_frame_size > 0 の欠落は引き続き拒否される。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_session_ready_called = False
 
@@ -2542,7 +2536,7 @@ async def test_server_accepts_client_without_reset_stream_at(
     reset_stream_at を欠落させたクライアントからセッションが確立される
     ことを検証する。max_datagram_frame_size > 0 の欠落は引き続き拒否される。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server_session_ready_called = False
 
@@ -2608,7 +2602,7 @@ async def test_connect_timeout_on_blackhole():
     到達不能系の例外になり得る)。
     期待値: timeout=1.0 で 1 秒強で ConnectTimeoutError が送出される。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     # blackhole 宛てのクライアントを構築する
     client = Client(
@@ -2632,7 +2626,7 @@ async def test_connect_timeout_on_blackhole():
 @pytest.mark.asyncio
 async def test_idle_timeout_reaps_connection(test_certificates):
     """アイドルタイムアウトで接続が回収されセッション終了は一斉発火しない"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     closed_sessions: list[int] = []
 
@@ -2706,7 +2700,7 @@ async def test_close_waits_for_peer_fin(test_certificates):
     WT は処理されないため、ワイヤ順序 WT → FIN → CC が成り立つ)。
     既定の待機上限が 3 秒であることも確認する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     # 既定の待機上限は 3 秒である
     assert Client(url="https://127.0.0.1:4433/webtransport")._close_wait_timeout == 3.0
@@ -2758,7 +2752,7 @@ async def test_close_times_out_without_peer_fin(test_certificates):
     サーバー停止後の無応答ピアに対し、短い上限で待機が打ち切られ、
     待機結果が timeout になる。実時間で上限いっぱい待つことを確認する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server = Server(
         host="127.0.0.1",
@@ -2808,7 +2802,7 @@ async def test_close_skipped_without_wait(test_certificates):
     待機結果が skipped になり、WT_CLOSE_SESSION は送出されるため
     サーバー側にも SESSION_CLOSED が届く。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_closed_event = asyncio.Event()
 
@@ -2853,7 +2847,7 @@ async def test_close_skipped_without_wait(test_certificates):
 @pytest.mark.asyncio
 async def test_close_observes_peer_reset(test_certificates):
     """ピアのリセットも終了観測になることを確認"""
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     client_addr: list = []
@@ -2905,7 +2899,7 @@ async def test_close_idempotent(test_certificates):
     二重 close の 2 回目は待機せず結果を変えない。未接続 close は
     何もせず結果は none のままである。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server = Server(
         host="127.0.0.1",
@@ -2953,7 +2947,7 @@ async def test_close_releases_socket_on_callback_error(test_certificates):
     リセット通知のコールバックが例外を送出しても、QUIC クローズと
     ソケット破棄は行われてから例外が伝播する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     server = Server(
         host="127.0.0.1",
@@ -3013,7 +3007,8 @@ async def test_on_session_request_accepts(test_certificates):
     コールバック引数には受信 CONNECT ヘッダー (疑似ヘッダーを含む) と
     正規化済み addr が渡り、セッションが確立して on_session_ready が発火する。
     """
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     received_headers: list[tuple[str, str]] = []
     received_addr: list[tuple[str, int]] = []
@@ -3080,7 +3075,8 @@ async def test_on_session_request_rejects_with_non_2xx(test_certificates):
     コールバックから発行できる。on_session_ready は発火せず、クライアントの
     connect() は WebTransportSessionRejectedError を送出する。
     """
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     session_ready_event = asyncio.Event()
     reject_statuses: list[int] = []
@@ -3143,7 +3139,8 @@ async def test_on_session_request_invalid_return_raises(test_certificates, statu
     の中で行われ、例外はサーバーの run() を停止させる (クライアントには応答が
     返らず connect がタイムアウトする)。
     """
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -3195,7 +3192,8 @@ async def test_connection_migration_continues_session(test_certificates):
     `_clients` のアドレスキーを張り替える。移行前後で双方向通信が継続し、
     サーバーが観測する addr も新アドレスに切り替わることを検証する。
     """
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     server_received: list[bytes] = []
     server_addrs: list[tuple[str, int]] = []
@@ -3295,7 +3293,7 @@ async def test_high_level_initiate_key_update(test_certificates):
     から開始できる。接続前と未登録アドレスでは False を返し、接続後は
     True を返す。鍵更新後もストリーム送受信が継続する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     session_ready_event = asyncio.Event()
     server_data_received = asyncio.Event()
@@ -3403,7 +3401,7 @@ async def test_client_goaway_keeps_connection_and_notifies_once(test_certificate
     ストリームは制御 3 / QPACK エンコーダ 7 / QPACK デコーダ 11 の順に開かれる
     (Server._setup_streams → open_http3_uni_streams) ため、制御ストリームは 3。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     goaway_events: list[int] = []
     goaway_received = asyncio.Event()
@@ -3489,7 +3487,7 @@ async def test_server_goaway_keeps_connection_and_notifies_once(test_certificate
     クライアントの制御ストリームは 2 (Client も制御 → QPACK エンコーダ → QPACK
     デコーダの順に開く) であり、サーバー側のセッションへ直接注入する。
     """
-    from webtransport.h3 import Client
+    from webtransport._h3_client import Client
 
     goaway_events: list[tuple[int, tuple[str, int]]] = []
     goaway_received = asyncio.Event()

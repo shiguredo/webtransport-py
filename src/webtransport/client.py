@@ -16,9 +16,9 @@ from webtransport.http_version import HTTPVersion
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from webtransport.h2 import Client as H2Client
+    from webtransport._h2_client import Client as H2Client
+    from webtransport._h3_client import Client as H3Client
     from webtransport.h2 import Config as H2Config
-    from webtransport.h3 import Client as H3Client
     from webtransport.quic import Config as QuicConfig
 
 __all__ = ["Client"]
@@ -87,7 +87,7 @@ class Client:
                     "config is only available for WebTransport over HTTP/2 "
                     "(http_version=HTTPVersion.HTTP2)"
                 )
-            from webtransport.h3 import Client as H3ClientImpl
+            from webtransport._h3_client import Client as H3ClientImpl
 
             self._h3 = H3ClientImpl(
                 url=url,
@@ -111,7 +111,7 @@ class Client:
                     "only available for WebTransport over HTTP/3 "
                     "(http_version=HTTPVersion.HTTP3)"
                 )
-            from webtransport.h2 import Client as H2ClientImpl
+            from webtransport._h2_client import Client as H2ClientImpl
 
             self._h2 = H2ClientImpl(
                 url=url,

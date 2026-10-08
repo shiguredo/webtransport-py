@@ -17,9 +17,9 @@ from webtransport.quic import Config
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from webtransport._h2_server import Server as H2Server
+    from webtransport._h3_server import Server as H3Server
     from webtransport.h2 import Config as H2Config
-    from webtransport.h2 import Server as H2Server
-    from webtransport.h3 import Server as H3Server
 
 __all__ = ["Server", "Session"]
 
@@ -211,7 +211,7 @@ class Server:
                     "config is only available for WebTransport over HTTP/2 "
                     "(http_version=HTTPVersion.HTTP2)"
                 )
-            from webtransport.h3 import Server as H3ServerImpl
+            from webtransport._h3_server import Server as H3ServerImpl
 
             self._h3 = H3ServerImpl(
                 host=host,
@@ -233,7 +233,7 @@ class Server:
                     "certfile and keyfile are required for WebTransport over HTTP/2 "
                     "(http_version=HTTPVersion.HTTP2)"
                 )
-            from webtransport.h2 import Server as H2ServerImpl
+            from webtransport._h2_server import Server as H2ServerImpl
 
             self._h2 = H2ServerImpl(
                 host=host,

@@ -31,7 +31,8 @@ from typing import Protocol
 
 import pytest
 
-from webtransport.h3 import Client, Server
+from webtransport._h3_client import Client
+from webtransport._h3_server import Server
 
 # セッション確立を待つ上限 (秒)
 SESSION_READY_TIMEOUT = 5.0
