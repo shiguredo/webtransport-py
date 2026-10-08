@@ -1,7 +1,7 @@
 # h3 層で WebTransport セッションを終了コードと理由付きで閉じられるようにする
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/add-h3-close-apis-with-code-and-reason
 - Polished: 2026-10-04
 
@@ -40,3 +40,15 @@ draft-ietf-webtrans-http3-16 Section 6 は、アプリが WT_CLOSE_SESSION カ�
 - モックなしの実通信で検証できる (webtransport-py のテスト方針に従う)
 - `skills/webtransport-py/SKILL.md` の h3 節と注意点を追加 API に合わせて更新する
 - 全テストが通過する
+
+## 解決方法
+
+0278 のリファクタリングで高レベル実装が `src/webtransport/h3/` から内部モジュールへ移ったため、実装先は `src/webtransport/_h3_client.py` / `src/webtransport/_h3_server.py` である。
+
+- `src/webtransport/_h3_client.py` の `Client.close(error_code: int = 0, error_message: str = "")` に任意引数を追加し、低レベル `Session.close_session` へ渡すようにした。引数省略時は従来どおり終了コード 0 / 空メッセージで、`close_wait_timeout` までのピア終了待ちと CONNECTION_CLOSE の手順は変えていない
+- 同 `Client.stop_sending(stream_id, error_code=0)` を追加した。データストリームのエラーコードは低レベル `Session.map_send_error_code` で WT_APPLICATION_ERROR レンジへリマップしてから低レベル `Connection.stop_sending` を呼ぶ (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)
+- `src/webtransport/_h3_server.py` の `Server.close_session(addr, session_id, error_code=0, error_message="")` を追加した。低レベル `Session.close_session` を呼んで `_send_to` で送出し、接続と同一接続上の他セッションは閉じない。CONNECT ストリームの FIN と `on_session_closed` の通知は低レベルが積む SESSION_CLOSED イベントを既存の `_process_webtransport_events` が処理する。未登録の `addr` と、確立済みセッションに無い `session_id` では何も送出せず例外にもならない
+- 同 `Server.stop_sending(addr, stream_id, error_code=0)` を追加した (リマップの扱いはクライアント側と同じ)
+- 統一 API への露出: `src/webtransport/server.py` の `Session` 基底に `stop_sending` / `close_session` を追加して `_H3Session` が実装し、`_H2Session` の同名メソッドはそのまま override する。`src/webtransport/client.py` の `Client.close(error_code=0, error_message="")` と `src/webtransport/_h2_client.py` の `Client.close(error_code=0, error_message="")` も引数を受け取るようにした
+- テスト: `tests/test_e2e_webtransport_h3_low_level.py` (高レベル Server + 低レベルクライアントで終了コード・理由・単一セッション終了・未登録ターゲットの no-op・STOP_SENDING のリマップを実 UDP 通信で観測)、`tests/test_webtransport_h3_client_close.py` (高レベル Client + 低レベルサーバーピアで WT_CLOSE_SESSION と STOP_SENDING をワイヤ観測)、`tests/test_unified_close_session.py` (統一 API の `Session.close_session` と `Client.close` を HTTP/2 / HTTP/3 で検証)
+- `skills/webtransport-py/SKILL.md` の統一 API・h3 節を追加 API に合わせて更新した
