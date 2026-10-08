@@ -233,7 +233,65 @@ if __name__ == "__main__":
 
 ### QMux
 
-QMux (draft-ietf-quic-qmux) は任意の双方向バイトストリーム上でストリーム多重化を提供するプロトコルです。Sans I/O API のみを提供します。
+QMux (draft-ietf-quic-qmux) は任意の双方向バイトストリーム上でストリーム多重化を提供するプロトコルです。
+
+#### クライアント
+
+```python
+import asyncio
+
+from webtransport import qmux
+
+
+async def main() -> None:
+    client = qmux.Client("127.0.0.1", 4433)
+
+    async def on_stream_data(stream_id: int, data: bytes, fin: bool) -> None:
+        print(f"ストリームデータ受信: {data}")
+
+    client.on_stream_data(on_stream_data)
+
+    await client.connect()
+    stream_id = await client.open_stream()
+    await client.send_stream_data(stream_id, b"Hello, QMux!", fin=True)
+    await asyncio.wait_for(client.run(), timeout=5.0)
+    await client.close()
+
+
+asyncio.run(main())
+```
+
+#### サーバー
+
+```python
+import asyncio
+
+from webtransport import qmux
+
+
+async def main() -> None:
+    server = qmux.Server("127.0.0.1", 4433)
+
+    async def on_stream_data(
+        session: qmux.Session,
+        stream_id: int,
+        data: bytes,
+        fin: bool,
+    ) -> None:
+        # 双方向ストリームのみエコーする
+        if stream_id % 4 == 0:
+            await session.send_stream_data(stream_id, data, fin=fin)
+
+    server.on_stream_data(on_stream_data)
+
+    await server.start()
+    await server.run()
+
+
+asyncio.run(main())
+```
+
+`ssl` に `SSLContext` を渡すと TLS 上で動きます (`alpn_protocols` が必須です)。
 
 ```python
 from webtransport import qmux

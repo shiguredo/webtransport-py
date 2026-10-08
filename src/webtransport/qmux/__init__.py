@@ -24,8 +24,26 @@ Usage:
 
 接続はトランスポートパラメータを帯域内で交換するため、TLS が無くても 2 つの
 接続をバイト列で直結すればハンドシェイクできる。
+
+asyncio API (`Client` / `Server`) は TCP で接続する。`ssl` に `SSLContext` を
+渡すと TLS 上で動き、その場合は `alpn_protocols` が必須になる
+(draft-ietf-quic-qmux-02 Section 8.1)。
+
+Usage:
+    # asyncio API
+    from webtransport import qmux
+
+    client = qmux.Client("127.0.0.1", 4433)
+    await client.connect()
+    stream_id = await client.open_stream()
+    await client.send_stream_data(stream_id, b"hello", fin=True)
+    await client.run()
+    await client.close()
 """
 
+from webtransport.qmux import exceptions
+from webtransport.qmux.client import Client
+from webtransport.qmux.server import Server, Session
 from webtransport.webtransport_ext.qmux import (
     Config,
     Connection,
@@ -35,9 +53,13 @@ from webtransport.webtransport_ext.qmux import (
 )
 
 __all__ = [
+    "Client",
     "Config",
     "Connection",
     "Event",
     "EventType",
+    "Server",
+    "Session",
+    "exceptions",
     "get_version",
 ]

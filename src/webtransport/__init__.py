@@ -32,7 +32,7 @@ Usage:
     from webtransport.h2.exceptions import WebTransportSessionRejectedError
 """
 
-from webtransport import h2, h3, http2, http3, quic
+from webtransport import h2, h3, http2, http3, qmux, quic
 from webtransport.client import Client
 from webtransport.exceptions import (
     ConnectFailedError,
@@ -54,5 +54,6 @@ __all__ = [
     "h3",
     "http2",
     "http3",
+    "qmux",
     "quic",
 ]

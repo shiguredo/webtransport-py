@@ -50,7 +50,7 @@ uv add webtransport-py
 | `webtransport.quic` | QUIC 単体 | `Connection` | `Server` / `Client` | UDP |
 | `webtransport.http3` | HTTP/3 単体 | `Connection` | `Server` / `Client` | UDP + QUIC |
 | `webtransport.http2` | HTTP/2 単体 | `Connection` | `Server` / `Client` / `ResponseWriter` | TCP + TLS |
-| `webtransport.qmux` | QMux (Sans-IO、draft-ietf-quic-qmux) | `Connection` | (未対応) | 任意のバイトストリーム (TLS/TCP など) |
+| `webtransport.qmux` | QMux (draft-ietf-quic-qmux) | `Connection` | `Server` / `Client` | TCP (+ 任意で TLS) |
 
 `quic` / `http3` / `http2` には `get_version()` があり、それぞれ ngtcp2 / nghttp3 / nghttp2 のバージョン文字列を返す。
 
@@ -176,7 +176,56 @@ record = client.pending_record
 - `next_event() -> Event | None`: `TRANSPORT_PARAMS_RECEIVED` / `STREAM_DATA` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING`
 - `get_version()`: dwnx のバージョン文字列
 
-TLS/TCP 上で動かす asyncio API と DATAGRAM (Unreliable Datagram Extension) は未対応である。DATAGRAM は dwnx が未実装のため、上流の対応を待つ。
+### asyncio API (`Client` / `Server`)
+
+TCP で接続する。`ssl` に `SSLContext` を渡すと TLS 上で動き、その場合は `alpn_protocols` が必須になる (draft Section 8.1 が QMux over TLS でアプリケーションプロトコルを合意する手段として ALPN を MUST としている)。
+
+```python
+from webtransport import qmux
+
+server = qmux.Server("127.0.0.1", 4433)
+
+
+async def on_stream_data(
+    session: qmux.Session,
+    stream_id: int,
+    data: bytes,
+    fin: bool,
+) -> None:
+    # 双方向ストリームのみエコーする
+    if stream_id % 4 == 0:
+        await session.send_stream_data(stream_id, data, fin=fin)
+
+
+server.on_stream_data(on_stream_data)
+await server.start()
+await server.run()
+```
+
+```python
+client = qmux.Client("127.0.0.1", 4433)
+
+
+async def on_stream_data(stream_id: int, data: bytes, fin: bool) -> None:
+    print(f"受信: {data}")
+
+
+client.on_stream_data(on_stream_data)
+await client.connect()
+stream_id = await client.open_stream()
+await client.send_stream_data(stream_id, b"hello", fin=True)
+await client.run()
+await client.close()
+```
+
+- `Client(host, port, config=None, ssl=None, alpn_protocols=None, close_reason="")`: `connect(timeout=10.0)` は TCP 接続とトランスポートパラメータの交換まで待つ。`run()` が受信ループで、`close()` が CONNECTION_CLOSE を送る。`peer_address` / `negotiated_alpn_protocol` / `is_connected` を持つ
+- クライアントのコールバックは `on_connected()` / `on_closed()` / `on_stream_data(stream_id, data, fin)` / `on_stream_reset(stream_id, error_code)` / `on_stop_sending(stream_id, error_code)`
+- `Server(host, port, config=None, ssl=None, alpn_protocols=None)`: `start()` で待ち受け、`run()` で受け付け続け、`stop()` で接続ごと閉じる。`actual_port` で実際に待ち受けているポートが分かる
+- サーバーのコールバックは `Session` ハンドルを受け取る (`on_session_ready(session)` / `on_session_closed(session)` / `on_stream_data(session, stream_id, data, fin)` / `on_stream_reset(session, stream_id, error_code)` / `on_stop_sending(session, stream_id, error_code)`)
+- `Session` は `session_id` / `peer_address` / `is_closed` と `open_stream(unidirectional=False)` / `send_stream_data(stream_id, data, fin=False)` / `close(error_code=0, reason="")` を持つ。QMux の接続がそのまま多重化の単位で、プロトコルにアプリケーション層のセッション識別子は無いため、`session_id` はサーバーが接続ごとに振る連番である
+- 例外は `webtransport.qmux.exceptions` にある (`QmuxError` 基底 / `QmuxConnectionError` トランスポートの失敗 / `QmuxProtocolError` プロトコル違反と dwnx のライブラリエラー / `QmuxLibraryErrorCode`)
+- ストリームのリセットと送信停止 (`reset_stream` / `stop_sending`) は Sans-IO のバインディングが未対応のため asyncio API にも無い
+- DATAGRAM (Unreliable Datagram Extension) は dwnx が未実装のため未対応である
 
 ## 例外
 
