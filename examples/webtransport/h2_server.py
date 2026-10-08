@@ -6,36 +6,33 @@
 
 import asyncio
 
-from webtransport import h2
+from webtransport import HTTPVersion, Server, Session
 
 
 async def main() -> None:
     """メイン関数"""
-    server = h2.Server(
+    server = Server(
         host="0.0.0.0",
         port=8443,
+        http_version=HTTPVersion.HTTP2,
         certfile="cert.pem",
         keyfile="key.pem",
     )
 
-    async def on_session_ready(session_writer: h2.SessionWriter) -> None:
-        print(f"WebTransport セッション確立: session_id={session_writer.session_id}")
+    async def on_session_ready(session: Session) -> None:
+        print(f"WebTransport セッション確立: session_id={session.session_id}")
 
-    async def on_session_closed(session_writer: h2.SessionWriter) -> None:
-        print(f"WebTransport セッション終了: session_id={session_writer.session_id}")
+    async def on_session_closed(session: Session) -> None:
+        print(f"WebTransport セッション終了: session_id={session.session_id}")
 
-    async def on_stream_data(
-        stream_id: int,
-        data: bytes,
-        session_writer: h2.SessionWriter,
-    ) -> None:
+    async def on_stream_data(session: Session, stream_id: int, data: bytes) -> None:
         print(f"ストリーム {stream_id} データ受信: {data}")
-        # エコーバック
-        await session_writer.send_stream_data(stream_id, data)
+        # エコーバック (セッションハンドル経由で送る)
+        await session.send_stream_data(stream_id, data)
 
-    async def on_datagram(data: bytes, session_writer: h2.SessionWriter) -> None:
+    async def on_datagram(session: Session, data: bytes) -> None:
         print(f"DATAGRAM 受信: {data}")
-        await session_writer.send_datagram(data)
+        await session.send_datagram(data)
 
     server.on_session_ready(on_session_ready)
     server.on_session_closed(on_session_closed)

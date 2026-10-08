@@ -86,6 +86,59 @@ asyncio.run(main())
 
 `on_goaway` のコールバック引数は HTTP バージョンで異なる (HTTP/3 は `(goaway_id)`、HTTP/2 は `(last_stream_id, error_code)`)。`on_stream_reset` のエラーコードは HTTP/3 ではレンジ外のとき None になり得る。
 
+## 統一サーバー
+
+サーバーも `webtransport.Server` を使い、`HTTPVersion` で選ぶ。コールバックはセッションハンドル (`Session`) を受け取る形に統一されている。
+
+```python
+import asyncio
+
+from webtransport import HTTPVersion, Server, Session
+
+
+async def main() -> None:
+    server = Server(
+        host="0.0.0.0",
+        port=4433,
+        http_version=HTTPVersion.HTTP3,
+        certfile="cert.pem",
+        keyfile="key.pem",
+    )
+
+    async def on_session_request(session_id: int, headers, addr) -> int | None:
+        return None  # None または 200-299 で受理、300-599 で拒否
+
+    async def on_datagram(session: Session, data: bytes) -> None:
+        # セッションハンドル経由で返す (addr を渡さない)
+        await session.send_datagram(data)
+
+    server.on_session_request(on_session_request)
+    server.on_datagram(on_datagram)
+
+    async with server:
+        await server.run()
+
+
+asyncio.run(main())
+```
+
+`Server(host, port, http_version=HTTPVersion.HTTP3, certfile=None, keyfile=None, allowed_origins=None, idle_timeout_ns=30000000000, quic_config=None, config=None)`。`certfile` / `keyfile` は HTTP/2 では必須、`idle_timeout_ns` と `quic_config` は HTTP/3 のみ、`config` は HTTP/2 のみで、選択したバージョンと矛盾する引数を渡すと `ValueError` になる。プロパティは `host` / `port` / `actual_port` / `is_running` / `http_version` と `h3` / `h2`。
+
+コールバックの引数は次のとおり。
+
+- `on_session_request(session_id, headers, addr)`: `int | None` を返す
+- `on_session_ready(session)` / `on_session_closed(session)`
+- `on_stream_data(session, stream_id, data)`
+- `on_stream_reset(session, stream_id, error_code)`
+- `on_datagram(session, data)`
+- `on_goaway(...)`: HTTP/3 は `(goaway_id, addr)`、HTTP/2 は `(last_stream_id, error_code, addr)`
+- `on_stop_sending(session, stream_id, error_code)`: HTTP/2 のみ
+- `on_error(session, error_code, error_message)`: HTTP/2 のみ
+
+`Session` の共通 API は `session_id` / `addr` / `http_version` プロパティと `open_stream(unidirectional=True)` / `send_stream_data(stream_id, data, fin=False)` / `send_datagram(data)` / `reset_stream(stream_id, error_code=0)` である。`addr` は取得できない場合 None になる。プロトコル固有の操作は具象クラスにあり、HTTP/3 は `close_stream()`、HTTP/2 は `stop_sending()` と `close_session()` を持つ。`server.h3` / `server.h2` で実装へ降りられる。
+
+サーバーの `run()` は接続ごとのエラーをコールバックで通知し、例外を送出しない。
+
 ## 例外
 
 例外は層ごとの `exceptions` サブモジュールにある。基底は `webtransport.exceptions.WebTransportError` で、接続の期限切れを表す `webtransport.exceptions.ConnectTimeoutError` と、名前解決の失敗のような接続前の失敗を表す `webtransport.exceptions.ConnectFailedError` はトップレベルから import できる。
