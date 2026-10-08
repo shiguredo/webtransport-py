@@ -5,7 +5,7 @@ from __future__ import annotations
 from conftest import _drain_events, _encode_varint
 
 from webtransport import http3
-from webtransport.http3.constants import H3_NO_ERROR
+from webtransport.http3.exceptions import Http3ErrorCode
 
 
 def _pump(src: http3.Connection, dst: http3.Connection) -> None:
@@ -186,7 +186,7 @@ def test_http3_protocol_error_event_reports_wire_code() -> None:
     nghttp3_error_to_h3_wire_code が 0x0105 を導出し、Error イベントとして
     アプリに通知される。
     """
-    from webtransport.http3.constants import H3_FRAME_UNEXPECTED
+    from webtransport.http3.exceptions import Http3ErrorCode
 
     _client, server = _create_connection_pair()
     while server.next_event() is not None:
@@ -205,7 +205,7 @@ def test_http3_protocol_error_event_reports_wire_code() -> None:
 
     error_events = [e for e in events if e.type == http3.EventType.ERROR]
     assert len(error_events) == 1
-    assert error_events[0].error_code == H3_FRAME_UNEXPECTED
+    assert error_events[0].error_code == Http3ErrorCode.FRAME_UNEXPECTED
     assert error_events[0].error_code == 0x0105
     assert "FRAME_UNEXPECTED" in error_events[0].error_message
     # 低レベルは自主クローズする
@@ -241,7 +241,7 @@ def test_http3_reset_stream_releases_pending_headers() -> None:
         "受信途中のヘッダーブロックのエントリが作られていない"
     )
 
-    server.reset_stream(0, H3_NO_ERROR)
+    server.reset_stream(0, Http3ErrorCode.NO_ERROR)
     assert server._has_pending_headers(0) is None, (
         "reset_stream 後に受信途中のヘッダーブロックのエントリが残っている"
     )
@@ -290,7 +290,7 @@ def test_http3_shutdown_stream_read_releases_pending_headers() -> None:
     assert all(event.type != http3.EventType.RESET_STREAM for event in _drain_events(server)), (
         "shutdown_stream_read が ResetStream イベントを push している"
     )
-    server.reset_stream(4, H3_NO_ERROR)
+    server.reset_stream(4, Http3ErrorCode.NO_ERROR)
     assert any(event.type == http3.EventType.RESET_STREAM for event in _drain_events(server)), (
         "reset_stream の ResetStream イベントが観測できない (表明が空虚になっている)"
     )
@@ -366,7 +366,7 @@ def test_http3_close_stream_releases_pending_headers() -> None:
         "受信途中のヘッダーブロックのエントリが作られていない"
     )
 
-    server.close_stream(0, H3_NO_ERROR)
+    server.close_stream(0, Http3ErrorCode.NO_ERROR)
     assert server._has_pending_headers(0) is None, (
         "close_stream 後に受信途中のヘッダーブロックのエントリが残っている"
     )
@@ -388,7 +388,7 @@ def test_http3_pending_headers_are_independent_per_stream() -> None:
         "受信途中のヘッダーブロックのエントリが作られていない"
     )
 
-    server.reset_stream(0, H3_NO_ERROR)
+    server.reset_stream(0, Http3ErrorCode.NO_ERROR)
     assert server._has_pending_headers(0) is None, (
         "reset_stream 後に受信途中のヘッダーブロックのエントリが残っている"
     )
@@ -396,7 +396,7 @@ def test_http3_pending_headers_are_independent_per_stream() -> None:
         "他ストリームのリセットで無関係なエントリまで解放されている"
     )
 
-    server.close_stream(4, H3_NO_ERROR)
+    server.close_stream(4, Http3ErrorCode.NO_ERROR)
     assert server._has_pending_headers(4) is None, (
         "close_stream 後に受信途中のヘッダーブロックのエントリが残っている"
     )

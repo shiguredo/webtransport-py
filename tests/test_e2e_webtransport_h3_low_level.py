@@ -15,7 +15,7 @@ from conftest import _encode_wt_datagram
 from webtransport import h3 as h3_low
 from webtransport import quic
 from webtransport._common import recv_datagram
-from webtransport.h3 import Server
+from webtransport._h3_server import Server
 
 # pacing の期限待ちで送信を再試行する上限 (ナノ秒)。これを超える期限 (PTO 等) は
 # 送信待ちではないため待たない

@@ -14,5 +14,9 @@
   "aws-lc": {
     "tag": "v5.11.0",
     "url": "https://github.com/aws/aws-lc"
+  },
+  "dwnx": {
+    "ref": "85c43b506e48f268029e98514d26fe65c8ff749e",
+    "url": "https://github.com/ngtcp2/dwnx"
   }
 }

@@ -8,6 +8,7 @@
 
 #include "bindings/http2.h"
 #include "bindings/http3.h"
+#include "bindings/qmux.h"
 #include "bindings/quic.h"
 #include "bindings/webtransport_h2.h"
 #include "bindings/webtransport_h3.h"
@@ -19,6 +20,9 @@ void bind_webtransport(nb::module_& m) {
 
   // QUIC バインディング
   webtransport::quic::bind_quic(m);
+
+  // QMux バインディング
+  bind_qmux(m);
 
   // HTTP/2 バインディング
   webtransport::http2::bind_http2(m);

@@ -1,28 +1,25 @@
-"""WebTransport over HTTP/3 API
+"""WebTransport over HTTP/3 の Sans-IO API
 
-Sans-IO 低レベル API と asyncio 高レベル API を提供する。
+プロトコル処理と I/O を分離した低レベル API を提供する。asyncio の高レベル API は
+`webtransport.Client` / `webtransport.Server` にあり、`HTTPVersion.HTTP3` で
+選ぶ。このモジュールは I/O を持たないため、テストや独自イベントループから
+`webtransport.quic.Connection` と結線して使う。
 
-低レベル API (Sans-IO):
+提供するもの:
     - Config: セッション設定
     - Session: WebTransport セッション
     - Event: イベント
     - EventType: イベント種別
     - StreamInfo: ストリーム情報
 
-高レベル API (asyncio + UDP):
-    - Server: WebTransport サーバー
-    - Client: WebTransport クライアント
-
 Usage:
-    # 低レベル API
     from webtransport.h3 import Config, Session, EventType
 
-    # 高レベル API
-    from webtransport.h3 import Server, Client
+    # asyncio の高レベル API
+    from webtransport import Client, HTTPVersion, Server
 """
 
-from webtransport.h3.client import Client
-from webtransport.h3.server import Server
+from webtransport.h3 import exceptions
 from webtransport.webtransport_ext.h3 import (
     Config,
     Event,
@@ -32,11 +29,10 @@ from webtransport.webtransport_ext.h3 import (
 )
 
 __all__ = [
-    "Client",
     "Config",
     "Event",
     "EventType",
-    "Server",
     "Session",
     "StreamInfo",
+    "exceptions",
 ]

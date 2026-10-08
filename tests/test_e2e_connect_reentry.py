@@ -12,11 +12,15 @@ import socket
 
 import pytest
 
-from webtransport import h2, h3, http2, http3, quic
-from webtransport.exceptions import WebTransportConnectError
+from webtransport import http2, http3, quic
+from webtransport._h2_client import Client as H2Client
+from webtransport._h2_server import Server as H2Server
+from webtransport._h3_client import Client as H3Client
+from webtransport._h3_server import Server as H3Server
+from webtransport.exceptions import WebTransportError
 
 # 5 層のサーバーのいずれか (起動と停止だけを共通化する)
-_Server = quic.Server | h3.Server | http3.Server | h2.Server | http2.Server
+_Server = quic.Server | H3Server | http3.Server | H2Server | http2.Server
 
 
 async def _start_server(server: _Server) -> asyncio.Task[None]:
@@ -92,7 +96,7 @@ async def test_quic_connect_reentry(test_certificates) -> None:
 @pytest.mark.asyncio
 async def test_h3_connect_reentry(test_certificates) -> None:
     """h3.Client の connect() 再入が RuntimeError になり、close() 後は再接続できることを確認する"""
-    server = h3.Server(
+    server = H3Server(
         host="127.0.0.1",
         port=0,
         certfile=test_certificates["certfile"],
@@ -101,7 +105,7 @@ async def test_h3_connect_reentry(test_certificates) -> None:
     task = await _start_server(server)
     url = f"https://127.0.0.1:{server.actual_port}/webtransport"
     try:
-        client = h3.Client(url=url, verify_peer=False)
+        client = H3Client(url=url, verify_peer=False)
         await client.connect()
         with pytest.raises(RuntimeError):
             await client.connect()
@@ -141,7 +145,7 @@ async def test_http3_connect_reentry(test_certificates) -> None:
 @pytest.mark.asyncio
 async def test_h2_connect_reentry(test_certificates) -> None:
     """h2.Client の connect() 再入が RuntimeError になり、close() 後は再接続できることを確認する"""
-    server = h2.Server(
+    server = H2Server(
         host="127.0.0.1",
         port=0,
         certfile=test_certificates["certfile"],
@@ -150,7 +154,7 @@ async def test_h2_connect_reentry(test_certificates) -> None:
     task = await _start_server(server)
     url = f"https://127.0.0.1:{server.actual_port}/webtransport"
     try:
-        client = h2.Client(url=url, verify_peer=False)
+        client = H2Client(url=url, verify_peer=False)
         await client.connect()
         # 確立済みのインスタンスへの再入は拒否される
         with pytest.raises(RuntimeError):
@@ -199,7 +203,7 @@ async def test_connect_in_progress_reentry() -> None:
     try:
         udp_clients = [
             quic.Client(host="127.0.0.1", port=udp_port, verify_peer=False),
-            h3.Client(url=f"https://127.0.0.1:{udp_port}/webtransport", verify_peer=False),
+            H3Client(url=f"https://127.0.0.1:{udp_port}/webtransport", verify_peer=False),
             http3.Client(host="127.0.0.1", port=udp_port, verify_peer=False),
         ]
         for client in udp_clients:
@@ -225,7 +229,7 @@ async def test_connect_in_progress_reentry() -> None:
     tcp_server, tcp_port = await _silent_tcp_server()
     try:
         tcp_clients = [
-            h2.Client(url=f"https://127.0.0.1:{tcp_port}/webtransport", verify_peer=False),
+            H2Client(url=f"https://127.0.0.1:{tcp_port}/webtransport", verify_peer=False),
             http2.Client(host="127.0.0.1", port=tcp_port, verify_peer=False),
         ]
         for client in tcp_clients:
@@ -262,11 +266,11 @@ async def test_h3_connect_retry_after_failure(test_certificates) -> None:
     ConnectTimeoutError で失敗する。
     """
     port = _reserve_port(socket.SOCK_DGRAM)
-    client = h3.Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
-    with pytest.raises(WebTransportConnectError):
+    client = H3Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
+    with pytest.raises(WebTransportError):
         await client.connect(timeout=0.3)
 
-    server = h3.Server(
+    server = H3Server(
         host="127.0.0.1",
         port=port,
         certfile=test_certificates["certfile"],
@@ -286,7 +290,7 @@ async def test_http3_connect_retry_after_failure(test_certificates) -> None:
     """http3.Client が connect() 失敗後に同じインスタンスで再試行できることを確認する"""
     port = _reserve_port(socket.SOCK_DGRAM)
     client = http3.Client(host="127.0.0.1", port=port, verify_peer=False)
-    with pytest.raises(WebTransportConnectError):
+    with pytest.raises(WebTransportError):
         await client.connect(timeout=0.3)
 
     server = http3.Server(
@@ -310,11 +314,11 @@ async def test_h2_connect_retry_after_failure(test_certificates) -> None:
     サーバーが起動していないポートへの TCP 接続は接続拒否で失敗する。
     """
     port = _reserve_port(socket.SOCK_STREAM)
-    client = h2.Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
-    with pytest.raises(WebTransportConnectError):
+    client = H2Client(url=f"https://127.0.0.1:{port}/webtransport", verify_peer=False)
+    with pytest.raises(WebTransportError):
         await client.connect(timeout=1.0)
 
-    server = h2.Server(
+    server = H2Server(
         host="127.0.0.1",
         port=port,
         certfile=test_certificates["certfile"],
@@ -364,7 +368,7 @@ async def test_transport_remaining_rejects_reentry(layer: str, test_certificates
     確認する。`close()` で transport を破棄した後は再入できる。
     """
     if layer == "h2":
-        server = h2.Server(
+        server = H2Server(
             host="127.0.0.1",
             port=0,
             certfile=test_certificates["certfile"],
@@ -380,7 +384,7 @@ async def test_transport_remaining_rejects_reentry(layer: str, test_certificates
     task = await _start_server(server)
     try:
         if layer == "h2":
-            client = h2.Client(
+            client = H2Client(
                 url=f"https://127.0.0.1:{server.actual_port}/webtransport",
                 verify_peer=False,
             )

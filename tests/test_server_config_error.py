@@ -12,7 +12,7 @@ import socket
 
 import pytest
 
-from webtransport import h3 as h3_high
+from webtransport import _h3_server as h3_high
 from webtransport import http3 as http3_high
 from webtransport import quic as quic_high
 from webtransport.webtransport_ext import quic as quic_low

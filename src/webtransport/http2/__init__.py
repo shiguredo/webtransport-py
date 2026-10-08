@@ -20,6 +20,7 @@ Usage:
     from webtransport.http2 import Server, Client
 """
 
+from webtransport.http2 import exceptions
 from webtransport.http2.client import Client
 from webtransport.http2.server import ResponseWriter, Server
 from webtransport.webtransport_ext.http2 import (
@@ -39,6 +40,7 @@ __all__ = [
     "EventType",
     "ResponseWriter",
     "Server",
+    "exceptions",
     "get_version",
     "select_alpn",
 ]

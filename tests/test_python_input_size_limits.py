@@ -640,7 +640,8 @@ async def test_h3_client_send_stream_data_of_one_mib_reaches_server(test_certifi
     """
     import asyncio
 
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     payload = b"x" * _ONE_MIB
     received = 0

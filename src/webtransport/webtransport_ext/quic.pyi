@@ -157,6 +157,15 @@ class EventType(enum.Enum):
 
     STOP_SENDING = 11
 
+class ConnectionErrorType(enum.Enum):
+    """受信した CONNECTION_CLOSE のエラー種別"""
+
+    TRANSPORT = 0
+
+    APPLICATION = 1
+
+    IDLE_CLOSE = 2
+
 class ReceiveResult(enum.Enum):
     """QUIC パケットの受信結果"""
 
@@ -438,6 +447,14 @@ class Connection:
     @property
     def reason(self) -> str | None:
         """コネクションエラーの理由 (エラーが無い場合は None)"""
+
+    @property
+    def error_code_type(self) -> ConnectionErrorType | None:
+        """受信した CONNECTION_CLOSE のエラー種別 (error_code が 0 の場合は None)"""
+
+    @property
+    def error_frame_type(self) -> int:
+        """エラーを引き起こしたフレーム種別 (不明な場合は 0)"""
 
     @property
     def tls_error(self) -> int:

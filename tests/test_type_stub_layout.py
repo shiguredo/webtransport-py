@@ -5,7 +5,7 @@
 パッケージを置き換える `webtransport/__init__.pyi` が、同名の実装
 (`webtransport/http2/__init__.py` と `webtransport/__init__.py`) より優先
 される。この状態になると、型検査からは `webtransport.http2.Client` や
-`webtransport.WebTransportConnectError` が消え、examples の利用コードだけが
+`webtransport.WebTransportError` が消え、examples の利用コードだけが
 「モジュールにそんなメンバーは無い」と誤って報告される。
 
 拡張モジュールのスタブは `webtransport/webtransport_ext/` 配下へ
@@ -32,7 +32,7 @@ SOURCE_DIR = REPO_ROOT / "src" / "webtransport"
 # 拡張モジュール (nanobind) のスタブパッケージ
 STUB_DIR = SOURCE_DIR / "webtransport_ext"
 # 拡張モジュールが公開する低レベル API のモジュール名
-MODULES = ("quic", "http3", "h3", "http2", "h2")
+MODULES = ("quic", "http3", "h3", "http2", "h2", "qmux")
 # スタブパッケージ自身がトップレベルに存在しないため、この絶対 import は解決できない
 UNRESOLVABLE_PREFIX = "webtransport_ext"
 

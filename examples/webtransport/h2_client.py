@@ -6,13 +6,14 @@
 
 import asyncio
 
-from webtransport import WebTransportConnectError, h2
+from webtransport import Client, HTTPVersion, WebTransportError
 
 
 async def main() -> None:
     """メイン関数"""
-    client = h2.Client(
+    client = Client(
         url="https://localhost:8443/webtransport",
+        http_version=HTTPVersion.HTTP2,
         verify_peer=False,
     )
 
@@ -35,7 +36,7 @@ async def main() -> None:
 
     try:
         await client.connect()
-    except WebTransportConnectError as exc:
+    except WebTransportError as exc:
         print(f"接続失敗: {exc}")
         await client.close()
         return

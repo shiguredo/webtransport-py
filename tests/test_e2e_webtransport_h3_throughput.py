@@ -26,7 +26,8 @@ CHUNK_BYTES = 64 * 1024
 @pytest.mark.asyncio
 async def test_client_to_server_large_transfer_throughput(test_certificates):
     """32 MiB のクライアント → サーバー転送が 10 秒以内に完了することを確認"""
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     received = 0
     completed = asyncio.Event()
@@ -98,7 +99,8 @@ async def test_server_to_client_large_transfer_throughput(test_certificates):
     sleep を重ねると RTT が過大に評価され、pacing と PTO も過大になって
     転送が著しく遅くなる。
     """
-    from webtransport.h3 import Client, Server
+    from webtransport._h3_client import Client
+    from webtransport._h3_server import Server
 
     received = 0
     completed = asyncio.Event()

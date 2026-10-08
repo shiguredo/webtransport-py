@@ -24,7 +24,8 @@ CHUNK_BYTES = 64 * 1024
 @pytest.mark.asyncio
 async def test_client_to_server_large_transfer_throughput(test_certificates):
     """64 MiB のクライアント → サーバー転送が 10 秒以内に完了することを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     received = 0
     completed = asyncio.Event()
@@ -89,7 +90,8 @@ async def test_server_to_client_large_transfer_throughput(test_certificates):
 
     クライアント側の受信ループも同じ粒度の問題を持つ。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     received = 0
     completed = asyncio.Event()

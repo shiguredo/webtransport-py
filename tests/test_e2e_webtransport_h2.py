@@ -9,12 +9,10 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from webtransport import http2
-from webtransport.exceptions import (
-    ConnectRefusedError,
-    ConnectTimeoutError,
-    HandshakeFailedError,
-)
-from webtransport.h2 import Server
+from webtransport._h2_server import Server
+from webtransport.exceptions import ConnectTimeoutError
+from webtransport.h2.exceptions import WebTransportSessionRejectedError
+from webtransport.http2.exceptions import Http2ConnectionError
 from webtransport.webtransport_ext import h2 as h2_low
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
@@ -41,7 +39,8 @@ def _encode_h2_wt_stream_data_frame(http2_stream_id: int, wt_stream_id: int, dat
 
 def test_import_server_client():
     """Server と Client がインポートできることを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     assert Server is not None
     assert Client is not None
@@ -49,14 +48,9 @@ def test_import_server_client():
 
 def test_import_all():
     """全ての公開 API がインポートできることを確認"""
-    from webtransport.h2 import (
-        Client,
-        Config,
-        Event,
-        EventType,
-        Server,
-        Session,
-    )
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
+    from webtransport.h2 import Config, Event, EventType, Session
 
     assert Server is not None
     assert Client is not None
@@ -68,7 +62,7 @@ def test_import_all():
 
 def test_server_init():
     """Server が初期化できることを確認"""
-    from webtransport.h2 import Server
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -84,7 +78,7 @@ def test_server_init():
 
 def test_server_init_with_different_host():
     """Server が異なるホストで初期化できることを確認"""
-    from webtransport.h2 import Server
+    from webtransport._h2_server import Server
 
     server = Server(
         host="0.0.0.0",
@@ -98,7 +92,7 @@ def test_server_init_with_different_host():
 
 def test_client_init():
     """Client が初期化できることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://localhost:8443/webtransport")
     assert client.url == "https://localhost:8443/webtransport"
@@ -110,7 +104,7 @@ def test_client_init():
 
 def test_client_init_url_parse():
     """Client が URL を正しくパースできることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://example.com:443/wt/session")
     assert client.host == "example.com"
@@ -119,7 +113,7 @@ def test_client_init_url_parse():
 
 def test_client_init_url_default_port():
     """Client がデフォルトポートで URL をパースできることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://example.com/webtransport")
     assert client.host == "example.com"
@@ -128,7 +122,7 @@ def test_client_init_url_default_port():
 
 def test_client_init_url_no_path():
     """Client がパスなし URL をパースできることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://example.com:8443")
     assert client.host == "example.com"
@@ -137,7 +131,7 @@ def test_client_init_url_no_path():
 
 def test_server_callbacks():
     """Server のコールバック設定ができることを確認"""
-    from webtransport.h2 import Server
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -171,7 +165,7 @@ def test_server_callbacks():
 
 def test_client_callbacks():
     """Client のコールバック設定ができることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://localhost:8443/webtransport")
 
@@ -200,7 +194,7 @@ def test_client_callbacks():
 
 def test_client_properties():
     """Client のプロパティが正しく設定されることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://www.example.com:9443/wt")
     assert client.url == "https://www.example.com:9443/wt"
@@ -237,7 +231,7 @@ def test_event_type_values():
 
 def test_client_datagram_and_reset_callbacks():
     """Client の datagram / reset コールバック設定ができることを確認"""
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(url="https://localhost:8443/webtransport")
 
@@ -256,7 +250,7 @@ def test_client_datagram_and_reset_callbacks():
 
 def test_server_datagram_and_reset_callbacks():
     """Server の datagram / reset コールバック設定ができることを確認"""
-    from webtransport.h2 import Server
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -301,7 +295,7 @@ def test_session_create_client():
 @pytest.mark.asyncio
 async def test_server_start_stop(test_certificates):
     """Server の開始と停止ができることを確認"""
-    from webtransport.h2 import Server
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -320,7 +314,7 @@ async def test_server_start_stop(test_certificates):
 @pytest.mark.asyncio
 async def test_server_context_manager(test_certificates):
     """Server がコンテキストマネージャーとして使えることを確認"""
-    from webtransport.h2 import Server
+    from webtransport._h2_server import Server
 
     async with Server(
         host="127.0.0.1",
@@ -337,7 +331,8 @@ async def test_server_context_manager(test_certificates):
 @pytest.mark.asyncio
 async def test_server_client_communication(test_certificates):
     """Server と Client 間で WebTransport 通信ができることを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     client_received_data = []
     server_received_data = []
@@ -409,7 +404,8 @@ async def test_server_client_communication(test_certificates):
 @pytest.mark.asyncio
 async def test_server_client_datagram_communication(test_certificates):
     """DATAGRAM capsule で双方向通信できることを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     client_received: list[bytes] = []
     server_received: list[bytes] = []
@@ -468,7 +464,8 @@ async def test_server_client_datagram_communication(test_certificates):
 @pytest.mark.asyncio
 async def test_unidirectional_stream(test_certificates):
     """単方向ストリームでデータを送れることを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server_received: list[bytes] = []
     server_data = asyncio.Event()
@@ -523,7 +520,8 @@ async def test_session_close_notifies_server(test_certificates):
     をクライアントの run() が受信した」という観測を待つことで、run() の起動を
     決定的に確認してから close() する。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     session_closed = asyncio.Event()
     client_ready = asyncio.Event()
@@ -577,7 +575,8 @@ async def test_session_close_notifies_server(test_certificates):
 @pytest.mark.asyncio
 async def test_server_resets_client_stream(test_certificates):
     """サーバーがクライアントストリームをリセットできることを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     reset_event = asyncio.Event()
     reset_codes: list[int] = []
@@ -630,7 +629,8 @@ async def test_server_resets_client_stream(test_certificates):
 @pytest.mark.asyncio
 async def test_chunked_stream_data(test_certificates):
     """複数回に分けたストリームデータが届くことを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server_chunks: list[bytes] = []
     done = asyncio.Event()
@@ -680,7 +680,8 @@ async def test_chunked_stream_data(test_certificates):
 @pytest.mark.asyncio
 async def test_is_webtransport_ready_after_settings(test_certificates):
     """SETTINGS 交換後に is_webtransport_ready が真になることを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -712,7 +713,9 @@ async def test_recv_flow_control_violation_notifies_on_error(test_certificates):
     WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15 Section 3.4 の 0xTBD) の
     プレースホルダ。draft で値が確定したら更新する。
     """
-    from webtransport.h2 import Client, Config, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
+    from webtransport.h2 import Config
 
     error_codes: list[int] = []
     error_messages: list[str] = []
@@ -780,7 +783,9 @@ async def test_client_recv_flow_control_violation_notifies_on_error(test_certifi
     WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15 Section 3.4 の 0xTBD) の
     プレースホルダ。draft で値が確定したら更新する。
     """
-    from webtransport.h2 import Client, Config, Server, SessionWriter
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server, SessionWriter
+    from webtransport.h2 import Config
 
     error_codes: list[int] = []
     error_messages: list[str] = []
@@ -860,7 +865,8 @@ async def test_server_stream_state_error_does_not_notify_on_error(test_certifica
     WT_CLOSE_SESSION を受けてセッション終了することをもって WT_STREAM_STATE_ERROR 経路を
     確認する。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     error_codes: list[int] = []
     stream_ready = asyncio.Event()
@@ -928,7 +934,8 @@ async def test_client_stream_state_error_does_not_notify_on_error(test_certifica
     サーバーが WT_CLOSE_SESSION を受けてセッション終了することをもって
     WT_STREAM_STATE_ERROR 経路を確認する。
     """
-    from webtransport.h2 import Client, Server, SessionWriter
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server, SessionWriter
 
     error_codes: list[int] = []
     session_writers: list[SessionWriter] = []
@@ -1257,16 +1264,17 @@ async def test_h2_server_on_session_closed_after_pre_accept_end_stream(test_cert
 
 @pytest.mark.asyncio
 async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
-    """on_session_request が 403 を返すと Client.connect() が HandshakeFailedError を送出することを確認
+    """on_session_request が 403 を返すと Client.connect() が WebTransportSessionRejectedError を送出することを確認
 
     draft-15 Section 3.2 により、非 2xx 応答はセッション未確立を意味する。
     bindings は拒否時に SESSION_REJECTED のみを発火し、SESSION_READY /
     SESSION_CLOSED は発火しない。connect() の待機ループが
     SESSION_REJECTED を検知しないと永久ブロックするため、実 Server と実
-    Client を組み合わせて有限時間で HandshakeFailedError が送出されることを
+    Client を組み合わせて有限時間で WebTransportSessionRejectedError が送出されることを
     検証する (修正前は wait_for のタイムアウトで失敗する)。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     async def on_session_request(session_id, headers, addr):
         return 403
@@ -1286,7 +1294,7 @@ async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
     )
 
     try:
-        with pytest.raises(HandshakeFailedError):
+        with pytest.raises(WebTransportSessionRejectedError):
             await asyncio.wait_for(client.connect(), timeout=5.0)
         assert client.is_connected is False
     finally:
@@ -1358,7 +1366,8 @@ async def test_client_on_session_ready_fires(test_certificates):
     on_session_ready が 1 回発火することを検証する (修正前は connect() が
     イベントを消費してしまうため、コールバックが一度も呼ばれなかった)。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     ready_event = asyncio.Event()
     ready_stream_ids: list[int] = []
@@ -1419,7 +1428,8 @@ async def test_client_on_session_ready_after_connect(test_certificates):
     終わっても、イベントは未配信バッファに保持され、登録後の run() で
     発火する。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     ready_event = asyncio.Event()
     ready_stream_ids: list[int] = []
@@ -1477,7 +1487,7 @@ async def test_connect_timeout_on_listen_only_server():
     通るが TLS 応答が返らない。
     期待値: timeout=1.0 で 1 秒強で ConnectTimeoutError が送出される。
     """
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     # accept しないリスナーを用意する (カーネルの backlog が TCP
     # ハンドシェイクを完了させるため、TLS 層で停滞する)
@@ -1508,22 +1518,22 @@ async def test_connect_timeout_on_listen_only_server():
 
 @pytest.mark.asyncio
 async def test_connect_refused_on_closed_port():
-    """閉じたポートに対して connect() が ConnectRefusedError を送出することを確認する
+    """閉じたポートに対して connect() が Http2ConnectionError を送出することを確認する
 
     前提: 127.0.0.1:1 は閉じており TCP RST が返る。
     期待値: Python 標準の ConnectionRefusedError を原因として保持する
-    ConnectRefusedError が即座に送出される。
+    Http2ConnectionError が即座に送出される。
     """
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     client = Client(
         url="https://127.0.0.1:1/webtransport",
         verify_peer=False,
     )
     try:
-        with pytest.raises(ConnectRefusedError) as exc_info:
+        with pytest.raises(Http2ConnectionError) as exc_info:
             await client.connect(timeout=5.0)
-        # 自前の ConnectRefusedError ではなく builtin の ConnectionRefusedError
+        # HTTP/2 層の接続例外ではなく builtin の ConnectionRefusedError
         # (綴りが 3 文字違い) が __cause__ に保持される
         assert isinstance(exc_info.value.__cause__, ConnectionRefusedError)
         assert client.is_connected is False
@@ -1534,7 +1544,8 @@ async def test_connect_refused_on_closed_port():
 @pytest.mark.asyncio
 async def test_stop_while_client_connected(test_certificates):
     """クライアント接続中に stop() が復帰する"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -1728,7 +1739,7 @@ async def test_goaway_notifies_client_and_keeps_session(test_certificates):
     行う。GOAWAY 前後でデータグラムの往復が継続し、on_goaway は 1 回
     のみ発火する。
     """
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     goaway_calls: list[tuple[int, int]] = []
     echoes: list[bytes] = []
@@ -1800,7 +1811,7 @@ async def test_goaway_notified_again_after_reconnect(test_certificates):
 
     同一 Client インスタンスの使い回しで通知済み印が残らない。
     """
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     goaway_calls: list[tuple[int, int]] = []
 
@@ -1895,7 +1906,7 @@ async def test_client_connect_with_config_over_limit_raises_value_error(test_cer
     TLS 接続後にセッション生成が ValueError になった場合も writer を閉じて
     から送出し、接続を開いたままにしない。
     """
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     server = Server(
         host="127.0.0.1",
@@ -1980,7 +1991,8 @@ async def test_client_close_waits_for_peer_fin(test_certificates):
     通常経路ではサーバーが WT_CLOSE_SESSION 応答の END_STREAM を返すため、
     待機結果が peer-closed になる。既定の待機上限が 3 秒であることも確認する。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     assert Client(url="https://127.0.0.1:4433/webtransport")._close_wait_timeout == 3.0
 
@@ -2018,7 +2030,8 @@ async def test_client_close_waits_while_run_active(test_certificates):
     run() の記録を close() が参照する経路と、run() 終了後に close() 自身が
     受信して観測する経路のどちらでも、待機結果が peer-closed になる。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -2062,7 +2075,8 @@ async def test_client_close_from_run_callback(test_certificates):
     run() がコールバックを await している間は _run_active が True のままだが、
     同一タスクからの close() は自身で受信してピアクローズを観測する。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -2108,7 +2122,8 @@ async def test_client_close_from_run_callback_child_task(test_certificates):
     コールバックが子タスク化して close() を待つ場合も、run() は受信して
     いないため close() が自身で受信してピアクローズを観測する。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     server = Server(
         host="127.0.0.1",
@@ -2150,7 +2165,8 @@ async def test_client_close_from_run_callback_child_task(test_certificates):
 @pytest.mark.asyncio
 async def test_client_close_idempotent_and_unconnected(test_certificates):
     """二重 close() と未接続 close() が安全で待機結果を保つことを確認"""
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     # 未接続の close() は待機せずに結果 none のまま完了する
     unconnected = Client(url="https://127.0.0.1:4433/webtransport", verify_peer=False)
@@ -2186,7 +2202,7 @@ async def test_client_close_times_out_without_peer_fin(test_certificates):
     2xx 応答後に沈黙する手続きサーバーに対し、短い上限で待機が打ち切られ、
     待機結果が timeout になる。実時間で上限いっぱい待つことを確認する。
     """
-    from webtransport.h2 import Client
+    from webtransport._h2_client import Client
 
     async def handle_silent_server(reader, writer):
         await _serve_silent_h2(reader, writer)
@@ -2221,7 +2237,8 @@ async def test_client_close_skipped_without_wait(test_certificates):
 
     WT_CLOSE_SESSION は送出されるためサーバー側にもセッション終了が届く。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     session_closed_event = asyncio.Event()
 
@@ -2384,7 +2401,8 @@ async def test_server_on_stop_sending_fires(test_certificates):
     アプリケーションエラーコードが観測でき、送信側が Ready 状態のため
     低レベル層が WT_RESET_STREAM を自動で返す (draft-15 Section 6.3)。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     received: list[tuple[int, int]] = []
     stop_sending_received = asyncio.Event()
@@ -2461,7 +2479,8 @@ async def test_client_on_stop_sending_fires(test_certificates):
     session_writer.stop_sending で送信停止を要求する。クライアント側で
     stream_id とアプリケーションエラーコードが観測できる。
     """
-    from webtransport.h2 import Client, Server
+    from webtransport._h2_client import Client
+    from webtransport._h2_server import Server
 
     received: list[tuple[int, int]] = []
     stop_sending_received = asyncio.Event()

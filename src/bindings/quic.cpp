@@ -2309,6 +2309,35 @@ std::optional<std::string> QuicConnection::reason() const {
                      ccerr->reasonlen);
 }
 
+std::optional<QuicConnectionErrorType> QuicConnection::error_code_type() const {
+  if (!conn_) {
+    return std::nullopt;
+  }
+  const auto* ccerr = ngtcp2_conn_get_ccerr2(conn_);
+  if (ccerr->error_code == 0) {
+    // ccerr の既定値は NO_ERROR のトランスポートエラーであり、受信して
+    // いない状態と区別できない (ngtcp2 は受信した CONNECTION_CLOSE だけを
+    // rx.ccerr に記録する)
+    return std::nullopt;
+  }
+  switch (ccerr->type) {
+    case NGTCP2_CCERR_TYPE_TRANSPORT:
+      return QuicConnectionErrorType::Transport;
+    case NGTCP2_CCERR_TYPE_APPLICATION:
+      return QuicConnectionErrorType::Application;
+    case NGTCP2_CCERR_TYPE_IDLE_CLOSE:
+      return QuicConnectionErrorType::IdleClose;
+  }
+  return std::nullopt;
+}
+
+uint64_t QuicConnection::error_frame_type() const {
+  if (!conn_) {
+    return 0;
+  }
+  return ngtcp2_conn_get_ccerr2(conn_)->frame_type;
+}
+
 int QuicConnection::tls_error() const {
   if (!conn_) {
     return 0;
@@ -3186,6 +3215,12 @@ void bind_quic(nb::module_& m) {
       .value("PATH_VALIDATION_FAILED", QuicEventType::PathValidationFailed)
       .value("STOP_SENDING", QuicEventType::StopSending);
 
+  nb::enum_<QuicConnectionErrorType>(quic_m, "ConnectionErrorType",
+                                     "受信した CONNECTION_CLOSE のエラー種別")
+      .value("TRANSPORT", QuicConnectionErrorType::Transport)
+      .value("APPLICATION", QuicConnectionErrorType::Application)
+      .value("IDLE_CLOSE", QuicConnectionErrorType::IdleClose);
+
   nb::enum_<ReceiveResult>(quic_m, "ReceiveResult", "QUIC パケットの受信結果")
       .value("ACCEPTED", ReceiveResult::Accepted)
       .value("DISCARDED", ReceiveResult::Discarded)
@@ -3585,6 +3620,15 @@ void bind_quic(nb::module_& m) {
           },
           nb::lock_self(), nb::sig("def reason(self) -> str | None"),
           "コネクションエラーの理由 (エラーが無い場合は None)")
+      .def_prop_ro(
+          "error_code_type", &QuicConnection::error_code_type, nb::lock_self(),
+          nb::sig("def error_code_type(self) -> ConnectionErrorType | None"),
+          "受信した CONNECTION_CLOSE のエラー種別 (error_code が 0 の場合は "
+          "None)")
+      .def_prop_ro("error_frame_type", &QuicConnection::error_frame_type,
+                   nb::lock_self(),
+                   nb::sig("def error_frame_type(self) -> int"),
+                   "エラーを引き起こしたフレーム種別 (不明な場合は 0)")
       .def_prop_ro(
           "tls_error", &QuicConnection::tls_error, nb::lock_self(),
           nb::sig("def tls_error(self) -> int"),

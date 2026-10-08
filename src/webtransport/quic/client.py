@@ -16,6 +16,8 @@ from webtransport._common import (
     normalize_addr,
     recv_datagram,
 )
+from webtransport.exceptions import WebTransportError
+from webtransport.quic.exceptions import quic_terminal_error
 from webtransport.webtransport_ext import quic as quic_low
 
 # 低レベル API の入力上限の写し (C++ 側は bindings/python_input.h の
@@ -147,6 +149,8 @@ class Client:
         self._connection_closed_event = asyncio.Event()
         # バックグラウンド受信タスクの異常終了時に保持する元の例外
         self._task_error: BaseException | None = None
+        # 接続がエラーで終了した場合の原因 (run() が送出する)
+        self._terminal_error: WebTransportError | None = None
         # connect() 実行中フラグ。実行中の early data 登録を拒否する
         self._connecting = False
         # ストリームごとの受信状態 (recv_stream_data 用)
@@ -603,6 +607,9 @@ class Client:
 
             elif event.type == quic_low.EventType.CONNECTION_CLOSED:
                 # 接続終了時は即座に状態を落とし、待機者へ通知する
+                self._terminal_error = quic_terminal_error(
+                    self._connection, event.error_code, event.reason
+                )
                 self._connected = False
                 self._running = False
                 self._connection_closed_event.set()
@@ -735,6 +742,7 @@ class Client:
         # connect() 実行中フラグ (再入拒否と early data 登録の拒否に使う)。
         # 名前解決中も立てて、解決中の再入を拒否する
         self._connecting = True
+        self._terminal_error = None
         try:
             # timeout <= 0 のときは接続を開始せずに即座に False を返す
             # (ngtcp2-py と同じ挙動)
@@ -797,6 +805,7 @@ class Client:
                 self._connect_waiter.cancel()
             self._connect_waiter = None
         self._task_error = None
+        self._terminal_error = None
         if self._socket is not None:
             self._socket.close()
             self._socket = None
@@ -1347,6 +1356,15 @@ class Client:
         バックグラウンドタスクが担うため、このメソッドは接続終了待ちで
         ある。キャンセルされた場合はバックグラウンドタスクへ伝播しない
         (close() まで受信処理を継続する)。
+
+        接続がエラーで終了した場合は、その原因を表す例外
+        (`quic.exceptions.QuicTransportError` / `QuicApplicationError`) を
+        送出する。正常終了 (NO_ERROR のクローズ・アイドルタイムアウト・
+        close() による終了) では送出しない。
+
+        Raises:
+            RuntimeError: connect() していない場合
+            WebTransportError: 接続がエラーで終了した場合
         """
         if self._recv_task is None:
             raise RuntimeError("client is not connected")
@@ -1354,6 +1372,10 @@ class Client:
         # shield() により run() のキャンセルはバックグラウンドタスクへ伝播せず、
         # 受信タスクは close() まで継続する
         await asyncio.shield(self._recv_task)
+
+        # 接続がエラーで終了した場合は、その原因を送出する (正常終了では None)
+        if self._terminal_error is not None:
+            raise self._terminal_error
 
     async def close(self) -> int:
         """接続を閉じる

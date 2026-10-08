@@ -10,6 +10,7 @@ import asyncio
 import ssl
 from typing import TYPE_CHECKING, Self
 
+from webtransport._common import normalize_addr
 from webtransport.webtransport_ext import h2 as h2_low
 
 if TYPE_CHECKING:
@@ -33,6 +34,22 @@ class SessionWriter:
     def session_id(self) -> int:
         """セッション ID"""
         return self._session_id
+
+    @property
+    def addr(self) -> tuple[str, int] | None:
+        """接続元アドレス (取得できない場合は None)
+
+        統一サーバー (`webtransport.Server`) がセッションハンドルへ載せるために
+        使う。IPv6 の 4 要素タプルは先頭 2 要素だけを取り出す。
+        """
+        peer = self._writer.get_extra_info("peername")
+        if not peer:
+            return None
+        try:
+            return normalize_addr(peer)
+        except TypeError:
+            # ポートが int でない実装がある場合はアドレス無しとして扱う
+            return None
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """ストリームを開く

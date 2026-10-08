@@ -33,6 +33,12 @@ SOURCE_DIR = REPO_ROOT / "src" / "webtransport"
 # SKILL が扱うモジュール。Sans I/O は webtransport_ext の stub、asyncio
 # ラッパーは src/webtransport/<module>/ の実装から集める
 MODULES = ("quic", "http3", "h3", "http2", "h2")
+# 統一 API (`webtransport.Client` / `Server` / `Session` / `HTTPVersion`) は
+# `webtransport` 直下にある。DOTTED_RE には含めない (`webtransport.h3` のような
+# 層の参照の先頭と衝突するため) が、モジュール修飾なしのクラス名を解決する先には
+# 含める
+UNIFIED = "webtransport"
+UNIFIED_SOURCES = ("client.py", "server.py", "http_version.py")
 
 # フェンス付き python ブロック
 PYTHON_BLOCK_RE = re.compile(r"```python\n(.*?)```", re.DOTALL)
@@ -81,15 +87,38 @@ def _load_api() -> dict[str, dict[str, set[str]]]:
         )
         for path in sorted((SOURCE_DIR / module).glob("*.py")):
             _collect_members(ast.parse(path.read_text(encoding="utf-8")), table)
+        exceptions_path = SOURCE_DIR / module / "exceptions.py"
+        if exceptions_path.is_file():
+            # 層ごとの exceptions サブモジュールは公開 API の一部である。SKILL は
+            # `quic.exceptions` と `quic.exceptions.QuicError` の両方の形で参照
+            # するため、サブモジュール名をキーにした表にも同じメンバーを入れる
+            collected: dict[str, set[str]] = {}
+            _collect_members(ast.parse(exceptions_path.read_text(encoding="utf-8")), collected)
+            # クラス名 (キー) とメンバー名 (値)、モジュール直下の関数名を
+            # すべて解決対象にする
+            entries: set[str] = set(collected)
+            for members in collected.values():
+                entries |= members
+            entries.discard("")
+            table["exceptions"] = entries
         api[module] = table
+    unified: dict[str, set[str]] = {}
+    for name in UNIFIED_SOURCES:
+        path = SOURCE_DIR / name
+        if path.is_file():
+            _collect_members(ast.parse(path.read_text(encoding="utf-8")), unified)
+    api[UNIFIED] = unified
     return api
 
 
 def _resolve_bare_class(api: dict[str, dict[str, set[str]]], name: str) -> str | None:
     """モジュール修飾なしのクラス名を一意に解決する
 
-    複数のモジュールに同名クラスがある場合は解決しない (誤判定を避ける)。
+    統一 API のクラス名は `webtransport` 直下を優先する。`Client` のように層ごとに
+    同名クラスがある名前は、層側では解決しない (誤判定を避ける)。
     """
+    if name in api[UNIFIED]:
+        return f"{UNIFIED}.{name}"
     found = [f"{module}.{name}" for module in MODULES if name in api[module]]
     if len(found) != 1:
         return None
@@ -233,6 +262,8 @@ def test_signature_block_members_exist(api: dict[str, dict[str, set[str]]]) -> N
                 continue
             if name not in table[class_name]:
                 problems.append(f"{fence_line + 1} 行目: {owner}.{name} が実装に無い")
-    # 抽出そのものが壊れると検証が空振りするため、対象ブロック数を確認する
-    assert checked >= 10, f"シグネチャ一覧ブロックの抽出数が少なすぎる: {checked}"
+    # 抽出そのものが壊れると検証が空振りするため、対象ブロック数を確認する。
+    # 高レベル API が統一 API (`webtransport.Client` / `Server`) へ移って
+    # 所有者を解決できるブロックが減ったため、現在の抽出数に合わせてある
+    assert checked >= 9, f"シグネチャ一覧ブロックの抽出数が少なすぎる: {checked}"
     assert not problems, "SKILL.md のシグネチャ一覧に実装が無い API がある:\n" + "\n".join(problems)

@@ -28,6 +28,7 @@ Usage:
     from webtransport.quic import Server, Client
 """
 
+from webtransport.quic import exceptions
 from webtransport.quic.client import Client
 from webtransport.quic.server import Server
 from webtransport.webtransport_ext.quic import (
@@ -49,5 +50,6 @@ __all__ = [
     "Packet",
     "ReceiveResult",
     "Server",
+    "exceptions",
     "get_version",
 ]
