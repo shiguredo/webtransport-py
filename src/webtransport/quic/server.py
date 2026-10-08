@@ -88,6 +88,11 @@ class Server:
             quic_low.Connection, asyncio.Queue[tuple[tuple[str, int], quic_low.Event]]
         ] = {}
         self._connection_tasks: dict[quic_low.Connection, asyncio.Task[None]] = {}
+        # アプリコールバックを実行中の接続。ローカル close 後の回収
+        # (`_discard_connection`) で接続タスクを cancel すると実行中の
+        # コールバックへ CancelledError が注入されるため、実行中は回収を
+        # 次の走査へ見送る判断に使う
+        self._callbacks_running: set[quic_low.Connection] = set()
         self._running = False
         self._actual_port = 0
         # 受信待ちの上限 (秒)。接続の QUIC タイマー期限に合わせて更新する
@@ -240,6 +245,7 @@ class Server:
             self._dcid_index.clear()
             self._conn_dcids.clear()
             self._conn_addr.clear()
+            self._callbacks_running.clear()
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
@@ -327,8 +333,18 @@ class Server:
 
         ローカル close 済みで CONNECTION_CLOSED イベントが来ない接続用。
         CLOSED 排水時は `_enqueue_connection_events` 内で既に外れるため、
-        ここには残らない
+        ここには残らない。
+
+        アプリコールバックの実行中は回収を次の走査へ見送る。ここで接続
+        タスクを cancel すると実行中のコールバックへ CancelledError が
+        注入されるためである (`quic.Server.close` は公開 API であり、
+        プロトコル違反の通知などコールバックの中からも呼ばれる)。見送る
+        場合は登録を外す前に return する。受信ループの回収条件は登録が
+        残っていることを前提にするため、外してしまうと次の走査で
+        回収されずに残る。コールバックが戻った後の走査で改めて呼ばれる。
         """
+        if connection in self._callbacks_running:
+            return
         self._remove_connection(connection)
         task = self._connection_tasks.pop(connection, None)
         if task is not None and not task.done():
@@ -440,7 +456,13 @@ class Server:
                 # 配送直前に現アドレスを解決する (Migration で張り替わるため。
                 # 削除済みは投入時アドレスへ退行する)
                 addr = self._conn_addr.get(connection, queued_addr)
-                finished = await self._dispatch_connection_event(addr, event)
+                # コールバック実行中を記録する (ローカル close 後の回収を
+                # 見送る判断に使う)。finally で必ず外す
+                self._callbacks_running.add(connection)
+                try:
+                    finished = await self._dispatch_connection_event(addr, event)
+                finally:
+                    self._callbacks_running.discard(connection)
                 if finished:
                     break
                 # コールバック内から stop() された場合は自身も抜ける
@@ -679,6 +701,9 @@ class Server:
         `run()` の回収経路 (`connection.is_closed()` →
         `_discard_connection`) が行うため、本メソッドの直後はまだ登録が
         残っている。他の接続の通信は継続する。未登録の `addr` では何もしない。
+        アプリコールバックの中から呼んでも、実行中のコールバックは
+        `CancelledError` で中断されない (回収はコールバックが戻った後の
+        走査で行われる)。
 
         ハンドシェイク完了前の終了は ngtcp2 が終了コードを APPLICATION_ERROR
         に置換して理由を落とす (RFC 9000 Section 10.2.3。将来改訂される

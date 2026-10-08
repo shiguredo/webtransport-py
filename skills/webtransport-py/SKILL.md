@@ -503,7 +503,7 @@ async def close(addr: tuple[str, int], error_code: int = 0, reason: str = "") ->
 def initiate_key_update(addr: tuple[str, int]) -> bool  # 対象クライアントの TLS 鍵更新を開始
 ```
 
-`shutdown_stream` は双方向ストリームでは RESET_STREAM と STOP_SENDING の両方を、単方向ストリームでは ngtcp2 が決める側だけを shutdown する (`quic.Client.shutdown_stream` と同じ意味)。`reset_stream` / `stop_sending` は片方だけを送る QUIC フレーム層の操作である。`close` は指定したクライアントへ終了コードと理由付きの CONNECTION_CLOSE を送出し、接続は `stop()` を呼ばずに 1 つだけ閉じられる (ローカル起点の終了として `on_connection_closed` は発火しない。他クライアントは継続する)。終了コードと理由がピアへ伝わるのはハンドシェイク完了後である (RFC 9000 Section 10.2.3)。
+`shutdown_stream` は双方向ストリームでは RESET_STREAM と STOP_SENDING の両方を、単方向ストリームでは ngtcp2 が決める側だけを shutdown する (`quic.Client.shutdown_stream` と同じ意味)。`reset_stream` / `stop_sending` は片方だけを送る QUIC フレーム層の操作である。`close` は指定したクライアントへ終了コードと理由付きの CONNECTION_CLOSE を送出し、接続は `stop()` を呼ばずに 1 つだけ閉じられる (ローカル起点の終了として `on_connection_closed` は発火しない。他クライアントは継続する)。アプリコールバックの中から呼んでも実行中のコールバックは `CancelledError` で中断されず、回収はコールバックが戻った後に行われる (プロトコル違反を検知したアプリがコールバック内から閉じる用途を想定する)。終了コードと理由がピアへ伝わるのはハンドシェイク完了後である (RFC 9000 Section 10.2.3)。
 
 `quic.Client`:
 
