@@ -848,12 +848,21 @@ async def test_server_resets_http3_stream(test_certificates):
 
 @pytest.mark.asyncio
 async def test_client_resets_http3_stream(test_certificates):
-    """Client が HTTP/3 ストリームを reset すると Server に届くことを確認"""
+    """Client が HTTP/3 ストリームを reset すると Server に届くことを確認
+
+    高レベル `Client.request` はリクエストを終端する (FIN を送出する) ため、
+    送出済みデータと FIN がすべて ACK されたストリームへの reset は ngtcp2 が
+    送出しない (RFC 9000 Section 3.1 の送信側の状態遷移では、FIN が ACK された
+    Data Recvd 状態から RESET_STREAM を送出できない)。reset の検証には
+    書き込み側が開いたままのストリームが要るため、低レベル API で用意する。
+    """
     from webtransport.http3 import Client, Server
 
     server_reset_received = asyncio.Event()
     request_received = asyncio.Event()
+    unterminated_request_received = asyncio.Event()
     reset_info = {}
+    request_count = 0
 
     server = Server(
         host="127.0.0.1",
@@ -863,7 +872,12 @@ async def test_client_resets_http3_stream(test_certificates):
     )
 
     async def on_request(stream_id, headers, addr):
-        request_received.set()
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            request_received.set()
+        else:
+            unterminated_request_received.set()
 
     async def on_stream_reset(stream_id, error_code, addr):
         reset_info["stream_id"] = stream_id
@@ -891,8 +905,9 @@ async def test_client_resets_http3_stream(test_certificates):
 
     await client.connect()
 
-    stream_id = await client.request("GET", "/will-reset")
-    assert stream_id >= 0
+    # 1 本目は公開 API で送り、HTTP/3 の制御・QPACK ストリームの設定を済ませる
+    setup_stream_id = await client.request("GET", "/will-reset-setup")
+    assert setup_stream_id >= 0
 
     async def run_client():
         try:
@@ -903,6 +918,28 @@ async def test_client_resets_http3_stream(test_certificates):
     client_task = asyncio.create_task(run_client())
 
     await asyncio.wait_for(request_received.wait(), timeout=5.0)
+
+    # 2 本目は低レベル API で開いて終端しない (終端済みのストリームへ送出された
+    # RESET_STREAM は ngtcp2 が送出しない)
+    quic_connection = client._quic_connection
+    assert quic_connection is not None
+    stream_id = quic_connection.open_stream(True)
+    assert stream_id >= 0
+
+    http3_connection = client._http3_connection
+    assert http3_connection is not None
+    assert http3_connection.submit_request(
+        stream_id,
+        [
+            (":method", "GET"),
+            (":path", "/will-reset"),
+            (":scheme", "https"),
+            (":authority", "127.0.0.1"),
+        ],
+    ), "リクエストの登録に失敗しました"
+    await client._send_pending()
+    await asyncio.wait_for(unterminated_request_received.wait(), timeout=5.0)
+
     await client.reset_stream(stream_id, error_code=0x0102)
     await asyncio.wait_for(server_reset_received.wait(), timeout=5.0)
 
