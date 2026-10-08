@@ -1,7 +1,7 @@
 # quic 層でサーバーがストリームを中断し接続を終了コードと理由付きで閉じられるようにする
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/add-quic-server-stream-and-connection-close
 - Polished: 2026-10-04
 
@@ -46,3 +46,10 @@ quic 層で、サーバーがクライアント単位のストリーム中断 (R
 - 全テストが通過する
 
 ## 解決方法
+
+- `src/webtransport/quic/server.py` の `Server` に `shutdown_stream(addr, stream_id, error_code=0)` / `reset_stream(addr, stream_id, error_code=0)` / `stop_sending(addr, stream_id, error_code=0)` を追加した。`self._connections` から `addr` で接続を引いて低レベル `Connection` の同名メソッドを呼び、`_send_to` で送出する。未登録の `addr` では何もしない。`shutdown_stream` の意味は `quic.Client.shutdown_stream` と同じである
+- 同 `Server.close(addr, error_code=0, reason="")` を追加した。低レベル `Connection.close(error_code, reason)` を呼んで CONNECTION_CLOSE を送出し、`stop()` を呼ばずに 1 接続だけを閉じられる。ローカル起点の終了として `on_connection_closed` は発火せず、接続の登録解除は `run()` の回収経路 (`is_closed()` → `_discard_connection`) が行う。他のクライアントの通信は継続する
+- 同 `Server.on_stream_reset(callback)` を追加し、`_dispatch_connection_event` の `EventType.STREAM_RESET` 分岐から `(stream_id, error_code, addr)` を渡す。既存の `on_stop_sending` と同じ形で、未登録の場合は通知しない
+- `src/webtransport/quic/client.py` の `Client.close(error_code=0, reason="")` に任意引数を追加し、低レベル `Connection.close` へそのまま渡す。送出の手順・戻り値・後始末は変えていない
+- テスト: `tests/test_e2e_quic_server_stream_ops.py` (9 件) と `tests/test_e2e_quic_server_close.py` (7 件)。RESET_STREAM / STOP_SENDING のフレームとエラーコードのピア観測、終了コードと理由付き CONNECTION_CLOSE のピア観測 (`Client.run()` の `QuicApplicationError`)、未登録 `addr` の no-op、`on_connection_closed` の非発火、他クライアントの継続、`on_stream_reset` の 1 回発火、ハンドシェイク完了前 close の既知の制約 (RFC 9000 Section 10.2.3) を実 UDP 通信で検証した
+- `skills/webtransport-py/SKILL.md` の quic 節を追加 API に合わせて更新した
