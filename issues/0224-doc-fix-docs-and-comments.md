@@ -26,7 +26,7 @@
 コードコメント:
 
 - `tests/browser/conftest.py` に「h2 Server には Origin 検証が未実装」と書いたコメントが 2 箇所あるが、`src/webtransport/h2/server.py` の `Server` は `allowed_origins` を受け取り、`src/bindings/webtransport_h2.cpp` で検証している
-- `src/webtransport/_common.py` の `parse_wt_url` の docstring が「`https://` のスキームは大文字小文字を問わず除去しない」と自己矛盾した書き方になっている。実装は `str.replace` で `https://` の出現をすべて除去する
+- `src/webtransport/_wt_url.py` の `parse_wt_url` の docstring が「`https://` のスキームは大文字小文字を問わず除去しない」と自己矛盾した書き方になっている。実装は `str.replace` で `https://` の出現をすべて除去する
 
 ## 設計方針
 
@@ -51,4 +51,4 @@
 
 - `skills/webtransport-py/SKILL.md` の該当箇所 (asyncio API の共通パターンの節、独自例外クラスの注意点の節、`http3.Client` と `http2.Client` の節) を修正する
 - `README.md` のサーバー例の節に証明書の生成手順 (`examples/http2/server.py` / `examples/http3/server.py` / `examples/webtransport/h2_server.py` / `examples/webtransport/h3_server.py` が案内している `openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes`) を追加する
-- `tests/browser/conftest.py` と `src/webtransport/_common.py` のコメントと docstring を実装に合わせて書き直す
+- `tests/browser/conftest.py` と `src/webtransport/_wt_url.py` のコメントと docstring を実装に合わせて書き直す

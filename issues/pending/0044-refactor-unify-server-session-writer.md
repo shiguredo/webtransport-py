@@ -29,21 +29,21 @@
 
 `h2.Server` の `SessionWriter` を「両サーバー共通の抽象」の位置付けに引き上げ、`h3.Server` にも同型の `H3SessionWriter` を導入する。ハンドラは常に `SessionWriter` プロトコルを満たす writer オブジェクトを 1 つだけ受け取る形にする。
 
-- `SessionWriter` プロトコル（`typing.Protocol`）は `src/webtransport/_common.py`（新設）に定義し、`send_stream_data` / `send_datagram` / `open_stream` / `reset_stream` / `close_session` の各 async メソッドと、`session_id` / `remote_addr` / `transport`（`"h3"` または `"h2"`）プロパティを含む。
+- `SessionWriter` プロトコル（`typing.Protocol`）は `src/webtransport/_session_writer.py`（新設）に定義し、`send_stream_data` / `send_datagram` / `open_stream` / `reset_stream` / `close_session` の各 async メソッドと、`session_id` / `remote_addr` / `transport`（`"h3"` または `"h2"`）プロパティを含む。
 - `h3.Server` にはコネクション単位の `H3SessionWriter` クラスを新設し、`_clients` から該当エントリを引く責務を Writer 側に閉じ込める。既存の `Server.send_stream_data(addr, stream_id, ...)` / `Server.send_datagram(addr, session_id, data)` / `Server.open_stream(addr, session_id, unidirectional)` は廃止する。
 - `on_session_ready` / `on_session_closed` / `on_stream_data` / `on_stream_reset` / `on_datagram` のコールバック署名を両サーバーで一致させる。`addr` は Writer の `remote_addr` プロパティから参照する形に統一する。
 - `h2.SessionWriter` に `remote_addr` プロパティを追加する（`asyncio.StreamWriter.get_extra_info("peername")` から取得）。`transport` プロパティも追加し、常に `"h2"` を返す。`H3SessionWriter` の `transport` は常に `"h3"` を返す。
 - `h2.Server.__init__` に `allowed_origins: list[str] | None = None` を追加する。H3 と同じ origin 検証セマンティクス（`None` と空リストはどちらも全オリジンを受理）にする。
-- `src/webtransport/h3/client.py` と `src/webtransport/h2/client.py` に重複する `_parse_url` を `src/webtransport/_common.py` の `parse_wt_url` に集約する（Client 側からもこの関数を呼ぶだけ）。
+- `src/webtransport/h3/client.py` と `src/webtransport/h2/client.py` に重複する `_parse_url` を `src/webtransport/_wt_url.py` の `parse_wt_url` に集約する（Client 側からもこの関数を呼ぶだけ）。
 
 破壊的変更として、既存の `h3.Server` を使うユーザーはコールバック署名と送信メソッド呼び出しをすべて書き換える必要がある。`CHANGES.md` に `shiguredo-changelog` スキルの規約に沿って `[CHANGE]` エントリを記載する。
 
 ## 完了条件
 
 - `h3.Server` と `h2.Server` の 5 種のコールバック（`on_session_ready`, `on_session_closed`, `on_stream_data`, `on_stream_reset`, `on_datagram`）が完全に同一の署名を持ち、それぞれ Writer オブジェクトを受け取る
-- `h3.Server` / `h2.Server` の Writer が `src/webtransport/_common.py` の `SessionWriter` プロトコルを満たす（`typing.get_type_hints` や `isinstance` チェックで確認できる）
+- `h3.Server` / `h2.Server` の Writer が `src/webtransport/_session_writer.py` の `SessionWriter` プロトコルを満たす（`typing.get_type_hints` や `isinstance` チェックで確認できる）
 - `h2.Server.__init__` が `allowed_origins` を受け取り、origin 検証セマンティクスが `h3.Server` と一致する
-- `_parse_url` が `src/webtransport/_common.py` に集約され、`h3.Client` / `h2.Client` の重複コードが削除されている
+- `_parse_url` が `src/webtransport/_wt_url.py` に集約され、`h3.Client` / `h2.Client` の重複コードが削除されている
 - `CHANGES.md` に破壊的変更エントリが追加されている
 
 ## 解決方法
@@ -52,8 +52,9 @@
 
 - `src/webtransport/h3/server.py`（改修）
 - `src/webtransport/h2/server.py`（`SessionWriter` 拡張、`allowed_origins` 追加）
-- `src/webtransport/_common.py`（新設。`SessionWriter` Protocol と `parse_wt_url`）
-- `src/webtransport/h3/client.py`（`_parse_url` 削除、`_common.parse_wt_url` を利用）
+- `src/webtransport/_session_writer.py`（新設。`SessionWriter` Protocol）
+- `src/webtransport/_wt_url.py`（`parse_wt_url`）
+- `src/webtransport/h3/client.py`（`_parse_url` 削除、`_wt_url.parse_wt_url` を利用）
 - `src/webtransport/h2/client.py`（同上）
 - `examples/webtransport/h3_server.py`（新 API 反映）
 - `examples/webtransport/h2_server.py`（新 API 反映）

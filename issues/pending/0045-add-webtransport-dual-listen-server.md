@@ -56,7 +56,7 @@ await server.serve()  # 2 つの内部サーバーを並行起動、両方停止
 - 証明書 / 秘密鍵 / `allowed_origins` / `idle_timeout_ns` は両サーバーで共通に使う。
 - コールバック登録メソッド（`on_session_ready`, `on_session_closed`, `on_stream_data`, `on_stream_reset`, `on_datagram`）は登録時に内部の 2 サーバーに同じ関数を渡す。
 - `serve()` は内部 2 サーバーの `run()` を `asyncio.gather` で並行実行し、どちらかがエラー終了したら残りも停止させる（`asyncio.CancelledError` の伝播で明示的にキャンセル）。
-- `SessionWriter` は先行 issue で `src/webtransport/_common.py` に定義された `Protocol`。統合 Server はこれを再エクスポートするだけ。
+- `SessionWriter` は先行 issue で `src/webtransport/_session_writer.py` に定義された `Protocol`。統合 Server はこれを再エクスポートするだけ。
 
 ## 完了条件
 
@@ -73,7 +73,7 @@ await server.serve()  # 2 つの内部サーバーを並行起動、両方停止
 
 - `src/webtransport/__init__.py`（`Server`, `SessionWriter` を追加公開）
 - `src/webtransport/server.py`（新設。統合 Server 実装）
-- `src/webtransport/_common.py`（先行 issue で新設済み。ここでは変更しない想定）
+- `src/webtransport/_session_writer.py`（先行 issue で新設済み。ここでは変更しない想定）
 - `examples/webtransport/dual_server.py`（新設）
 - `tests/test_e2e_webtransport_dual.py`（新設。同一プロセスで h3 / h2 両方に接続してハンドラが同じ Writer 型を受けることを検証）
 - `skills/webtransport-py/SKILL.md`（統合 Server 節を追加）
