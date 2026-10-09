@@ -18,13 +18,13 @@ def _assert_payload_matches(actual: bytes, expected: bytes, label: str) -> None:
     """
     if actual == expected:
         return
-    common = min(len(actual), len(expected))
+    comparable_length = min(len(actual), len(expected))
     position = next(
-        (index for index in range(common) if actual[index] != expected[index]),
-        common,
+        (index for index in range(comparable_length) if actual[index] != expected[index]),
+        comparable_length,
     )
     start = max(0, position - 8)
-    end = min(common, position + 24)
+    end = min(comparable_length, position + 24)
     raise AssertionError(
         f"{label} が一致しません: 長さ expected={len(expected)} actual={len(actual)} "
         f"最初の不一致位置={position} "
