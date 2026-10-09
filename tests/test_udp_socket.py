@@ -1,4 +1,4 @@
-"""`webtransport._common` の受信ヘルパーのテスト
+"""`webtransport._udp_socket` の受信ヘルパーのテスト
 
 高レベル API (`quic` / `h3` / `http3` の Client / Server) の受信ループが
 共有する待機・受信ヘルパーを検証する。実ソケットを使い、モックは使わない。
@@ -9,7 +9,7 @@ import socket
 
 import pytest
 
-from webtransport._common import recv_datagram, wait_socket_readable
+from webtransport._udp_socket import recv_datagram, wait_socket_readable
 
 
 def _create_udp_pair() -> tuple[socket.socket, socket.socket, tuple[str, int]]:

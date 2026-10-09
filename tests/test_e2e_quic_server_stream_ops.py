@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import pytest
 
-from webtransport._common import recv_datagram
+from webtransport._udp_socket import recv_datagram
 from webtransport.quic import Client, Config, Connection, Event, EventType, Server
 
 # ピアのポンプ試行上限。1 回の試行で送信待ちの掃き出しと受信 1 パケットを行う

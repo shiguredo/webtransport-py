@@ -14,8 +14,8 @@ from conftest import _encode_wt_datagram
 
 from webtransport import h3 as h3_low
 from webtransport import quic
-from webtransport._common import recv_datagram
 from webtransport._h3_server import Server
+from webtransport._udp_socket import recv_datagram
 from webtransport.h3._error_codes import webtransport_code_to_http_code
 
 # pacing の期限待ちで送信を再試行する上限 (ナノ秒)。これを超える期限 (PTO 等) は
@@ -168,7 +168,7 @@ class _LowLevelClient:
         待機にはライブラリ本体と同じ recv_datagram を使う。
         asyncio.wait_for で loop.sock_recvfrom を包むと macOS の kqueue
         セレクタでパケットの読み取り可能通知が失われる
-        (src/webtransport/_common.py の wait_socket_readable 参照)。
+        (src/webtransport/_udp_socket.py の wait_socket_readable 参照)。
         """
         result = await recv_datagram(self._socket, 0.1)
         if result is None:

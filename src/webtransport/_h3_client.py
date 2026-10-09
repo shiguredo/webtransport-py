@@ -9,14 +9,9 @@ from typing import TYPE_CHECKING, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
-from webtransport._common import (
-    bind_http3_uni_streams,
-    destination_for_packet,
-    normalize_addr,
-    open_http3_uni_streams,
-    parse_wt_url,
-    recv_datagram,
-)
+from webtransport._h3_uni_streams import bind_http3_uni_streams, open_http3_uni_streams
+from webtransport._udp_socket import destination_for_packet, normalize_addr, recv_datagram
+from webtransport._wt_url import parse_wt_url
 from webtransport.exceptions import (
     ConnectFailedError,
     ConnectTimeoutError,
@@ -242,17 +237,17 @@ class Client:
         self._on_datagram = callback
 
     def _parse_url(self, url: str) -> tuple[str, int, str]:
-        """URL をパースする (実装は _common に集約)"""
+        """URL をパースする (実装は _wt_url に集約)"""
         return parse_wt_url(url)
 
-    # 実装は _common.normalize_addr に集約する (self を使わないため staticmethod)
+    # 実装は _udp_socket.normalize_addr に集約する (self を使わないため staticmethod)
     _normalize_addr = staticmethod(normalize_addr)
 
     def _destination_for_packet(
         self,
         packet: quic.Packet,
     ) -> tuple[str, int]:
-        """パケットの送信先アドレスを決める (実装は _common に集約)"""
+        """パケットの送信先アドレスを決める (実装は _udp_socket に集約)"""
         return destination_for_packet(packet, self._remote_addr, self._host, self._port)
 
     async def _send_pending(self) -> int:
@@ -307,7 +302,7 @@ class Client:
         待機には `recv_datagram` を使う。`asyncio.wait_for` で
         `loop.sock_recvfrom` を包むと、macOS の kqueue セレクタでタイム
         アウト時にパケットの読み取り可能通知が失われる
-        (src/webtransport/_common.py の `wait_socket_readable` 参照)。
+        (src/webtransport/_udp_socket.py の `wait_socket_readable` 参照)。
 
         Returns:
             受信したパケット数

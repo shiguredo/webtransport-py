@@ -8,7 +8,7 @@ import asyncio
 import ssl
 from typing import TYPE_CHECKING, Self
 
-from webtransport._common import normalize_addr
+from webtransport._udp_socket import normalize_addr
 from webtransport.webtransport_ext import h2 as h2_low
 
 if TYPE_CHECKING:

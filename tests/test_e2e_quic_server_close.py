@@ -17,7 +17,7 @@ from collections.abc import Callable
 
 import pytest
 
-from webtransport._common import recv_datagram
+from webtransport._udp_socket import recv_datagram
 from webtransport.quic import Client, Config, Connection, Server
 from webtransport.quic.exceptions import QuicApplicationError, QuicTransportErrorCode
 from webtransport.webtransport_ext.quic import ConnectionErrorType

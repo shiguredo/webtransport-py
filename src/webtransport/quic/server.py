@@ -8,11 +8,8 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Any, Self
 
-from webtransport._common import (
-    normalize_addr,
-    recv_datagram,
-    validate_cert_key_files,
-)
+from webtransport._tls_files import validate_cert_key_files
+from webtransport._udp_socket import normalize_addr, recv_datagram
 from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
@@ -196,7 +193,7 @@ class Server:
         """
         self._on_connection_closed = callback
 
-    # 実装は _common.normalize_addr に集約する (self を使わないため staticmethod)
+    # 実装は _udp_socket.normalize_addr に集約する (self を使わないため staticmethod)
     _normalize_addr = staticmethod(normalize_addr)
 
     async def start(self) -> None:
@@ -738,7 +735,7 @@ class Server:
             # 待機には recv_datagram を使う。asyncio.wait_for で
             # loop.sock_recvfrom を包むと、macOS の kqueue セレクタで
             # タイムアウト時にパケットの読み取り可能通知が失われる
-            # (src/webtransport/_common.py の wait_socket_readable 参照)
+            # (src/webtransport/_udp_socket.py の wait_socket_readable 参照)
             result = await recv_datagram(self._socket, self._wait)
             if result is not None:
                 data, raw_addr = result

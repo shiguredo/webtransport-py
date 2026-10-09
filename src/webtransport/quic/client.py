@@ -9,11 +9,7 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
-from webtransport._common import (
-    destination_for_packet,
-    normalize_addr,
-    recv_datagram,
-)
+from webtransport._udp_socket import destination_for_packet, normalize_addr, recv_datagram
 from webtransport.exceptions import WebTransportError
 from webtransport.quic.exceptions import quic_terminal_error
 from webtransport.webtransport_ext import quic as quic_low
@@ -321,14 +317,14 @@ class Client:
             )
         self._early_data_queue.clear()
 
-    # 実装は _common.normalize_addr に集約する (self を使わないため staticmethod)
+    # 実装は _udp_socket.normalize_addr に集約する (self を使わないため staticmethod)
     _normalize_addr = staticmethod(normalize_addr)
 
     def _destination_for_packet(
         self,
         packet: quic_low.Packet,
     ) -> tuple[str, int]:
-        """パケットの送信先アドレスを決める (実装は _common に集約)"""
+        """パケットの送信先アドレスを決める (実装は _udp_socket に集約)"""
         return destination_for_packet(packet, self._remote_addr, self._host, self._port)
 
     async def _send_pending(self) -> int:
@@ -375,7 +371,7 @@ class Client:
         待機には `recv_datagram` を使う。`asyncio.wait_for` で
         `loop.sock_recvfrom` を包むと、macOS の kqueue セレクタでタイム
         アウト時にパケットの読み取り可能通知が失われる
-        (src/webtransport/_common.py の `wait_socket_readable` 参照)。
+        (src/webtransport/_udp_socket.py の `wait_socket_readable` 参照)。
 
         Returns:
             受信したパケット数

@@ -78,8 +78,8 @@ def test_http2_only_argument_rejected_for_http3() -> None:
         )
 
 
-def test_common_arguments_are_forwarded() -> None:
-    """共通の引数が実装へ渡る"""
+def test_arguments_shared_by_both_http_versions_are_forwarded() -> None:
+    """HTTP/3 と HTTP/2 で共通の引数が実装へ渡る"""
     client = Client(
         url="https://localhost:4433/webtransport",
         http_version=HTTPVersion.HTTP2,
