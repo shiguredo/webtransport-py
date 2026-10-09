@@ -15,8 +15,6 @@ API からは観測できない (stop_sending / drain_session のテスト docst
 もテスト対象外。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

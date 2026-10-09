@@ -1,7 +1,5 @@
 """HTTP/3 の送信側拡張 API テスト"""
 
-from __future__ import annotations
-
 from conftest import _drain_events
 
 from webtransport import http3

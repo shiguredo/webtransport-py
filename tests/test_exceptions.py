@@ -7,8 +7,6 @@ draft の定義を直接照合し、`str()` がエラーコード名と理由を
 オブジェクトだけを使う。
 """
 
-from __future__ import annotations
-
 import pytest
 
 from webtransport import h2, h3, http2, http3, quic

@@ -10,8 +10,6 @@ WebTransport DevTools は現時点でも ":protocol: webtransport" で CONNECT �
   3.2)
 """
 
-from __future__ import annotations
-
 from conftest import _create_session_pair, _drain_events, _setup_connect
 
 from webtransport import h3

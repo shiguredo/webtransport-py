@@ -7,8 +7,6 @@ WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ�
 ストリームも含める。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _drain_events,

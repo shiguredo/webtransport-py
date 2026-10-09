@@ -13,8 +13,6 @@ WT_STOP_SENDING を複数回送出しないこと (Section 6.3 の MUST NOT) も
 (実セッションを使う。モックなし)。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

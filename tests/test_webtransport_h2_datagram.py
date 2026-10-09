@@ -11,8 +11,6 @@ MUST」と Section 3.4 の「セッション終了 = CONNECT ストリームの�
 実装ポリシーである。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

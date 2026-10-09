@@ -10,8 +10,6 @@ HTTP/3 は QUIC 上で動くため、QUIC 層のエラー (`webtransport.quic.ex
 しない (GOAWAY は graceful shutdown の通知であり、接続は継続できる)。
 """
 
-from __future__ import annotations
-
 import enum
 
 from webtransport.exceptions import WebTransportError, error_code_name

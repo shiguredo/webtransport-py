@@ -20,8 +20,6 @@ GOAWAY 受信後もデータグラムを送受信できること、GOAWAY ID が
 検証する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _drain_events,
     _encode_h3_goaway_frame,

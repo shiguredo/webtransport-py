@@ -17,8 +17,6 @@
 - スタブパッケージの絶対 import が解決不能な形で残っていないこと
 """
 
-from __future__ import annotations
-
 import ast
 import importlib
 import importlib.util

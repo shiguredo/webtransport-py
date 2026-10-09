@@ -5,8 +5,6 @@ TCP で接続し、`ssl` に `SSLContext` を渡すと TLS 上で動く。TLS �
 TLS でアプリケーションプロトコルを合意する手段として ALPN を MUST としている)。
 """
 
-from __future__ import annotations
-
 import asyncio
 import ssl as ssl_module
 from collections.abc import Awaitable, Callable

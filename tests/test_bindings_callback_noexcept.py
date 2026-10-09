@@ -22,8 +22,6 @@ BoringSSL へ登録する C コールバックに `noexcept` を付与するこ�
   を付けてはならない)
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 from typing import NamedTuple

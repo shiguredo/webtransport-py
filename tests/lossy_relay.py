@@ -12,8 +12,6 @@
 遅延・重複の注入は行わない (ドロップのみ)。
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from dataclasses import dataclass

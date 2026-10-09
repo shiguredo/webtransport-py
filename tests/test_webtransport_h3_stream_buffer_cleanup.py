@@ -1,7 +1,5 @@
 """WebTransport over HTTP/3 のリセット・セッション終了時の送信バッファ解放テスト"""
 
-from __future__ import annotations
-
 import pytest
 from conftest import _drain_events, _establish_session, _establish_two_sessions, _pump
 

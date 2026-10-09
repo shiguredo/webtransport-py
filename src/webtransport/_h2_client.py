@@ -4,8 +4,6 @@ asyncio と TCP/TLS を使用した高レベル WebTransport クライアント�
 Capsule Protocol (RFC 9297) を使用して WebTransport ストリームと DATAGRAM をサポート。
 """
 
-from __future__ import annotations
-
 import asyncio
 import socket
 import ssl

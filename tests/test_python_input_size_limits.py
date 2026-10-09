@@ -12,8 +12,6 @@ http2 の ping は opaque_data が 8 バイト固定という別の検証を持�
 (1 MiB 超) だけを検証する。
 """
 
-from __future__ import annotations
-
 import asyncio
 from collections.abc import Callable
 

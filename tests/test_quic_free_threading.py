@@ -5,8 +5,6 @@ GIL 無効環境で同一ハンドルへの同時アクセスを行い、プロ�
 オブジェクト単位の排他で保護するため、GIL 有効環境では自明に通過する
 """
 
-from __future__ import annotations
-
 import threading
 import time
 from collections.abc import Callable

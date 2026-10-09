@@ -7,8 +7,6 @@ Length 解釈直後に単一カプセルのペイロード上限 (既定 1 MiB) 
 Length を送出する手段が存在しないため)。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

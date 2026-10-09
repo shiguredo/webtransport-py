@@ -24,8 +24,6 @@ Stream ID すら含まれず「識別フィールドの終端に達していな�
 途中の場合は、後続のバイト列を待って蓄積する (RFC 9297 Section 3.2)。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,

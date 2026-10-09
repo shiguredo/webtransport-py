@@ -10,8 +10,6 @@ nghttp3 の CONNECT ストリームはストリームテーブルに残存する
 ばならない」) を検証する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _create_session_pair,
     _drain_events,

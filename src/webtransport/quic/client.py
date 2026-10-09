@@ -3,8 +3,6 @@
 asyncio と UDP を使用した高レベル QUIC クライアント実装。
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextvars
 import logging

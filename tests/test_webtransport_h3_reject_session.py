@@ -7,8 +7,6 @@ nghttp3 は非 2xx 応答を受信した CONNECT ストリームを reset する
 end_stream コールバックが発火せず、既存の FIN 経路では削除されない。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import _connect_session, _create_session_pair, _drain_events, _pump, _setup_connect
 

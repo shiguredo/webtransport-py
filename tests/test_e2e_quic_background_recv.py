@@ -5,8 +5,6 @@ connect() がバックグラウンド受信タスクを起動するため、run(
 継続・異常終了時の connect() への伝播を検証する。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

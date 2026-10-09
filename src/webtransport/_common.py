@@ -4,8 +4,6 @@
 ここへ集約する。公開 API ではないため、利用者は参照しないこと。
 """
 
-from __future__ import annotations
-
 import asyncio
 import os
 import socket

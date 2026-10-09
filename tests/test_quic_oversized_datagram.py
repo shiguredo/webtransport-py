@@ -6,8 +6,6 @@ larger than the max_datagram_frame_size value it has received from its peer」
 送出がブロックされないことを検証する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     CERTFILE,
     CLIENT_ADDR,

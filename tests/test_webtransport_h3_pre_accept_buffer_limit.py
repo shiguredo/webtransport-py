@@ -8,8 +8,6 @@ draft-ietf-webtrans-http3-16 Section 4.6 の MUST (受理前バッファの上�
 ストリームは上限の対象外になる。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _bind_session_streams,
     _drain_events,

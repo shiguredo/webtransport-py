@@ -13,8 +13,6 @@ HTTP/3 はセッションを閉じても QUIC 接続を閉じないため `run()
 `tests/test_e2e_webtransport_h3_low_level.py` が担う。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

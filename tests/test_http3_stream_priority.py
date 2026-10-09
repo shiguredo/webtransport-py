@@ -1,7 +1,5 @@
 """HTTP/3 の優先度制御 API テスト"""
 
-from __future__ import annotations
-
 from webtransport import http3
 
 

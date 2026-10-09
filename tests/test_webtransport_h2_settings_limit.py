@@ -6,8 +6,6 @@ HTTP/2 の SETTINGS 値は uint32 (RFC 9113 Section 6.5.1) のため、Config �
 2^32 - 1 の上限検査を行い、超過は ValueError にする境界を検証する。
 """
 
-from __future__ import annotations
-
 import pytest
 
 from webtransport import h2

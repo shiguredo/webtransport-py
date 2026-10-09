@@ -13,8 +13,6 @@ Server は受信した WT_CLOSE_SESSION の終了コード・理由をアプリ�
   レンジへリマップされてワイヤに載ること (同 Section 4.4 の MUST)
 """
 
-from __future__ import annotations
-
 import asyncio
 import socket
 

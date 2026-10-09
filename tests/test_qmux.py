@@ -6,8 +6,6 @@
 相手にする。
 """
 
-from __future__ import annotations
-
 from webtransport import qmux
 
 # dwnx の DWNX_ERR_DRAINING (dwnx.h)。ピアの CONNECTION_CLOSE を受信した後は

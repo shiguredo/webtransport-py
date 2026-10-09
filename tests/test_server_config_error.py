@@ -4,8 +4,6 @@
 検証する。実サーバーと実 UDP ソケットのみを使い、モックは使わない。
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import socket

@@ -4,8 +4,6 @@ draft-ietf-webtrans-http3-16 Section 4.4 / Figure 4 の変換を実装する。
 仕様が改訂された場合はこのモジュールを見直すこと。
 """
 
-from __future__ import annotations
-
 # WT_APPLICATION_ERROR レンジ (draft-16 Section 4.4 / Section 9.5)
 _WT_APPLICATION_ERROR_FIRST = 0x52E4A40FA8DB
 _WT_APPLICATION_ERROR_LAST = 0x52E5AC983162

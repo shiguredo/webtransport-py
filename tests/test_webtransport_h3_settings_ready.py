@@ -8,8 +8,6 @@ wt_enabled / enable_connect_protocol / h3_datagram を直接判定すること�
 検証する (draft-ietf-webtrans-http3-16 Section 3.1)。
 """
 
-from __future__ import annotations
-
 from conftest import _bind_session_streams, _drain_events, _pump
 
 from webtransport import h3

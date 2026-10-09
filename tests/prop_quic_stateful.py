@@ -8,8 +8,6 @@ issue 0146 (Config 値で assert に到達する経路) の回帰ピンとして
 Config の境界値でも abort しないことを併せて確認する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     CLIENT_ADDR,
     SERVER_ADDR,

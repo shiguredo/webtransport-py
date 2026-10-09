@@ -3,8 +3,6 @@
 asyncio と UDP を使用した高レベル HTTP/3 サーバー実装。
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import socket

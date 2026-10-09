@@ -16,8 +16,6 @@ Usage:
     uv run python scripts/normalize_stubs.py <stub-dir>
 """
 
-from __future__ import annotations
-
 import subprocess
 import sys
 from pathlib import Path

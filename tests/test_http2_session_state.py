@@ -1,7 +1,5 @@
 """HTTP/2 のセッション状態確認 API テスト"""
 
-from __future__ import annotations
-
 from conftest import (
     _create_http2_pair,
     _exchange_http2_settings,

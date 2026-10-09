@@ -5,8 +5,6 @@
 引数の検証だけを見る (実通信の検証は h3 / h2 の e2e テストが担う)。
 """
 
-from __future__ import annotations
-
 import pytest
 
 from webtransport import Client, HTTPVersion, h2

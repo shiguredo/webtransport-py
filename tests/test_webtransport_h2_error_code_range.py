@@ -8,8 +8,6 @@ StreamReset / StopSending が届く。終端状態や二重受信と同時に立
 範囲検証が先で、 WT_STREAM_STATE_ERROR ではなく WT_ERROR になる。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

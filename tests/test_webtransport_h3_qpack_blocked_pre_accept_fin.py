@@ -17,8 +17,6 @@ close_stream で解放する。
 解釈と保持を行う。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _accept_session,

@@ -5,8 +5,6 @@ GOAWAY 受信後も既存セッションが継続し、新規 CONNECT のみ抑�
 は送出手段が存在しないためワイヤ注入で再現する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

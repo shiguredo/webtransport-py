@@ -10,8 +10,6 @@
 開設を行い、送信側 (`close_stream`) から送出する。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

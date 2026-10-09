@@ -5,8 +5,6 @@
 と `on_connected` (クライアント) が発火する。
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import ssl

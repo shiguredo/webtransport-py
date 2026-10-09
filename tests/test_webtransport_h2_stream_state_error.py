@@ -14,8 +14,6 @@ MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ
 プレースホルダ (draft-15 Section 3.4)。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

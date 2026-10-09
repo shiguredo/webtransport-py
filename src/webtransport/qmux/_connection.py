@@ -8,8 +8,6 @@
 ため、送信側のコルーチンと受信ループは `asyncio.Lock` で排他する。
 """
 
-from __future__ import annotations
-
 import asyncio
 from collections.abc import Awaitable, Callable
 

@@ -1,7 +1,5 @@
 """HTTP/2 のメッセージング拡張 API テスト"""
 
-from __future__ import annotations
-
 from conftest import (
     _create_http2_pair,
     _drain_events,

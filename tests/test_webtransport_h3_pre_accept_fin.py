@@ -9,8 +9,6 @@ close_stream で後始末する (draft-ietf-webtrans-http3-16 Section 6 の
 セッション終了条件 1 つ目)。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _accept_session,

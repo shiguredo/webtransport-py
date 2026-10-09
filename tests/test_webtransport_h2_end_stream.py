@@ -29,8 +29,6 @@ PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) になるこ
 検証する。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,

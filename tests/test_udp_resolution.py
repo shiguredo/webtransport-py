@@ -4,8 +4,6 @@ localhost の解決順序によらず family 一致で接続できることを�
 (実ソケットを使う。モックなし)。解決順自体は環境依存のため表明しない。
 """
 
-from __future__ import annotations
-
 import asyncio
 import socket
 import time

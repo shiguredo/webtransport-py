@@ -1,7 +1,5 @@
 """WebTransport over HTTP/3 の ACK 通知による送信バッファ解放テスト"""
 
-from __future__ import annotations
-
 from conftest import _establish_session, _pump
 
 

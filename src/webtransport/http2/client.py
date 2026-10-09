@@ -3,8 +3,6 @@
 asyncio と TCP/TLS を使用した高レベル HTTP/2 クライアント実装。
 """
 
-from __future__ import annotations
-
 import asyncio
 import ssl
 from typing import TYPE_CHECKING, Self

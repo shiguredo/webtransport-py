@@ -7,8 +7,6 @@
 ピア側の STREAM_RESET イベント受信を確認する。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

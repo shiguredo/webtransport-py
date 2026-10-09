@@ -22,8 +22,6 @@
 - `stream_id` / `frame_type` / `status_code`: 層ごとに意味を持つ追加情報
 """
 
-from __future__ import annotations
-
 import enum
 
 __all__ = [

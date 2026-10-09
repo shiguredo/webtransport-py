@@ -4,8 +4,6 @@ QMux 層で起きた失敗を表す。dwnx のライブラリエラーコード�
 で名前に、`Connection.strerror` で dwnx 自身のメッセージに変換できる。
 """
 
-from __future__ import annotations
-
 import enum
 
 from webtransport.exceptions import WebTransportError

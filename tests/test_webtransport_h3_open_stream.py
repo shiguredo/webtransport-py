@@ -11,8 +11,6 @@ nghttp3 の CONNECT ストリームはストリームテーブルに残存し wt
 nghttp3 側が拒否するため nghttp3 更新時のリグレッション防御として機能する。
 """
 
-from __future__ import annotations
-
 from conftest import _create_session_pair, _establish_session, _pump
 
 

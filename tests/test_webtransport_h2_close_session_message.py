@@ -19,8 +19,6 @@ Section 6.12 の "The message takes up the remainder of the capsule" に下限�
 従来どおり受理される (対照)。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,

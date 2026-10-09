@@ -4,8 +4,6 @@ UDP リレー器具で最初の 1 パケットを落とし、PTO 再送による
 (実ソケットを使う。モックなし)。
 """
 
-from __future__ import annotations
-
 import asyncio
 import socket
 import time

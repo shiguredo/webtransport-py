@@ -9,8 +9,6 @@ ID 宛の send_datagram がデータグラムを送出し、receive_datagram が
 (SessionClosed) の意味論が合わないため黙って削除する。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _connect_session,

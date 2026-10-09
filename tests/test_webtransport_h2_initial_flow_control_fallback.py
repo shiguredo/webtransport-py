@@ -9,8 +9,6 @@ open_stream が -1 を返す。カプセル受信で送信クレジットが前�
 ワイヤ注入で検証する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _encode_capsule,

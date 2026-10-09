@@ -13,8 +13,6 @@ reject_session 2xx 送出経路はデータプロバイダ未登録のため修�
 されないことからテスト対象外。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
