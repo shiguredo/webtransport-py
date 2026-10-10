@@ -492,6 +492,8 @@ record = client.pending_record
 
 - 3.14
 - 3.14t
+- 3.15
+- 3.15t
 
 ## プラットフォーム
 

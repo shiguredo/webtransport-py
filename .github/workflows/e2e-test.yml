@@ -16,7 +16,11 @@ jobs:
           - name: macos-26_arm64
             runs_on: macos-26
         python_version:
+          # ブラウザ E2E は拡張モジュールの Python バージョン依存が小さいため、
+          # GIL ありの対応バージョンのみを対象にする (free-threading を含む全
+          # バージョンの検証は test.yml のマトリクスで行う)
           - "3.14"
+          - "3.15"
     runs-on: ${{ matrix.platform.runs_on }}
     timeout-minutes: 30
     steps:

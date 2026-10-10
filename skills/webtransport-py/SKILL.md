@@ -15,7 +15,7 @@ Sans I/O アーキテクチャを採用した WebTransport の Python ライブ�
 - 二層 API 設計
   - Sans I/O API: プロトコル処理のみを提供する低レベル API (C 拡張)
   - asyncio API: すぐに使える高レベルなクライアント / サーバー実装
-- Python Free-Threading (3.14t) 対応
+- Python Free-Threading (3.14t / 3.15t) 対応
 
 ## インストールと動作環境
 
@@ -25,7 +25,7 @@ uv add webtransport-py
 
 - 配布名は `webtransport-py`、import 名は `webtransport`
 - 実行時依存はゼロ
-- Python 3.14 / 3.14t
+- Python 3.14 / 3.14t / 3.15 / 3.15t
 - Ubuntu 24.04 LTS x86_64 / arm64、macOS 26 arm64
 
 ## モジュール構成
