@@ -1,7 +1,7 @@
 # Python 3.15 / 3.15t を 3.14 と併存でサポートする
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/add-python-315-support
 
 ## 目的
@@ -34,3 +34,12 @@ MOQT を扱う利用側 (moqt-py) が新しい Python へ追従する際、webtr
 - 3.15 / 3.15t で全テストが通過する
 - CI のマトリクスが wheel のビルド・テスト・公開の 4 バージョン分と、ブラウザ E2E の 2 バージョン分を含む
 - prek のフック (ruff / ty / pytest など) がすべて通過する
+
+## 解決方法
+
+- ビルド構成の変更は不要だった。nanobind 3.1.0 と scikit-build-core 1.1.1 により 3.15 / 3.15t の wheel がビルドでき、3.15t でビルドした拡張モジュールを import しても GIL は無効のまま (`sys._is_gil_enabled()` が `False`) だった
+- `pyproject.toml` の classifier に `Programming Language :: Python :: 3.15` を追加した。`requires-python` は併存のため `>=3.14` のままとした
+- `.github/workflows/wheel.yml` の `build_ubuntu` / `build_macos` / `publish_wheel` と `.github/workflows/test.yml` の `test_ubuntu` / `test_macos` のマトリクスを 4 バージョンへ広げ、`.github/workflows/e2e-test.yml` の `test_browser` は GIL ありの 3.14 / 3.15 を対象にした
+- `build_no_ssize_t` は非推奨 nghttp2 API のコンパイル回帰検出であり Python バージョンに依存しないため 3.14 のみを維持した
+- README と `skills/webtransport-py/SKILL.md` の対応バージョン表記を 3.14 / 3.14t / 3.15 / 3.15t に更新した
+- 検証: 3.15 / 3.15t のローカル全テスト 1464 件が通過し、`prek run --all-files` も通過した。push 後の wheel ワークフローでは 3.15 / 3.15t を含むビルド 12 ジョブと wheel を使うテスト 20 ジョブ、e2e-test ワークフローでは 3.14 / 3.15 の 2 ジョブがすべて成功した
