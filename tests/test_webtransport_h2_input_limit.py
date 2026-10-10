@@ -7,8 +7,6 @@ nb::bytes から std::vector へコピーする Python 境界の 3 経路
 同値のローカル防御である。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import _connect_h2_session, _create_h2_session_pair, _h2_pump
 

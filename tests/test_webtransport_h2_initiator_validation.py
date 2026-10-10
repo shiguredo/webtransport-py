@@ -8,8 +8,6 @@ QUIC 互換ストリーム ID (Bit 0 = initiator、Bit 1 = 方向) の検証を
 存在しないため)。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

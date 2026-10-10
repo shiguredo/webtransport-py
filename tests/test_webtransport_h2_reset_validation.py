@@ -6,8 +6,6 @@ reset_stream の Reliable Size は送信済みバイト数と一致しなけれ�
 16) の検査と、存在しないストリーム ID への送出抑止を検証する。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _connect_h2_session,

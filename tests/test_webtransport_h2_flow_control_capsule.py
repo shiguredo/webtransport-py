@@ -20,8 +20,6 @@ Section 6.8 の WT_DATA_BLOCKED も対象に含む。Maximum Data (可変長整�
 tests/test_webtransport_h2_capsule_trailing_bytes.py が担う。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _connect_h2_session,

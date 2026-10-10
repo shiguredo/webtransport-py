@@ -6,8 +6,6 @@ max_datagram_frame_size による DATAGRAM 広告の制御を検証する。DATA
 観測する。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

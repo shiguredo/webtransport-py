@@ -3,8 +3,6 @@
 WebTransport over HTTP/3 側と対称の形式で検証する。
 """
 
-from __future__ import annotations
-
 from webtransport import http3
 
 

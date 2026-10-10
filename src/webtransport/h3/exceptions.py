@@ -11,8 +11,6 @@ draft-ietf-webtrans-http3-16 が定義するセッションの拒否と終了を
 (Section 4.4 の WT_APPLICATION_ERROR レンジへの載せ替え前の値)。
 """
 
-from __future__ import annotations
-
 import enum
 
 from webtransport.exceptions import WebTransportError, error_code_name

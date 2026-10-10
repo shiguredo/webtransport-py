@@ -13,8 +13,6 @@ WebTransport のセッションエラーは HTTP/2 の接続状態を変えな�
 (draft-ietf-webtrans-http2-15 Section 3.4)。
 """
 
-from __future__ import annotations
-
 import enum
 
 from webtransport.exceptions import WebTransportError, error_code_name

@@ -1,7 +1,5 @@
 """QUIC 証明書検証 / 0-RTT / Connection Migration / パケットロス の e2e テスト"""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 

@@ -1,7 +1,5 @@
 """HTTP/3 テスト"""
 
-from __future__ import annotations
-
 from conftest import _drain_events, _encode_varint
 
 from webtransport import http3

@@ -4,8 +4,6 @@ TCP で待ち受け、`ssl` に `SSLContext` を渡すと TLS 上で動く。TLS
 `alpn_protocols` が必須である (draft-ietf-quic-qmux-02 Section 8.1)。
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import ssl as ssl_module

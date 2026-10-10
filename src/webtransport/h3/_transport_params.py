@@ -1,7 +1,5 @@
 """WebTransport over HTTP/3 の transport parameter 検証ヘルパー"""
 
-from __future__ import annotations
-
 from webtransport import quic
 
 

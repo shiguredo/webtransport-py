@@ -29,7 +29,7 @@ http3 の組の応答経路:
 
 単体で失敗する例:
 
-- `examples/quic/server.py` にだけ証明書生成の案内が無い。他の 4 本の server 例は同一文面で `openssl` のコマンドを案内している。`src/webtransport/_common.py` の `validate_cert_key_files` が起動時に `FileNotFoundError` を上げるため必ず踏む
+- `examples/quic/server.py` にだけ証明書生成の案内が無い。他の 4 本の server 例は同一文面で `openssl` のコマンドを案内している。`src/webtransport/_tls_files.py` の `validate_cert_key_files` が起動時に `FileNotFoundError` を上げるため必ず踏む
 
 同時起動できない例:
 

@@ -9,8 +9,6 @@ QPACK ブロック中 DATA pipeline による SIGABRT (3 ステップの状態�
 不変条件を検証する回帰ピンである。
 """
 
-from __future__ import annotations
-
 from conftest import _drain_events, _pump
 from hypothesis import settings
 from hypothesis import strategies as st

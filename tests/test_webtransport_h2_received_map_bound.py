@@ -7,8 +7,6 @@ DoS への防御 (固定上限の安全弁) を検証する。上限超過の新
 イベント通知・クレジット反映は維持される。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

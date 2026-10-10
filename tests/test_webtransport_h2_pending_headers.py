@@ -28,8 +28,6 @@ nghttp2 の分類は次のとおりである (一次資料と実測)。
 完了したブロックのエントリはストリーム終了時まで残る (別の対応)。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

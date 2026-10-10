@@ -6,8 +6,6 @@ nb::bytes から std::vector へコピーする Python 境界の 4 経路
 (ValueError) になる。上限判定は > のため 1 MiB ちょうどは通る。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import _drain_events, _encode_varint, _establish_session, _pump
 

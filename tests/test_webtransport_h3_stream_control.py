@@ -1,7 +1,5 @@
 """WebTransport over HTTP/3 のストリーム・接続制御 API テスト"""
 
-from __future__ import annotations
-
 from conftest import _establish_session, _pump
 
 from webtransport import h3

@@ -6,8 +6,6 @@ API (`webtransport.Server` / `webtransport.Client`) を使い、セッション�
 経由の送信が両プロトコルで動くことを確認する。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

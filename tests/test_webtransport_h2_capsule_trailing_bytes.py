@@ -19,8 +19,6 @@ WT_CLOSE_SESSION / PADDING) には適用しない。
 カプセルは形の検証が意味論検証 (減少値・方向・ストリーム状態) より先に走る。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,

@@ -5,8 +5,6 @@
 モックなし)。サーバーの接続管理は内部状態で直接確認する
 """
 
-from __future__ import annotations
-
 import asyncio
 import os
 import socket

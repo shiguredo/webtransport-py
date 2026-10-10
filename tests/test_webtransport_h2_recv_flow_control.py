@@ -14,8 +14,6 @@ send_stream_data は送信側クレジットで塞がれ、超過分を送れな
 恒久的に停止する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,

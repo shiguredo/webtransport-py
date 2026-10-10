@@ -4,8 +4,6 @@
 低レベルの `Http3Connection` へ読み取り中断を伝えることを検証する。
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import time

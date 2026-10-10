@@ -5,8 +5,6 @@ WebTransport は HTTP/3 (QUIC 上) と HTTP/2 (TCP + TLS 上の Capsule Protocol
 enum をここに置く。
 """
 
-from __future__ import annotations
-
 import enum
 
 __all__ = ["HTTPVersion"]

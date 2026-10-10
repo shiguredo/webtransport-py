@@ -7,8 +7,6 @@ pacing 間隔は平滑化 RTT に比例するため、キュー満載のまま�
 大きくしてから観測する。
 """
 
-from __future__ import annotations
-
 import time
 
 from conftest import (

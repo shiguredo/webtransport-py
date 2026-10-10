@@ -6,8 +6,6 @@ WebTransport over HTTP/3 と WebTransport over HTTP/2 を `HTTPVersion` enum で
 `webtransport.h3.Server` / `webtransport.h2.Server` のハンドルへ降りて呼ぶ。
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any, Self
 
 from webtransport.exceptions import WebTransportError

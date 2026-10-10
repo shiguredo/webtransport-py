@@ -12,8 +12,6 @@ Section 6 に従う」と、データグラムは再送されず配信保証が�
 楽観的送信が妨げられないことの回帰防止も行う。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _connect_session,

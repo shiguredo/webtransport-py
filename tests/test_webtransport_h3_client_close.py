@@ -13,8 +13,6 @@ Server は受信した WT_CLOSE_SESSION の終了コード・理由をアプリ�
   レンジへリマップされてワイヤに載ること (同 Section 4.4 の MUST)
 """
 
-from __future__ import annotations
-
 import asyncio
 import socket
 
@@ -22,12 +20,9 @@ import pytest
 
 from webtransport import h3 as h3_low
 from webtransport import quic
-from webtransport._common import (
-    bind_http3_uni_streams,
-    open_http3_uni_streams,
-    recv_datagram,
-)
 from webtransport._h3_client import Client
+from webtransport._h3_uni_streams import bind_http3_uni_streams, open_http3_uni_streams
+from webtransport._udp_socket import recv_datagram
 
 # 待機の上限 (秒)。テスト全体は pytest-timeout の 30 秒で打ち切られるため、
 # 個々の待機はこの上限で必ず終わらせる
@@ -271,7 +266,7 @@ class _LowLevelServer:
 
         待機には recv_datagram を使う。asyncio.wait_for で loop.sock_recvfrom を
         包むと macOS の kqueue セレクタでパケットの読み取り可能通知が失われる
-        (src/webtransport/_common.py の wait_socket_readable 参照。
+        (src/webtransport/_udp_socket.py の wait_socket_readable 参照。
         _LowLevelClient._receive と同じ理由)。
         """
         self._running = True

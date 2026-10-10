@@ -1,7 +1,5 @@
 """HTTP/2 テスト"""
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _create_http2_pair,

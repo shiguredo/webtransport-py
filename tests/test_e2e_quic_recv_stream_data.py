@@ -6,8 +6,6 @@ return・ゼロ長 FIN・idle / overall タイムアウト・接続終了から�
 を対象とする。
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

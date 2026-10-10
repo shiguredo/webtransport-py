@@ -17,8 +17,6 @@ TLS アラート由来のコード (CRYPTO_ERROR 範囲)、RFC 9368 のバージ
 入る。
 """
 
-from __future__ import annotations
-
 import enum
 from typing import TYPE_CHECKING
 

@@ -7,8 +7,6 @@ nghttp3 は書き込み側を生存とみなし、`nghttp3_conn_writev_stream` �
 MUST と定めるため、そのデータは破棄される)。
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import time

@@ -3,8 +3,6 @@
 draft-ietf-webtrans-http3-16 Section 4.4 / Figure 4 の変換と配信整形を検証する。
 """
 
-from __future__ import annotations
-
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st

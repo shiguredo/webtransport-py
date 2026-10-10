@@ -4,8 +4,6 @@
 実時間の分離は Sans-IO では検証できないため e2e 形式とする。
 """
 
-from __future__ import annotations
-
 import asyncio
 import time
 

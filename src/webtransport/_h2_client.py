@@ -4,14 +4,12 @@ asyncio と TCP/TLS を使用した高レベル WebTransport クライアント�
 Capsule Protocol (RFC 9297) を使用して WebTransport ストリームと DATAGRAM をサポート。
 """
 
-from __future__ import annotations
-
 import asyncio
 import socket
 import ssl
 from typing import TYPE_CHECKING, Literal, Self
 
-from webtransport._common import parse_wt_url
+from webtransport._wt_url import parse_wt_url
 from webtransport.exceptions import ConnectFailedError, ConnectTimeoutError, WebTransportError
 from webtransport.h2.exceptions import (
     WebTransportProtocolError,
@@ -240,7 +238,7 @@ class Client:
         self._on_goaway = callback
 
     def _parse_url(self, url: str) -> tuple[str, int, str]:
-        """URL をパースする (実装は _common に集約)"""
+        """URL をパースする (実装は _wt_url に集約)"""
         return parse_wt_url(url)
 
     async def _send_pending(self) -> None:

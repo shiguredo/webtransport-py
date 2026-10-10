@@ -22,8 +22,6 @@ session is established when the server sends a 2xx response」により、非 2x
 リセット済みストリーム) に ERROR イベントが発火することを検証する。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import (
     _create_h2_http2_pair,

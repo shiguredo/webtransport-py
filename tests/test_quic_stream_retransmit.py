@@ -6,8 +6,6 @@
 規則的に落としても内容一致することを決定的に検証する。
 """
 
-from __future__ import annotations
-
 import time
 
 import pytest

@@ -9,8 +9,6 @@ HTTP/2 は TLS over TCP 上で動くため、ハンドシェイクの失敗は
 しない (接続を終わらせず、同じ接続で回復できるためである)。
 """
 
-from __future__ import annotations
-
 import enum
 
 from webtransport.exceptions import WebTransportError, error_code_name

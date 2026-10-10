@@ -7,8 +7,6 @@ message MUST do so at a UTF-8 character boundary」を検証する。送信側�
 トリミングはワイヤ部分列チェック、受信側のリセットはイベント列で観測する。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _create_session_pair,
     _drain_events,

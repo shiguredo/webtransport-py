@@ -8,8 +8,6 @@ RFC 9110 Section 15.5.6 の MUST に従い、405 には Allow: CONNECT を付け
 Event には headers がないため)。
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import _create_h3_http3_pair, _drain_events, _h3_http3_pump
 

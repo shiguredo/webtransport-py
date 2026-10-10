@@ -20,8 +20,6 @@ WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアント
 状態のため公開 API から観測できないことからテスト対象外。
 """
 
-from __future__ import annotations
-
 from conftest import (
     _connect_h2_session,
     _create_h2_session_pair,
