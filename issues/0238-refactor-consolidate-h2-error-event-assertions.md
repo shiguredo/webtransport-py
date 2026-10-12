@@ -1,7 +1,7 @@
 # h2 のテストで WT_STREAM_STATE_ERROR の Error イベントを検証する表明をヘルパに集約する
 
 - Created: 2026-09-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-consolidate-h2-error-event-assertions
 - Polished: 2026-10-03
 - Updated: 2026-10-05
@@ -81,3 +81,11 @@
 - ヘルパの検証内容は「Error イベントが 1 件だけ通知される・`error_code` が WT_STREAM_STATE_ERROR・
   `stream_id` が期待値」の 3 点を維持する
 - 全テストが通過する
+
+## 解決方法
+
+- `_assert_error_event` を `_assert_state_error_event(events, stream_id)` に改名し、`server` ではなく `_drain_events` 済みのイベントリストと期待する `stream_id` を受け取る形にした。エラーコードは WT_STREAM_STATE_ERROR 固定とした
+- 列挙した 8 箇所のインラインの絞り込みと表明をヘルパ呼び出しへ移行した。`stream_id` を表明していなかった 2 箇所 (`test_wt_stream_after_fin_sends_state_error` / `test_wt_stream_flow_control_excess_on_terminal_stream_sends_state_error`) もヘルパへ移行し、3 点検証になった
+- 2 回目の WT_STOP_SENDING 系の 3 箇所は、1 回の `_drain_events` の結果から STOP_SENDING と ERROR を検証する形を維持したまま、ERROR の表明だけをヘルパへ移した
+- ファイル内に `h2.EventType.ERROR` で絞り込むインラインの表明は残っていない (ヘルパ定義を除く)
+- `tests/test_webtransport_h2_stream_state_error.py` の全 34 テストが通過することを確認した
