@@ -2,9 +2,9 @@
 
 既存の `prop_*.py` は「新規未接続オブジェクト 1 個」または「1 回の
 ハンドシェイク」に対する操作しか検証しておらず、確立済みペアへの API
-呼び出し系列を駆動する property test が無かった。そのため issue 0145 の
-QPACK ブロック中 DATA pipeline による SIGABRT (3 ステップの状態遷移で
-発火) を 136 個の property test が見逃した。本ファイルは
+呼び出し系列を駆動する property test が無かった。そのため QPACK ブロック中
+DATA pipeline による SIGABRT (3 ステップの状態遷移で発火) を 136 個の
+property test が見逃した。本ファイルは
 `RuleBasedStateMachine` で呼び出し系列を生成し、abort しないことと
 不変条件を検証する回帰ピンである。
 """
@@ -155,7 +155,7 @@ class H3EstablishedPairMachine(RuleBasedStateMachine):
 
     @invariant()
     def session_closed_fires_at_most_once(self) -> None:
-        """SessionClosed が side ごとに二重発火しない (0145 の回帰ピン)
+        """SessionClosed が side ごとに二重発火しない
 
         QPACK ブロック中に DATA / FIN がパイプラインされた経路でも、
         セッション終了通知は高々 1 回である。
@@ -167,7 +167,7 @@ class H3EstablishedPairMachine(RuleBasedStateMachine):
     def no_error_events_for_valid_operations(self) -> None:
         """正当な API 操作系列では ERROR イベントが積まれない
 
-        issue 0145 のクラッシュ経路は「正当なワイヤ列で発火する」もので
+        クラッシュ経路は「正当なワイヤ列で発火する」もので
         あったため、正しい API 呼び出し系列でエラーイベントが観測されたら
         回帰として失敗させる。
         """

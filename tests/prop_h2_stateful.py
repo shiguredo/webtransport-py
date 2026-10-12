@@ -3,9 +3,9 @@
 既存の `prop_*.py` は「新規未接続オブジェクト 1 個」または「1 回の
 ハンドシェイク」に対する操作しか検証しておらず、確立済みペアへの API
 呼び出し系列を駆動する property test が無かった (`prop_h3_stateful.py` と
-対)。session の寿命・フロー制御クレジット・カプセルバッファ上限に関する
-既知バグ (0156 / 0157 / 0158 / 0159) の回帰ピンとして、確立済みペアへの
-操作系列で abort せず不変条件が保たれることを検証する。
+対)。session の寿命・フロー制御クレジット・カプセルバッファ上限の扱いを
+誤ると確立済みペアへの操作で abort しうる。その回帰ピンとして、確立済み
+ペアへの操作系列で abort せず不変条件が保たれることを検証する。
 """
 
 from conftest import _connect_h2_session, _create_h2_session_pair, _drain_events, _h2_pump
@@ -101,7 +101,7 @@ class H2EstablishedPairMachine(RuleBasedStateMachine):
 
     @invariant()
     def send_credit_is_monotonic_within_window(self) -> None:
-        """残クレジットが窓を超えて負にならない (0156 の回帰ピン)
+        """残クレジットが窓を超えて負にならない
 
         `get_send_credit` は枯渇時 0 を返し、単調に減ることはあっても
         対向の広告値を超えて増えることはない。

@@ -774,7 +774,7 @@ async def test_server_large_response_throughput(test_certificates):
         assert stream_ended is True
         # drain 化前は 13 秒以上かかっていた。CI の負荷変動を考慮して 5 秒を
         # 上限にする (実測は 1 秒未満)
-        assert elapsed < 5.0, f"large response took {elapsed:.2f}s"
+        assert elapsed < 5.0, f"大容量レスポンスに {elapsed:.2f} 秒かかりました"
     finally:
         client_task.cancel()
         await asyncio.gather(client_task, return_exceptions=True)

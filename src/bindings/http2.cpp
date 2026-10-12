@@ -1005,7 +1005,7 @@ nghttp2_ssize Http2Connection::data_source_read_callback(
 void bind_http2(nb::module_& m) {
   auto http2_m = m.def_submodule("http2", "HTTP/2 protocol (nghttp2)");
 
-  // Http2Config
+  // Http2Config のバインディング
   nb::class_<Http2Config>(http2_m, "Config", "HTTP/2 設定")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_rw("initial_window_size", &Http2Config::initial_window_size,
@@ -1020,7 +1020,7 @@ void bind_http2(nb::module_& m) {
       .def_rw("no_rfc7540_priorities", &Http2Config::no_rfc7540_priorities,
               "SETTINGS_NO_RFC7540_PRIORITIES を送信するか");
 
-  // Http2EventType
+  // Http2EventType のバインディング
   nb::enum_<Http2EventType>(http2_m, "EventType", "HTTP/2 イベント種別")
       .value("HEADERS", Http2EventType::Headers)
       .value("DATA", Http2EventType::Data)
@@ -1035,7 +1035,7 @@ void bind_http2(nb::module_& m) {
       .value("INFORMATIONAL", Http2EventType::Informational)
       .value("TRAILERS", Http2EventType::Trailers);
 
-  // Http2Event
+  // Http2Event のバインディング
   nb::class_<Http2Event>(http2_m, "Event", "HTTP/2 イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_ro("type", &Http2Event::type, "イベント種別")
@@ -1067,7 +1067,7 @@ void bind_http2(nb::module_& m) {
       .def_ro("window_size_increment", &Http2Event::window_size_increment,
               "WINDOW_UPDATE の増分値 (RFC 9113 Section 6.9)");
 
-  // Http2Connection
+  // Http2Connection のバインディング
   nb::class_<Http2Connection>(http2_m, "Connection",
                               "HTTP/2 コネクション (Sans-IO)")
       .def_static(

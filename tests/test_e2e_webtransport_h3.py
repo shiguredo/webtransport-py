@@ -2597,9 +2597,8 @@ async def test_server_accepts_client_without_reset_stream_at(
 async def test_connect_timeout_on_blackhole():
     """応答が返らない UDP 宛先に対して connect() が ConnectTimeoutError を送出することを確認する
 
-    前提: blackhole IP (10.255.255.1) は issue の完了条件が例示する
-    ルーティングされるが応答を返さないアドレスである (経路の無い環境では
-    到達不能系の例外になり得る)。
+    前提: blackhole IP (10.255.255.1) は、ルーティングはされるが応答を
+    返さないアドレスである (経路の無い環境では到達不能系の例外になり得る)。
     期待値: timeout=1.0 で 1 秒強で ConnectTimeoutError が送出される。
     """
     from webtransport._h3_client import Client

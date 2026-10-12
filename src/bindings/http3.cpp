@@ -664,8 +664,8 @@ std::vector<std::pair<std::string, bool>>
 Http3Connection::get_required_streams() const {
   // HTTP/3 は単方向ストリームを 3 本必要とする
   // control (server -> client または client -> server)
-  // qpack encoder
-  // qpack decoder
+  // QPACK エンコーダー
+  // QPACK デコーダー
   return {
       {"control", false},        // false = 単方向
       {"qpack_encoder", false},  // false = 単方向
@@ -1229,7 +1229,7 @@ nghttp3_ssize Http3Connection::read_data_cb(nghttp3_conn* conn,
 void bind_http3(nb::module_& m) {
   auto http3_m = m.def_submodule("http3", "HTTP/3 protocol (nghttp3)");
 
-  // Http3Config
+  // Http3Config のバインディング
   nb::class_<Http3Config>(http3_m, "Config", "HTTP/3 設定")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_rw("max_field_section_size", &Http3Config::max_field_section_size,
@@ -1245,7 +1245,7 @@ void bind_http3(nb::module_& m) {
               "HTTP/3 Datagram 有効化")
       .def_rw("is_server", &Http3Config::is_server, "サーバーモード");
 
-  // Http3EventType
+  // Http3EventType のバインディング
   nb::enum_<Http3EventType>(http3_m, "EventType", "HTTP/3 イベント種別")
       .value("HEADERS", Http3EventType::Headers)
       .value("DATA", Http3EventType::Data)
@@ -1257,7 +1257,7 @@ void bind_http3(nb::module_& m) {
       .value("TRAILERS", Http3EventType::Trailers)
       .value("ERROR", Http3EventType::Error);
 
-  // Http3Event
+  // Http3Event のバインディング
   nb::class_<Http3Event>(http3_m, "Event", "HTTP/3 イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_ro("type", &Http3Event::type, "イベント種別")
@@ -1275,7 +1275,7 @@ void bind_http3(nb::module_& m) {
               "Error イベントのエラーメッセージ (他イベントでは空)")
       .def_ro("push_id", &Http3Event::push_id, "Push ID");
 
-  // Http3Connection
+  // Http3Connection のバインディング
   nb::class_<Http3Connection>(http3_m, "Connection",
                               "HTTP/3 コネクション (Sans-IO)")
       .def_static(

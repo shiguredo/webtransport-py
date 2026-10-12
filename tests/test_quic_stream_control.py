@@ -175,7 +175,7 @@ def test_keep_alive_timeout():
     assert timeout <= 1_000_000_000
 
     # 期限超過後に handle_timeout → send() で PING が送出され、
-    # ピア側の ping_recv (0014 の接続統計) が増加する
+    # ピア側の ping_recv (接続統計) が増加する
     ping_recv_before = server.ping_recv
     time.sleep(1.1)
     client.handle_timeout()

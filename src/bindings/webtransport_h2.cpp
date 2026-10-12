@@ -539,7 +539,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
                                        size_t length) {
   size_t offset = 0;
 
-  // Stream ID
+  // ストリーム ID
   auto stream_id_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
@@ -548,7 +548,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   auto [stream_id, stream_id_len] = *stream_id_result;
   offset += stream_id_len;
 
-  // Error Code
+  // エラーコード
   auto error_code_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!error_code_result) {
@@ -566,7 +566,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     return;
   }
 
-  // Reliable Size
+  // 信頼済みサイズ
   auto reliable_size_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!reliable_size_result) {
@@ -713,7 +713,7 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
                                        size_t length) {
   size_t offset = 0;
 
-  // Stream ID
+  // ストリーム ID
   auto stream_id_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
@@ -722,7 +722,7 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   auto [stream_id, stream_id_len] = *stream_id_result;
   offset += stream_id_len;
 
-  // Error Code
+  // エラーコード
   auto error_code_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!error_code_result) {
@@ -843,7 +843,7 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
                                           size_t length) {
   size_t offset = 0;
 
-  // Stream ID
+  // ストリーム ID
   auto stream_id_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
@@ -852,7 +852,7 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   auto [stream_id, stream_id_len] = *stream_id_result;
   offset += stream_id_len;
 
-  // Max Stream Data
+  // 最大ストリームデータ
   auto max_data_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!max_data_result) {
@@ -911,8 +911,8 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   } else {
     // カプセル未受信なら SETTINGS / WebTransport-Init の初期値が
     // 「前回受信値」 (draft-15 Section 6.6)
-    // Bit 0: initiator (0 = client, 1 = server)
-    // Bit 1: directionality (0 = bidi, 1 = uni)
+    // ビット 0: 開始側 (0 = クライアント, 1 = サーバー)
+    // ビット 1: 方向性 (0 = 双方向, 1 = 単方向)
     bool is_unidirectional = (stream_id & 0x02) != 0;
     bool is_local = ((stream_id & 0x01) != 0) == is_server_;
     previous =
@@ -1000,7 +1000,7 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
                                               size_t length) {
   size_t offset = 0;
 
-  // Stream ID
+  // ストリーム ID
   auto stream_id_result =
       read_capsule_varint(session_id, payload + offset, length - offset);
   if (!stream_id_result) {
@@ -1421,8 +1421,8 @@ uint64_t H2Session::allocate_stream_id(int32_t session_id,
   }
 
   // QUIC 互換ストリーム ID
-  // Bit 0: initiator (0 = client, 1 = server)
-  // Bit 1: directionality (0 = bidi, 1 = uni)
+  // ビット 0: 開始側 (0 = クライアント, 1 = サーバー)
+  // ビット 1: 方向性 (0 = 双方向, 1 = 単方向)
   uint64_t stream_id;
   if (is_unidirectional) {
     stream_id =
@@ -2703,7 +2703,7 @@ void H2Session::reset_stream(int32_t session_id,
   // (送信者は自カウンタで正値を知り得るため引数では受け取らない)
   uint64_t reliable_size = stream_it->second.bytes_sent;
 
-  // WT_RESET_STREAM capsule: Stream ID + Error Code + Reliable Size
+  // WT_RESET_STREAM カプセル: ストリーム ID + エラーコード + 信頼済みサイズ
   std::vector<uint8_t> payload;
   auto stream_id_bytes = bindings::encode_quic_varint(stream_id);
   auto error_code_bytes = bindings::encode_quic_varint(error_code);
@@ -2781,7 +2781,7 @@ void H2Session::stop_sending(int32_t session_id,
   // maybe_send_max_stream_data で抑止する (Section 6.3 の判定にも使う)
   wt_session->sent_stop_sending_stream_ids.insert(stream_id);
 
-  // WT_STOP_SENDING capsule: Stream ID + Error Code
+  // WT_STOP_SENDING カプセル: ストリーム ID + エラーコード
   std::vector<uint8_t> payload;
   auto stream_id_bytes = bindings::encode_quic_varint(stream_id);
   auto error_code_bytes = bindings::encode_quic_varint(error_code);
@@ -2870,7 +2870,7 @@ void H2Session::close_session(int32_t session_id,
   // 破棄されるため、ここで記録を解放する
   discard_stream_recv_bytes(session_id);
 
-  // WT_CLOSE_SESSION capsule: Error Code (32bit) + Message
+  // WT_CLOSE_SESSION カプセル: エラーコード (32bit) + メッセージ
   // draft-15 Section 6.12: Application Error Message は最大 1024 バイト
   std::vector<uint8_t> payload;
   payload.push_back(static_cast<uint8_t>((error_code >> 24) & 0xFF));
@@ -3598,14 +3598,14 @@ nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
 void bind_webtransport_h2(nb::module_& m) {
   auto h2_mod = m.def_submodule("h2", "WebTransport over HTTP/2");
 
-  // WtErrorCode (draft-15 Section 3.4)
+  // WtErrorCode のバインディング (draft-15 Section 3.4)
   nb::enum_<WtErrorCode>(h2_mod, "WtErrorCode",
                          "WebTransport over HTTP/2 のエラーコード")
       .value("WT_FLOW_CONTROL_ERROR", WtErrorCode::kWtFlowControlError)
       .value("WT_STREAM_STATE_ERROR", WtErrorCode::kWtStreamStateError)
       .value("WT_ERROR", WtErrorCode::kWtError);
 
-  // CapsuleType
+  // CapsuleType のバインディング
   nb::enum_<CapsuleType>(h2_mod, "CapsuleType", "Capsule 種別")
       .value("DATAGRAM", CapsuleType::Datagram)
       .value("PADDING", CapsuleType::Padding)
@@ -3624,7 +3624,7 @@ void bind_webtransport_h2(nb::module_& m) {
       .value("WT_CLOSE_SESSION", CapsuleType::WtCloseSession)
       .value("WT_DRAIN_SESSION", CapsuleType::WtDrainSession);
 
-  // H2SessionConfig
+  // H2SessionConfig のバインディング
   nb::class_<H2SessionConfig>(h2_mod, "Config", "WebTransport over HTTP/2 設定")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_rw("initial_window_size", &H2SessionConfig::initial_window_size)
@@ -3647,7 +3647,7 @@ void bind_webtransport_h2(nb::module_& m) {
       .def_rw("allowed_origins", &H2SessionConfig::allowed_origins,
               "許可オリジンリスト (空なら Origin 検証を行わない)");
 
-  // H2EventType
+  // H2EventType のバインディング
   nb::enum_<H2EventType>(h2_mod, "EventType",
                          "WebTransport over HTTP/2 イベント種別")
       .value("SESSION_READY", H2EventType::SessionReady)
@@ -3661,7 +3661,7 @@ void bind_webtransport_h2(nb::module_& m) {
       .value("SESSION_REJECTED", H2EventType::SessionRejected)
       .value("GOAWAY", H2EventType::GoAway);
 
-  // H2Event
+  // H2Event のバインディング
   nb::class_<H2Event>(h2_mod, "Event", "WebTransport over HTTP/2 イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_ro("type", &H2Event::type)
@@ -3687,7 +3687,7 @@ void bind_webtransport_h2(nb::module_& m) {
               "GoAway 発火時の GOAWAY フレームの "
               "last_stream_id。他イベントでは 0");
 
-  // H2Session
+  // H2Session のバインディング
   nb::class_<H2Session>(h2_mod, "Session",
                         "WebTransport over HTTP/2 セッション")
       .def_static(

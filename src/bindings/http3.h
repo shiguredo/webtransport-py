@@ -66,7 +66,7 @@ enum class Http3EventType {
   // nghttp3 が QUIC 層への送出を要求する
   ResetStream,
   StopSending,
-  // 1xx (interim response)。RFC 9114 Section 4.1
+  // 1xx (中間応答)。RFC 9114 Section 4.1
   Informational,
   // トレーラ (終端 HEADERS で :status を持たないもの)
   Trailers,

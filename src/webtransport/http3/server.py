@@ -441,8 +441,10 @@ class Server:
         渡すこと。受信アドレスのままだと登録が解放されずに残る。あわせて
         quic_connection と http3_connection が非 None であることを保証すること。
         """
-        assert client.quic_connection is not None
-        assert client.http3_connection is not None
+        if client.quic_connection is None:
+            raise RuntimeError("quic_connection is not established")
+        if client.http3_connection is None:
+            raise RuntimeError("http3_connection is not established")
         while True:
             quic_event = client.quic_connection.next_event()
             if quic_event is None:

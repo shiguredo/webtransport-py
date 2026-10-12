@@ -1837,7 +1837,8 @@ void QuicConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
   // Reliable Size に設定した RESET_STREAM_AT を送出する。Reliable Size までの
   // データ配信は ngtcp2 が保証し、ロス時は再送される (draft-ietf-quic-reliable-
   // stream-reset-09 Section 5)。リセット送出時点で未パケット化データ
-  // (streamfrq) が無ければ、リセット送出パケットにデータは同梱されない
+  // (ngtcp2 が再送用に保持する送信済み未 ACK の STREAM フレームキュー。
+  // ngtcp2_strm::tx.streamfrq) が無ければ、リセット送出パケットにデータは同梱されない
   // (writev_stream はアプリのデータ (vec) を直接パケットに書く設計のため、
   // データの配信は送信済みパケットが担う)。データ未書き込みのストリームは
   // Reliable Size 0 になるため従来どおり RESET_STREAM が送出され、広告しない
@@ -2987,7 +2988,7 @@ int QuicConnection::version_negotiation_cb(ngtcp2_conn* conn,
 void bind_quic(nb::module_& m) {
   auto quic_m = m.def_submodule("quic", "QUIC protocol (ngtcp2)");
 
-  // QuicConfig
+  // QuicConfig のバインディング
   nb::class_<QuicConfig>(quic_m, "Config", "QUIC コネクション設定")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_rw("max_streams_bidi", &QuicConfig::max_streams_bidi,
@@ -3068,7 +3069,7 @@ void bind_quic(nb::module_& m) {
           "0-RTT トランスポートパラメータ (bytes。1 MiB 超の場合は "
           "ValueError)");
 
-  // QuicEventType
+  // QuicEventType のバインディング
   nb::enum_<QuicEventType>(quic_m, "EventType", "QUIC イベント種別")
       .value("HANDSHAKE_COMPLETED", QuicEventType::HandshakeCompleted)
       .value("CONNECTION_CLOSED", QuicEventType::ConnectionClosed)
@@ -3094,7 +3095,7 @@ void bind_quic(nb::module_& m) {
       .value("DISCARDED", ReceiveResult::Discarded)
       .value("CLOSED", ReceiveResult::Closed);
 
-  // QuicEvent
+  // QuicEvent のバインディング
   nb::class_<QuicEvent>(quic_m, "Event", "QUIC イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_ro("type", &QuicEvent::type, "イベント種別")
@@ -3113,7 +3114,7 @@ void bind_quic(nb::module_& m) {
           "offset", &QuicEvent::offset,
           "STREAM_DATA イベントのストリーム上のオフセット (他イベントでは 0)");
 
-  // QuicPacket
+  // QuicPacket のバインディング
   nb::class_<QuicPacket>(quic_m, "Packet", "QUIC UDP パケット (パス情報付き)")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_prop_ro(
@@ -3128,7 +3129,7 @@ void bind_quic(nb::module_& m) {
       .def_ro("remote_host", &QuicPacket::remote_host, "リモートホスト")
       .def_ro("remote_port", &QuicPacket::remote_port, "リモートポート");
 
-  // QuicConnection
+  // QuicConnection のバインディング
   nb::class_<QuicConnection>(quic_m, "Connection",
                              "QUIC コネクション (Sans-IO)")
       .def_static(

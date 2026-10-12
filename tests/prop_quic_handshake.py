@@ -42,7 +42,7 @@ def prop_quic_handshake_with_server_name(server_name: str):
         return
 
     success = perform_handshake(client, server, initial_packet.data)
-    assert success, "Handshake should complete"
+    assert success, "ハンドシェイクが完了すること"
 
 
 @given(

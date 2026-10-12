@@ -51,7 +51,7 @@ struct QuicConfig {
   // アイドルタイムアウト (ナノ秒)
   uint64_t idle_timeout_ns = 30000000000ULL;  // 30秒
 
-  // ALPN (Application-Layer Protocol Negotiation)
+  // ALPN (アプリケーション層プロトコルネゴシエーション)
   std::vector<std::string> alpn;
 
   // サーバー名 (SNI)

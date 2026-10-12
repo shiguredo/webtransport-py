@@ -2508,7 +2508,7 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
 void bind_webtransport_h3(nb::module_& m) {
   auto h3_mod = m.def_submodule("h3", "WebTransport over HTTP/3");
 
-  // H3SessionConfig
+  // H3SessionConfig のバインディング
   nb::class_<H3SessionConfig>(h3_mod, "Config", "WebTransport over HTTP/3 設定")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_rw("max_field_section_size",
@@ -2525,7 +2525,7 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_rw("allowed_origins", &H3SessionConfig::allowed_origins,
               "許可オリジンリスト (空なら全オリジンを受理)");
 
-  // H3EventType
+  // H3EventType のバインディング
   nb::enum_<H3EventType>(h3_mod, "EventType", "WebTransport イベント種別")
       .value("SESSION_READY", H3EventType::SessionReady)
       .value("SESSION_CLOSED", H3EventType::SessionClosed)
@@ -2538,7 +2538,7 @@ void bind_webtransport_h3(nb::module_& m) {
       .value("SESSION_REJECTED", H3EventType::SessionRejected)
       .value("GOAWAY", H3EventType::GoAway);
 
-  // H3Event
+  // H3Event のバインディング
   nb::class_<H3Event>(h3_mod, "Event", "WebTransport イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_ro("type", &H3Event::type)
@@ -2565,7 +2565,7 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_ro("headers", &H3Event::headers,
               "SESSION_READY 発火時の受信 CONNECT ヘッダー。他イベントでは空");
 
-  // StreamInfo
+  // StreamInfo のバインディング
   nb::class_<StreamInfo>(h3_mod, "StreamInfo", "WebTransport ストリーム情報")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_ro("stream_id", &StreamInfo::stream_id)
@@ -2574,7 +2574,7 @@ void bind_webtransport_h3(nb::module_& m) {
       .def_ro("is_incoming", &StreamInfo::is_incoming)
       .def_ro("is_write_registered", &StreamInfo::is_write_registered);
 
-  // H3Session
+  // H3Session のバインディング
   nb::class_<H3Session>(h3_mod, "Session",
                         "WebTransport over HTTP/3 セッション")
       .def_static(

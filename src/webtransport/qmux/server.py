@@ -228,7 +228,8 @@ class Server:
         """
         if self._server is None:
             await self.start()
-        assert self._server is not None
+        if self._server is None:
+            raise RuntimeError("server failed to start")
         async with self._server:
             await self._server.serve_forever()
 

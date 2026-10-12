@@ -158,7 +158,7 @@ def test_client_response_201_session_kept_until_fin() -> None:
     nghttp3 は 2xx 全般をセッション確立として扱う (status_code / 100 == 2
     による confirm) ため、201 応答は有効なセッションである。session_ids_
     に残ること・SESSION_READY が発火すること (2xx 全般で発火する契約。
-    0104 の h2 側と同じ) を確認し、FIN 到着後は既存の FIN 経路で後始末
+    h2 側と同じ) を確認し、FIN 到着後は既存の FIN 経路で後始末
     されることを確認する。
     """
     client, server = _create_session_pair()

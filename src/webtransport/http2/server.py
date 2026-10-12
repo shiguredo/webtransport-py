@@ -219,7 +219,8 @@ class Server:
 
         try:
             while self._running:
-                assert read_task is not None
+                if read_task is None:
+                    raise RuntimeError("read task is not scheduled")
                 done, _ = await asyncio.wait({read_task}, timeout=0.1)
                 if done:
                     received = read_task.result()

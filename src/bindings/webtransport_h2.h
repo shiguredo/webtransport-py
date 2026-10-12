@@ -59,7 +59,7 @@ enum class CapsuleType : uint64_t {
   // DATAGRAM (RFC 9297 Section 3.5 / draft Section 6.11)
   Datagram = 0x00,
 
-  // WebTransport Capsules (draft-ietf-webtrans-http2-15)
+  // WebTransport カプセル (draft-ietf-webtrans-http2-15)
   Padding = 0x190B4D38,
   WtResetStream = 0x190B4D39,
   WtStopSending = 0x190B4D3A,

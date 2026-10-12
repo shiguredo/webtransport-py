@@ -70,7 +70,7 @@ enum class Http2EventType {
   Ping,
   PushPromise,
   PriorityUpdate,
-  // 1xx (interim response)。RFC 9114 Section 4.1 / RFC 9113 Section 8.1
+  // 1xx (中間応答)。RFC 9114 Section 4.1 / RFC 9113 Section 8.1
   Informational,
   // トレーラ (終端 HEADERS で :status を持たないもの)
   Trailers,

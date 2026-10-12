@@ -65,14 +65,15 @@ def run_uv_sync(dry_run: bool) -> None:
 def git_operations(new_version: str, dry_run: bool) -> None:
     if dry_run:
         print("Dry-run: Would run 'git add VERSION' and 'git add uv.lock'")
-        print(f"Dry-run: Would run 'git commit -m Bump version to {new_version}'")
+        print(f"Dry-run: Would run 'git commit -m [canary] バージョンを {new_version} に上げる'")
         print(f"Dry-run: Would run 'git tag {new_version}'")
         print("Dry-run: Would run 'git push'")
         print("Dry-run: Would run 'git push --tags'")
     else:
         subprocess.run(["git", "add", "VERSION"], check=True)
         subprocess.run(
-            ["git", "commit", "-m", f"[canary] Bump version to {new_version}"], check=True
+            ["git", "commit", "-m", f"[canary] バージョンを {new_version} に上げる"],
+            check=True,
         )
         subprocess.run(["git", "tag", new_version], check=True)
         subprocess.run(["git", "push"], check=True)

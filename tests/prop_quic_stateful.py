@@ -3,9 +3,9 @@
 既存の `prop_quic*.py` は「新規未接続オブジェクト 1 個」または「1 回の
 ハンドシェイク」に対する操作しか検証していない (`prop_h3_stateful.py` /
 `prop_h2_stateful.py` と対)。確立済みの QUIC 接続ペアへストリーム操作と
-データグラム操作の系列を駆動し、abort せず不変条件が保たれることを検証する。
-issue 0146 (Config 値で assert に到達する経路) の回帰ピンとして、
-Config の境界値でも abort しないことを併せて確認する。
+データグラム操作の系列を駆動し、abort せず不変条件が保たれることを検証する。Config 値だけで依存ライブラリの
+assert に到達し SIGABRT する経路の回帰ピンとして、Config の境界値でも
+abort しないことを併せて確認する。
 """
 
 from conftest import (
@@ -145,10 +145,10 @@ TestQuicEstablishedPair.settings = settings(
 )
 @settings(max_examples=50, deadline=None)
 def test_quic_config_boundary_values_never_abort(max_data: int, max_streams_bidi: int) -> None:
-    """Config の境界値でも abort しない (0146 の回帰ピン)
+    """Config の境界値でも abort しない
 
-    issue 0146 は「Python から渡した Config 値だけで依存ライブラリの assert に
-    到達し SIGABRT する経路」を塞いだ。生成時・接続時のどちらでも abort せず、
+    「Python から渡した Config 値だけで依存ライブラリの assert に到達し
+    SIGABRT する経路」は塞いである。生成時・接続時のどちらでも abort せず、
     ValueError で拒否されることを確認する。
     """
     client_config = quic.Config()
