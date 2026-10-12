@@ -273,6 +273,13 @@ def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
     return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
 
 
+# HEADERS フレーム (Type 0x01) の Length を実際に渡すペイロードより大きく宣言し、
+# ヘッダーブロックの受信途中の状態を作る。宣言した Length に達するまで end_headers_cb
+# は発火せず、begin_headers_cb が作ったエントリが残る。Sans-IO への注入と実 QUIC
+# ストリームへの送出の両方で使う
+_PARTIAL_HEADERS = bytes([0x01]) + _encode_varint(100) + b"\x00\x00"
+
+
 def _encode_data_frame(session_id: int, payload: bytes = b"", end_stream: bool = False) -> bytes:
     """HTTP/2 DATA フレームのワイヤバイト列を組み立てる
 

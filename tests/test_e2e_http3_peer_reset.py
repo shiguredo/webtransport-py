@@ -10,13 +10,9 @@ import time
 from collections.abc import Callable
 
 import pytest
-from conftest import PUMP_ATTEMPTS, _encode_varint, wait_pacing_timeout
+from conftest import _PARTIAL_HEADERS, PUMP_ATTEMPTS, wait_pacing_timeout
 
 from webtransport import http3, quic
-
-# HEADERS フレーム (Type 0x01) の Length を実際に渡すペイロードより大きく宣言し、
-# ヘッダーブロックの受信途中の状態を作る (end_headers_cb が発火しない)
-_PARTIAL_HEADERS = bytes([0x01]) + _encode_varint(100) + b"\x00\x00"
 
 # ピアが送るリセットのアプリケーションエラーコード
 _RESET_ERROR_CODE = 0x0102

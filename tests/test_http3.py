@@ -1,9 +1,9 @@
 """HTTP/3 テスト"""
 
 from conftest import (
+    _PARTIAL_HEADERS,
     _create_http3_connection_pair,
     _drain_events,
-    _encode_varint,
     _http3_pump,
 )
 
@@ -12,16 +12,13 @@ from webtransport.http3.exceptions import Http3ErrorCode
 
 
 def _inject_partial_headers(conn: http3.Connection, stream_id: int) -> int:
-    """ヘッダーブロックの受信途中の状態を作る
+    """ヘッダーブロックの受信途中の状態を注入する
 
-    HEADERS フレーム (Type 0x01) の Length を実際に渡すペイロードより大きく
-    宣言する。宣言した Length に達していないため end_headers_cb は発火せず、
-    begin_headers_cb が作った Http3Connection::pending_headers_ のエントリが
-    残る。戻り値は receive_stream_data の戻り値で、0 の場合はエントリが
-    作られていない (接続が閉じている等)。
+    共通定義 (conftest の `_PARTIAL_HEADERS`) を Sans-IO の
+    receive_stream_data へ渡す。戻り値は receive_stream_data の戻り値で、
+    0 の場合はエントリが作られていない (接続が閉じている等)。
     """
-    frame = bytes([0x01]) + _encode_varint(100) + b"\x00\x00"
-    return conn.receive_stream_data(stream_id, frame, False)
+    return conn.receive_stream_data(stream_id, _PARTIAL_HEADERS, False)
 
 
 def test_http3_import() -> None:
