@@ -10,14 +10,29 @@
 #include "python_input.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstring>
+#include <random>
 #include <stdexcept>
 #include <string>
 
 namespace webtransport {
 namespace h2 {
+
+namespace {
+
+// nghttp2-v2 のタイムスタンプはナノ秒解像度 (nghttp2_tstamp)
+nghttp2_tstamp now_ts() {
+  return static_cast<nghttp2_tstamp>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+}  // namespace
 
 namespace {
 // 未完成カプセルを残したまま消費を開始するしきい値の下限 (バイト)。
@@ -28,13 +43,10 @@ namespace {
 // 受けるたびに WINDOW_UPDATE を送ることになるため、フレーム数個分を残す
 constexpr size_t kMinUnfinishedCapsuleBytes = 32768;
 
-// 未完成カプセルを残してよい上限を返す。ピアが広告した最大フレームサイズに
-// よらず、1 フレーム分の余裕を常に残す
-size_t max_unfinished_capsule_bytes(nghttp2_session* session) {
-  uint32_t peer_max_frame_size = nghttp2_session_get_local_settings(
-      session, NGHTTP2_SETTINGS_MAX_FRAME_SIZE);
-  size_t headroom = peer_max_frame_size > 0 ? peer_max_frame_size : 16384;
-  return std::max(kMinUnfinishedCapsuleBytes, headroom);
+// 未完成カプセルを残してよい上限を返す。nghttp2-v2 は最大フレーム
+// サイズを 16384 に固定するため、1 フレーム分の余裕を常に残す
+size_t max_unfinished_capsule_bytes() {
+  return std::max(kMinUnfinishedCapsuleBytes, static_cast<size_t>(16384));
 }
 
 // 対向から受信した上限を記録する。未受信ならそのまま格納し、受信済みなら
@@ -197,6 +209,15 @@ bool is_valid_utf8(const uint8_t* data, size_t length) {
 
 }  // namespace
 
+// データプロバイダ。nghttp2-v2 は v1 の data_source を廃止し、
+// nghttp2_vec にアプリのバッファを直接指す方式になった
+const nghttp2_data_reader* H2Session::data_reader() {
+  static const nghttp2_data_reader dr = {
+      .read_data = &H2Session::on_read_data_callback,
+  };
+  return &dr;
+}
+
 // ========== Varint エンコード/デコード (QUIC 形式) ==========
 
 std::vector<uint8_t> H2Session::encode_varint(uint64_t value) {
@@ -295,26 +316,12 @@ void H2Session::reset_stream_for_malformed_capsule(int32_t session_id) {
   // 受理前 END_STREAM の保留記録も除去する (malformed のストリームエラーで
   // 終了するため)
   pending_pre_accept_end_stream_session_ids_.erase(session_id);
-  if (!session_) {
+  if (!conn_) {
     return;
   }
-  // submit の失敗 (NOMEM 等) は RST_STREAM が送出されず SessionClosed も
-  // 発火しないため、既存の submit 失敗と同じく Error イベントで観測可能に
-  // する (error_code は nghttp2 エラーコードの絶対値)。0 が返っても
-  // ストリームが既に CLOSING の場合は何も積まれないが、カプセル処理の前に
-  // リセットする経路は他に無いため到達しない
-  const int rv = nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE,
-                                           session_id, NGHTTP2_PROTOCOL_ERROR);
-  if (rv == 0) {
-    return;
-  }
-  H2Event event;
-  event.type = H2EventType::Error;
-  event.session_id = session_id;
-  event.stream_id = static_cast<uint64_t>(session_id);
-  event.error_code = static_cast<uint32_t>(-rv);
-  event.error_message = nghttp2_strerror(rv);
-  push_event(std::move(event));
+  // nghttp2-v2 の nghttp2_conn_shutdown_stream は戻り値を持たず、submit の
+  // 失敗 (NOMEM 等) を観測できない。失敗時は SessionClosed が発火しない
+  nghttp2_conn_shutdown_stream(conn_, 0, session_id, NGHTTP2_PROTOCOL_ERROR);
 }
 
 bool H2Session::verify_capsule_payload_fully_read(int32_t session_id,
@@ -802,8 +809,8 @@ void H2Session::report_stream_state_error(int32_t session_id,
                                           uint64_t stream_id,
                                           const std::string& error_message) {
   // 検知した WT_STREAM_STATE_ERROR をアプリに通知してからセッションを閉じる。
-  // close_session は送信をキューするのみで nghttp2_session_send を呼ばないため
-  // mem_recv2 コールバック中でも安全であり、即座に is_terminated を立てて同一
+  // close_session は送信をキューするのみで flush_output を呼ばないため
+  // nghttp2_conn_read コールバック中でも安全であり、即座に is_terminated を立てて同一
   // receive() 内の後続カプセルを遮断する
   H2Event event;
   event.type = H2EventType::Error;
@@ -1350,7 +1357,7 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
   end_stream_pending_.insert(session_id);
-  nghttp2_session_resume_data(session_, session_id);
+  nghttp2_conn_resume_stream(conn_, session_id);
 }
 
 void H2Session::handle_wt_drain_session(int32_t session_id,
@@ -1444,7 +1451,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // ものではなく、従来の「受信者 MUST は END_STREAM のみの受信には該当しない」
   // という解釈を、h3 の SESSION_CLOSED で応答 FIN を送る経路と揃えてストリームを
   // 両ハーフクローズで閉じ同時ストリーム枠を解放するための実装ポリシーとして
-  // 変更したものである。nghttp2_session_send は呼ばない
+  // 変更したものである。flush_output は呼ばない
   // (on_frame_recv_callback から呼ばれるため)。送出は呼び出し元の receive()
   // 末尾または send() に委ねる (handle_wt_close_session と同じ)
   http2_stream_buffers_.erase(session_id);
@@ -1452,7 +1459,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
   end_stream_pending_.insert(session_id);
-  nghttp2_session_resume_data(session_, session_id);
+  nghttp2_conn_resume_stream(conn_, session_id);
 }
 
 void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
@@ -1467,14 +1474,14 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   // する。受理後 END_STREAM の handle_end_stream と同じ扱いであり、
   // SessionClosed は RST_STREAM の送出で発火する on_stream_close_callback が
   // 通知する (error_code は nghttp2 のクローズ由来)。この関数は accept_session
-  // (nghttp2 コールバック外) からのみ呼ばれるため、ここで nghttp2_session_send を
+  // (nghttp2 コールバック外) からのみ呼ばれるため、ここで flush_output を
   // 呼んでも再入にならない。送出を呼び出し元の send() に委ねると、
   // accept_session から戻った時点では通知とエントリの後始末が確定せず、
   // 高レベル層が次の読み取りで EOF を受けてイベント drain の前に抜けると
   // on_session_closed が呼ばれない窓が残る
   if (!wt_session->capsule_buffer.empty()) {
     reset_stream_for_malformed_capsule(session_id);
-    nghttp2_session_send(session_);
+    flush_output();
     return;
   }
 
@@ -1495,7 +1502,7 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   // (仕様が強制するものではなく、h3 の応答 FIN と揃えて同時ストリーム枠を解放
   // するための実装ポリシー)。2xx は accept_session が送出済みであり、ここで
   // 積んだ応答 END_STREAM は呼び出し元 (高レベル層の send()) の
-  // nghttp2_session_send で送出される (受理前に蓄積した WT_CLOSE_SESSION を
+  // flush_output で送出される (受理前に蓄積した WT_CLOSE_SESSION を
   // 遅延処理する handle_wt_close_session と同じ位置・同じ 2 操作)。エントリは
   // 削除済みのため、両ハーフクローズ時の on_stream_close_callback は
   // SessionClosed を発火しない
@@ -1505,7 +1512,7 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   discard_stream_recv_bytes(session_id);
   pending_pre_accept_end_stream_session_ids_.erase(session_id);
   end_stream_pending_.insert(session_id);
-  nghttp2_session_resume_data(session_, session_id);
+  nghttp2_conn_resume_stream(conn_, session_id);
 }
 
 // ========== Capsule 送信 ==========
@@ -1514,8 +1521,9 @@ void H2Session::send_capsule(int32_t session_id,
                              CapsuleType type,
                              const std::vector<uint8_t>& payload) {
   auto capsule = encode_capsule(type, payload);
-  http2_stream_buffers_[session_id].push_back(std::move(capsule));
-  nghttp2_session_resume_data(session_, session_id);
+  http2_stream_buffers_[session_id].push_back(
+      H2StreamData{.data = std::move(capsule)});
+  nghttp2_conn_resume_stream(conn_, session_id);
 }
 
 // ========== ストリーム ID 割り当て ==========
@@ -1592,7 +1600,7 @@ void H2Session::push_event(H2Event event) {
 }
 
 void H2Session::consume_recv_bytes(int32_t stream_id, size_t size) {
-  if (!session_ || size == 0) {
+  if (!conn_ || size == 0) {
     return;
   }
 
@@ -1608,14 +1616,15 @@ void H2Session::consume_recv_bytes(int32_t stream_id, size_t size) {
     return;
   }
 
-  // nghttp2_session_consume はコネクションとストリームの両方の
-  // WINDOW_UPDATE を積む (nghttp2.h の説明に従う)。実際の送出は次の
-  // nghttp2_session_send が行う
-  if (nghttp2_session_consume(session_, stream_id, consume_size) == 0) {
-    it->second -= consume_size;
-    if (it->second == 0) {
-      unconsumed_recv_bytes_.erase(it);
-    }
+  // nghttp2-v2 では受信ウィンドウの管理はアプリの責務。v1 の
+  // v1 の nghttp2_session_consume 相当として、コネクションとストリームの両方の
+  // ウィンドウを consume_size だけ広げる (実際の WINDOW_UPDATE の送出は
+  // nghttp2 内部のしきい値判定と次の flush_output に任せる)
+  (void)nghttp2_conn_extend_max_stream_offset(conn_, stream_id, consume_size);
+  consume_connection_recv_bytes(consume_size);
+  it->second -= consume_size;
+  if (it->second == 0) {
+    unconsumed_recv_bytes_.erase(it);
   }
 }
 
@@ -1635,25 +1644,28 @@ void H2Session::discard_stream_recv_bytes(int32_t stream_id) {
   }
   size_t remaining = it->second;
   unconsumed_recv_bytes_.erase(it);
-  // 終了するストリームへ nghttp2_session_consume を使うとストリームの
+  // 終了するストリームへ extend_max_stream_offset を使うとストリームの
   // WINDOW_UPDATE まで積まれ、受信を継続しないストリームのウィンドウを
   // 開いてしまう。コネクションレベルだけを返す
   consume_connection_recv_bytes(remaining);
 }
 
 void H2Session::consume_connection_recv_bytes(size_t size) {
-  if (!session_ || size == 0) {
+  if (!conn_ || size == 0) {
     return;
   }
-  // 破棄したバイトの分だけコネクションレベル受信ウィンドウを返す
-  // (返却量が受信ウィンドウの半分以上なら nghttp2 が WINDOW_UPDATE を積む。
-  // 実際の送出は次の nghttp2_session_send が行う)
-  //
-  // 戻り値は NOMEM と INVALID_STATE でのみ失敗する。INVALID_STATE は
-  // H2Session::initialize で NGHTTP2_OPTMASK_NO_AUTO_WINDOW_UPDATE を設定済み
-  // のため発生しない。NOMEM はプロセス全体のメモリ枯渇であり、記録は呼び出し
-  // 元で削除済みのため再試行の余地が無い (返却できない分は失われる)
-  (void)nghttp2_session_consume_connection(session_, size);
+
+  // v1 の session_update_consumed_size と同じく、消費量が受信ウィンドウの
+  // 半分以上に達したら WINDOW_UPDATE を積む。積んだ分だけ未返却の受信量
+  // (conn_recv_window_size_) を減らす。test_effective_recv_data_length は
+  // この未返却量を返す
+  conn_consumed_size_ += static_cast<int64_t>(size);
+  int64_t recv_size = std::min(conn_consumed_size_, conn_recv_window_size_);
+  if (recv_size > 0 && recv_size >= conn_local_window_size_ / 2) {
+    (void)nghttp2_conn_extend_max_offset(conn_, static_cast<size_t>(recv_size));
+    conn_recv_window_size_ -= recv_size;
+    conn_consumed_size_ -= recv_size;
+  }
 }
 
 std::optional<int64_t> H2Session::test_unconsumed_recv_bytes(
@@ -1666,10 +1678,10 @@ std::optional<int64_t> H2Session::test_unconsumed_recv_bytes(
 }
 
 std::optional<int32_t> H2Session::test_effective_recv_data_length() const {
-  if (!session_) {
+  if (!conn_) {
     return std::nullopt;
   }
-  return nghttp2_session_get_effective_recv_data_length(session_);
+  return static_cast<int32_t>(std::max<int64_t>(0, conn_recv_window_size_));
 }
 
 WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
@@ -1897,8 +1909,8 @@ void H2Session::report_recv_flow_control_error(
 void H2Session::report_wt_error(int32_t session_id,
                                 const std::string& error_message) {
   // 検知した WT_ERROR をアプリへ通知してからセッションを閉じる。
-  // close_session は送信をキューするのみで nghttp2_session_send を呼ばない
-  // ため mem_recv2 コールバック中でも安全であり、即座に is_terminated を
+  // close_session は送信をキューするのみで flush_output を呼ばない
+  // ため nghttp2_conn_read コールバック中でも安全であり、即座に is_terminated を
   // 立てて同一 receive() 内の後続カプセルを遮断する
   H2Event event;
   event.type = H2EventType::Error;
@@ -2126,18 +2138,22 @@ H2Session::H2Session(bool is_server, const H2SessionConfig& config)
     : is_server_(is_server), config_(config) {}
 
 H2Session::~H2Session() {
-  if (session_) {
-    nghttp2_session_del(session_);
+  if (conn_) {
+    nghttp2_conn_del(conn_);
   }
 }
 
 H2Session::H2Session(H2Session&& other) noexcept
     : is_server_(other.is_server_),
       config_(std::move(other.config_)),
-      session_(other.session_),
+      conn_(other.conn_),
       events_(std::move(other.events_)),
       send_buffer_(std::move(other.send_buffer_)),
       http2_stream_buffers_(std::move(other.http2_stream_buffers_)),
+      http2_stream_data_sent_(std::move(other.http2_stream_data_sent_)),
+      conn_local_window_size_(other.conn_local_window_size_),
+      conn_recv_window_size_(other.conn_recv_window_size_),
+      conn_consumed_size_(other.conn_consumed_size_),
       pending_headers_(std::move(other.pending_headers_)),
       wt_sessions_(std::move(other.wt_sessions_)),
       end_stream_pending_(std::move(other.end_stream_pending_)),
@@ -2157,20 +2173,24 @@ H2Session::H2Session(H2Session&& other) noexcept
           other.peer_wt_initial_max_streams_bidi_),
       closed_(other.closed_),
       goaway_received_(other.goaway_received_) {
-  other.session_ = nullptr;
+  other.conn_ = nullptr;
 }
 
 H2Session& H2Session::operator=(H2Session&& other) noexcept {
   if (this != &other) {
-    if (session_) {
-      nghttp2_session_del(session_);
+    if (conn_) {
+      nghttp2_conn_del(conn_);
     }
     is_server_ = other.is_server_;
     config_ = std::move(other.config_);
-    session_ = other.session_;
+    conn_ = other.conn_;
     events_ = std::move(other.events_);
     send_buffer_ = std::move(other.send_buffer_);
     http2_stream_buffers_ = std::move(other.http2_stream_buffers_);
+    http2_stream_data_sent_ = std::move(other.http2_stream_data_sent_);
+    conn_local_window_size_ = other.conn_local_window_size_;
+    conn_recv_window_size_ = other.conn_recv_window_size_;
+    conn_consumed_size_ = other.conn_consumed_size_;
     pending_headers_ = std::move(other.pending_headers_);
     wt_sessions_ = std::move(other.wt_sessions_);
     end_stream_pending_ = std::move(other.end_stream_pending_);
@@ -2189,7 +2209,7 @@ H2Session& H2Session::operator=(H2Session&& other) noexcept {
     peer_wt_initial_max_streams_bidi_ = other.peer_wt_initial_max_streams_bidi_;
     closed_ = other.closed_;
     goaway_received_ = other.goaway_received_;
-    other.session_ = nullptr;
+    other.conn_ = nullptr;
   }
   return *this;
 }
@@ -2237,116 +2257,131 @@ bool H2Session::initialize() {
         "wt_initial_max_streams_uni must be less than 2^32: " +
         std::to_string(config_.wt_initial_max_streams_uni));
   }
-
-  nghttp2_session_callbacks* callbacks;
-  int rv = nghttp2_session_callbacks_new(&callbacks);
-  if (rv != 0) {
-    return false;
+  // nghttp2_conn_server_new / nghttp2_conn_client_new は
+  // settings.initial_max_stream_data を INT32_MAX 以下で assert する。
+  // assert 失敗はプロセスの abort になるため境界で拒否する
+  if (config_.initial_window_size > static_cast<uint32_t>(INT32_MAX)) {
+    throw std::invalid_argument("initial_window_size must be less than 2^31: " +
+                                std::to_string(config_.initial_window_size));
   }
 
-  nghttp2_session_callbacks_set_send_callback2(callbacks, send_callback);
-  nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
-                                                       on_frame_recv_callback);
-  nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
-      callbacks, on_data_chunk_recv_callback);
-  nghttp2_session_callbacks_set_on_stream_close_callback(
-      callbacks, on_stream_close_callback);
-  nghttp2_session_callbacks_set_on_frame_not_send_callback(
-      callbacks, on_frame_not_send_callback);
-  nghttp2_session_callbacks_set_on_header_callback(callbacks,
-                                                   on_header_callback);
-  nghttp2_session_callbacks_set_on_begin_headers_callback(
-      callbacks, on_begin_headers_callback);
+  // nghttp2-v2 のコールバックは nghttp2_callbacks 構造体で渡す。rand は
+  // 必須 (接続生成時にレートリミッタの種に使われる)
+  nghttp2_callbacks callbacks = {};
+  callbacks.rand = &H2Session::on_rand_callback;
+  callbacks.stream_open = &H2Session::on_stream_open_callback;
+  callbacks.stream_close = &H2Session::on_stream_close_callback;
+  callbacks.recv_settings_entry = &H2Session::on_recv_settings_entry_callback;
+  callbacks.begin_headers = &H2Session::on_begin_headers_callback;
+  callbacks.recv_header = &H2Session::on_recv_header_callback;
+  callbacks.end_headers = &H2Session::on_end_headers_callback;
+  // トレーラも受信バッファへ蓄積して完了時に解放する (WebTransport
+  // over HTTP/2 では使用しないが、受信したヘッダーブロックを接続の
+  // 終了まで保持しないため)。begin/recv はヘッダーと同じ処理でよい
+  callbacks.begin_trailers = &H2Session::on_begin_headers_callback;
+  callbacks.recv_trailer = &H2Session::on_recv_header_callback;
+  callbacks.end_trailers = &H2Session::on_end_trailers_callback;
+  callbacks.recv_data = &H2Session::on_recv_data_callback;
+  callbacks.remote_end_stream = &H2Session::on_remote_end_stream_callback;
+  callbacks.shutdown = &H2Session::on_shutdown_callback;
+  callbacks.write_stream_data_offset =
+      &H2Session::on_write_stream_data_offset_callback;
 
-  // 受信ウィンドウの自動更新を無効にする。アプリが消費した分だけ
-  // nghttp2_session_consume で WINDOW_UPDATE を返すため、アプリの消費速度が
+  // 受信ウィンドウの管理は nghttp2-v2 ではアプリの責務である。自動更新は
+  // 存在せず、アプリが消費した分だけ extend するため、アプリの消費速度が
   // 受信レートの上限になる (背圧)。
-  nghttp2_option* option = nullptr;
-  rv = nghttp2_option_new(&option);
-  if (rv != 0) {
-    nghttp2_session_callbacks_del(callbacks);
-    return false;
-  }
-  nghttp2_option_set_no_auto_window_update(option, 1);
-
+  //
+  // SETTINGS は draft-15 Section 3.1 / 4.3.1 / 11.2 に従う。nghttp2-v2 が
+  // 自ら送る SETTINGS (MAX_CONCURRENT_STREAMS / NO_RFC7540_PRIORITIES /
+  // INITIAL_WINDOW_SIZE / ENABLE_CONNECT_PROTOCOL) は nghttp2_settings の
+  // フィールドで指定し、WebTransport 固有の SETTINGS は extra_settings で
+  // 送る (extra_settings の上限は NGHTTP2_MAX_EXTRA_SETTINGS = 16)。
+  nghttp2_settings settings;
+  nghttp2_settings_default(&settings);
+  settings.initial_ts = now_ts();
+  settings.max_concurrent_streams_remote = config_.max_concurrent_streams;
+  settings.initial_max_stream_data = config_.initial_window_size;
+  // SETTINGS_ENABLE_CONNECT_PROTOCOL はサーバーが送る (draft-15 Section 3.1
+  // の MUST)。クライアントはライブラリがこのフィールドを無視するため
+  // extra_settings で送る (サーバーはフィールドで送るので重複しない)
   if (is_server_) {
-    rv = nghttp2_session_server_new2(&session_, callbacks, this, option);
-  } else {
-    rv = nghttp2_session_client_new2(&session_, callbacks, this, option);
+    settings.enable_connect_protocol = 1;
   }
 
-  nghttp2_option_del(option);
-  nghttp2_session_callbacks_del(callbacks);
-
-  if (rv != 0) {
-    return false;
-  }
-
-  // SETTINGS を送信
-  // draft-15 Section 3.1 / 4.3.1 / 11.2
-  nghttp2_settings_entry settings[] = {
-      {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, config_.max_concurrent_streams},
-      {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, config_.initial_window_size},
-      {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, config_.max_frame_size},
-      {NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, config_.max_header_list_size},
-      {NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL, 1},
-      {SETTINGS_WT_ENABLED, 1},
-      {SETTINGS_WT_INITIAL_MAX_DATA,
-       static_cast<uint32_t>(config_.wt_initial_max_data)},
-      {SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI,
-       static_cast<uint32_t>(config_.wt_initial_max_stream_data)},
-      {SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
-       static_cast<uint32_t>(config_.wt_initial_max_stream_data)},
-      {SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
-       static_cast<uint32_t>(config_.wt_initial_max_stream_data)},
-      {SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
-       static_cast<uint32_t>(config_.wt_initial_max_streams_uni)},
-      {SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI,
-       static_cast<uint32_t>(config_.wt_initial_max_streams_bidi)},
-  };
-
-  rv = nghttp2_submit_settings(session_, NGHTTP2_FLAG_NONE, settings,
-                               sizeof(settings) / sizeof(settings[0]));
-  if (rv != 0) {
-    return false;
-  }
-
-  // クライアントの場合は connection preface を送信
+  nghttp2_settings_entry extra_settings[8];
+  size_t extra_settings_count = 0;
   if (!is_server_) {
-    nghttp2_session_send(session_);
+    extra_settings[extra_settings_count++] = {SETTINGS_ENABLE_CONNECT_PROTOCOL,
+                                              1};
   }
+  extra_settings[extra_settings_count++] = {SETTINGS_WT_ENABLED, 1};
+  extra_settings[extra_settings_count++] = {
+      SETTINGS_WT_INITIAL_MAX_DATA,
+      static_cast<uint32_t>(config_.wt_initial_max_data)};
+  extra_settings[extra_settings_count++] = {
+      SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI,
+      static_cast<uint32_t>(config_.wt_initial_max_stream_data)};
+  extra_settings[extra_settings_count++] = {
+      SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+      static_cast<uint32_t>(config_.wt_initial_max_stream_data)};
+  extra_settings[extra_settings_count++] = {
+      SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+      static_cast<uint32_t>(config_.wt_initial_max_stream_data)};
+  extra_settings[extra_settings_count++] = {
+      SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
+      static_cast<uint32_t>(config_.wt_initial_max_streams_uni)};
+  extra_settings[extra_settings_count++] = {
+      SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI,
+      static_cast<uint32_t>(config_.wt_initial_max_streams_bidi)};
+  settings.extra_settings = extra_settings;
+  settings.extra_settingslen = extra_settings_count;
+
+  int rv;
+  if (is_server_) {
+    rv = nghttp2_conn_server_new(&conn_, &callbacks, &settings, nullptr, this);
+  } else {
+    rv = nghttp2_conn_client_new(&conn_, &callbacks, &settings, nullptr, this);
+  }
+
+  if (rv != 0) {
+    return false;
+  }
+
+  // クライアントの connection preface と SETTINGS を送信バッファへ
+  // 蓄積する (旧実装の session_send 相当)
+  flush_output();
 
   return true;
 }
 
 size_t H2Session::receive(const std::vector<uint8_t>& data) {
-  if (!session_) {
+  if (!conn_) {
     return 0;
   }
 
-  nghttp2_ssize processed =
-      nghttp2_session_mem_recv2(session_, data.data(), data.size());
-
-  if (processed < 0) {
+  int rv = nghttp2_conn_read(conn_, data.data(), data.size(), now_ts());
+  if (rv != 0) {
     H2Event event;
     event.type = H2EventType::Error;
-    event.error_code = static_cast<uint32_t>(-processed);
-    event.error_message = nghttp2_strerror(static_cast<int>(processed));
+    event.error_code = static_cast<uint32_t>(-rv);
+    event.error_message = nghttp2_strerror(rv);
     push_event(std::move(event));
     return 0;
   }
 
-  nghttp2_session_send(session_);
+  // 受信で発生した応答フレーム (SETTINGS ACK / WINDOW_UPDATE 等) を
+  // 送信バッファへ蓄積する (旧実装の session_send 相当)
+  flush_output();
 
-  return static_cast<size_t>(processed);
+  return data.size();
 }
 
 std::optional<std::vector<uint8_t>> H2Session::send() {
-  if (!session_) {
+  if (!conn_) {
     return std::nullopt;
   }
 
-  nghttp2_session_send(session_);
+  flush_output();
 
   if (send_buffer_.empty()) {
     return std::nullopt;
@@ -2357,8 +2392,32 @@ std::optional<std::vector<uint8_t>> H2Session::send() {
   return result;
 }
 
+void H2Session::flush_output() {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // nghttp2-v2 はアプリ提供バッファへ書き込む。TLS レコードに収まる
+  // 16384 バイトを 1 チャンクとし、nghttp2_conn_write が 0 を返すまで
+  // (送信待ちが尽きるまで) 繰り返す
+  for (;;) {
+    std::array<uint8_t, 16384> buf;
+    nghttp2_ssize n =
+        nghttp2_conn_write(conn_, buf.data(), buf.size(), now_ts());
+    if (n < 0) {
+      // NGHTTP2_ERR_CLOSING は GOAWAY 送出後の正常な終了状態。それ以外の
+      // エラーは旧実装と同じく黙って無視する
+      return;
+    }
+    if (n == 0) {
+      return;
+    }
+    send_buffer_.insert(send_buffer_.end(), buf.data(), buf.data() + n);
+  }
+}
+
 int32_t H2Session::connect(const std::string& url, const std::string& origin) {
-  if (!session_ || is_server_) {
+  if (!conn_ || is_server_) {
     return -1;
   }
 
@@ -2400,13 +2459,8 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
 
   std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
 
-  // Capsule データ送信用のデータプロバイダー
-  nghttp2_data_provider2 data_prd;
-  data_prd.source.ptr = this;
-  data_prd.read_callback = data_source_read_callback;
-
-  int32_t stream_id = nghttp2_submit_request2(session_, nullptr, nva.data(),
-                                              nva.size(), &data_prd, this);
+  int64_t stream_id = nghttp2_conn_submit_request(conn_, nva.data(), nva.size(),
+                                                  data_reader(), this);
 
   if (stream_id < 0) {
     return -1;
@@ -2414,17 +2468,19 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
 
   // WebTransport セッションを作成
   WtSessionInfo wt_session;
-  wt_session.http2_stream_id = stream_id;
+  wt_session.http2_stream_id = static_cast<int32_t>(stream_id);
   apply_peer_initial_flow_control(wt_session);
-  wt_sessions_[stream_id] = wt_session;
+  wt_sessions_[static_cast<int32_t>(stream_id)] = wt_session;
 
-  nghttp2_session_send(session_);
+  flush_output();
 
-  return stream_id;
+  return static_cast<int32_t>(stream_id);
 }
 
 bool H2Session::accept_session(int32_t session_id) {
-  if (!session_ || !is_server_) {
+  // サーバーが応答するのはクライアント起動のストリーム (奇数) のみ。
+  // nghttp2-v2 は偶数 ID を assert で弾く (abort する) ため境界で拒否する
+  if (!conn_ || !is_server_ || session_id <= 0 || (session_id & 1) == 0) {
     return false;
   }
 
@@ -2443,13 +2499,9 @@ bool H2Session::accept_session(int32_t session_id) {
        17, wt_init.size(), NGHTTP2_NV_FLAG_NONE},
   };
 
-  // Capsule データ送信用のデータプロバイダー
-  nghttp2_data_provider2 data_prd;
-  data_prd.source.ptr = this;
-  data_prd.read_callback = data_source_read_callback;
-
-  int rv = nghttp2_submit_response2(session_, session_id, nva,
-                                    sizeof(nva) / sizeof(nva[0]), &data_prd);
+  // データプロバイダにはカプセルデータ用の read_data を常に渡す
+  int rv = nghttp2_conn_submit_response(
+      conn_, session_id, nva, sizeof(nva) / sizeof(nva[0]), data_reader());
   if (rv != 0) {
     // 応答送出に失敗したら蓄積を破棄する
     if (auto* failed_session = get_wt_session(session_id)) {
@@ -2464,7 +2516,7 @@ bool H2Session::accept_session(int32_t session_id) {
     wt_session->is_established = true;
   }
 
-  nghttp2_session_send(session_);
+  flush_output();
 
   // 受理前の楽観的カプセルを遅延処理する (draft-15 Section 3.2) 。
   // SessionReady push 後に Datagram / StreamData が発火するよう、
@@ -2513,18 +2565,25 @@ bool H2Session::accept_session(int32_t session_id) {
 }
 
 void H2Session::reject_session(int32_t session_id, int status_code) {
-  if (!session_ || !is_server_) {
+  if (!conn_ || !is_server_) {
     return;
   }
 
   // RFC 9113 Section 5.1.1: HTTP/2 のストリーム ID は 1 以上。0 以下は
-  // nghttp2_submit_response2 が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用で
-  // あり、黙って no-op にしない (クライアントセッションは接続ガードで
+  // nghttp2_conn_submit_response が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用
+  // であり、黙って no-op にしない (クライアントセッションは接続ガードで
   // 従来どおり no-op)。例外は nanobind の既定翻訳で ValueError になる
   if (session_id <= 0) {
     throw std::invalid_argument(
         "reject_session session_id must be a positive stream ID: " +
         std::to_string(session_id));
+  }
+
+  // サーバーが応答するのはクライアント起動のストリーム (奇数) のみ。
+  // nghttp2-v2 は偶数 ID を assert で弾く (abort する) ため、誤用は
+  // 黙って無視する
+  if ((session_id & 1) == 0) {
+    return;
   }
 
   // status_code を検証する: HTTP status code (RFC 9110 Section 15) として
@@ -2560,10 +2619,11 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   size_t nva_count = (status_code == 405) ? 2 : 1;
 
   int rv =
-      nghttp2_submit_response2(session_, session_id, nva, nva_count, nullptr);
+      nghttp2_conn_submit_response(conn_, session_id, nva, nva_count, nullptr);
   if (rv != 0) {
-    // submit 失敗 (NOMEM 等) を観測可能にする。送出時の非 fatal な失敗は
-    // on_frame_not_send_callback が観測する
+    // submit 失敗 (NOMEM 等) を観測可能にする。nghttp2-v2 には v1 の
+    // on_frame_not_send_callback に相当する送出失敗の通知が無いため、
+    // 送出時の非 fatal な失敗は観測できない
     H2Event error_event;
     error_event.type = H2EventType::Error;
     error_event.session_id = session_id;
@@ -2615,7 +2675,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
       discard_stream_recv_bytes(session_id);
     }
   }
-  // mem_recv2 コールバック中でも安全なよう、ここでは session_send しない
+  // nghttp2_conn_read コールバック中でも安全なよう、ここでは session_send しない
 }
 
 int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
@@ -2988,7 +3048,7 @@ void H2Session::send_datagram(int32_t session_id,
   }
   // 受理前 END_STREAM を検知したセッションは終了を学習した状態であり、
   // 終了処理 (accept_session 後) までにキューされる DATAGRAM を塞ぐ。
-  // 検知前にキュー済みの DATAGRAM は accept_session の nghttp2_session_send で
+  // 検知前にキュー済みの DATAGRAM は accept_session の flush_output で
   // 送出され得る (handle_wt_close_session のように検知時点で破棄する経路では
   // ない)
   if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
@@ -3081,10 +3141,10 @@ void H2Session::close_session(int32_t session_id,
   // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
   // RST_STREAM ではアプリケーション終了を正しく伝えられない
   //
-  // nghttp2_session_send は mem_recv2 コールバック中に呼んではならない。
+  // nghttp2_conn_read のコールバック中に flush_output を呼んではならない。
   // 送信は呼び出し側の send() / receive() 後段に任せる。
   end_stream_pending_.insert(session_id);
-  nghttp2_session_resume_data(session_, session_id);
+  nghttp2_conn_resume_stream(conn_, session_id);
 }
 
 bool H2Session::is_webtransport_ready() const {
@@ -3126,10 +3186,15 @@ std::optional<H2Event> H2Session::next_event() {
 }
 
 bool H2Session::want_write() const {
-  if (!session_) {
+  if (!conn_) {
     return false;
   }
-  return nghttp2_session_want_write(session_) != 0 || !send_buffer_.empty();
+
+  // nghttp2-v2 には want_write に相当する API が無いため、nghttp2_conn_write
+  // で送信バッファへ吸い上げて有無を判定する
+  auto* self = const_cast<H2Session*>(this);
+  self->flush_output();
+  return !send_buffer_.empty();
 }
 
 std::optional<int64_t> H2Session::test_unfinished_capsule_bytes(
@@ -3180,406 +3245,448 @@ std::vector<uint64_t> H2Session::get_stream_ids(int32_t session_id) const {
 
 // ========== nghttp2 コールバック実装 ==========
 
-nghttp2_ssize H2Session::send_callback(nghttp2_session* session,
-                                       const uint8_t* data,
-                                       size_t length,
-                                       int flags,
-                                       void* user_data) noexcept {
-  (void)session;
-  (void)flags;
-
-  auto* h2_session = static_cast<H2Session*>(user_data);
-  h2_session->send_buffer_.insert(h2_session->send_buffer_.end(), data,
-                                  data + length);
-  return static_cast<nghttp2_ssize>(length);
+void H2Session::on_rand_callback(uint8_t* dest, size_t destlen) noexcept {
+  // rand は接続生成時にレートリミッタの種として 1 度だけ呼ばれる
+  std::random_device rd;
+  std::uniform_int_distribution<unsigned int> dist(0, 255);
+  for (size_t i = 0; i < destlen; ++i) {
+    dest[i] = static_cast<uint8_t>(dist(rd));
+  }
 }
 
-int H2Session::on_frame_recv_callback(nghttp2_session* session,
-                                      const nghttp2_frame* frame,
-                                      void* user_data) noexcept {
-  (void)session;
-
-  auto* h2_session = static_cast<H2Session*>(user_data);
-  int32_t stream_id = frame->hd.stream_id;
-
-  switch (frame->hd.type) {
-    case NGHTTP2_SETTINGS:
-      // draft-15 Section 3.1 / 4.3.1
-      if ((frame->hd.flags & NGHTTP2_FLAG_ACK) == 0) {
-        for (size_t i = 0; i < frame->settings.niv; ++i) {
-          const nghttp2_settings_entry& entry = frame->settings.iv[i];
-          switch (entry.settings_id) {
-            case NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL:
-              h2_session->peer_enable_connect_protocol_ = (entry.value == 1);
-              break;
-            case SETTINGS_WT_ENABLED:
-              // draft-15 Section 3.1: 1 超は PROTOCOL_ERROR
-              if (entry.value > 1) {
-                H2Event event;
-                event.type = H2EventType::Error;
-                event.error_code = NGHTTP2_PROTOCOL_ERROR;
-                event.error_message =
-                    "SETTINGS_WT_ENABLED value greater than 1";
-                h2_session->push_event(std::move(event));
-                h2_session->closed_ = true;
-              } else {
-                h2_session->peer_wt_enabled_ = (entry.value == 1);
-              }
-              break;
-            case SETTINGS_WT_INITIAL_MAX_DATA:
-              h2_session->peer_wt_initial_max_data_ = entry.value;
-              break;
-            case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI:
-              h2_session->peer_wt_initial_max_stream_data_uni_ = entry.value;
-              break;
-            case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL:
-              h2_session->peer_wt_initial_max_stream_data_bidi_local_ =
-                  entry.value;
-              break;
-            case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE:
-              h2_session->peer_wt_initial_max_stream_data_bidi_remote_ =
-                  entry.value;
-              break;
-            case SETTINGS_WT_INITIAL_MAX_STREAMS_UNI:
-              h2_session->peer_wt_initial_max_streams_uni_ = entry.value;
-              break;
-            case SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI:
-              h2_session->peer_wt_initial_max_streams_bidi_ = entry.value;
-              break;
-            default:
-              break;
-          }
-        }
-      }
-      break;
-
-    case NGHTTP2_HEADERS:
-      if (frame->headers.cat == NGHTTP2_HCAT_REQUEST &&
-          h2_session->is_server_) {
-        // サーバー側でリクエストを受信
-        auto it = h2_session->pending_headers_.find(stream_id);
-        if (it != h2_session->pending_headers_.end()) {
-          // WebTransport CONNECT リクエストかチェック
-          bool is_connect = false;
-          bool is_webtransport = false;
-          std::string wt_init_value;
-          bool has_wt_init = false;
-          for (const auto& [name, value] : it->second) {
-            if (name == ":method" && value == "CONNECT") {
-              is_connect = true;
-            }
-            if (name == ":protocol" && value == "webtransport") {
-              is_webtransport = true;
-            }
-            if (name == "webtransport-init") {
-              has_wt_init = true;
-              wt_init_value = value;
-            }
-          }
-          if (is_connect && is_webtransport) {
-            // draft-15 Section 3.2: Origin ヘッダーがある場合は検証 MUST。
-            // 検証失敗は 403 で拒否する (同 Section の SHOULD)
-            if (!h2_session->verify_origin(it->second)) {
-              h2_session->pending_headers_.erase(it);
-              h2_session->reject_session(stream_id, 403);
-              break;
-            }
-
-            // WebTransport セッション情報を作成
-            WtSessionInfo wt_session;
-            wt_session.http2_stream_id = stream_id;
-            h2_session->apply_peer_initial_flow_control(wt_session);
-
-            // draft-15 Section 4.3: SETTINGS とヘッダーの大きい方を採用
-            if (has_wt_init) {
-              uint64_t init_u = 0;
-              uint64_t init_bl = 0;
-              uint64_t init_br = 0;
-              bool has_u = false;
-              bool has_bl = false;
-              bool has_br = false;
-              if (!h2_session->parse_webtransport_init(wt_init_value, init_u,
-                                                       init_bl, init_br, has_u,
-                                                       has_bl, has_br)) {
-                h2_session->pending_headers_.erase(it);
-                h2_session->reject_session(stream_id, 400);
-                break;
-              }
-              // クライアント送信ヘッダー: 受信側 (server) 向けクレジット
-              // u = サーバー開始 uni, bl = クライアント開始 bidi,
-              // br = サーバー開始 bidi
-              if (has_u) {
-                wt_session.peer_max_stream_data_uni =
-                    std::max(wt_session.peer_max_stream_data_uni, init_u);
-                record_received_limit(
-                    wt_session.received_initial_max_stream_data_uni, init_u);
-              }
-              if (has_bl) {
-                wt_session.peer_max_stream_data_bidi_remote = std::max(
-                    wt_session.peer_max_stream_data_bidi_remote, init_bl);
-                record_received_limit(
-                    wt_session.received_initial_max_stream_data_bidi_remote,
-                    init_bl);
-              }
-              if (has_br) {
-                wt_session.peer_max_stream_data_bidi_local = std::max(
-                    wt_session.peer_max_stream_data_bidi_local, init_br);
-                record_received_limit(
-                    wt_session.received_initial_max_stream_data_bidi_local,
-                    init_br);
-              }
-            }
-
-            h2_session->wt_sessions_[stream_id] = wt_session;
-
-            // WebTransport セッションリクエスト
-            H2Event event;
-            event.type = H2EventType::SessionReady;
-            event.session_id = stream_id;
-            event.headers = it->second;
-            h2_session->push_event(std::move(event));
-          } else {
-            // 非 WebTransport リクエスト (CONNECT +
-            // :protocol=webtransport 以外) は 405 で拒否してストリームを
-            // 終端する。draft-15 Section 3.2 の 405 SHOULD は extended
-            // CONNECT + :protocol=webtransport の対象リソースが
-            // WebTransport 非対応の場合を指し、本分岐はその対象外だが、
-            // WebTransport 専用エンドポイントとしての実装ポリシーで送出する
-            h2_session->reject_session(stream_id, 405);
-          }
-          h2_session->pending_headers_.erase(it);
-        }
-      } else if (frame->headers.cat == NGHTTP2_HCAT_RESPONSE &&
-                 !h2_session->is_server_) {
-        // クライアント側でレスポンスを受信
-        auto it = h2_session->pending_headers_.find(stream_id);
-        if (it != h2_session->pending_headers_.end()) {
-          // レスポンスの :status を取得する (1xx 中間応答もこの分岐に通知
-          // される。nghttp2.h の on_begin_headers_callback の docstring と
-          // nghttp2_headers_category enum の docstring)
-          bool is_success = false;
-          std::string status_value;
-          std::string wt_init_value;
-          bool has_wt_init = false;
-          for (const auto& [name, value] : it->second) {
-            if (name == ":status") {
-              status_value = value;
-              // draft-15 Section 3.2 の「A WebTransport session is established
-              // when the server sends a 2xx response」。200 のみでなく先頭
-              // 文字が '2' の 2xx 全般を確立として扱う
-              if (!value.empty() && value[0] == '2') {
-                is_success = true;
-              }
-            }
-            if (name == "webtransport-init") {
-              has_wt_init = true;
-              wt_init_value = value;
-            }
-          }
-          auto* wt_session = h2_session->get_wt_session(stream_id);
-          if (is_success && wt_session) {
-            // draft-15 Section 4.3: 応答の WebTransport-Init も反映
-            // (2xx 全般の確立であり、200 のみに限らない)
-            if (has_wt_init) {
-              uint64_t init_u = 0;
-              uint64_t init_bl = 0;
-              uint64_t init_br = 0;
-              bool has_u = false;
-              bool has_bl = false;
-              bool has_br = false;
-              if (h2_session->parse_webtransport_init(wt_init_value, init_u,
-                                                      init_bl, init_br, has_u,
-                                                      has_bl, has_br)) {
-                // サーバー送信ヘッダー: 受信側 (client) 向けクレジット
-                if (has_u) {
-                  wt_session->peer_max_stream_data_uni =
-                      std::max(wt_session->peer_max_stream_data_uni, init_u);
-                  record_received_limit(
-                      wt_session->received_initial_max_stream_data_uni, init_u);
-                }
-                if (has_bl) {
-                  wt_session->peer_max_stream_data_bidi_remote = std::max(
-                      wt_session->peer_max_stream_data_bidi_remote, init_bl);
-                  record_received_limit(
-                      wt_session->received_initial_max_stream_data_bidi_remote,
-                      init_bl);
-                }
-                if (has_br) {
-                  wt_session->peer_max_stream_data_bidi_local = std::max(
-                      wt_session->peer_max_stream_data_bidi_local, init_br);
-                  record_received_limit(
-                      wt_session->received_initial_max_stream_data_bidi_local,
-                      init_br);
-                }
-              }
-            }
-
-            wt_session->is_established = true;
-
-            // WebTransport セッション確立
-            H2Event event;
-            event.type = H2EventType::SessionReady;
-            event.session_id = stream_id;
-            event.headers = it->second;
-            h2_session->push_event(std::move(event));
-
-            // 初期フロー制御 Capsule を送信
-            std::vector<uint8_t> max_data_payload = h2_session->encode_varint(
-                h2_session->config_.wt_initial_max_data);
-            h2_session->send_capsule(stream_id, CapsuleType::WtMaxData,
-                                     max_data_payload);
-
-            std::vector<uint8_t> max_streams_bidi_payload =
-                h2_session->encode_varint(
-                    h2_session->config_.wt_initial_max_streams_bidi);
-            h2_session->send_capsule(stream_id, CapsuleType::WtMaxStreamsBidi,
-                                     max_streams_bidi_payload);
-
-            std::vector<uint8_t> max_streams_uni_payload =
-                h2_session->encode_varint(
-                    h2_session->config_.wt_initial_max_streams_uni);
-            h2_session->send_capsule(stream_id, CapsuleType::WtMaxStreamsUni,
-                                     max_streams_uni_payload);
-          } else if (wt_session && !status_value.empty() &&
-                     status_value[0] != '1' && status_value[0] != '2') {
-            // 非 2xx 応答 (拒否) を受信したセッションは一度も確立されていない
-            // (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
-            // session is established when the server sends a 2xx
-            // response」)。SessionClosed は発火しない: 一度も確立されて
-            // いないセッションの終了通知という意味論が合わないため、
-            // 拒否の通知としては SessionRejected イベント (status_code
-            // 付き) を push してからエントリを削除する。エントリ削除により、
-            // 以後の on_stream_close_callback /
-            // close_session / send_datagram / send_stream_data / open_stream /
-            // reset_stream / stop_sending / drain_session がエントリ不在で
-            // 自然に塞がる (二重発火の経路も残らない)。HTTP/2 ストリーム
-            // 自体は
-            // サーバー側のみが閉じた半開きのまま接続終了まで残る
-            // (RST_STREAM 等の後始末は行わない既知の制約)。1xx 中間応答
-            // (100-199) は削除対象外: 1xx は中間応答であり拒否ではない
-            // (nghttp2 は 1xx で abort せず最終応答を待つ)。1xx を挟んだ
-            // 応答の最終応答は NGHTTP2_HCAT_HEADERS で通知され、本分岐では
-            // 捕捉されないため wt_sessions_ のエントリは残る (既知の制約。
-            // 1xx 後の最終応答の捕捉不能。pending_headers_ は
-            // NGHTTP2_HCAT_HEADERS の分岐で解放する)。なお、
-            // 拒否応答の受信前にキュー済みだったカプセル
-            // (http2_stream_buffers_) は後始末せず、以後の send() で送出
-            // され得る (既存の挙動を維持する。エントリ削除で塞がるのは
-            // 以後の send_datagram 等の新規呼び出しのみ)
-            H2Event rejected_event;
-            rejected_event.type = H2EventType::SessionRejected;
-            rejected_event.session_id = stream_id;
-            // std::from_chars を使い C++ 例外を投げない (nghttp2 の C ABI
-            // 境界のため)。nghttp2 は :status を 100-999 の 3 桁数字として
-            // バリデーション済みだが、パース失敗時と HTTP status code として
-            // 意味を持つ 100-599 の範囲外 (600-999 等) は 0 に丸める
-            // (不正な status code をアプリへ渡さない)
-            uint16_t code = 0;
-            const auto parse_result = std::from_chars(
-                status_value.data(), status_value.data() + status_value.size(),
-                code);
-            if (parse_result.ec != std::errc{} || code < 100 || code >= 600) {
-              code = 0;
-            }
-            rejected_event.status_code = code;
-            h2_session->push_event(std::move(rejected_event));
-            h2_session->wt_sessions_.erase(stream_id);
-            // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を
-            // 解放する。2xx 応答前の DATA は nghttp2 がアプリへ配送せず自身で
-            // コネクションレベル消費するためここでは常に空だが、エントリを
-            // 削除する他の経路と揃えて呼ぶ (防御)
-            h2_session->discard_stream_recv_bytes(stream_id);
-          }
-          h2_session->pending_headers_.erase(it);
-        }
-      } else if (frame->headers.cat == NGHTTP2_HCAT_HEADERS) {
-        // 完了したヘッダーブロックのうち NGHTTP2_HCAT_HEADERS として通知
-        // されるもの (trailer。END_STREAM の有無を問わず受理される。および
-        // 1xx 中間応答の後に届く最終応答) のエントリを解放する。後者はストリームが OPENED に
-        // なった後の応答であり nghttp2 は応答として検証するが、分類は
-        // NGHTTP2_HCAT_HEADERS になる。上の 2 分岐では捕捉されない。
-        // wt_sessions_ の扱いは変えない (1xx 後の最終応答の捕捉は別の対応)
-        h2_session->pending_headers_.erase(stream_id);
-      }
-      break;
-
-    case NGHTTP2_GOAWAY: {
-      // draft-15 Section 6.13 の graceful shutdown: GOAWAY 受信後も既存
-      // セッションの送受信を継続する。closed_ にはせず、新規 CONNECT の
-      // 抑止のみを goaway_received_ で行う
-      H2Event event;
-      event.type = H2EventType::GoAway;
-      event.last_stream_id = frame->goaway.last_stream_id;
-      event.error_code = frame->goaway.error_code;
-      h2_session->push_event(std::move(event));
-      h2_session->goaway_received_ = true;
-      break;
-    }
-
-    default:
-      break;
-  }
-
-  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
-  // を閉じた場合のセッション終了検知 (draft-15 Section 3.4 の正規の終了経路)。
-  // HEADERS フレームの処理分岐の後に置く: 2xx + END_STREAM (受理と同時
-  // クローズ) では HCAT_RESPONSE 分岐で is_established が設定された後に検知
-  // する必要がある。フレーム種別 (cat) に依存させない (trailers 等の
-  // HCAT_HEADERS + END_STREAM も捕捉する)。END_STREAM ビット (0x01) は
-  // SETTINGS ACK / PING ACK の ACK ビットと同一の値だが、これらのフレームの
-  // stream_id は 0 であり wt_sessions_ にエントリが存在しないため
-  // handle_end_stream 冒頭で返る。nghttp2 は DATA / HEADERS 以外のフレーム
-  // の未定義フラグをマスクしてから通知するため、0x01 ビットが立って通知
-  // されるのは DATA / HEADERS のみである (nghttp2 の実装前提)
-  if ((frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0) {
-    h2_session->handle_end_stream(stream_id);
-  }
-
+int H2Session::on_stream_open_callback(nghttp2_conn* conn,
+                                       int64_t stream_id,
+                                       void* user_data) noexcept {
+  (void)conn;
+  (void)stream_id;
+  (void)user_data;
+  // WebTransport セッションの CONNECT ストリームは begin_headers /
+  // end_headers で処理するため、ここでは何もしない
   return 0;
 }
 
-int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
-                                           uint8_t flags,
-                                           int32_t stream_id,
-                                           const uint8_t* data,
-                                           size_t len,
-                                           void* user_data) noexcept {
-  (void)session;
-  (void)flags;
+int H2Session::on_stream_close_callback(nghttp2_conn* conn,
+                                        uint32_t flags,
+                                        int64_t stream_id,
+                                        uint32_t error_code,
+                                        void* user_data,
+                                        void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
+  int32_t session_id = static_cast<int32_t>(stream_id);
+
+  // error_code は NGHTTP2_STREAM_CLOSE_FLAG_ERROR_CODE_SET のときだけ有効
+  // (RST_STREAM による終了)。それ以外の正常終了は 0
+  uint32_t close_error_code =
+      (flags & NGHTTP2_STREAM_CLOSE_FLAG_ERROR_CODE_SET) ? error_code : 0;
+
+  // WebTransport セッションが閉じられた場合
+  auto* wt_session = h2_session->get_wt_session(session_id);
+  if (wt_session) {
+    H2Event event;
+    event.type = H2EventType::SessionClosed;
+    event.session_id = session_id;
+    event.error_code = close_error_code;
+    h2_session->push_event(std::move(event));
+    h2_session->wt_sessions_.erase(session_id);
+  }
+  // 受理前 END_STREAM の保留記録も除去する (エントリを削除する経路)
+  h2_session->pending_pre_accept_end_stream_session_ids_.erase(session_id);
+
+  h2_session->http2_stream_buffers_.erase(session_id);
+  h2_session->http2_stream_data_sent_.erase(session_id);
+  // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
+  h2_session->end_stream_pending_.erase(session_id);
+  // 完了通知が届かなかったヘッダーブロックのエントリをストリームの終了でも
+  // 解放する (完了したブロックは on_end_headers_callback で解放済み)
+  h2_session->pending_headers_.erase(session_id);
+  // ストリームの終了で未消費の受信バイト記録を解放する
+  h2_session->discard_stream_recv_bytes(session_id);
+  return 0;
+}
+
+int H2Session::on_recv_settings_entry_callback(
+    nghttp2_conn* conn,
+    const nghttp2_settings_entry* ent,
+    void* user_data) noexcept {
+  (void)conn;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+
+  // draft-15 Section 3.1 / 4.3.1
+  switch (ent->id) {
+    case SETTINGS_ENABLE_CONNECT_PROTOCOL:
+      h2_session->peer_enable_connect_protocol_ = (ent->value == 1);
+      break;
+    case SETTINGS_WT_ENABLED:
+      // draft-15 Section 3.1: 1 超は PROTOCOL_ERROR
+      if (ent->value > 1) {
+        H2Event event;
+        event.type = H2EventType::Error;
+        event.error_code = NGHTTP2_PROTOCOL_ERROR;
+        event.error_message = "SETTINGS_WT_ENABLED value greater than 1";
+        h2_session->push_event(std::move(event));
+        h2_session->closed_ = true;
+      } else {
+        h2_session->peer_wt_enabled_ = (ent->value == 1);
+      }
+      break;
+    case SETTINGS_WT_INITIAL_MAX_DATA:
+      h2_session->peer_wt_initial_max_data_ = ent->value;
+      break;
+    case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI:
+      h2_session->peer_wt_initial_max_stream_data_uni_ = ent->value;
+      break;
+    case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL:
+      h2_session->peer_wt_initial_max_stream_data_bidi_local_ = ent->value;
+      break;
+    case SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE:
+      h2_session->peer_wt_initial_max_stream_data_bidi_remote_ = ent->value;
+      break;
+    case SETTINGS_WT_INITIAL_MAX_STREAMS_UNI:
+      h2_session->peer_wt_initial_max_streams_uni_ = ent->value;
+      break;
+    case SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI:
+      h2_session->peer_wt_initial_max_streams_bidi_ = ent->value;
+      break;
+    default:
+      break;
+  }
+  return 0;
+}
+
+int H2Session::on_begin_headers_callback(nghttp2_conn* conn,
+                                         int64_t stream_id,
+                                         void* user_data,
+                                         void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+  h2_session->pending_headers_[static_cast<int32_t>(stream_id)].clear();
+  return 0;
+}
+
+int H2Session::on_recv_header_callback(nghttp2_conn* conn,
+                                       int64_t stream_id,
+                                       int32_t token,
+                                       nghttp2_rcbuf* name,
+                                       nghttp2_rcbuf* value,
+                                       uint8_t flags,
+                                       void* user_data,
+                                       void* stream_user_data) noexcept {
+  (void)conn;
+  (void)token;
+  (void)flags;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+
+  nghttp2_vec name_buf = nghttp2_rcbuf_get_buf(name);
+  nghttp2_vec value_buf = nghttp2_rcbuf_get_buf(value);
+  std::string header_name(reinterpret_cast<const char*>(name_buf.base),
+                          name_buf.len);
+  std::string header_value(reinterpret_cast<const char*>(value_buf.base),
+                           value_buf.len);
+
+  h2_session->pending_headers_[static_cast<int32_t>(stream_id)].emplace_back(
+      std::move(header_name), std::move(header_value));
+  return 0;
+}
+
+int H2Session::on_end_headers_callback(nghttp2_conn* conn,
+                                       int64_t stream_id,
+                                       int fin,
+                                       void* user_data,
+                                       void* stream_user_data) noexcept {
+  (void)conn;
+  (void)fin;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+  int32_t session_id = static_cast<int32_t>(stream_id);
+
+  auto it = h2_session->pending_headers_.find(session_id);
+  if (it == h2_session->pending_headers_.end()) {
+    return 0;
+  }
+
+  if (h2_session->is_server_) {
+    // サーバー側でリクエストを受信
+    bool is_connect = false;
+    bool is_webtransport = false;
+    std::string wt_init_value;
+    bool has_wt_init = false;
+    for (const auto& [name, value] : it->second) {
+      if (name == ":method" && value == "CONNECT") {
+        is_connect = true;
+      }
+      if (name == ":protocol" && value == "webtransport") {
+        is_webtransport = true;
+      }
+      if (name == "webtransport-init") {
+        has_wt_init = true;
+        wt_init_value = value;
+      }
+    }
+
+    if (is_connect && is_webtransport) {
+      // draft-15 Section 3.2: Origin ヘッダーがある場合は検証 MUST。
+      // 検証失敗は 403 で拒否する (同 Section の SHOULD)
+      if (!h2_session->verify_origin(it->second)) {
+        h2_session->pending_headers_.erase(it);
+        h2_session->reject_session(session_id, 403);
+        return 0;
+      }
+
+      // WebTransport セッション情報を作成
+      WtSessionInfo wt_session;
+      wt_session.http2_stream_id = session_id;
+      h2_session->apply_peer_initial_flow_control(wt_session);
+
+      // draft-15 Section 4.3: SETTINGS とヘッダーの大きい方を採用
+      if (has_wt_init) {
+        uint64_t init_u = 0;
+        uint64_t init_bl = 0;
+        uint64_t init_br = 0;
+        bool has_u = false;
+        bool has_bl = false;
+        bool has_br = false;
+        if (!h2_session->parse_webtransport_init(wt_init_value, init_u, init_bl,
+                                                 init_br, has_u, has_bl,
+                                                 has_br)) {
+          h2_session->pending_headers_.erase(it);
+          h2_session->reject_session(session_id, 400);
+          return 0;
+        }
+        // クライアント送信ヘッダー: 受信側 (server) 向けクレジット
+        // u = サーバー開始 uni, bl = クライアント開始 bidi,
+        // br = サーバー開始 bidi
+        if (has_u) {
+          wt_session.peer_max_stream_data_uni =
+              std::max(wt_session.peer_max_stream_data_uni, init_u);
+          record_received_limit(wt_session.received_initial_max_stream_data_uni,
+                                init_u);
+        }
+        if (has_bl) {
+          wt_session.peer_max_stream_data_bidi_remote =
+              std::max(wt_session.peer_max_stream_data_bidi_remote, init_bl);
+          record_received_limit(
+              wt_session.received_initial_max_stream_data_bidi_remote, init_bl);
+        }
+        if (has_br) {
+          wt_session.peer_max_stream_data_bidi_local =
+              std::max(wt_session.peer_max_stream_data_bidi_local, init_br);
+          record_received_limit(
+              wt_session.received_initial_max_stream_data_bidi_local, init_br);
+        }
+      }
+
+      h2_session->wt_sessions_[session_id] = wt_session;
+
+      // WebTransport セッションリクエスト
+      H2Event event;
+      event.type = H2EventType::SessionReady;
+      event.session_id = session_id;
+      event.headers = it->second;
+      h2_session->push_event(std::move(event));
+    } else {
+      // 非 WebTransport リクエスト (CONNECT +
+      // :protocol=webtransport 以外) は 405 で拒否してストリームを
+      // 終端する。draft-15 Section 3.2 の 405 SHOULD は extended
+      // CONNECT + :protocol=webtransport の対象リソースが
+      // WebTransport 非対応の場合を指し、本分岐はその対象外だが、
+      // WebTransport 専用エンドポイントとしての実装ポリシーで送出する
+      h2_session->reject_session(session_id, 405);
+    }
+    h2_session->pending_headers_.erase(it);
+    return 0;
+  }
+
+  // クライアント側でレスポンスを受信 (1xx 中間応答も含む)
+  bool is_success = false;
+  std::string status_value;
+  std::string wt_init_value;
+  bool has_wt_init = false;
+  for (const auto& [name, value] : it->second) {
+    if (name == ":status") {
+      status_value = value;
+      // draft-15 Section 3.2 の「A WebTransport session is established
+      // when the server sends a 2xx response」。200 のみでなく先頭
+      // 文字が '2' の 2xx 全般を確立として扱う
+      if (!value.empty() && value[0] == '2') {
+        is_success = true;
+      }
+    }
+    if (name == "webtransport-init") {
+      has_wt_init = true;
+      wt_init_value = value;
+    }
+  }
+  auto* wt_session = h2_session->get_wt_session(session_id);
+  if (is_success && wt_session) {
+    // draft-15 Section 4.3: 応答の WebTransport-Init も反映
+    // (2xx 全般の確立であり、200 のみに限らない)
+    if (has_wt_init) {
+      uint64_t init_u = 0;
+      uint64_t init_bl = 0;
+      uint64_t init_br = 0;
+      bool has_u = false;
+      bool has_bl = false;
+      bool has_br = false;
+      if (h2_session->parse_webtransport_init(wt_init_value, init_u, init_bl,
+                                              init_br, has_u, has_bl, has_br)) {
+        // サーバー送信ヘッダー: 受信側 (client) 向けクレジット
+        if (has_u) {
+          wt_session->peer_max_stream_data_uni =
+              std::max(wt_session->peer_max_stream_data_uni, init_u);
+          record_received_limit(
+              wt_session->received_initial_max_stream_data_uni, init_u);
+        }
+        if (has_bl) {
+          wt_session->peer_max_stream_data_bidi_remote =
+              std::max(wt_session->peer_max_stream_data_bidi_remote, init_bl);
+          record_received_limit(
+              wt_session->received_initial_max_stream_data_bidi_remote,
+              init_bl);
+        }
+        if (has_br) {
+          wt_session->peer_max_stream_data_bidi_local =
+              std::max(wt_session->peer_max_stream_data_bidi_local, init_br);
+          record_received_limit(
+              wt_session->received_initial_max_stream_data_bidi_local, init_br);
+        }
+      }
+    }
+
+    wt_session->is_established = true;
+
+    // WebTransport セッション確立
+    H2Event event;
+    event.type = H2EventType::SessionReady;
+    event.session_id = session_id;
+    event.headers = it->second;
+    h2_session->push_event(std::move(event));
+
+    // 初期フロー制御 Capsule を送信
+    std::vector<uint8_t> max_data_payload =
+        h2_session->encode_varint(h2_session->config_.wt_initial_max_data);
+    h2_session->send_capsule(session_id, CapsuleType::WtMaxData,
+                             max_data_payload);
+
+    std::vector<uint8_t> max_streams_bidi_payload = h2_session->encode_varint(
+        h2_session->config_.wt_initial_max_streams_bidi);
+    h2_session->send_capsule(session_id, CapsuleType::WtMaxStreamsBidi,
+                             max_streams_bidi_payload);
+
+    std::vector<uint8_t> max_streams_uni_payload = h2_session->encode_varint(
+        h2_session->config_.wt_initial_max_streams_uni);
+    h2_session->send_capsule(session_id, CapsuleType::WtMaxStreamsUni,
+                             max_streams_uni_payload);
+  } else if (wt_session && !status_value.empty() && status_value[0] != '1' &&
+             status_value[0] != '2') {
+    // 非 2xx 応答 (拒否) を受信したセッションは一度も確立されていない
+    // (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
+    // session is established when the server sends a 2xx
+    // response」)。SessionClosed は発火しない: 一度も確立されて
+    // いないセッションの終了通知という意味論が合わないため、
+    // 拒否の通知としては SessionRejected イベント (status_code
+    // 付き) を push してからエントリを削除する。エントリ削除により、
+    // 以後の on_stream_close_callback / close_session / send_datagram /
+    // send_stream_data / open_stream / reset_stream / stop_sending /
+    // drain_session がエントリ不在で自然に塞がる (二重発火の経路も残らない)。
+    // HTTP/2 ストリーム自体はサーバー側のみが閉じた半開きのまま接続終了まで
+    // 残る (RST_STREAM 等の後始末は行わない既知の制約)。1xx 中間応答
+    // (100-199) は削除対象外: 1xx は中間応答であり拒否ではない
+    H2Event rejected_event;
+    rejected_event.type = H2EventType::SessionRejected;
+    rejected_event.session_id = session_id;
+    // std::from_chars を使い C++ 例外を投げない (nghttp2 の C ABI
+    // 境界のため)。nghttp2 は :status を 100-999 の 3 桁数字として
+    // バリデーション済みだが、パース失敗時と HTTP status code として
+    // 意味を持つ 100-599 の範囲外 (600-999 等) は 0 に丸める
+    uint16_t code = 0;
+    const auto parse_result = std::from_chars(
+        status_value.data(), status_value.data() + status_value.size(), code);
+    if (parse_result.ec != std::errc{} || code < 100 || code >= 600) {
+      code = 0;
+    }
+    rejected_event.status_code = code;
+    h2_session->push_event(std::move(rejected_event));
+    h2_session->wt_sessions_.erase(session_id);
+    // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を
+    // 解放する
+    h2_session->discard_stream_recv_bytes(session_id);
+  }
+
+  h2_session->pending_headers_.erase(it);
+  return 0;
+}
+
+int H2Session::on_end_trailers_callback(nghttp2_conn* conn,
+                                        int64_t stream_id,
+                                        int fin,
+                                        void* user_data,
+                                        void* stream_user_data) noexcept {
+  (void)conn;
+  (void)fin;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+  // トレーラは WebTransport over HTTP/2 では使用しないため、受信バッファ
+  // だけ解放して破棄する
+  h2_session->pending_headers_.erase(static_cast<int32_t>(stream_id));
+  return 0;
+}
+
+int H2Session::on_recv_data_callback(nghttp2_conn* conn,
+                                     int64_t stream_id,
+                                     const uint8_t* data,
+                                     size_t datalen,
+                                     void* user_data,
+                                     void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+  int32_t session_id = static_cast<int32_t>(stream_id);
+
+  // v1 の recv_window_size 相当の追跡。破棄する DATA も受信量として
+  // 数え、消費した時点で返す (test_effective_recv_data_length で観測する)
+  h2_session->conn_recv_window_size_ += static_cast<int64_t>(datalen);
 
   // WebTransport セッションのデータとして Capsule を処理する。確立済みは
   // 即時処理し、サーバー側の受理前は上限付きで蓄積して accept_session で
   // 遅延処理する (draft-15 Section 3.2 の楽観送信) 。クライアント側の
   // 受理前 (2xx 応答前) は排出契機がないため従来どおり破棄する
-  auto* wt_session = h2_session->get_wt_session(stream_id);
+  auto* wt_session = h2_session->get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
     // アプリへ配送せず破棄する DATA は消費する機会が無いため、ここで
-    // コネクションレベル受信ウィンドウを返す (返さないと破棄した分だけ
-    // ウィンドウが消費されたままになる)
-    h2_session->consume_connection_recv_bytes(len);
+    // コネクションレベル受信ウィンドウを返す
+    h2_session->consume_connection_recv_bytes(datalen);
     return 0;
   }
-  if (len == 0) {
+  if (datalen == 0) {
     return 0;
   }
 
-  // 自動 WINDOW_UPDATE を無効化しているため、アプリへ届けた DATA の
+  // 受信ウィンドウの管理はアプリの責務であるため、アプリへ届けた DATA の
   // バイト数をストリームごとに記録し、イベント化した時点で消費する
-  h2_session->unconsumed_recv_bytes_[stream_id] += len;
+  h2_session->unconsumed_recv_bytes_[session_id] += datalen;
   if (wt_session->is_established) {
-    h2_session->process_capsules(stream_id, stream_id, data, len);
+    h2_session->process_capsules(session_id, session_id, data, datalen);
 
-    // 自動 WINDOW_UPDATE を無効化しているため、完成したカプセルだけを
-    // 消費すると「1 カプセルが受信ウィンドウより大きい」場合にウィンドウが
-    // 戻らずデッドロックする。未完成のまま残ったバイトのうち上限を超える分を
-    // 先に消費してウィンドウを開け、残りを受け取れるようにする
-    auto* after = h2_session->get_wt_session(stream_id);
+    // 完成したカプセルだけを消費すると「1 カプセルが受信ウィンドウより
+    // 大きい」場合にウィンドウが戻らずデッドロックする。未完成のまま
+    // 残ったバイトのうち上限を超える分を先に消費してウィンドウを開け、
+    // 残りを受け取れるようにする
+    auto* after = h2_session->get_wt_session(session_id);
     if (after != nullptr && !after->is_terminated) {
-      size_t limit = max_unfinished_capsule_bytes(h2_session->session_);
+      size_t limit = max_unfinished_capsule_bytes();
       if (after->capsule_buffer.size() > limit) {
-        h2_session->consume_recv_bytes(stream_id,
+        h2_session->consume_recv_bytes(session_id,
                                        after->capsule_buffer.size() - limit);
       }
     }
@@ -3587,169 +3694,159 @@ int H2Session::on_data_chunk_recv_callback(nghttp2_session* session,
   }
   if (!h2_session->is_server_) {
     // クライアント側の受理前 (2xx 応答前) に届く DATA はアプリへ配送せず
-    // 破棄する。nghttp2 は 2xx 前の DATA を配送せず自身でコネクションレベル
-    // 消費するため通常ここには来ない (防御)。記録が残った場合はセッション
-    // 終了 (非 2xx 応答の受信・ローカル close_session・ストリームのクローズ)
-    // で discard_stream_recv_bytes が解放する
+    // 破棄する。記録が残った場合はセッション終了で
+    // discard_stream_recv_bytes が解放する
     return 0;
   }
   // 受理前蓄積の上限超過時は非 2xx (413) で拒否しバッファを破棄する
-  // (接続は切らない。reject_session は session_send しないため
+  // (接続は切らない。reject_session は flush しないため
   // コールバック中でも安全である)
-  if (wt_session->capsule_buffer.size() + len >
+  if (wt_session->capsule_buffer.size() + datalen >
       h2_session->config_.wt_pre_accept_buffer_limit) {
-    h2_session->reject_session(stream_id, 413);
+    h2_session->reject_session(session_id, 413);
     return 0;
   }
   wt_session->capsule_buffer.insert(wt_session->capsule_buffer.end(), data,
-                                    data + len);
+                                    data + datalen);
   return 0;
 }
 
-int H2Session::on_stream_close_callback(nghttp2_session* session,
-                                        int32_t stream_id,
-                                        uint32_t error_code,
-                                        void* user_data) noexcept {
-  (void)session;
+int H2Session::on_remote_end_stream_callback(nghttp2_conn* conn,
+                                             int64_t stream_id,
+                                             void* user_data,
+                                             void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
 
   auto* h2_session = static_cast<H2Session*>(user_data);
 
-  // WebTransport セッションが閉じられた場合
-  auto* wt_session = h2_session->get_wt_session(stream_id);
-  if (wt_session) {
-    H2Event event;
-    event.type = H2EventType::SessionClosed;
-    event.session_id = stream_id;
-    event.error_code = error_code;
-    h2_session->push_event(std::move(event));
-    h2_session->wt_sessions_.erase(stream_id);
-  }
-  // 受理前 END_STREAM の保留記録も除去する (エントリを削除する経路)
-  h2_session->pending_pre_accept_end_stream_session_ids_.erase(stream_id);
-
-  h2_session->http2_stream_buffers_.erase(stream_id);
-  // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
-  h2_session->end_stream_pending_.erase(stream_id);
-  // 完了通知が届かなかったヘッダーブロックのエントリをストリームの終了でも
-  // 解放する (完了したブロックは NGHTTP2_HCAT_HEADERS の分岐で解放済み)。
-  // ヘッダー単位の拒否や messaging 検証の失敗では on_frame_recv_callback が
-  // 発火しないまま nghttp2 がストリームを閉じるため、この経路が唯一の解放に
-  // なる (受信途中のまま放置する RST_STREAM の注入では発火しない)
-  h2_session->pending_headers_.erase(stream_id);
-  // ストリームの終了で未消費の受信バイト記録を解放する
-  h2_session->discard_stream_recv_bytes(stream_id);
+  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
+  // を閉じた場合のセッション終了検知 (draft-15 Section 3.4 の正規の終了経路)。
+  // nghttp2-v2 は end_headers / end_trailers の後にこのコールバックを呼ぶ
+  // ため、2xx + END_STREAM (受理と同時クローズ) でも is_established が
+  // 設定された後に検知できる
+  h2_session->handle_end_stream(static_cast<int32_t>(stream_id));
   return 0;
 }
 
-int H2Session::on_frame_not_send_callback(nghttp2_session* session,
-                                          const nghttp2_frame* frame,
-                                          int lib_error_code,
-                                          void* user_data) noexcept {
-  (void)session;
+int H2Session::on_shutdown_callback(nghttp2_conn* conn,
+                                    int64_t last_stream_id,
+                                    uint32_t error_code,
+                                    void* user_data) noexcept {
+  (void)conn;
 
-  // HEADERS フレームの送出失敗を観測対象にする (H2Session が送出するのは
-  // reject_session / accept_session の応答 HEADERS が主)。nghttp2 は送出直前の
-  // 判定でカテゴリーを書き換えるため、カテゴリーではなく type のみで判定する
-  if (frame->hd.type != NGHTTP2_HEADERS) {
+  auto* h2_session = static_cast<H2Session*>(user_data);
+
+  // draft-15 Section 6.13 の graceful shutdown: GOAWAY 受信後も既存
+  // セッションの送受信を継続する。closed_ にはせず、新規 CONNECT の
+  // 抑止のみを goaway_received_ で行う
+  H2Event event;
+  event.type = H2EventType::GoAway;
+  event.last_stream_id = static_cast<int32_t>(last_stream_id);
+  event.error_code = error_code;
+  h2_session->push_event(std::move(event));
+  h2_session->goaway_received_ = true;
+  return 0;
+}
+
+nghttp2_ssize H2Session::on_read_data_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    nghttp2_vec* vec,
+    size_t veccnt,
+    uint32_t* pflags,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)veccnt;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+  int32_t session_id = static_cast<int32_t>(stream_id);
+
+  if (vec == nullptr || veccnt == 0) {
+    return NGHTTP2_ERR_CALLBACK_FAILURE;
+  }
+
+  auto it = h2_session->http2_stream_buffers_.find(session_id);
+  for (;;) {
+    if (it != h2_session->http2_stream_buffers_.end() && !it->second.empty()) {
+      H2StreamData& front = it->second.front();
+      size_t remaining = front.data.size() - front.offset;
+      if (remaining == 0) {
+        it->second.pop_front();
+        continue;
+      }
+      // アプリのバッファを直接指す (nghttp2-v2 は書き込み確認まで
+      // アプリがバッファを保持する契約)
+      vec[0] = nghttp2_vec{
+          const_cast<uint8_t*>(front.data.data() + front.offset), remaining};
+
+      // これが最後のチャンクで END_STREAM の送出を保留している場合、
+      // 同じ read_data 呼び出しで EOF を立てる。別の空 DATA フレームで
+      // END_STREAM を送ると v1 とワイヤの形が変わるため
+      auto pending_it = h2_session->end_stream_pending_.find(session_id);
+      if (pending_it != h2_session->end_stream_pending_.end() &&
+          it->second.size() == 1) {
+        *pflags |= NGHTTP2_READ_DATA_FLAG_EOF;
+        h2_session->end_stream_pending_.erase(pending_it);
+      }
+      return 1;
+    }
+
+    // 送信するカプセルが尽きた。END_STREAM の送出を保留していれば
+    // half-close する (draft-15 Section 6.12)
+    auto pending_it = h2_session->end_stream_pending_.find(session_id);
+    if (pending_it != h2_session->end_stream_pending_.end()) {
+      *pflags |= NGHTTP2_READ_DATA_FLAG_EOF;
+      h2_session->end_stream_pending_.erase(pending_it);
+      vec[0] = nghttp2_vec{nullptr, 0};
+      return 1;
+    }
+
+    return NGHTTP2_ERR_WOULDBLOCK;
+  }
+}
+
+int H2Session::on_write_stream_data_offset_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    uint64_t offset,
+    size_t len,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+
+  auto* h2_session = static_cast<H2Session*>(user_data);
+  int32_t session_id = static_cast<int32_t>(stream_id);
+
+  uint64_t& sent = h2_session->http2_stream_data_sent_[session_id];
+  uint64_t new_sent = offset + len;
+  if (new_sent <= sent) {
     return 0;
   }
 
-  auto* h2_session = static_cast<H2Session*>(user_data);
+  uint64_t delta = new_sent - sent;
+  sent = new_sent;
 
-  // 送出失敗を Error イベントで観測可能にする。receive() の失敗時と同じ
-  // 形式 (error_code は nghttp2 エラーコードの絶対値)。nghttp2 のセッション
-  // 操作 API は呼ばず push_event のみを行う (nghttp2_strerror は状態に
-  // 触れない。再入防止)。戻り値は 0 固定 (非 0 は
-  // NGHTTP2_ERR_CALLBACK_FAILURE として致命扱いになる)
-  H2Event event;
-  event.type = H2EventType::Error;
-  event.session_id = frame->hd.stream_id;
-  event.stream_id = static_cast<uint64_t>(frame->hd.stream_id);
-  event.error_code = static_cast<uint32_t>(-lib_error_code);
-  event.error_message = nghttp2_strerror(lib_error_code);
-  h2_session->push_event(std::move(event));
-  return 0;
-}
+  auto it = h2_session->http2_stream_buffers_.find(session_id);
+  if (it == h2_session->http2_stream_buffers_.end()) {
+    return 0;
+  }
 
-int H2Session::on_header_callback(nghttp2_session* session,
-                                  const nghttp2_frame* frame,
-                                  const uint8_t* name,
-                                  size_t namelen,
-                                  const uint8_t* value,
-                                  size_t valuelen,
-                                  uint8_t flags,
-                                  void* user_data) noexcept {
-  (void)session;
-  (void)flags;
-
-  auto* h2_session = static_cast<H2Session*>(user_data);
-  int32_t stream_id = frame->hd.stream_id;
-
-  std::string header_name(reinterpret_cast<const char*>(name), namelen);
-  std::string header_value(reinterpret_cast<const char*>(value), valuelen);
-
-  h2_session->pending_headers_[stream_id].emplace_back(std::move(header_name),
-                                                       std::move(header_value));
-  return 0;
-}
-
-int H2Session::on_begin_headers_callback(nghttp2_session* session,
-                                         const nghttp2_frame* frame,
-                                         void* user_data) noexcept {
-  (void)session;
-
-  auto* h2_session = static_cast<H2Session*>(user_data);
-  int32_t stream_id = frame->hd.stream_id;
-
-  h2_session->pending_headers_[stream_id].clear();
-  return 0;
-}
-
-nghttp2_ssize H2Session::data_source_read_callback(nghttp2_session* session,
-                                                   int32_t stream_id,
-                                                   uint8_t* buf,
-                                                   size_t length,
-                                                   uint32_t* data_flags,
-                                                   nghttp2_data_source* source,
-                                                   void* user_data) noexcept {
-  (void)session;
-  (void)source;
-
-  auto* h2_session = static_cast<H2Session*>(user_data);
-  bool end_pending = h2_session->end_stream_pending_.find(stream_id) !=
-                     h2_session->end_stream_pending_.end();
-
-  auto it = h2_session->http2_stream_buffers_.find(stream_id);
-  if (it == h2_session->http2_stream_buffers_.end() || it->second.empty()) {
-    // draft-15 Section 6.12: END_STREAM の送出を保留していれば half-close
-    if (end_pending) {
-      *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-      h2_session->end_stream_pending_.erase(stream_id);
-      return 0;
+  while (delta > 0 && !it->second.empty()) {
+    H2StreamData& front = it->second.front();
+    size_t remaining = front.data.size() - front.offset;
+    size_t take = std::min<size_t>(static_cast<size_t>(delta), remaining);
+    front.offset += take;
+    delta -= take;
+    if (front.offset >= front.data.size()) {
+      it->second.pop_front();
     }
-    return NGHTTP2_ERR_DEFERRED;
   }
 
-  auto& buffer = it->second.front();
-  size_t to_read = std::min(length, buffer.size());
-
-  if (to_read > 0) {
-    std::memcpy(buf, buffer.data(), to_read);
-    buffer.erase(buffer.begin(),
-                 buffer.begin() + static_cast<std::ptrdiff_t>(to_read));
-  }
-
-  if (buffer.empty()) {
-    it->second.pop_front();
-  }
-
-  // 送信キューが空で END_STREAM の送出を保留していれば EOF
-  if (it->second.empty() && end_pending) {
-    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-    h2_session->end_stream_pending_.erase(stream_id);
-  }
-
-  return static_cast<nghttp2_ssize>(to_read);
+  return 0;
 }
 
 // ========== Python バインディング ==========

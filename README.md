@@ -48,14 +48,14 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
   - [nghttp3](https://github.com/ngtcp2/nghttp3) を採用
 - HTTP/2
   - Sans I/O API と asyncio API の両方を提供
-  - [nghttp2](https://github.com/nghttp2/nghttp2) を採用
+  - [nghttp2-v2](https://github.com/nghttp2/nghttp2-v2) を採用
 - QMux
   - 任意の双方向バイトストリーム上でストリーム多重化を提供
   - Sans I/O API と asyncio API の両方を提供
   - [dwnx](https://github.com/ngtcp2/dwnx) を採用
   - DATAGRAM は未対応
 - 依存ライブラリは [deps.json](deps.json) で特定のタグ / コミットに固定する
-  - ngtcp2 / nghttp3 / dwnx は上流ブランチの特定コミット (`ref`)、nghttp2 / AWS-LC はタグ (`tag`) で固定する
+  - ngtcp2 / nghttp3 / nghttp2-v2 / dwnx は上流ブランチの特定コミット (`ref`)、AWS-LC はタグ (`tag`) で固定する
   - 更新時は `deps.json` を書き換える (ビルドキャッシュのキーも `deps.json` の内容に連動する)
 - Python [Free-Threading](https://docs.python.org/3/howto/free-threading-python.html) 対応
   - [PEP 703 – Making the Global Interpreter Lock Optional in CPython \| peps\.python\.org](https://peps.python.org/pep-0703/)
@@ -528,7 +528,7 @@ make test
 
 ## 第三者ライセンス
 
-本プロジェクトは ngtcp2 / nghttp3 / nghttp2 / dwnx / AWS-LC / nanobind (同梱の tsl::robin_map を含む) を静的リンクしています。各ライセンス全文は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) を参照してください。
+本プロジェクトは ngtcp2 / nghttp3 / nghttp2-v2 / dwnx / AWS-LC / nanobind (同梱の tsl::robin_map を含む) を静的リンクしています。各ライセンス全文は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) を参照してください。
 
 ## ライセンス
 

@@ -8,8 +8,8 @@
     "url": "https://github.com/ngtcp2/nghttp3"
   },
   "nghttp2": {
-    "tag": "v1.70.0",
-    "url": "https://github.com/nghttp2/nghttp2"
+    "ref": "57300274186979a3a0a40f9dc060dc20608f6528",
+    "url": "https://github.com/nghttp2/nghttp2-v2"
   },
   "aws-lc": {
     "tag": "v5.11.0",

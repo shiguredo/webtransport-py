@@ -297,6 +297,9 @@ else()
     GIT_REPOSITORY ${NGHTTP2_GIT_REPOSITORY}
     GIT_TAG ${NGHTTP2_GIT_TAG}
     GIT_SHALLOW ${NGHTTP2_USE_SHALLOW}
+    # nghttp2-v2 は lib/sfparse (Structured Field パーサ) をサブモジュールで
+    # 取得する。ENABLE_LIB_ONLY でも必須のため明示的に指定する
+    GIT_SUBMODULES lib/sfparse
     SOURCE_DIR ${NGHTTP2_SOURCE_DIR}
     BINARY_DIR ${NGHTTP2_BUILD_DIR}
     STAMP_DIR ${NGHTTP2_BUILD_DIR}/stamp

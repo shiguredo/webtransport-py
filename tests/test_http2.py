@@ -53,9 +53,12 @@ def test_http2_event_type():
     assert http2.EventType.STREAM_END is not None
     assert http2.EventType.STREAM_RESET is not None
     assert http2.EventType.GO_AWAY is not None
-    assert http2.EventType.WINDOW_UPDATE is not None
     assert http2.EventType.SETTINGS is not None
     assert http2.EventType.PING is not None
+    assert http2.EventType.INFORMATIONAL is not None
+    assert http2.EventType.TRAILERS is not None
+    # nghttp2-v2 は WINDOW_UPDATE / PUSH_PROMISE / PRIORITY_UPDATE を
+    # イベントとして公開しない
 
 
 def test_http2_connection_client():
@@ -151,13 +154,12 @@ def test_http2_request_body_reaches_server():
 
 
 def test_http2_ping_opaque_data_roundtrip():
-    """ping の opaque data がピアで観測され、ACK が同一データで観測されることを確認
+    """ping の opaque data が ACK で戻り、RTT が観測できることを確認
 
-    RFC 9113 Section 6.7 の PING は 8 バイトの opaque data を持つ。送信側は
-    ping(opaque_data) で任意の 8 バイトを載せられ、受信側では ack=False の
-    PING イベントとして観測できる。nghttp2 は受信 PING に自動で ACK を返す
-    ため、送信側では ack=True の PING イベントとして同じ opaque data が
-    観測できる。
+    RFC 9113 Section 6.7 の PING は 8 バイトの opaque data を持つ。nghttp2-v2
+    は受信 PING に自動で ACK を返し、アプリへは ACK の受信だけを通知する
+    (nghttp2_callbacks.recv_ping_ack)。送信側では同じ opaque data を持つ
+    PING イベントと RTT が観測できる。
     """
     client = http2.Connection.create_client(http2.Config())
     server_config = http2.Config()
@@ -169,22 +171,21 @@ def test_http2_ping_opaque_data_roundtrip():
     client.ping(opaque_data)
     _h2_pump(client, server)
 
-    # サーバー側では ACK なしの PING として同じ 8 バイトが観測される
-    server_events = _drain_events(server)
-    ping_events = [event for event in server_events if event.type == http2.EventType.PING]
-    assert len(ping_events) == 1
-    assert ping_events[0].ack is False
-    assert ping_events[0].opaque_data == opaque_data
-    assert len(ping_events[0].opaque_data) == 8
+    # 受信 PING は nghttp2-v2 が自動で ACK を返すため、サーバーでは
+    # イベントにならない
+    server_ping_events = [
+        event for event in _drain_events(server) if event.type == http2.EventType.PING
+    ]
+    assert server_ping_events == []
 
-    # サーバーからクライアントへ ACK が返り、同じ opaque data が観測される
+    # サーバーからクライアントへ ACK が返り、同じ opaque data と RTT が観測される
     _h2_pump(server, client)
     client_events = _drain_events(client)
-    ack_events = [
-        event for event in client_events if event.type == http2.EventType.PING and event.ack is True
-    ]
+    ack_events = [event for event in client_events if event.type == http2.EventType.PING]
     assert len(ack_events) == 1
     assert ack_events[0].opaque_data == opaque_data
+    assert len(ack_events[0].opaque_data) == 8
+    assert ack_events[0].ping_rtt_ns >= 0
 
 
 def test_http2_ping_without_opaque_data_sends_zero_bytes():
@@ -197,8 +198,11 @@ def test_http2_ping_without_opaque_data_sends_zero_bytes():
 
     client.ping()
     _h2_pump(client, server)
+    _drain_events(server)
 
-    ping_events = [event for event in _drain_events(server) if event.type == http2.EventType.PING]
+    # ACK でゼロ 8 バイトが戻る
+    _h2_pump(server, client)
+    ping_events = [event for event in _drain_events(client) if event.type == http2.EventType.PING]
     assert len(ping_events) == 1
     assert ping_events[0].opaque_data == b"\x00" * 8
 
@@ -217,13 +221,13 @@ def test_http2_ping_invalid_opaque_data_length_raises():
         client.ping(b"012345678")
 
 
-def test_http2_window_update_increment_observed():
-    """WINDOW_UPDATE イベントが Window Size Increment を保持することを確認
+def test_http2_recv_flow_control_replenished():
+    """受信ウィンドウの再開放により初期ウィンドウを超えるボディが届くことを確認
 
-    RFC 9113 Section 6.9 の WINDOW_UPDATE は 1〜2^31-1 の増分値を持つ。
-    サーバーの初期受信ウィンドウ (既定 65535) を超えるボディを送ると、
-    サーバーは消費したぶんのウィンドウを再開放し、クライアントは増分値
-    付きの WINDOW_UPDATE を観測できる。
+    nghttp2-v2 は WINDOW_UPDATE の送受信をイベント化しないため、ウィンドウ
+    再開放の効果を「初期受信ウィンドウ (65535) を超えるボディが欠落なく
+    届くこと」で検証する (バインディングが v1 相当の自動 WINDOW_UPDATE を
+    実装している)。
     """
     client = http2.Connection.create_client(http2.Config())
     server_config = http2.Config()
@@ -239,32 +243,28 @@ def test_http2_window_update_increment_observed():
     ]
     stream_id = client.submit_request(headers)
     assert stream_id > 0
+    _h2_pump(client, server)
+    _drain_events(server)
 
-    # 初期受信ウィンドウ (65535) を超えるボディを送る (終端しない)
-    client.send_data(stream_id, b"x" * (128 * 1024))
-    for _ in range(40):
-        client_data = client.send()
-        server_data = server.send()
-        if client_data:
-            server.receive(client_data)
-        if server_data:
-            client.receive(server_data)
-        if not client_data and not server_data:
+    # 初期受信ウィンドウ (65535) を超えるボディを送る
+    body = b"x" * (128 * 1024)
+    client.send_data(stream_id, body, True)
+    received = bytearray()
+    for _ in range(400):
+        _h2_pump(client, server)
+        for event in _drain_events(server):
+            if event.type == http2.EventType.DATA:
+                received.extend(event.data)
+        # サーバーが返す WINDOW_UPDATE をクライアントへ渡す
+        _h2_pump(server, client)
+        _drain_events(client)
+        if len(received) == len(body):
             break
-
-    window_events = [
-        event for event in _drain_events(client) if event.type == http2.EventType.WINDOW_UPDATE
-    ]
-    assert window_events, "ウィンドウ再開放の WINDOW_UPDATE が観測されるべき"
-    # 増分値は 1 以上 (RFC 9113 Section 6.9)
-    assert all(event.window_size_increment >= 1 for event in window_events)
-    # ストリーム単位とコネクション単位の両方の再開放が観測できる
-    assert any(event.stream_id == stream_id for event in window_events)
-    assert any(event.stream_id == 0 for event in window_events)
+    assert bytes(received) == body
 
 
-def test_http2_window_update_event_fields_default_for_other_events():
-    """PING / WINDOW_UPDATE 以外のイベントでは新フィールドが既定値になることを確認"""
+def test_http2_ping_event_fields_default_for_other_events():
+    """PING 以外のイベントでは PING 用フィールドが既定値になることを確認"""
     client = http2.Connection.create_client(http2.Config())
     server_config = http2.Config()
     server_config.is_server = True
@@ -282,11 +282,10 @@ def test_http2_window_update_event_fields_default_for_other_events():
     _h2_pump(client, server)
 
     for event in _drain_events(server):
-        if event.type in (http2.EventType.PING, http2.EventType.WINDOW_UPDATE):
+        if event.type == http2.EventType.PING:
             continue
         assert event.opaque_data == b""
-        assert event.ack is False
-        assert event.window_size_increment == 0
+        assert event.ping_rtt_ns == 0
 
 
 def test_http2_test_force_close_helper():
@@ -544,3 +543,19 @@ def test_http2_empty_send_data_without_eof_keeps_pending_data():
             break
 
     assert bytes(received) == body
+
+
+def test_http2_initial_window_size_over_int32_max_fails():
+    """initial_window_size が INT32_MAX 超なら接続生成に失敗することを確認
+
+    nghttp2-v2 の接続生成は SETTINGS_INITIAL_WINDOW_SIZE を INT32_MAX 以下で
+    assert する (失敗するとプロセスが abort する)。バインディングの境界で
+    生成失敗 (RuntimeError) にして abort を防ぐ。
+    """
+    config = http2.Config()
+    config.initial_window_size = 2**31
+
+    with pytest.raises(RuntimeError):
+        http2.Connection.create_client(config)
+    with pytest.raises(RuntimeError):
+        http2.Connection.create_server(config)

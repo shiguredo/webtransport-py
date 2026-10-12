@@ -359,11 +359,15 @@ def test_quic_early_transport_params_accepts_one_mib() -> None:
 def test_http2_receive_accepts_one_mib() -> None:
     """http2.Connection.receive が 1 MiB ちょうどを受理することを確認
 
-    戻り値は nghttp2 が消費したバイト数になるため、全量が渡ったことまで表明する。
+    nghttp2-v2 の nghttp2_conn_read は入力全体を処理するかエラーを返す。
+    1 MiB の bytes がサイズ上限で拒否されずに渡ること (ValueError に
+    ならないこと) を確認する。不正なバイト列は接続エラーになるため
+    戻り値は 0 になる。
     """
     client = _make_http2_client()
 
-    assert client.receive(b"x" * _ONE_MIB) == _ONE_MIB
+    assert client.receive(b"x" * _ONE_MIB) == 0
+    assert client.is_closed() is True
 
 
 def test_http2_send_data_accepts_one_mib() -> None:

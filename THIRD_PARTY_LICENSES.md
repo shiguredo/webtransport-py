@@ -59,9 +59,9 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## nghttp2
+## nghttp2-v2
 
-<https://github.com/nghttp2/nghttp2/blob/master/COPYING>
+<https://github.com/nghttp2/nghttp2-v2/blob/main/COPYING>
 
 ```text
 The MIT License

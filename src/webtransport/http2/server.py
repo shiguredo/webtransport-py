@@ -50,9 +50,9 @@ class ResponseWriter:
     async def drain(self) -> None:
         """送信待ちのフレームを送出できるだけ送出する
 
-        nghttp2_session_mem_send2 は 1 回の呼び出しで 1 フレームしか返さない
-        ため、空が返るまで繰り返す (nghttp2.h の mem_send2 の説明に従う)。
-        1 回で止めると 1 ループ 1 フレームに律速される。
+        nghttp2_conn_write (nghttp2-v2) は 1 回の呼び出しでアプリ提供
+        バッファ (16384 バイト) 分のフレーム群を返す。返却が無くなるまで
+        繰り返す。1 回で止めると送信待ちが残る。
         """
         while True:
             data = self._connection.send()

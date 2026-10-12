@@ -11,7 +11,7 @@ Sans I/O アーキテクチャを採用した WebTransport の Python ライブ�
 
 - Sans I/O アーキテクチャ
   - プロトコル処理と I/O を分離し、任意のイベントループやフレームワークと統合できる
-  - QUIC は ngtcp2、HTTP/3 は nghttp3、HTTP/2 は nghttp2 を採用
+  - QUIC は ngtcp2、HTTP/3 は nghttp3、HTTP/2 は nghttp2-v2 を採用
 - 二層 API 設計
   - Sans I/O API: プロトコル処理のみを提供する低レベル API (C 拡張)
   - asyncio API: すぐに使える高レベルなクライアント / サーバー実装
@@ -52,7 +52,7 @@ uv add webtransport-py
 | `webtransport.http2` | HTTP/2 単体 | `Connection` | `Server` / `Client` / `ResponseWriter` | TCP + TLS |
 | `webtransport.qmux` | QMux (draft-ietf-quic-qmux) | `Connection` | `Server` / `Client` | TCP (+ 任意で TLS) |
 
-`quic` / `http3` / `http2` には `get_version()` があり、それぞれ ngtcp2 / nghttp3 / nghttp2 のバージョン文字列を返す。
+`quic` / `http3` / `http2` には `get_version()` があり、それぞれ ngtcp2 / nghttp3 / nghttp2-v2 のバージョン文字列を返す。
 
 ## 統一クライアント
 
@@ -893,25 +893,23 @@ def set_local_window_size(stream_id: int, window_size: int) -> bool  # ローカ
 def submit_trailer(stream_id: int, headers: list[tuple[str, str]]) -> bool
 def submit_priority_update(stream_id: int, urgency: int, incremental: bool) -> bool
 def change_extpri_stream_priority(stream_id: int, urgency: int, incremental: bool) -> bool
-def submit_push_promise(stream_id: int, headers: list[tuple[str, str]]) -> int  # Server Push (返り値は promised stream_id)
 def next_event() -> Event | None
 
 # セッション状態 (プロパティ)
 remote_settings -> dict[str, int] | None  # ピアの SETTINGS
 local_settings -> dict[str, int] | None
-outbound_queue_size -> int | None  # 送信キューのフレーム数
-remote_window_size -> int | None  # コネクションのリモートウィンドウ残量
-local_window_size -> int | None
+local_window_size -> int | None  # コネクションのローカル (受信側) ウィンドウ残量
 effective_recv_data_length -> int | None  # WINDOW_UPDATE 未送信の受信 DATA バイト数
 request_allowed -> bool | None  # 新しいリクエストを送信できるか
-def stream_remote_window_size(stream_id: int) -> int | None
 def stream_local_window_size(stream_id: int) -> int | None
 def stream_effective_recv_data_length(stream_id: int) -> int | None
 def stream_local_close(stream_id: int) -> bool | None  # ローカル側が half-closed か
 def stream_remote_close(stream_id: int) -> bool | None
 ```
 
-モジュール関数 `get_version()` は nghttp2 のバージョンを、`select_alpn(client_protocols: list[str]) -> str | None` は h2 / http/1.1 の優先順で ALPN を選択する。
+モジュール関数 `get_version()` は nghttp2-v2 のバージョンを、`select_alpn(client_protocols: list[str]) -> str | None` は h2 / http/1.1 の優先順で ALPN を選択する。
+
+nghttp2-v2 では次が使えない (v1 から削除された)。`Connection` の送信側 (リモート) ウィンドウを観測する API (`remote_window_size` / `stream_remote_window_size`) と送信キューのフレーム数 (`outbound_queue_size`)、Server Push (`submit_push_promise`)、WINDOW_UPDATE / PUSH_PROMISE / PRIORITY_UPDATE / 受信 PING のイベントがある。`http2.EventType` に `WINDOW_UPDATE` / `PUSH_PROMISE` / `PRIORITY_UPDATE` は無く、`PING` イベントは ACK の受信時のみ届く (受信 PING はライブラリが自動で ACK を返す)。`remote_settings` / `local_settings` の `max_header_list_size` は nghttp2-v2 がローカルの上限を管理しないため常に 4294967295 になり、`max_frame_size` は 16384 固定になる。
 
 ### WebTransport over HTTP/2 (`h2.Session`)
 
@@ -964,10 +962,10 @@ Sans I/O API はモジュールごとの `Config` で設定する。主要なも
 - `quic.EventType`: `HANDSHAKE_COMPLETED` / `CONNECTION_CLOSED` / `STREAM_DATA` / `STREAM_OPENED` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `SESSION_TICKET` / `EARLY_DATA_REJECTED` / `PATH_VALIDATED` / `PATH_VALIDATION_FAILED`
 - `http3.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `GO_AWAY` / `RESET_STREAM` / `STOP_SENDING` / `INFORMATIONAL` / `TRAILERS` / `ERROR`
 - `h3.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_CLOSED` / `RESET_STREAM` / `STOP_SENDING` / `DATAGRAM` / `ERROR` / `GOAWAY`
-- `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `WINDOW_UPDATE` / `SETTINGS` / `PING` / `PUSH_PROMISE` / `PRIORITY_UPDATE` / `INFORMATIONAL` / `TRAILERS`
+- `http2.EventType`: `HEADERS` / `DATA` / `STREAM_END` / `STREAM_RESET` / `GO_AWAY` / `SETTINGS` / `PING` (PING ACK の受信のみ) / `INFORMATIONAL` / `TRAILERS`
 - `h2.EventType`: `SESSION_READY` / `SESSION_CLOSED` / `SESSION_DRAINING` / `SESSION_REJECTED` / `STREAM_DATA` / `STREAM_RESET` / `STOP_SENDING` / `DATAGRAM` / `ERROR` / `GOAWAY`
 
-`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `goaway_id` (GOAWAY でのみ意味を持つ。他イベントでは 0。RFC 9114 Section 7.2.6 のとおりクライアント→サーバー方向では push ID、サーバー→クライアント方向ではクライアントが開始した要求の識別子) / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空) / `last_stream_id` (GOAWAY でのみ意味を持つ。他イベントでは 0)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `promised_stream_id` / `priority_field_value` / `opaque_data` (PING の 8 バイト。他イベントでは空) / `ack` (PING ACK かどうか。PING 以外では false) / `window_size_increment` (WINDOW_UPDATE の増分値。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
+`Event` の主なフィールド: `quic.Event` は `stream_id` / `data` / `fin` / `error_code` / `reason` / `offset` (STREAM_DATA のストリーム上オフセット。他イベントでは 0)。`STOP_SENDING` は `error_code` にピアが送ったアプリケーションエラーコードを持つ (RFC 9000 Section 19.5)、`h3.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `goaway_id` (GOAWAY でのみ意味を持つ。他イベントでは 0。RFC 9114 Section 7.2.6 のとおりクライアント→サーバー方向では push ID、サーバー→クライアント方向ではクライアントが開始した要求の識別子) / `headers` (SESSION_READY でのみ意味を持つ受信 CONNECT ヘッダー。疑似ヘッダーを含む。他イベントでは空)、`h2.Event` は `session_id` / `stream_id` / `data` / `error_code` / `error_message` / `fin` / `status_code` (SESSION_REJECTED でのみ意味を持つ。他イベントでは 0) / `headers` (SESSION_READY でのみ意味を持つ。疑似ヘッダー `:status` 等を含む。他イベントでは空) / `last_stream_id` (GOAWAY でのみ意味を持つ。他イベントでは 0)。`SESSION_REJECTED` は非 2xx 応答によるセッション拒否通知で、`SESSION_CLOSED` (確立後の終了) とは意味論が異なる。`http3.Event` は `stream_id` / `headers` / `data` / `error_code` / `push_id` (`HEADERS` のうち `:status` が 1xx のものは `INFORMATIONAL`、`:status` を持たない終端 HEADERS は `TRAILERS` として届く)、`http2.Event` は `stream_id` / `headers` / `data` / `error_code` / `last_stream_id` / `opaque_data` (PING ACK の 8 バイト。他イベントでは空) / `ping_rtt_ns` (PING ACK の RTT (ナノ秒)。他イベントでは 0)。`http2.Event` でも `:status` が 1xx の HEADERS は `INFORMATIONAL`、`:status` も `:method` も持たない終端 HEADERS は `TRAILERS` として届く。
 
 ## 注意点
 

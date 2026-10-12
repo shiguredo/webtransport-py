@@ -3,7 +3,6 @@
 from conftest import (
     _create_http2_pair,
     _drain_events,
-    _exchange_http2_settings,
     _h2_pump,
 )
 
@@ -166,7 +165,12 @@ def test_http2_submit_trailer_after_eof_data() -> None:
 
 
 def test_http2_submit_priority_update() -> None:
-    """クライアントが PRIORITY_UPDATE フレームを送信できることを確認"""
+    """クライアントが PRIORITY_UPDATE を送信できることを確認
+
+    nghttp2-v2 は受信した PRIORITY_UPDATE を内部のスケジューリングへ適用
+    するだけでアプリへ通知しないため、送信側の戻り値と、送信後も通常の
+    通信が継続できることを検証する。
+    """
     client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
@@ -179,43 +183,19 @@ def test_http2_submit_priority_update() -> None:
     assert client.submit_priority_update(stream_id, 0, False) is True
     _h2_pump(client, server)
 
-    # サーバーで PriorityUpdate イベントを受信する (stream_id と
-    # priority field value を含む)
-    priority_events = [
-        e for e in _drain_events(server) if e.type == http2.EventType.PRIORITY_UPDATE
-    ]
-    assert len(priority_events) == 2
-    assert priority_events[0].stream_id == stream_id
-    assert priority_events[0].priority_field_value == "u=5, i"
-    assert priority_events[1].stream_id == stream_id
-    assert priority_events[1].priority_field_value == "u=0"
-
-
-def test_http2_priority_update_noop_without_no_rfc7540_priorities() -> None:
-    """ピアが NO_RFC7540_PRIORITIES を送信しない場合は noop で成功することを確認"""
-    client = http2.Connection.create_client(http2.Config())
-    server_config = http2.Config()
-    server_config.is_server = True
-    server_config.no_rfc7540_priorities = False
-    server = http2.Connection.create_server(server_config)
-    _exchange_http2_settings(client, server)
-
-    stream_id = client.submit_request(_request_headers())
-    assert stream_id > 0
-    _h2_pump(client, server)
-
-    # ピアが NO_RFC7540_PRIORITIES=0 を送信しているため noop (成功) になり、
-    # PRIORITY_UPDATE フレームは送出されない
-    assert client.submit_priority_update(stream_id, 0, False) is True
-    _h2_pump(client, server)
-    assert not any(e.type == http2.EventType.PRIORITY_UPDATE for e in _drain_events(server))
+    # 優先度更新後も通常のレスポンスが流れる
+    server.submit_response(stream_id, [(":status", "200")])
+    server.send_data(stream_id, b"body", True)
+    _h2_pump(server, client)
+    events = _drain_events(client)
+    assert any(e.type == http2.EventType.DATA and e.data == b"body" for e in events)
 
 
 def test_http2_change_extpri_stream_priority() -> None:
     """サーバーがストリームの優先度を変更できることを確認
 
     ローカルなスケジューリング変更のみでワイヤ上の効果が無いため、
-    返り値での確認となる
+    返り値での確認となる。
     """
     client, server = _create_http2_pair()
 
@@ -226,50 +206,8 @@ def test_http2_change_extpri_stream_priority() -> None:
     # urgency の境界値 (0 と 7) と incremental の両方を確認する
     assert server.change_extpri_stream_priority(stream_id, 0, True) is True
     assert server.change_extpri_stream_priority(stream_id, 7, False) is True
-    # 存在しないストリームは False (nghttp2 が INVALID_ARGUMENT を返す)
-    assert server.change_extpri_stream_priority(3, 3, False) is False
-
-
-def test_http2_submit_push_promise() -> None:
-    """サーバーが Server Push を宣言できることを確認"""
-    client, server = _create_http2_pair()
-
-    stream_id = client.submit_request(_request_headers())
-    assert stream_id > 0
-    _h2_pump(client, server)
-
-    # プッシュするリクエストを宣言する
-    push_headers = [
-        (":method", "GET"),
-        (":path", "/pushed"),
-        (":scheme", "https"),
-        (":authority", "localhost"),
-    ]
-    promised_stream_id = server.submit_push_promise(stream_id, push_headers)
-    assert promised_stream_id > 0
-    _h2_pump(server, client)
-
-    # クライアントで PushPromise イベントを受信する (promised stream ID と
-    # ヘッダーを含む)
-    push_events = [e for e in _drain_events(client) if e.type == http2.EventType.PUSH_PROMISE]
-    assert len(push_events) == 1
-    assert push_events[0].stream_id == stream_id
-    assert push_events[0].promised_stream_id == promised_stream_id
-    for name, value in push_headers:
-        assert (name, value) in push_events[0].headers
-
-    # プッシュされたリソースのレスポンスも送信できる (promised stream 上で
-    # 通常のレスポンスと同じフロー)
-    server.submit_response(promised_stream_id, [(":status", "200")])
-    server.send_data(promised_stream_id, b"pushed-body", True)
-    _h2_pump(server, client)
-    events = _drain_events(client)
-    pushed_data = b"".join(
-        e.data
-        for e in events
-        if e.type == http2.EventType.DATA and e.stream_id == promised_stream_id
-    )
-    assert pushed_data == b"pushed-body"
+    # nghttp2-v2 は存在しないストリームに 0 を返して no-op にする
+    assert server.change_extpri_stream_priority(3, 3, False) is True
 
 
 def test_http2_select_alpn() -> None:
@@ -288,7 +226,7 @@ def test_http2_select_alpn() -> None:
 
 
 def test_http2_message_ext_guards() -> None:
-    """利用できない側で False / -1 になることを確認"""
+    """利用できない側で False になることを確認"""
     client, server = _create_http2_pair()
 
     stream_id = client.submit_request(_request_headers())
@@ -297,9 +235,8 @@ def test_http2_message_ext_guards() -> None:
 
     # サーバーセッションでは PRIORITY_UPDATE を送信できない
     assert server.submit_priority_update(stream_id, 0, False) is False
-    # クライアントセッションでは優先度変更と Server Push を送信できない
+    # クライアントセッションでは優先度変更を送信できない
     assert client.change_extpri_stream_priority(stream_id, 0, False) is False
-    assert client.submit_push_promise(stream_id, _request_headers()) == -1
     # クライアントセッションではトレーラを送信できない
     assert client.submit_trailer(stream_id, [("x-trailer", "value")]) is False
     # RFC 9218 で定義された urgency の範囲 (0-7) を超える場合は False
@@ -309,31 +246,25 @@ def test_http2_message_ext_guards() -> None:
     assert client.submit_priority_update(0, 0, False) is False
     assert server.change_extpri_stream_priority(0, 0, False) is False
     assert server.submit_trailer(0, [("x-trailer", "value")]) is False
-    assert server.submit_push_promise(0, _request_headers()) == -1
     # 負のストリーム ID も受け付けない
     assert client.submit_priority_update(-1, 0, False) is False
     assert server.change_extpri_stream_priority(-1, 0, False) is False
     assert server.submit_trailer(-1, [("x-trailer", "value")]) is False
-    assert server.submit_push_promise(-1, _request_headers()) == -1
+    # 偶数 (サーバーが応答できない) ストリーム ID は受け付けない
+    assert server.submit_trailer(2, [("x-trailer", "value")]) is False
 
-    # 存在しないストリームには送信できない
+    # 存在しないストリームにはトレーラを送信できない
     assert server.submit_trailer(999, [("x-trailer", "value")]) is False
     # レスポンス (データプロバイダ) が設定されていないストリームにも
     # トレーラを送信できない
     assert server.submit_trailer(stream_id, [("x-trailer", "value")]) is False
-    # 存在しない親ストリームへの Server Push 宣言は -1
-    assert server.submit_push_promise(999, _request_headers()) == -1
-    # 存在しないストリームへの PRIORITY_UPDATE は送出される (nghttp2 は
-    # stream_id の存在を検証しない。RFC 9218 では受信側の扱いに委ねられる)
+    # 存在しないストリームへの PRIORITY_UPDATE / 優先度変更は no-op で成功する
+    # (nghttp2-v2 はストリームの存在を検証しない)
     assert client.submit_priority_update(999, 0, False) is True
-    _h2_pump(client, server)
-    assert any(
-        e.type == http2.EventType.PRIORITY_UPDATE and e.stream_id == 999
-        for e in _drain_events(server)
-    )
+    assert server.change_extpri_stream_priority(999, 3, False) is True
 
     # トレーラセクションは 1 つのみ (RFC 9113 8.1 節) のため、同一ストリーム
-    # への再予約はできない
+    # への再送信はできない
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"body", False)
     assert server.submit_trailer(stream_id, [("x-trailer", "first")]) is True
@@ -344,17 +275,14 @@ def test_http2_message_ext_guards() -> None:
         for e in _drain_events(client)
     )
 
-    # サーバー側の GOAWAY 送信 (クライアントの GOAWAY 受信) は下の
-    # test_http2_goaway_connection_guards で検証する
-
 
 def test_http2_goaway_connection_guards() -> None:
     """GOAWAY 受信後は新規ストリームのみ抑止され既存ストリーム操作は継続することを確認
 
     RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も接続は閉じず、
-    新規ストリームの開始 (submit_push_promise / submit_request) のみが
-    goaway_received_ で抑止される。既存ストリームへの操作 (レスポンス送出
-    等) は closed_ 起因のガードだけがあり、GOAWAY では塞がれない。
+    新規ストリームの開始 (submit_request) のみが goaway_received_ で抑止される。
+    既存ストリームへの操作 (レスポンス送出等) は closed_ 起因のガードだけがあり、
+    GOAWAY では塞がれない。
     """
     # クライアント側が GOAWAY を送信する場合 (サーバーの GOAWAY 受信)
     client, server = _create_http2_pair()
@@ -364,8 +292,6 @@ def test_http2_goaway_connection_guards() -> None:
     client.goaway()
     _h2_pump(client, server)
     assert server.is_closed() is False
-    # 新規ストリームの開始 (push promise) は抑止される
-    assert server.submit_push_promise(stream_id, _request_headers()) == -1
     # 既存ストリームへの操作 (レスポンス送出) は継続する
     server.submit_response(stream_id, [(":status", "200")])
     # レスポンスの送出 (既存ストリームの処理継続) がワイヤで確認できる
@@ -373,8 +299,6 @@ def test_http2_goaway_connection_guards() -> None:
     assert response is not None and len(response) > 0
 
     # クライアント側が GOAWAY を受信する場合 (サーバーの GOAWAY 送信)。
-    # クライアントセッションでは is_server_ ガードに抵触しない
-    # submit_priority_update / change_extpri で検証する
     client2, server2 = _create_http2_pair()
     stream_id2 = client2.submit_request(_request_headers())
     assert stream_id2 > 0
@@ -382,7 +306,9 @@ def test_http2_goaway_connection_guards() -> None:
     server2.goaway()
     _h2_pump(server2, client2)
     assert client2.is_closed() is False
+    # 新規リクエストは抑止される
     assert client2.submit_request(_request_headers()) == -1
+    # 既存ストリームへの操作 (優先度更新) は継続する
     assert client2.submit_priority_update(stream_id2, 0, False) is True
 
 

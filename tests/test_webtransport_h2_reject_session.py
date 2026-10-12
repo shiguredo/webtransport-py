@@ -209,15 +209,12 @@ def test_client_receive_1xx_keeps_session() -> None:
     assert _encode_capsule(0x00, b"after-1xx") in wire
 
 
-def test_client_receive_1xx_then_final_response_keeps_session() -> None:
-    """1xx 中間応答を挟んだ最終応答 (拒否) では削除が機能せずエントリが残ることを確認
+def test_client_receive_1xx_then_final_response_rejects_session() -> None:
+    """1xx 中間応答を挟んだ最終応答 (拒否) でセッションが削除されることを確認
 
-    1xx 受信後は stream state が OPENED に遷移するため、続く最終応答は
-    NGHTTP2_HCAT_HEADERS で通知され、レスポンス処理分岐 (HCAT_RESPONSE) で
-    捕捉されない。1xx を挟んだ拒否は本対応の削除が機能せず、wt_sessions_
-    のエントリが残って DATAGRAM capsule が送出され続ける (既知の制約の
-    回帰ピン。pending_headers_ は 1xx 後の最終応答の完了時に解放される)。
-    本テストは修正前実装でも通る設計ピンであり、既知の制約の維持を守る。
+    nghttp2-v2 は 1xx の後でも最終応答のヘッダーブロックを end_headers で
+    通知するため、v1 では捕捉できなかった「1xx を挟んだ拒否」も
+    SESSION_REJECTED として扱える。削除後は DATAGRAM capsule が送出されない。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -231,11 +228,15 @@ def test_client_receive_1xx_then_final_response_keeps_session() -> None:
     server.reject_session(session_id, 403)
     _h2_pump(server, client)
 
-    # 1xx を挟んだ拒否ではエントリが残り、DATAGRAM capsule が送出され続ける
+    events = _drain_events(client)
+    rejected_events = [event for event in events if event.type == h2.EventType.SESSION_REJECTED]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].status_code == 403
+    assert client.get_session_ids() == []
+
+    # エントリ削除後は DATAGRAM capsule が送出されない
     client.send_datagram(session_id, b"after-1xx-403")
-    wire = client.send()
-    assert wire is not None
-    assert _encode_capsule(0x00, b"after-1xx-403") in wire
+    assert client.send() is None
 
 
 def test_client_accept_200_normal_session_unaffected() -> None:
@@ -613,7 +614,7 @@ def test_server_reject_session_invalid_session_id_raises_value_error() -> None:
     """0 以下の session_id で reject_session が ValueError を投げることを確認
 
     HTTP/2 のストリーム ID は 1 以上 (RFC 9113 Section 5.1.1)。0 以下は
-    nghttp2_submit_response が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用で
+    nghttp2_conn_submit_response が NGHTTP2_ERR_INVALID_ARGUMENT を返す誤用で
     あり、黙って no-op にしない。例外は副作用の前に投げられるため、ワイヤに
     応答は送出されない。クライアントセッションでは接続ガードで従来どおり
     no-op になる。
@@ -635,13 +636,14 @@ def test_server_reject_session_invalid_session_id_raises_value_error() -> None:
     client.reject_session(-1, 403)
 
 
-def test_server_reject_session_send_failure_pushes_error() -> None:
-    """送出時に HEADERS が破棄された場合に ERROR イベントが発火することを確認
+def test_server_reject_session_duplicate_respond_pushes_error() -> None:
+    """同一ストリームへの 2 回目の応答で ERROR イベントが発火することを確認
 
-    応答の submit は成功しても、同一ストリームへの 2 回目の応答は送出時に
-    NGHTTP2_ERR_STREAM_SHUT_WR で破棄される。on_frame_not_send コールバックが
-    これを ERROR イベント (error_code は nghttp2 エラーコードの絶対値) として
-    観測可能にする。失敗時も非 2xx の削除は成功時と同じく行われる。
+    応答送信済みのストリームへの 2 回目の reject_session は、nghttp2-v2 の
+    nghttp2_conn_submit_response が submit 時に NGHTTP2_ERR_STREAM_STATE を
+    返す。v1 の on_frame_not_send に相当する送出失敗の通知は無いため、
+    submit 失敗として ERROR イベント (error_code は nghttp2 エラーコードの
+    絶対値) が発火する。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -653,33 +655,31 @@ def test_server_reject_session_send_failure_pushes_error() -> None:
     _h2_pump(server, client)
     assert all(e.type != h2.EventType.ERROR for e in _drain_events(server))
 
-    # 2 回目の拒否は submit は成功するが送出時に破棄され、ERROR が発火する
+    # 2 回目の拒否は submit 時に STREAM_STATE (-221) で失敗し、ERROR が発火する
     server.reject_session(session_id, 403)
-    # submit 成功の時点ではイベントが無い (発火は送出時)
-    assert _drain_events(server) == []
-    _h2_pump(server, client)
     error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
     assert len(error_events) == 1
     assert error_events[0].session_id == session_id
     assert error_events[0].stream_id == session_id
-    # NGHTTP2_ERR_STREAM_SHUT_WR (-512) の絶対値
-    assert error_events[0].error_code == 512
+    # NGHTTP2_ERR_STREAM_STATE (-221) の絶対値
+    assert error_events[0].error_code == 221
     assert error_events[0].error_message != ""
 
     # 1 回目の応答で非 2xx の削除は完了している。失敗した 2 回目の呼び出しが
     # エントリを再作成しないことと、両ハーフクローズ時に SessionClosed が
-    # 発火しないことを表明する (rv 非依存の無条件更新そのものは実装で担保する)
+    # 発火しないことを表明する
     ret = server.receive(_encode_data_frame(session_id, end_stream=True))
     assert ret > 0, "END_STREAM フレームの注入に失敗しました"
     assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(server))
 
 
-def test_server_reject_session_send_failure_after_reset_pushes_error() -> None:
-    """リセット済みストリームへの応答送出失敗でも ERROR が発火することを確認
+def test_server_reject_session_after_reset_pushes_error() -> None:
+    """リセット済みストリームへの応答が ERROR イベントになることを確認
 
-    CONNECT ストリームが RST_STREAM で閉じられた後に reject_session を呼ぶと、
-    submit は成功するが送出時に NGHTTP2_ERR_STREAM_CLOSED で破棄され、
-    ERROR イベント (error_code 510) が発火する。
+    CONNECT ストリームが RST_STREAM で閉じられた後に reject_session を
+    呼ぶと、nghttp2-v2 の nghttp2_conn_submit_response が submit 時に
+    NGHTTP2_ERR_STREAM_NOT_FOUND を返し、ERROR イベント (error_code は
+    nghttp2 エラーコードの絶対値) が発火する。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
@@ -693,12 +693,9 @@ def test_server_reject_session_send_failure_after_reset_pushes_error() -> None:
     _drain_events(server)
 
     server.reject_session(session_id, 403)
-    # submit 成功の時点ではイベントが無い (発火は送出時)
-    assert _drain_events(server) == []
-    _h2_pump(server, client)
     error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
     assert len(error_events) == 1
     assert error_events[0].session_id == session_id
     assert error_events[0].stream_id == session_id
-    # NGHTTP2_ERR_STREAM_CLOSED (-510) の絶対値
-    assert error_events[0].error_code == 510
+    # NGHTTP2_ERR_STREAM_NOT_FOUND (-220) の絶対値
+    assert error_events[0].error_code == 220
