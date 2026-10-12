@@ -1,7 +1,7 @@
 # テスト用の部分 HEADERS バイト列が 2 ファイルに重複している
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-consolidate-partial-headers-frame
 - Polished: 2026-10-03
 
@@ -31,3 +31,10 @@
 - `tests/test_http3.py` と `tests/test_e2e_http3_peer_reset.py` が同じ定義を使っている
 - 生成されるバイト列が変わっていない (両ファイルのテストが通過する)
 - 全テストが通過する
+
+## 解決方法
+
+- `tests/conftest.py` に `_PARTIAL_HEADERS` を追加し、「受信途中のヘッダーブロックを作る」目的の説明を 1 箇所に置いた
+- `tests/test_http3.py` の `_inject_partial_headers` は `_PARTIAL_HEADERS` を使う形にし、docstring を用途 (Sans-IO の `receive_stream_data` への注入) に絞った
+- `tests/test_e2e_http3_peer_reset.py` のローカル `_PARTIAL_HEADERS` を削除し、conftest から import した
+- 生成されるバイト列が変わらないことを両ファイルのテストの通過で確認した
