@@ -1,7 +1,7 @@
 # 重複実装を共通ヘルパーへ集約する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-consolidate-duplicated-code
 - Polished: 2026-09-15
 - Updated: 2026-10-05
@@ -55,8 +55,12 @@ Python 側:
 
 ## 解決方法
 
-- `src/bindings/webtransport_h2.cpp` / `webtransport_h3.cpp` の `is_valid_utf8` を共通ヘッダへ移す
-- `src/bindings/quic.cpp` と `src/bindings/webtransport_h2.cpp` の可変長整数の成功時処理を共通ヘルパーへ統合し、`src/bindings/quic.cpp` の呼び出し 2 箇所を新しい契約に合わせる
-- WT_APPLICATION_ERROR の一致検証を `tests/test_webtransport_h3_error_code_remap.py` または `tests/prop_webtransport_h3.py` に追加する (端点と境界値を含む)
-- 責務ごとのモジュール (`_udp_socket.py` など) に送信処理 (UDP)・タイマー期限 (クライアント用とサーバー用)・名前解決・DCID 索引のヘルパーを追加し、各層から呼ぶ
-- `tests/conftest.py` に `http3.Connection` 用のポンプとペア生成 (クレジット設定を引数化)、証明書の生成部分、`_encode_capsule` を集約し、各テストファイルの複製を削除する
+- `src/bindings/text_util.h` を新設し `is_valid_utf8` を集約した。h2 / h3 の各コピーは削除し、層固有の仕様参照は呼び出し側のコメントに残した
+- `src/bindings/quic_varint.h` を新設し `kMaxQuicVarint` / `quic_varint_length` / `encode_quic_varint` / `decode_quic_varint` を集約した。`H2Session::encode_varint` / `decode_varint` は削除して共通ヘルパーへ置換し、`src/bindings/quic.cpp` の `quic_varint_length` / `decode_varint` も削除してパケット解析 2 箇所を `std::optional` を返す `decode_quic_varint` の契約へ合わせた
+- WT_APPLICATION_ERROR の一致検証を `tests/test_webtransport_h3_error_code_remap.py` に PBT で追加した。`H3Session::map_send_error_code` と Python の `webtransport_code_to_http_code` を端点 (0 / 0xFFFFFFFF) と予約済み境界 (0x1D / 0x1E / 0x1F) を含めて照合する
+- `src/webtransport/_udp_socket.py` に `send_pending_packets` (UDP 送信)・`resolve_remote` (名前解決)・`client_timeout_seconds` / `server_timeout_seconds` (タイマー期限) を追加した
+- `src/webtransport/_dcid_index.py` を新設し `refresh_dcid_index` / `drop_dcid_index` を集約した。各 Server の同名メソッドは層固有のガードだけを残して共通ヘルパーへ委譲する
+- 3 クライアントの `_resolve_remote` は削除して `resolve_remote` を直接呼び、`_send_pending` / `_timeout_seconds` は共通ヘルパーへ委譲した。`_destination_for_packet` は quic / h3 では不要になったため削除した (http3 は `_drain_all` で使うため残す)
+- `tests/conftest.py` に `_http3_pump` / `_create_http3_connection_pair` (クレジット設定を `set_max_client_streams_bidi` で引数化) / `_write_self_signed_certificate` を追加し、6 ファイルの `_pump` / `_create_connection_pair` の複製と証明書生成の重複を削除した。`_encode_capsule` の複製も削除した
+- 挙動を変えない純粋なリファクタリングとし、`ruff` / `ty` / `pytest` (prek の全フック) と `make develop` のスタブ一致検査が通過することを確認した
+- C++ の共通化、Python の共通化、テストの共通化の 3 コミットに分けた
