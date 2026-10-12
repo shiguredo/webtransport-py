@@ -1,7 +1,7 @@
 # h2 の受理前 END_STREAM の保留状態をセッション情報へ移動して簿記をなくす
 
 - Created: 2026-09-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-h2-pre-accept-end-stream-state
 - Polished: 2026-10-04
 
@@ -41,3 +41,14 @@
 
 - 受理前 END_STREAM の挙動変更 (0253 で実装済み。0254 / 0255 は別 issue)
 - h3 側の同種の保留集合 (`H3Session::pending_pre_accept_fin_session_ids_`) の置き換え (本 issue は h2 限定)
+
+## 解決方法
+
+- `WtSessionInfo` に `bool pre_accept_end_stream = false;` を追加し、`H2Session::handle_end_stream` の検知で立てるようにした
+- `H2Session::accept_session` / `send_datagram` / `drain_session` は `get_wt_session` 経由でフラグを参照する (accept_session は is_terminated の早期 return を通過した後のみ確認する)
+- 集合メンバー `pending_pre_accept_end_stream_session_ids_` と、エントリ削除を伴う 4 経路の除去・`accept_session` の防御的除去を削除した。`H2Session` のムーブ操作は 0223 で `= delete` 済みのため転送は存在しない
+- エントリを残したまま `is_terminated` を立てる 3 経路 (`reset_stream_for_malformed_capsule` / `reject_session` の 2xx 分岐 / `close_session`) では、`is_terminated = true` と同一箇所でフラグを false に戻すようにした
+- テスト専用アクセサ `_test_has_pre_accept_end_stream(session_id) -> bool | None` を追加し、`src/webtransport/webtransport_ext/h2.pyi` を再生成した
+- 検知前 `False` → 検知後 `True` → クリーン受理後の `None` と、`close_session` 後の `False` を固定する回帰テストを追加した
+- フラグを立てる処理を外すとテストが失敗することを実測で確認した (RED)
+- 全テスト 1466 件が通過することを確認した
