@@ -1,49 +1,6 @@
 """HTTP/3 のストリーム状態確認 API テスト"""
 
-from webtransport import http3
-
-
-def _pump(src: http3.Connection, dst: http3.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
-    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
-    1 回の呼び出しで全てのデータを返すとは限らないため、データが無く
-    なるまで繰り返す
-    """
-    for _ in range(64):
-        sent = False
-        for stream_id, data, fin in src.get_streams_to_send():
-            dst.receive_stream_data(stream_id, data, fin)
-            sent = True
-        if not sent:
-            break
-
-
-def _create_connection_pair() -> tuple[http3.Connection, http3.Connection]:
-    """Http3Connection のクライアント・サーバーペアを作成して初期化する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http3.Connection.create_client(http3.Config())
-    server_config = http3.Config()
-    server_config.is_server = True
-    server = http3.Connection.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-
-    # 双方の SETTINGS を交換する
-    _pump(server, client)
-    _pump(client, server)
-
-    return client, server
+from conftest import _create_http3_connection_pair, _http3_pump
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -58,7 +15,7 @@ def _request_headers() -> list[tuple[str, str]]:
 
 def test_http3_stream_writable() -> None:
     """データストリームの書き込み可否が取得できることを確認"""
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
 
     # リクエストを送信すると書き込み可能になる
     assert client.submit_request(0, _request_headers()) is True
@@ -70,7 +27,7 @@ def test_http3_stream_writable() -> None:
 
 def test_http3_stream_flushed() -> None:
     """送信データが QUIC スタックに受け渡し済みか確認できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストを送信してデータを積む
     assert client.submit_request(0, _request_headers()) is True
@@ -80,7 +37,7 @@ def test_http3_stream_flushed() -> None:
     assert client.stream_flushed(0) == 0
 
     # 送信処理で QUIC スタックに受け渡すと受け渡し済みになる
-    _pump(client, server)
+    _http3_pump(client, server)
     assert client.stream_flushed(0) == 1
 
     # 存在しないストリームは受け渡し済み扱い (1) になる
@@ -89,11 +46,11 @@ def test_http3_stream_flushed() -> None:
 
 def test_http3_frame_payload_left() -> None:
     """受信中フレームのペイロード残量が取得できることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストのヘッダーを送信する
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # ボディを送信し、DATA フレームを 4 バイトずつ受信する
     # 受信途中のフレーム残量が受信済みバイト数に応じて単調に減り、
@@ -128,7 +85,7 @@ def test_http3_frame_payload_left_guard() -> None:
     nghttp3 は assert で stream_id の範囲を検証するため、C++ 側のガードで
     範囲外の値には 0 を返す
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
     assert client.frame_payload_left(-1) == 0
     # NGHTTP3_MAX_VARINT (2**62 - 1) を超える値もガードされる
     assert client.frame_payload_left(1 << 62) == 0
@@ -136,7 +93,7 @@ def test_http3_frame_payload_left_guard() -> None:
 
 def test_http3_drained() -> None:
     """ドレイン状態が取得できることを確認 (サーバーのみ)"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # クライアントセッションでは None
     assert client.drained is None
@@ -144,12 +101,12 @@ def test_http3_drained() -> None:
     # リクエストを送信する
     assert client.submit_request(0, _request_headers()) is True
     client.send_data(0, b"request-body", fin=True)
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # レスポンスを送信する
     assert server.submit_response(0, [(":status", "200")]) is True
     server.send_data(0, b"response-body", fin=True)
-    _pump(server, client)
+    _http3_pump(server, client)
 
     # goaway 前はドレイン状態でない
     assert server.drained is False
@@ -160,5 +117,5 @@ def test_http3_drained() -> None:
     server.goaway()
     # GOAWAY フレームを書き出す送信処理が完了するまではドレイン状態でない
     assert server.drained is False
-    _pump(server, client)
+    _http3_pump(server, client)
     assert server.drained is True

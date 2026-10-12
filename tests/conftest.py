@@ -42,6 +42,50 @@ def _drain_events[E](source: _EventSource[E]) -> list[E]:
     return events
 
 
+def _write_self_signed_certificate(
+    certfile: Path,
+    keyfile: Path,
+    subject_name: list[x509.NameAttribute],
+    *,
+    san: list[x509.GeneralName] | None = None,
+) -> None:
+    """自己署名証明書 (ECDSA P-256) を生成してファイルへ書く
+
+    subject / SAN のプロファイルとファイルのライフサイクルは呼び出し側が
+    決める。証明書の有効期間は生成時点から 1 日。
+
+    Args:
+        certfile: 証明書の書き出し先
+        keyfile: 秘密鍵の書き出し先
+        subject_name: subject と issuer に使う属性列
+        san: Subject Alternative Name に載せる値 (None なら付与しない)
+    """
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    subject = issuer = x509.Name(subject_name)
+
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
+    )
+    if san is not None:
+        builder = builder.add_extension(x509.SubjectAlternativeName(san), critical=False)
+    cert = builder.sign(private_key, hashes.SHA256())
+
+    keyfile.write_bytes(
+        private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
 @pytest.fixture(scope="session")
 def test_certificates():
     """テスト用の自己署名証明書を生成する
@@ -54,47 +98,21 @@ def test_certificates():
         certfile = tmpdir_path / "cert.pem"
         keyfile = tmpdir_path / "key.pem"
 
-        private_key = ec.generate_private_key(ec.SECP256R1())
-
-        subject = issuer = x509.Name(
+        _write_self_signed_certificate(
+            certfile,
+            keyfile,
             [
                 x509.NameAttribute(NameOID.COUNTRY_NAME, "JP"),
                 x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Tokyo"),
                 x509.NameAttribute(NameOID.LOCALITY_NAME, "Chiyoda"),
                 x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Test"),
                 x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
-            ]
+            ],
+            san=[
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            ],
         )
-
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(private_key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now(datetime.UTC))
-            .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
-            .add_extension(
-                x509.SubjectAlternativeName(
-                    [
-                        x509.DNSName("localhost"),
-                        x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
-                    ]
-                ),
-                critical=False,
-            )
-            .sign(private_key, hashes.SHA256())
-        )
-
-        keyfile.write_bytes(
-            private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
-
-        certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
         yield {
             "certfile": str(certfile),
@@ -118,34 +136,11 @@ def create_test_certificates():
     certfile = tmpdir_path / "cert.pem"
     keyfile = tmpdir_path / "key.pem"
 
-    private_key = ec.generate_private_key(ec.SECP256R1())
-
-    subject = issuer = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
-        ]
+    _write_self_signed_certificate(
+        certfile,
+        keyfile,
+        [x509.NameAttribute(NameOID.COMMON_NAME, "localhost")],
     )
-
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(private_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.UTC))
-        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
-        .sign(private_key, hashes.SHA256())
-    )
-
-    keyfile.write_bytes(
-        private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-    )
-
-    certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
     return str(certfile), str(keyfile)
 
@@ -652,6 +647,62 @@ def _create_h3_http3_pair() -> tuple[http3.Connection, h3.Session]:
     server = h3.Session.create_server(server_config)
     _bind_h3_server_streams(server)
     _h3_http3_pump(client, server)
+    return client, server
+
+
+def _http3_pump(src: http3.Connection, dst: http3.Connection) -> None:
+    """http3.Connection の src の送信データを全て dst に渡す
+
+    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
+    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
+    1 回の呼び出しで全てのデータを返すとは限らないため、データが無く
+    なるまで繰り返す (防御的に最大 64 回)。
+    """
+    for _ in range(64):
+        sent = False
+        for stream_id, data, fin in src.get_streams_to_send():
+            dst.receive_stream_data(stream_id, data, fin)
+            sent = True
+        if not sent:
+            break
+
+
+def _create_http3_connection_pair(
+    *,
+    set_max_client_streams_bidi: bool = False,
+) -> tuple[http3.Connection, http3.Connection]:
+    """http3.Connection のクライアント・サーバーペアを作成して初期化する
+
+    Args:
+        set_max_client_streams_bidi: サーバーのクライアント双方向ストリーム
+            上限を 100 にするか (PRIORITY_UPDATE を受け入れる準備)
+
+    Returns:
+        (クライアント Connection, サーバー Connection)
+    """
+    client = http3.Connection.create_client(http3.Config())
+    server_config = http3.Config()
+    server_config.is_server = True
+    server = http3.Connection.create_server(server_config)
+
+    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
+    # サーバーは %4 == 3)
+    client.bind_control_stream(2)
+    client.bind_qpack_encoder_stream(6)
+    client.bind_qpack_decoder_stream(10)
+    server.bind_control_stream(3)
+    server.bind_qpack_encoder_stream(7)
+    server.bind_qpack_decoder_stream(11)
+
+    if set_max_client_streams_bidi:
+        # クライアントからの双方向ストリームを受け入れる準備をする
+        # (設定しないと PRIORITY_UPDATE フレームが H3_ID_ERROR で拒否される)
+        server.set_max_client_streams_bidi(100)
+
+    # 双方の SETTINGS を交換する
+    _http3_pump(server, client)
+    _http3_pump(client, server)
+
     return client, server
 
 

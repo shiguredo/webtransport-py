@@ -3,50 +3,7 @@
 WebTransport over HTTP/3 側と対称の形式で検証する。
 """
 
-from webtransport import http3
-
-
-def _pump(src: http3.Connection, dst: http3.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
-    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
-    1 回の呼び出しで全てのデータを返すとは限らないため、データが無く
-    なるまで繰り返す
-    """
-    for _ in range(64):
-        sent = False
-        for stream_id, data, fin in src.get_streams_to_send():
-            dst.receive_stream_data(stream_id, data, fin)
-            sent = True
-        if not sent:
-            break
-
-
-def _create_connection_pair() -> tuple[http3.Connection, http3.Connection]:
-    """Http3Connection のクライアント・サーバーペアを作成して初期化する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http3.Connection.create_client(http3.Config())
-    server_config = http3.Config()
-    server_config.is_server = True
-    server = http3.Connection.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-
-    # 双方の SETTINGS を交換する
-    _pump(server, client)
-    _pump(client, server)
-
-    return client, server
+from conftest import _create_http3_connection_pair, _http3_pump
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -66,7 +23,7 @@ def test_ack_offset_releases_send_buffer() -> None:
     acked_stream_data コールバック経由で stream_buffers_ から
     エントリが削除される
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストを送信してデータを積む
     assert client.submit_request(0, _request_headers()) is True
@@ -76,14 +33,14 @@ def test_ack_offset_releases_send_buffer() -> None:
     assert client._has_stream_buffer(0) is True
 
     # 送信処理を実行すると ACK が通知され、バッファが解放される
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert client._has_stream_buffer(0) is None
 
 
 def test_ack_offset_releases_multiple_buffers() -> None:
     """複数のバッファエントリが ACK 通知で全て解放されることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
     client.send_data(0, b"AAAA", fin=False)
@@ -92,7 +49,7 @@ def test_ack_offset_releases_multiple_buffers() -> None:
 
     assert client._has_stream_buffer(0) is True
 
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert client._has_stream_buffer(0) is None
 
@@ -103,14 +60,14 @@ def test_ack_offset_fin_only_releases_send_buffer() -> None:
     fin=True でデータが空のエントリは read_data コールバックの空 FIN
     除去で削除される (データ量 0 のため ACK 経路では解放されない)
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
     client.send_data(0, b"", fin=True)
 
     assert client._has_stream_buffer(0) is True
 
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert client._has_stream_buffer(0) is None
 
@@ -120,7 +77,7 @@ def test_ack_offset_bounds_entries_to_active_streams() -> None:
 
     複数ストリームの転送後も残留エントリが残らない
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
     client.send_data(0, b"first", fin=True)
@@ -130,7 +87,7 @@ def test_ack_offset_bounds_entries_to_active_streams() -> None:
     assert client._has_stream_buffer(0) is True
     assert client._has_stream_buffer(4) is True
 
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert client._has_stream_buffer(0) is None
     assert client._has_stream_buffer(4) is None
@@ -141,10 +98,10 @@ def test_ack_offset_repeated_round_trips_release_each_time() -> None:
 
     同一ストリームへの送信と送出を繰り返しても残留が積み上がらない
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
     for index in range(5):
         client.send_data(0, f"chunk-{index}".encode(), fin=False)
-        _pump(client, server)
+        _http3_pump(client, server)
         assert client._has_stream_buffer(0) is None

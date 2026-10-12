@@ -1,49 +1,8 @@
 """HTTP/3 のストリーム・接続制御 API テスト"""
 
+from conftest import _create_http3_connection_pair, _http3_pump
+
 from webtransport import http3
-
-
-def _pump(src: http3.Connection, dst: http3.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
-    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
-    1 回の呼び出しで全てのデータを返すとは限らないため、データが無く
-    なるまで繰り返す
-    """
-    for _ in range(64):
-        sent = False
-        for stream_id, data, fin in src.get_streams_to_send():
-            dst.receive_stream_data(stream_id, data, fin)
-            sent = True
-        if not sent:
-            break
-
-
-def _create_connection_pair() -> tuple[http3.Connection, http3.Connection]:
-    """Http3Connection のクライアント・サーバーペアを作成して初期化する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http3.Connection.create_client(http3.Config())
-    server_config = http3.Config()
-    server_config.is_server = True
-    server = http3.Connection.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-
-    # 双方の SETTINGS を交換する
-    _pump(server, client)
-    _pump(client, server)
-
-    return client, server
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -58,7 +17,7 @@ def _request_headers() -> list[tuple[str, str]]:
 
 def test_http3_block_unblock_stream() -> None:
     """ストリームのブロック / アンブロックで送信が止まることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストを送信してデータを積む (block 前に flush してしまうと
     # unblock 後も再スケジュールされないため、flush しない)
@@ -112,7 +71,7 @@ def test_http3_max_concurrent_streams() -> None:
     効果は外部から観測できない (現在値との max マージのため) ため、
     呼び出し後も通常の動作が続くことのみ確認する
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # ヒントを設定する
     client.max_concurrent_streams(10)
@@ -121,11 +80,11 @@ def test_http3_max_concurrent_streams() -> None:
     # ヒント設定後もリクエスト送受信が継続できる
     assert client.submit_request(0, _request_headers()) is True
     client.send_data(0, b"request-body", fin=True)
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert server.submit_response(0, [(":status", "200")]) is True
     server.send_data(0, b"response-body", fin=True)
-    _pump(server, client)
+    _http3_pump(server, client)
 
     received = False
     while True:
@@ -140,7 +99,7 @@ def test_http3_max_concurrent_streams() -> None:
 
 def test_http3_block_unblock_guards() -> None:
     """存在しない・範囲外のストリームでは no-op / 成功になることを確認"""
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
 
     # 存在しないストリームの unblock_stream は成功扱い (nghttp3 が 0 を返す)
     assert client.unblock_stream(999) is True

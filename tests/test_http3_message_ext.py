@@ -1,52 +1,9 @@
 """HTTP/3 の送信側拡張 API テスト"""
 
-from conftest import _drain_events
+from conftest import _create_http3_connection_pair, _drain_events, _http3_pump
 
 from webtransport import http3
 from webtransport.http3.exceptions import Http3ErrorCode
-
-
-def _pump(src: http3.Connection, dst: http3.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
-    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
-    1 回の呼び出しで全てのデータを返すとは限らないため、データが無く
-    なるまで繰り返す
-    """
-    for _ in range(64):
-        sent = False
-        for stream_id, data, fin in src.get_streams_to_send():
-            dst.receive_stream_data(stream_id, data, fin)
-            sent = True
-        if not sent:
-            break
-
-
-def _create_connection_pair() -> tuple[http3.Connection, http3.Connection]:
-    """Http3Connection のクライアント・サーバーペアを作成して初期化する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http3.Connection.create_client(http3.Config())
-    server_config = http3.Config()
-    server_config.is_server = True
-    server = http3.Connection.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-
-    # 双方の SETTINGS を交換する
-    _pump(server, client)
-    _pump(client, server)
-
-    return client, server
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -61,16 +18,16 @@ def _request_headers() -> list[tuple[str, str]]:
 
 def test_http3_submit_trailers() -> None:
     """トレーラが本体の後に送信されることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストヘッダーを先に送信処理する
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # 本体を fin=True で積み、flush 前にトレーラを呼ぶ
     client.send_data(0, b"request-body", fin=True)
     assert client.submit_trailers(0, [("x-trailer", "trailer-value")]) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # リクエストヘッダー → 本体 → トレーラ → ストリーム終端の順に届く
     event = server.next_event()
@@ -102,33 +59,33 @@ def test_http3_submit_trailers_after_fin_fails() -> None:
     送信処理で read_data_cb が EOF を返すと WRITE_END_STREAM が立ち、
     トレーラは NGHTTP3_ERR_INVALID_STATE になる
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, _server)
+    _http3_pump(client, _server)
 
     # 本体を送信処理すると WRITE_END_STREAM が立つ
     client.send_data(0, b"request-body", fin=True)
-    _pump(client, _server)
+    _http3_pump(client, _server)
     assert client.submit_trailers(0, [("x-trailer", "trailer-value")]) is False
 
 
 def test_http3_submit_info() -> None:
     """1xx レスポンスが最終レスポンスより先に送信されることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストを送信する
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     # 1xx を送ってから最終レスポンスを送る (103 Early Hints)
     assert server.submit_info(0, [(":status", "103")]) is True
     assert server.submit_response(0, [(":status", "200")]) is True
     # nghttp3 はフレームキュー (HEADERS) を DATA より先に書き出す
-    _pump(server, client)
+    _http3_pump(server, client)
     server.send_data(0, b"response-body", fin=True)
-    _pump(server, client)
+    _http3_pump(server, client)
 
     # 1xx → 最終レスポンス → 本体 → ストリーム終端の順に届く
     # (1xx は INFORMATIONAL として最終レスポンスの HEADERS と区別する)
@@ -162,19 +119,19 @@ def test_http3_submit_info_client_guard() -> None:
     nghttp3 は conn->server を assert するため、C++ 側のガードで
     クライアントの呼び出しを拒否する
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
     assert client.submit_info(0, [(":status", "103")]) is False
 
 
 def test_http3_submit_shutdown_notice() -> None:
     """shutdown notice が GOAWAY として届くことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert server.submit_shutdown_notice() is True
     # GOAWAY_QUEUED のみで SHUTDOWN_COMMENCED は立たないため、
     # 送信処理後もドレイン状態にはならない
     assert server.drained is False
-    _pump(server, client)
+    _http3_pump(server, client)
     assert server.drained is False
 
     # サーバーの shutdown notice は最大ストリーム ID 版 GOAWAY として届く
@@ -193,7 +150,7 @@ def test_http3_submit_shutdown_notice_client_guard() -> None:
     クライアントでは PUSH ID 版 GOAWAY になるため C++ 側のガードで
     拒否する
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
     assert client.submit_shutdown_notice() is False
 
 
@@ -203,10 +160,10 @@ def test_http3_submit_shutdown_notice_then_goaway() -> None:
     RFC 9114 5.2 節の MUST NOT に従い、shutdown notice の GOAWAY ID
     ((1 << 62) - 4) の後に shutdown の GOAWAY ID (0) が届く
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert server.submit_shutdown_notice() is True
-    _pump(server, client)
+    _http3_pump(server, client)
     event = client.next_event()
     assert event is not None
     assert event.type == http3.EventType.GO_AWAY
@@ -217,7 +174,7 @@ def test_http3_submit_shutdown_notice_then_goaway() -> None:
     # 初期値 -4 + 4 = 0 になる (RFC 9114 5.2 節の "MAY be zero if no
     # requests or pushes were processed")
     server.goaway()
-    _pump(server, client)
+    _http3_pump(server, client)
     event = client.next_event()
     assert event is not None
     assert event.type == http3.EventType.GO_AWAY
@@ -234,7 +191,7 @@ def test_http3_submit_shutdown_notice_after_goaway_fails() -> None:
     shutdown notice の GOAWAY ID は shutdown の GOAWAY ID より大きいため、
     GOAWAY ID の単調減少 (RFC 9114 5.2 節の MUST NOT) に違反する
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     server.goaway()
     assert server.submit_shutdown_notice() is False
@@ -245,7 +202,7 @@ def test_http3_submit_shutdown_notice_twice_fails() -> None:
 
     同一 GOAWAY ID の重複送信を避けるため、2 回目以降は False を返す
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     assert server.submit_shutdown_notice() is True
     assert server.submit_shutdown_notice() is False
@@ -265,16 +222,16 @@ def test_http3_submit_shutdown_notice_control_stream_unbound() -> None:
 
 def test_http3_shutdown_stream_write() -> None:
     """書き込み側シャットダウン後の send_data が no-op になることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストヘッダーを先に送信処理する
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     # 本体を送信処理する
     client.send_data(0, b"request-body")
-    _pump(client, server)
+    _http3_pump(client, server)
     event = server.next_event()
     assert event is not None
     assert event.type == http3.EventType.DATA
@@ -286,16 +243,16 @@ def test_http3_shutdown_stream_write() -> None:
 
     # シャットダウン後の send_data は no-op となり送出されない
     client.send_data(0, b"more-data")
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is None
 
 
 def test_http3_submit_trailers_after_shutdown_stream_write_fails() -> None:
     """書き込み側シャットダウン後の submit_trailers が失敗することを確認"""
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, _server)
+    _http3_pump(client, _server)
 
     client.shutdown_stream_write(0)
     assert client.submit_trailers(0, [("x-trailer", "trailer-value")]) is False
@@ -330,17 +287,17 @@ def test_http3_shutdown_stream_write_blocks_pending() -> None:
     (%4 == 0) ではスケジューラからも外すため、シャットダウン前に積んだ
     データも送信されない
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストヘッダーを先に送信処理する
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     # 送信処理前に書き込み側をシャットダウンする
     client.send_data(0, b"request-body")
     client.shutdown_stream_write(0)
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # 本体は送出されない
     assert server.next_event() is None
@@ -358,11 +315,11 @@ def test_http3_headers_fin_same_chunk_stream_end_once() -> None:
     高レベル層がこのイベントを on_stream_end に使わないこと (QUIC FIN
     の単一経路化) は client.py の run() の実装で担保される。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # クライアントがリクエストを送信し、サーバーが受理する
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # サーバーが 200 応答 + FIN を 1 回の get_streams_to_send で書き出す
     # (送信側はヘッダーと DATA (空) をまとめて flush し、1 チャンクに収まる)
@@ -394,21 +351,21 @@ def test_http3_response_trailers_distinguished() -> None:
     終端 HEADERS は `:status` を持たない。サーバーの最終レスポンスは
     HEADERS のまま、トレーラは TRAILERS として届く。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     # リクエストを送ってサーバーに届ける
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     request_event = server.next_event()
     assert request_event is not None
     assert request_event.type == http3.EventType.HEADERS
 
     # サーバーが最終レスポンス + 本体 + トレーラを送る
     assert server.submit_response(0, [(":status", "200")]) is True
-    _pump(server, client)
+    _http3_pump(server, client)
     server.send_data(0, b"response-body", fin=True)
     assert server.submit_trailers(0, [("x-checksum", "abc")]) is True
-    _pump(server, client)
+    _http3_pump(server, client)
 
     events = []
     while True:
@@ -440,10 +397,10 @@ def test_http3_close_stream_default_error_code() -> None:
     0 は予約域 (0x0000-0x00ff) のため既定値に使わない。STREAM_END イベントの
     error_code で観測する。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # error_code を省略して閉じる
     client.close_stream(0)
@@ -457,10 +414,10 @@ def test_http3_close_stream_default_error_code() -> None:
 
 def test_http3_close_stream_explicit_error_code() -> None:
     """close_stream に明示した error_code がそのまま観測されることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     client.close_stream(0, Http3ErrorCode.REQUEST_CANCELLED)
 
@@ -478,10 +435,10 @@ def test_http3_reset_stream_default_error_code_stays_zero() -> None:
     のため close_stream のような H3 既定値を設けず、アプリ固有エラーなしを
     意味する 0 を据え置く。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     client.reset_stream(0)
 

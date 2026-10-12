@@ -1,50 +1,14 @@
 """HTTP/3 テスト"""
 
-from conftest import _drain_events, _encode_varint
+from conftest import (
+    _create_http3_connection_pair,
+    _drain_events,
+    _encode_varint,
+    _http3_pump,
+)
 
 from webtransport import http3
 from webtransport.http3.exceptions import Http3ErrorCode
-
-
-def _pump(src: http3.Connection, dst: http3.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
-    receive_stream_data で直接渡す (モックなし)
-    """
-    for _ in range(64):
-        sent = False
-        for stream_id, data, fin in src.get_streams_to_send():
-            dst.receive_stream_data(stream_id, data, fin)
-            sent = True
-        if not sent:
-            break
-
-
-def _create_connection_pair() -> tuple[http3.Connection, http3.Connection]:
-    """Http3Connection のクライアント・サーバーペアを作成して初期化する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http3.Connection.create_client(http3.Config())
-    server_config = http3.Config()
-    server_config.is_server = True
-    server = http3.Connection.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-
-    # 双方の SETTINGS を交換する
-    _pump(server, client)
-    _pump(client, server)
-
-    return client, server
 
 
 def _inject_partial_headers(conn: http3.Connection, stream_id: int) -> int:
@@ -152,7 +116,7 @@ def test_http3_test_force_close_helper() -> None:
     Python から人工的に作る。イベントは push しないため next_event() は
     None を返す。
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair()
 
     # 既存イベントを空にしてから検証する
     assert client.is_closed() is False
@@ -168,7 +132,7 @@ def test_http3_test_force_close_helper() -> None:
 
 def test_http3_test_force_close_does_not_affect_peer() -> None:
     """_test_force_close がピア側の接続に影響しないことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     client._test_force_close()
 
@@ -186,7 +150,7 @@ def test_http3_protocol_error_event_reports_wire_code() -> None:
     """
     from webtransport.http3.exceptions import Http3ErrorCode
 
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
     while server.next_event() is not None:
         pass
 
@@ -212,7 +176,7 @@ def test_http3_protocol_error_event_reports_wire_code() -> None:
 
 def test_http3_non_error_events_have_no_error_message() -> None:
     """Error 以外のイベントでは error_message が空であることを確認"""
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     while True:
         event = server.next_event()
@@ -232,7 +196,7 @@ def test_http3_reset_stream_releases_pending_headers() -> None:
     この経路に到達する (ピア起点のリセットは高レベル層が
     shutdown_stream_read で転送する)。
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     assert _inject_partial_headers(server, 0) > 0
     assert server._has_pending_headers(0) is True, (
@@ -254,7 +218,7 @@ def test_http3_shutdown_stream_read_releases_pending_headers() -> None:
     (ResetStream を push すると高レベル層がピアのリセットをアプリ起点の
     リセットとして扱い、こちらから RESET_STREAM を送出してしまう)。
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     assert _inject_partial_headers(server, 0) > 0
     assert server._has_pending_headers(0) is True, (
@@ -301,7 +265,7 @@ def test_http3_shutdown_stream_read_releases_stream_buffers() -> None:
     される。送信方向は開いたままなので、以後の send_data は改めてキューされ
     送出される (読み取りの中断は書き込み側の状態を変えない)。
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     assert _inject_partial_headers(server, 0) > 0
     assert server.submit_response(0, [(":status", "200")]) is True, "応答の登録に失敗しました"
@@ -324,7 +288,7 @@ def test_http3_shutdown_stream_read_on_client_request_stream() -> None:
     高レベル Client は、自分が開いたリクエストストリームがサーバーに
     リセットされたときに shutdown_stream_read を呼ぶ。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(
         0,
@@ -335,7 +299,7 @@ def test_http3_shutdown_stream_read_on_client_request_stream() -> None:
             (":path", "/"),
         ],
     ), "リクエストの登録に失敗しました"
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert _inject_partial_headers(client, 0) > 0
     assert client._has_pending_headers(0) is True, (
@@ -357,7 +321,7 @@ def test_http3_close_stream_releases_pending_headers() -> None:
     close_stream は nghttp3_conn_close_stream 経由で stream_close_cb を呼ぶ。
     この経路でエントリが解放されることを確認する。
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     assert _inject_partial_headers(server, 0) > 0
     assert server._has_pending_headers(0) is True, (
@@ -375,7 +339,7 @@ def test_http3_pending_headers_are_independent_per_stream() -> None:
 
     片方のストリームの終了が、他方の受信途中のエントリを消さないことを確認する。
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair()
 
     assert _inject_partial_headers(server, 0) > 0
     assert _inject_partial_headers(server, 4) > 0
@@ -408,7 +372,7 @@ def test_split_send_delivers_body_with_single_fin() -> None:
     挟んだ送信が相手側で 1 つのボディに連結され、終端の fin が最後のチャンクで
     1 回だけ立つことを固定する。
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair()
 
     assert client.submit_request(
         0,
@@ -420,7 +384,7 @@ def test_split_send_delivers_body_with_single_fin() -> None:
         ],
     )
     # ヘッダーを先に届ける (ヘッダーとボディを同じチャンクにまとめない順序)
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # 前半は fin を立てずに送る
     client.send_data(0, b"pay", fin=False)

@@ -1,53 +1,8 @@
 """HTTP/3 の優先度制御 API テスト"""
 
+from conftest import _create_http3_connection_pair, _http3_pump
+
 from webtransport import http3
-
-
-def _pump(src: http3.Connection, dst: http3.Connection) -> None:
-    """src の送信データを全て dst に渡す
-
-    QUIC レイヤーを介さず、get_streams_to_send で取り出したデータを
-    receive_stream_data で直接渡す (モックなし)。get_streams_to_send は
-    1 回の呼び出しで全てのデータを返すとは限らないため、データが無く
-    なるまで繰り返す
-    """
-    for _ in range(64):
-        sent = False
-        for stream_id, data, fin in src.get_streams_to_send():
-            dst.receive_stream_data(stream_id, data, fin)
-            sent = True
-        if not sent:
-            break
-
-
-def _create_connection_pair() -> tuple[http3.Connection, http3.Connection]:
-    """Http3Connection のクライアント・サーバーペアを作成して初期化する
-
-    @return (クライアント Connection, サーバー Connection)
-    """
-    client = http3.Connection.create_client(http3.Config())
-    server_config = http3.Config()
-    server_config.is_server = True
-    server = http3.Connection.create_server(server_config)
-
-    # ストリームをバインド (クライアントの単方向ストリームは %4 == 2、
-    # サーバーは %4 == 3)
-    client.bind_control_stream(2)
-    client.bind_qpack_encoder_stream(6)
-    client.bind_qpack_decoder_stream(10)
-    server.bind_control_stream(3)
-    server.bind_qpack_encoder_stream(7)
-    server.bind_qpack_decoder_stream(11)
-
-    # クライアントからの双方向ストリームを受け入れる準備をする
-    # (設定しないと PRIORITY_UPDATE フレームが H3_ID_ERROR で拒否される)
-    server.set_max_client_streams_bidi(100)
-
-    # 双方の SETTINGS を交換する
-    _pump(server, client)
-    _pump(client, server)
-
-    return client, server
 
 
 def _request_headers() -> list[tuple[str, str]]:
@@ -62,10 +17,10 @@ def _request_headers() -> list[tuple[str, str]]:
 
 def test_http3_stream_priority_default() -> None:
     """Priority ヘッダーなしのリクエストはデフォルト優先度を返すことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     assert server.stream_priority(0) == (3, False)
@@ -73,10 +28,10 @@ def test_http3_stream_priority_default() -> None:
 
 def test_http3_stream_priority_with_priority_header() -> None:
     """Priority ヘッダーの値がストリーム優先度に反映されることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers() + [("priority", "u=2, i")]) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     assert server.stream_priority(0) == (2, True)
@@ -88,7 +43,7 @@ def test_http3_stream_priority_client_guard() -> None:
     nghttp3 は conn->server を assert するため、C++ 側のガードで
     クライアントの呼び出しを拒否する
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
     assert client.stream_priority(0) is None
 
 
@@ -98,10 +53,10 @@ def test_http3_stream_priority_not_found() -> None:
     クライアント起動双方向ストリーム (%4 == 0) だが未作成の stream 4 を
     使う (STREAM_NOT_FOUND 経路)
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert server.stream_priority(4) is None
 
@@ -112,10 +67,10 @@ def test_http3_stream_priority_invalid_stream_id() -> None:
     サーバー起動双方向ストリーム (%4 == 1) は優先度の対象外であり、
     nghttp3 が INVALID_ARGUMENT を返す
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert server.stream_priority(1) is None
 
@@ -126,7 +81,7 @@ def test_http3_stream_priority_out_of_range() -> None:
     nghttp3 は assert で stream_id の範囲を検証するため、C++ 側のガードで
     範囲外の値には None を返す
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
     assert server.stream_priority(-1) is None
     # NGHTTP3_MAX_VARINT (2**62 - 1) を超える値もガードされる
     assert server.stream_priority(1 << 62) is None
@@ -135,14 +90,14 @@ def test_http3_stream_priority_out_of_range() -> None:
 
 def test_http3_client_stream_priority() -> None:
     """クライアントの優先度設定が PRIORITY_UPDATE でサーバーに届くことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     assert client.client_stream_priority(0, 2, True) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # クライアントのシリアライズ (u=2, i) がサーバーでパースされて反映される
     assert server.stream_priority(0) == (2, True)
@@ -154,7 +109,7 @@ def test_http3_client_stream_priority_server_guard() -> None:
     nghttp3 は !conn->server を assert するため、C++ 側のガードで
     サーバーの呼び出しを拒否する
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
     assert server.client_stream_priority(0, 2, True) is False
 
 
@@ -164,7 +119,7 @@ def test_http3_client_stream_priority_invalid_urgency() -> None:
     urgency は 0-7 のみ。範囲外の値はピアが PRIORITY_UPDATE を
     パースできずコネクションエラーになるため、C++ 側で拒否する
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
     assert client.client_stream_priority(0, 8, True) is False
@@ -172,7 +127,7 @@ def test_http3_client_stream_priority_invalid_urgency() -> None:
 
 def test_http3_client_stream_priority_invalid_stream_id() -> None:
     """範囲外の stream_id で client_stream_priority が False を返すことを確認"""
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
     assert client.client_stream_priority(-1, 2, True) is False
@@ -194,7 +149,7 @@ def test_http3_client_stream_priority_not_found() -> None:
     クライアント起動双方向ストリーム (%4 == 0) だが未作成の stream 4 を
     使う (STREAM_NOT_FOUND 経路)
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
     assert client.client_stream_priority(4, 2, True) is False
@@ -206,7 +161,7 @@ def test_http3_client_stream_priority_not_bidi() -> None:
     サーバー起動双方向ストリーム (%4 == 1) は優先度の対象外であり、
     nghttp3 が INVALID_ARGUMENT を返す
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
     assert client.client_stream_priority(1, 2, True) is False
@@ -214,10 +169,10 @@ def test_http3_client_stream_priority_not_bidi() -> None:
 
 def test_http3_server_stream_priority() -> None:
     """サーバーの優先度設定が stream_priority で読めることを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     assert server.server_stream_priority(0, 5, False) is True
@@ -230,15 +185,15 @@ def test_http3_server_stream_priority_overrides_client() -> None:
     nghttp3 は SERVER_PRIORITY_SET フラグが立っているストリームへの
     PRIORITY_UPDATE を無視する
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     assert server.server_stream_priority(0, 5, False) is True
     assert client.client_stream_priority(0, 2, True) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     # サーバーが設定した優先度が維持される
     assert server.stream_priority(0) == (5, False)
@@ -250,16 +205,16 @@ def test_http3_server_stream_priority_client_guard() -> None:
     nghttp3 は conn->server を assert するため、C++ 側のガードで
     クライアントの呼び出しを拒否する
     """
-    client, _server = _create_connection_pair()
+    client, _server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
     assert client.server_stream_priority(0, 5, False) is False
 
 
 def test_http3_server_stream_priority_invalid_urgency() -> None:
     """範囲外の urgency で server_stream_priority が False を返すことを確認"""
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
 
     assert server.server_stream_priority(0, 8, True) is False
 
@@ -270,7 +225,7 @@ def test_http3_server_stream_priority_not_found() -> None:
     クライアント起動双方向ストリーム (%4 == 0) だが未作成の stream 4 を
     使う (STREAM_NOT_FOUND 経路)
     """
-    _client, server = _create_connection_pair()
+    _client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
     assert server.server_stream_priority(4, 5, False) is False
 
 
@@ -307,15 +262,15 @@ def test_http3_set_max_client_streams_bidi_decrease_ignored() -> None:
     減算ガードがないと nghttp3 の max_client_streams が減り、以降の
     PRIORITY_UPDATE が H3_ID_ERROR で拒否される
     """
-    client, server = _create_connection_pair()
+    client, server = _create_http3_connection_pair(set_max_client_streams_bidi=True)
 
     assert client.submit_request(0, _request_headers()) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.next_event() is not None
 
     # 100 から 0 への減算は無視される (単調増加のみ許可)
     server.set_max_client_streams_bidi(0)
 
     assert client.client_stream_priority(0, 2, True) is True
-    _pump(client, server)
+    _http3_pump(client, server)
     assert server.stream_priority(0) == (2, True)

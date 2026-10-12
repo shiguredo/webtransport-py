@@ -10,6 +10,7 @@ message MUST do so at a UTF-8 character boundary」を検証する。送信側�
 from conftest import (
     _create_session_pair,
     _drain_events,
+    _encode_capsule,
     _encode_varint,
     _establish_session,
     _setup_connect,
@@ -18,11 +19,6 @@ from conftest import (
 from webtransport import h3
 
 _H3_MESSAGE_ERROR = 0x010E
-
-
-def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
-    """Type / Length / Payload のカプセルバイト列を組み立てる"""
-    return _encode_varint(capsule_type) + _encode_varint(len(payload)) + payload
 
 
 def _encode_wt_close_session_capsule(error_code: int, message: bytes) -> bytes:
