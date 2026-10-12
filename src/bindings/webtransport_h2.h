@@ -379,9 +379,9 @@ class H2Session {
   H2Session(const H2Session&) = delete;
   H2Session& operator=(const H2Session&) = delete;
 
-  // ムーブ許可
-  H2Session(H2Session&&) noexcept;
-  H2Session& operator=(H2Session&&) noexcept;
+  // ムーブ禁止 (受信フロー制御の会計 (unconsumed_recv_bytes_) を移動できないため)
+  H2Session(H2Session&&) = delete;
+  H2Session& operator=(H2Session&&) = delete;
 
   /**
    * 受信したデータを処理

@@ -271,57 +271,6 @@ class Server:
             writer.close()
             await writer.wait_closed()
 
-    async def submit_response(
-        self,
-        writer: asyncio.StreamWriter,
-        stream_id: int,
-        headers: list[tuple[str, str]],
-        connection: http2_low.Connection,
-    ) -> None:
-        """レスポンスヘッダーを送信する
-
-        Args:
-            writer: StreamWriter
-            stream_id: ストリーム ID
-            headers: レスポンスヘッダー
-            connection: HTTP/2 接続
-        """
-        connection.submit_response(stream_id, headers)
-        while True:
-            data = connection.send()
-            if not data:
-                return
-            writer.write(data)
-            await writer.drain()
-
-    async def send_data(
-        self,
-        writer: asyncio.StreamWriter,
-        stream_id: int,
-        data: bytes,
-        eof: bool,
-        connection: http2_low.Connection,
-    ) -> None:
-        """ストリームにデータを送信する
-
-        Args:
-            writer: StreamWriter
-            stream_id: ストリーム ID
-            data: 送信データ
-            eof: ストリームを終了するか
-            connection: HTTP/2 接続
-
-        Raises:
-            ValueError: data が 1 MiB 超の場合
-        """
-        connection.send_data(stream_id, data, eof)
-        while True:
-            send_data = connection.send()
-            if not send_data:
-                return
-            writer.write(send_data)
-            await writer.drain()
-
     async def run(self) -> None:
         """サーバーを実行する
 

@@ -100,15 +100,6 @@ struct StreamData {
 };
 
 /**
- * 送信待ちストリームデータ
- */
-struct PendingStreamData {
-  int64_t stream_id;
-  std::vector<uint8_t> data;
-  bool fin;
-};
-
-/**
  * HTTP/3 コネクション (Sans-IO)
  *
  * QUIC ストリーム上で動作。
@@ -134,9 +125,9 @@ class Http3Connection {
   Http3Connection(const Http3Connection&) = delete;
   Http3Connection& operator=(const Http3Connection&) = delete;
 
-  // ムーブ許可
-  Http3Connection(Http3Connection&&) noexcept;
-  Http3Connection& operator=(Http3Connection&&) noexcept;
+  // ムーブ禁止 (nghttp3 へ登録したコールバックが this を指すため)
+  Http3Connection(Http3Connection&&) = delete;
+  Http3Connection& operator=(Http3Connection&&) = delete;
 
   /**
    * QUIC ストリームからデータを受信
@@ -205,11 +196,6 @@ class Http3Connection {
                  bool fin = false);
 
   /**
-   * ストリームをリセット
-   * @param stream_id ストリーム ID
-   * @param error_code エラーコード
-   */
-  /**
    * ストリームの読み取りを停止してリセットを要求する
    *
    * error_code は QUIC RESET_STREAM に載るアプリケーションエラーコードで、
@@ -235,15 +221,6 @@ class Http3Connection {
   /**
    * QUIC ストリーム終了を nghttp3 に通知する
    *
-   * QUIC の STREAM_CLOSED を受けたときに呼ぶ。
-   * nghttp3 の stream_close コールバック経由で STREAM_END イベントが生成される。
-   *
-   * @param stream_id ストリーム ID
-   * @param error_code アプリケーションエラーコード
-   */
-  /**
-   * QUIC ストリーム終了を nghttp3 に通知する
-   *
    * @param stream_id ストリーム ID
    * @param error_code ストリームが終了した理由の HTTP/3 アプリケーション
    *   エラーコード (RFC 9114 Section 8.1)。省略時は H3_NO_ERROR (0x0100)。
@@ -252,14 +229,6 @@ class Http3Connection {
   void close_stream(int64_t stream_id,
                     uint64_t error_code = NGHTTP3_H3_NO_ERROR);
 
-  /**
-   * GOAWAY を送信
-   *
-   * GOAWAY ID は nghttp3 が受信済み最大ストリームから自動計算するため、
-   * 引数の id は無視される。二重呼び出しは黙って無視する (同値再送も
-   * 抑止する)。
-   * @param id GOAWAY ID (現状は無視される)
-   */
   /**
    * GOAWAY を送信する
    *
@@ -627,9 +596,6 @@ class Http3Connection {
 
   // ストリームデータ (送信待ち)
   std::map<int64_t, std::deque<StreamData>> stream_buffers_;
-
-  // 送信待ちストリームデータ (nghttp3 から生成)
-  std::deque<PendingStreamData> pending_sends_;
 
   // 現在受信中のヘッダー
   std::map<int64_t, std::vector<std::pair<std::string, std::string>>>

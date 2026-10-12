@@ -620,7 +620,7 @@ async def drain() -> None  # 送信待ちフレームを空になるまで送出
 
 `http2.Client.__init__(host, port=443, verify_peer=True)`。`connect()` は `close()` を挟まずに再度呼ぶと `RuntimeError` になる (接続済み・接続中に加え、前回の接続に使った transport が残っている間も拒否する。`close()` が完了した後は再度接続できる)。コールバックは `on_headers` / `on_data` / `on_stream_end`。`request()` は http3 と同形で、`send_data(stream_id, data, eof=False)` のみ引数名が異なる (http3 は `fin`)。
 
-`http2.Client` / `http2.Server` / `ResponseWriter` の `send_data` は data が 1 MiB 超なら `ValueError` を送出する (`http2.Client` は接続が未確立のときは送信しないため例外にならない)。`http2.Client.request` の `body` も 1 MiB 超なら、ヘッダーを送出する前に `ValueError` を送出する。
+`http2.Client` / `ResponseWriter` の `send_data` は data が 1 MiB 超なら `ValueError` を送出する (`http2.Client` は接続が未確立のときは送信しないため例外にならない)。`http2.Client.request` の `body` も 1 MiB 超なら、ヘッダーを送出する前に `ValueError` を送出する。
 
 ## Sans I/O API
 

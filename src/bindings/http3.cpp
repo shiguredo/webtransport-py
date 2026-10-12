@@ -26,51 +26,6 @@ Http3Connection::~Http3Connection() {
   }
 }
 
-Http3Connection::Http3Connection(Http3Connection&& other) noexcept
-    : is_server_(other.is_server_),
-      config_(std::move(other.config_)),
-      conn_(other.conn_),
-      events_(std::move(other.events_)),
-      stream_buffers_(std::move(other.stream_buffers_)),
-      pending_sends_(std::move(other.pending_sends_)),
-      pending_headers_(std::move(other.pending_headers_)),
-      control_stream_id_(other.control_stream_id_),
-      qpack_encoder_stream_id_(other.qpack_encoder_stream_id_),
-      qpack_decoder_stream_id_(other.qpack_decoder_stream_id_),
-      closed_(other.closed_),
-      shutdown_stream_ids_(std::move(other.shutdown_stream_ids_)),
-      shutdown_commenced_(other.shutdown_commenced_),
-      shutdown_notice_sent_(other.shutdown_notice_sent_),
-      max_client_streams_bidi_(other.max_client_streams_bidi_) {
-  other.conn_ = nullptr;
-}
-
-Http3Connection& Http3Connection::operator=(Http3Connection&& other) noexcept {
-  if (this != &other) {
-    if (conn_)
-      nghttp3_conn_del(conn_);
-
-    is_server_ = other.is_server_;
-    config_ = std::move(other.config_);
-    conn_ = other.conn_;
-    events_ = std::move(other.events_);
-    stream_buffers_ = std::move(other.stream_buffers_);
-    pending_sends_ = std::move(other.pending_sends_);
-    pending_headers_ = std::move(other.pending_headers_);
-    control_stream_id_ = other.control_stream_id_;
-    qpack_encoder_stream_id_ = other.qpack_encoder_stream_id_;
-    qpack_decoder_stream_id_ = other.qpack_decoder_stream_id_;
-    closed_ = other.closed_;
-    shutdown_stream_ids_ = std::move(other.shutdown_stream_ids_);
-    shutdown_commenced_ = other.shutdown_commenced_;
-    shutdown_notice_sent_ = other.shutdown_notice_sent_;
-    max_client_streams_bidi_ = other.max_client_streams_bidi_;
-
-    other.conn_ = nullptr;
-  }
-  return *this;
-}
-
 std::unique_ptr<Http3Connection> Http3Connection::create_client(
     const Http3Config& config) {
   Http3Config client_config = config;

@@ -126,15 +126,6 @@ struct StreamInfo {
 };
 
 /**
- * 送信待ちストリームデータ
- */
-struct PendingData {
-  int64_t stream_id;
-  std::vector<uint8_t> data;
-  bool fin;
-};
-
-/**
  * WebTransport over HTTP/3 セッション (Sans-IO)
  *
  * HTTP/3 コネクション上で WebTransport セッションを管理
@@ -160,9 +151,9 @@ class H3Session {
   H3Session(const H3Session&) = delete;
   H3Session& operator=(const H3Session&) = delete;
 
-  // ムーブ許可
-  H3Session(H3Session&&) noexcept;
-  H3Session& operator=(H3Session&&) noexcept;
+  // ムーブ禁止 (nghttp3 へ登録したコールバックが this を指すため)
+  H3Session(H3Session&&) = delete;
+  H3Session& operator=(H3Session&&) = delete;
 
   /**
    * QUIC ストリームからデータを受信
@@ -217,9 +208,6 @@ class H3Session {
   std::vector<std::vector<uint8_t>> get_datagrams_to_send();
 
   /**
-   * QUIC コントロールストリーム ID を設定
-   */
-  /**
    * ローカル起点の単方向ストリーム ID として妥当かを返す
    *
    * QUIC varint の上限内であり、かつ自側の単方向ストリームのビットパターン
@@ -229,6 +217,9 @@ class H3Session {
    */
   bool is_valid_local_uni_stream_id(int64_t stream_id) const;
 
+  /**
+   * QUIC コントロールストリーム ID を設定
+   */
   void bind_control_stream(int64_t stream_id);
 
   /**
@@ -794,9 +785,6 @@ class H3Session {
     bool fin = false;
   };
   std::map<int64_t, std::deque<StreamBuffer>> stream_buffers_;
-
-  // 送信待ちストリームデータ (nghttp3 から生成)
-  std::deque<PendingData> pending_sends_;
 
   // 送信待ちデータグラム
   std::deque<std::vector<uint8_t>> pending_datagrams_;

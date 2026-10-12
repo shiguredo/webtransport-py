@@ -2131,69 +2131,6 @@ H2Session::~H2Session() {
   }
 }
 
-H2Session::H2Session(H2Session&& other) noexcept
-    : is_server_(other.is_server_),
-      config_(std::move(other.config_)),
-      session_(other.session_),
-      events_(std::move(other.events_)),
-      send_buffer_(std::move(other.send_buffer_)),
-      http2_stream_buffers_(std::move(other.http2_stream_buffers_)),
-      pending_headers_(std::move(other.pending_headers_)),
-      wt_sessions_(std::move(other.wt_sessions_)),
-      end_stream_pending_(std::move(other.end_stream_pending_)),
-      pending_pre_accept_end_stream_session_ids_(
-          std::move(other.pending_pre_accept_end_stream_session_ids_)),
-      peer_enable_connect_protocol_(other.peer_enable_connect_protocol_),
-      peer_wt_enabled_(other.peer_wt_enabled_),
-      peer_wt_initial_max_data_(other.peer_wt_initial_max_data_),
-      peer_wt_initial_max_stream_data_uni_(
-          other.peer_wt_initial_max_stream_data_uni_),
-      peer_wt_initial_max_stream_data_bidi_local_(
-          other.peer_wt_initial_max_stream_data_bidi_local_),
-      peer_wt_initial_max_stream_data_bidi_remote_(
-          other.peer_wt_initial_max_stream_data_bidi_remote_),
-      peer_wt_initial_max_streams_uni_(other.peer_wt_initial_max_streams_uni_),
-      peer_wt_initial_max_streams_bidi_(
-          other.peer_wt_initial_max_streams_bidi_),
-      closed_(other.closed_),
-      goaway_received_(other.goaway_received_) {
-  other.session_ = nullptr;
-}
-
-H2Session& H2Session::operator=(H2Session&& other) noexcept {
-  if (this != &other) {
-    if (session_) {
-      nghttp2_session_del(session_);
-    }
-    is_server_ = other.is_server_;
-    config_ = std::move(other.config_);
-    session_ = other.session_;
-    events_ = std::move(other.events_);
-    send_buffer_ = std::move(other.send_buffer_);
-    http2_stream_buffers_ = std::move(other.http2_stream_buffers_);
-    pending_headers_ = std::move(other.pending_headers_);
-    wt_sessions_ = std::move(other.wt_sessions_);
-    end_stream_pending_ = std::move(other.end_stream_pending_);
-    pending_pre_accept_end_stream_session_ids_ =
-        std::move(other.pending_pre_accept_end_stream_session_ids_);
-    peer_enable_connect_protocol_ = other.peer_enable_connect_protocol_;
-    peer_wt_enabled_ = other.peer_wt_enabled_;
-    peer_wt_initial_max_data_ = other.peer_wt_initial_max_data_;
-    peer_wt_initial_max_stream_data_uni_ =
-        other.peer_wt_initial_max_stream_data_uni_;
-    peer_wt_initial_max_stream_data_bidi_local_ =
-        other.peer_wt_initial_max_stream_data_bidi_local_;
-    peer_wt_initial_max_stream_data_bidi_remote_ =
-        other.peer_wt_initial_max_stream_data_bidi_remote_;
-    peer_wt_initial_max_streams_uni_ = other.peer_wt_initial_max_streams_uni_;
-    peer_wt_initial_max_streams_bidi_ = other.peer_wt_initial_max_streams_bidi_;
-    closed_ = other.closed_;
-    goaway_received_ = other.goaway_received_;
-    other.session_ = nullptr;
-  }
-  return *this;
-}
-
 std::unique_ptr<H2Session> H2Session::create_client(
     const H2SessionConfig& config) {
   auto session = std::unique_ptr<H2Session>(new H2Session(false, config));

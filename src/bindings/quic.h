@@ -219,9 +219,9 @@ class QuicConnection {
   QuicConnection(const QuicConnection&) = delete;
   QuicConnection& operator=(const QuicConnection&) = delete;
 
-  // ムーブ許可
-  QuicConnection(QuicConnection&&) noexcept;
-  QuicConnection& operator=(QuicConnection&&) noexcept;
+  // ムーブ禁止 (ngtcp2 / BoringSSL へ登録したコールバックが this を指すため)
+  QuicConnection(QuicConnection&&) = delete;
+  QuicConnection& operator=(QuicConnection&&) = delete;
 
   /**
    * 受信したデータを処理
