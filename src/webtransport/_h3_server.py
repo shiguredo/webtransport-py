@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any, Self
 
 from webtransport import h3 as h3_low
 from webtransport import quic
+from webtransport._dcid_index import drop_dcid_index, refresh_dcid_index
 from webtransport._h3_uni_streams import bind_http3_uni_streams, open_http3_uni_streams
 from webtransport._tls_files import validate_cert_key_files
-from webtransport._udp_socket import normalize_addr, recv_datagram
+from webtransport._udp_socket import normalize_addr, recv_datagram, server_timeout_seconds
 from webtransport.h3._error_codes import deliver_stream_reset_error_code
 from webtransport.h3._transport_params import meets_transport_param_requirements
 from webtransport.http3.exceptions import Http3ErrorCode
@@ -342,29 +343,20 @@ class Server:
     def _refresh_dcid_index(self, client: ClientConnection) -> None:
         """接続の発行済み SCID を DCID 索引に反映する
 
-        quic.Server と同じ方針。自側 SCID (= ピアから見た DCID) の新規発行分を
-        登録し、退役で消えた分を破棄する。8 バイト以外の CID は照会形式と
-        合わないため登録しない (安全側に破棄される)。
+        quic.Server と同じ方針。8 バイト以外の CID は照会形式と合わない
+        ため登録しない (安全側に破棄される)。索引の更新は _dcid_index に
+        集約する。
         """
         if client not in self._clients.values():
             return
         quic_connection = client.quic_connection
         if quic_connection is None:
             return
-        current = {cid for cid in quic_connection.scid if len(cid) == 8}
-        previous = self._conn_dcids.get(client, set())
-        for retired in previous - current:
-            if self._dcid_index.get(retired) is client:
-                del self._dcid_index[retired]
-        for issued in current - previous:
-            self._dcid_index[issued] = client
-        self._conn_dcids[client] = current
+        refresh_dcid_index(self._dcid_index, self._conn_dcids, client, quic_connection.scid)
 
     def _drop_dcid_index(self, client: ClientConnection) -> None:
         """接続の CID を索引から外す"""
-        for cid in self._conn_dcids.pop(client, set()):
-            if self._dcid_index.get(cid) is client:
-                del self._dcid_index[cid]
+        drop_dcid_index(self._dcid_index, self._conn_dcids, client)
 
     def _addr_of(self, client: ClientConnection) -> tuple[str, int] | None:
         """接続に紐づく現在のアドレスを返す (未登録なら None)"""
@@ -950,24 +942,13 @@ class Server:
     def _timeout_seconds(self) -> float:
         """全クライアントのうち最も早い QUIC タイマー期限までの秒数を返す
 
-        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
-        0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
-        ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
-        送り出せない。
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。
         """
-        deadline: float | None = None
-        for client in self._clients.values():
-            if client.quic_connection is None:
-                continue
-            timeout_ns = client.quic_connection.get_timeout()
-            if timeout_ns is None:
-                continue
-            seconds = timeout_ns / 1e9
-            if deadline is None or seconds < deadline:
-                deadline = seconds
-        if deadline is None:
-            return 0.1
-        return min(max(deadline, 0.001), 0.1)
+        return server_timeout_seconds(
+            client.quic_connection.get_timeout()
+            for client in self._clients.values()
+            if client.quic_connection is not None
+        )
 
     async def _handle_datagram(self, data: bytes, raw_addr: tuple[Any, ...]) -> bool:
         """受信した 1 データグラムを接続へ振り分けて処理する

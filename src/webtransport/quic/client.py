@@ -9,7 +9,13 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Self
 
-from webtransport._udp_socket import destination_for_packet, normalize_addr, recv_datagram
+from webtransport._udp_socket import (
+    client_timeout_seconds,
+    normalize_addr,
+    recv_datagram,
+    resolve_remote,
+    send_pending_packets,
+)
 from webtransport.exceptions import WebTransportError
 from webtransport.quic.exceptions import quic_terminal_error
 from webtransport.webtransport_ext import quic as quic_low
@@ -320,39 +326,21 @@ class Client:
     # 実装は _udp_socket.normalize_addr に集約する (self を使わないため staticmethod)
     _normalize_addr = staticmethod(normalize_addr)
 
-    def _destination_for_packet(
-        self,
-        packet: quic_low.Packet,
-    ) -> tuple[str, int]:
-        """パケットの送信先アドレスを決める (実装は _udp_socket に集約)"""
-        return destination_for_packet(packet, self._remote_addr, self._host, self._port)
-
     async def _send_pending(self) -> int:
         """送信待ちパケットを送出できるだけ送出する
-
-        send() は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで
-        必ず None を返すため、None まで drain しても戻ってこなくならない。
-        1 パケットに留めると run() の待機間隔がそのままスループット上限に
-        なるため、送出できるだけまとめて送出する。
 
         Returns:
             送信したパケット数
         """
         if self._connection is None or self._socket is None:
             return 0
-
-        loop = asyncio.get_running_loop()
-        sent = 0
-        while True:
-            packet = self._connection.send()
-            if packet is None:
-                return sent
-            await loop.sock_sendto(
-                self._socket,
-                packet.data,
-                self._destination_for_packet(packet),
-            )
-            sent += 1
+        return await send_pending_packets(
+            self._socket,
+            self._connection,
+            self._remote_addr,
+            self._host,
+            self._port,
+        )
 
     async def _receive(self, timeout: float = 0.1) -> int:
         """データを受信する
@@ -413,15 +401,9 @@ class Client:
         if self._connection is None:
             return 0.1
         timeout_ns = self._connection.get_timeout()
-        if timeout_ns is None:
-            return 0.1
-        if timeout_ns <= 0:
+        if timeout_ns is not None and timeout_ns <= 0:
             return 0.0
-        # 1 回の受信待ちは 0.001〜0.1 秒に収める。下限を設けないと
-        # pacing 期限がマイクロ秒単位で来たときに受信待ちがほぼ常に
-        # タイムアウトし、pacing で送れるようになった直後に送り出せない
-        # (下限を設けても sleep 側は 0 に近い値で回るため応答性は落ちない)
-        return min(max(timeout_ns / 1e9, 0.001), 0.1)
+        return client_timeout_seconds(timeout_ns)
 
     def _resolve_connect(self, result: bool) -> None:
         """connect() の待機者へ結果を通知する
@@ -746,7 +728,7 @@ class Client:
             # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
             # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
             try:
-                candidates = await self._resolve_remote(self._host, self._port)
+                candidates = await resolve_remote(self._host, self._port)
             except OSError:
                 return False
             if not candidates:
@@ -767,26 +749,6 @@ class Client:
             return False
         finally:
             self._connecting = False
-
-    async def _resolve_remote(self, host: str, port: int) -> list[tuple[socket.AddressFamily, str]]:
-        """ホストを解決して (family, 数値 IP) の候補列を返す
-
-        getaddrinfo の順序を保ち、重複を除く。TLS の server_name には元の
-        ホスト名を使い続けるため、ここでは数値 IP のみを取り出す。
-        """
-        loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
-        candidates: list[tuple[socket.AddressFamily, str]] = []
-        seen: set[tuple[socket.AddressFamily, str]] = set()
-        for family, _, _, _, sockaddr in infos:
-            ip = sockaddr[0]
-            if not isinstance(ip, str):
-                continue
-            candidate = (family, ip)
-            if candidate not in seen:
-                seen.add(candidate)
-                candidates.append(candidate)
-        return candidates
 
     async def _abandon_attempt(self) -> None:
         """失敗試行の後始末をして次候補に備える"""

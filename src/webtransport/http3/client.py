@@ -9,7 +9,14 @@ import socket
 from typing import TYPE_CHECKING, Self
 
 from webtransport._h3_uni_streams import bind_http3_uni_streams, open_http3_uni_streams
-from webtransport._udp_socket import destination_for_packet, normalize_addr, recv_datagram
+from webtransport._udp_socket import (
+    client_timeout_seconds,
+    destination_for_packet,
+    normalize_addr,
+    recv_datagram,
+    resolve_remote,
+    send_pending_packets,
+)
 from webtransport.exceptions import (
     ConnectFailedError,
     ConnectTimeoutError,
@@ -228,18 +235,13 @@ class Client:
             # 上位層が組み立てたワイヤデータは入力サイズの検査対象外
             self._quic_connection._send_stream_data_unchecked(stream_id, stream_data, fin)
 
-        loop = asyncio.get_running_loop()
-        sent = 0
-        while True:
-            packet = self._quic_connection.send()
-            if packet is None:
-                return sent
-            await loop.sock_sendto(
-                self._socket,
-                packet.data,
-                self._destination_for_packet(packet),
-            )
-            sent += 1
+        return await send_pending_packets(
+            self._socket,
+            self._quic_connection,
+            self._remote_addr,
+            self._host,
+            self._port,
+        )
 
     async def _drain_all(self) -> None:
         """QUIC の送信キューにあるパケットをすべて送出する
@@ -323,17 +325,11 @@ class Client:
     def _timeout_seconds(self) -> float:
         """QUIC の次のタイムアウトまでの秒数を返す
 
-        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
-        0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
-        ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
-        送り出せない。
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。
         """
         if self._quic_connection is None:
             return 0.1
-        timeout_ns = self._quic_connection.get_timeout()
-        if timeout_ns is None:
-            return 0.1
-        return min(max(timeout_ns / 1e9, 0.001), 0.1)
+        return client_timeout_seconds(self._quic_connection.get_timeout())
 
     def _setup_http3_streams(self) -> None:
         """HTTP/3 制御ストリームを設定する"""
@@ -352,26 +348,6 @@ class Client:
                 encoder_stream_id,
                 decoder_stream_id,
             )
-
-    async def _resolve_remote(self, host: str, port: int) -> list[tuple[socket.AddressFamily, str]]:
-        """ホストを解決して (family, 数値 IP) の候補列を返す
-
-        getaddrinfo の順序を保ち、重複を除く。TLS の server_name には元の
-        ホスト名を使い続けるため、ここでは数値 IP のみを取り出す。
-        """
-        loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
-        candidates: list[tuple[socket.AddressFamily, str]] = []
-        seen: set[tuple[socket.AddressFamily, str]] = set()
-        for family, _, _, _, sockaddr in infos:
-            ip = sockaddr[0]
-            if not isinstance(ip, str):
-                continue
-            candidate = (family, ip)
-            if candidate not in seen:
-                seen.add(candidate)
-                candidates.append(candidate)
-        return candidates
 
     async def connect(self, timeout: float = 10.0) -> None:
         """サーバーに接続する
@@ -426,7 +402,7 @@ class Client:
             # 名前解決は Python 側で非同期に行い、family 順の候補列を作る。
             # C++ 側には数値 IP を渡し、ソケット family との食い違いを避ける
             try:
-                candidates = await self._resolve_remote(self._host, self._port)
+                candidates = await resolve_remote(self._host, self._port)
             except OSError as exc:
                 raise ConnectFailedError(
                     f"failed to resolve {self._host}:{self._port}: {exc}"

@@ -8,11 +8,12 @@
 
 import asyncio
 import socket
+from collections.abc import Iterable
 from typing import Any, Protocol
 
 
 class _Packet(Protocol):
-    """送信先アドレスを持ち得るパケット (quic.Packet と同型)
+    """送信先アドレスとデータを持つパケット (quic.Packet と同型)
 
     読み取り専用の property として宣言する。nanobind の公開プロパティは
     property として型付けされるため、可変属性として宣言すると実型が
@@ -20,10 +21,19 @@ class _Packet(Protocol):
     """
 
     @property
+    def data(self) -> bytes: ...
+
+    @property
     def remote_host(self) -> str: ...
 
     @property
     def remote_port(self) -> int: ...
+
+
+class _PacketSender(Protocol):
+    """send() で送信パケットを取り出せる Sans-IO コネクション"""
+
+    def send(self) -> _Packet | None: ...
 
 
 def normalize_addr(addr: tuple[Any, ...]) -> tuple[str, int]:
@@ -164,3 +174,114 @@ async def recv_datagram(
     except BlockingIOError, InterruptedError:
         # 待機中に別の処理が読み取った場合に備える
         return None
+
+
+async def send_pending_packets(
+    sock: socket.socket,
+    connection: _PacketSender,
+    remote_addr: tuple[str, int] | None,
+    host: str,
+    port: int,
+) -> int:
+    """送信待ちパケットを送出できるだけ送出する
+
+    send() は輻輳ウィンドウの枯渇・フロー制御・送信待ちの解消のいずれかで
+    必ず None を返すため、None まで drain しても戻ってこなくならない。
+    1 パケットに留めると呼び出し側の待機間隔がそのままスループット上限に
+    なるため、送出できるだけまとめて送出する。
+
+    Args:
+        sock: 送信に使う UDP ソケット
+        connection: send() でパケットを取り出す Sans-IO コネクション
+        remote_addr: 解決済みの数値リモートアドレス (未解決なら None)
+        host: 接続先ホスト
+        port: 接続先ポート
+
+    Returns:
+        送信したパケット数
+    """
+    loop = asyncio.get_running_loop()
+    sent = 0
+    while True:
+        packet = connection.send()
+        if packet is None:
+            return sent
+        await loop.sock_sendto(
+            sock,
+            packet.data,
+            destination_for_packet(packet, remote_addr, host, port),
+        )
+        sent += 1
+
+
+async def resolve_remote(host: str, port: int) -> list[tuple[socket.AddressFamily, str]]:
+    """ホストを解決して (family, 数値 IP) の候補列を返す
+
+    getaddrinfo の順序を保ち、重複を除く。TLS の server_name には元の
+    ホスト名を使い続けるため、ここでは数値 IP のみを取り出す。
+
+    Args:
+        host: 解決するホスト名
+        port: 解決に使うポート番号
+
+    Returns:
+        (family, 数値 IP) の重複を除いた候補列
+    """
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    candidates: list[tuple[socket.AddressFamily, str]] = []
+    seen: set[tuple[socket.AddressFamily, str]] = set()
+    for family, _, _, _, sockaddr in infos:
+        ip = sockaddr[0]
+        if not isinstance(ip, str):
+            continue
+        candidate = (family, ip)
+        if candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def client_timeout_seconds(timeout_ns: int | None) -> float:
+    """クライアントの次のタイムアウトまでの秒数を返す
+
+    タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
+    0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
+    ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
+    送り出せない。
+
+    Args:
+        timeout_ns: QUIC の次のタイムアウトまでのナノ秒 (タイマー無しは
+            None)
+
+    Returns:
+        受信待ちに使う秒数
+    """
+    if timeout_ns is None:
+        return 0.1
+    return min(max(timeout_ns / 1e9, 0.001), 0.1)
+
+
+def server_timeout_seconds(timeouts: Iterable[int | None]) -> float:
+    """接続集合のうち最も早い QUIC タイマー期限までの秒数を返す
+
+    タイマーが無い要素は無視し、全て無ければ受信待ちの上限 (0.1 秒) を
+    返す。1 回の受信待ちは 0.001〜0.1 秒に収める。
+
+    Args:
+        timeouts: 各接続の次のタイムアウトまでのナノ秒 (タイマー無しは
+            None)
+
+    Returns:
+        受信待ちに使う秒数
+    """
+    deadline: float | None = None
+    for timeout_ns in timeouts:
+        if timeout_ns is None:
+            continue
+        seconds = timeout_ns / 1e9
+        if deadline is None or seconds < deadline:
+            deadline = seconds
+    if deadline is None:
+        return 0.1
+    return min(max(deadline, 0.001), 0.1)

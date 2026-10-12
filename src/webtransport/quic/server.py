@@ -8,8 +8,9 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Any, Self
 
+from webtransport._dcid_index import drop_dcid_index, refresh_dcid_index
 from webtransport._tls_files import validate_cert_key_files
-from webtransport._udp_socket import normalize_addr, recv_datagram
+from webtransport._udp_socket import normalize_addr, recv_datagram, server_timeout_seconds
 from webtransport.webtransport_ext import quic as quic_low
 
 if TYPE_CHECKING:
@@ -292,29 +293,18 @@ class Server:
     def _refresh_dcid_index(self, connection: quic_low.Connection) -> None:
         """接続の発行済み SCID を索引に反映する
 
-        自側 SCID (= ピアから見た DCID) の新規発行分を登録し、退役で消えた分を破棄する。退役 CID の索引残り
-        は無害である (受信結果で破棄と判定され張り替えない) が、接触の
-        たびに最新化して残存期間を抑える。8 バイト以外の CID は索引の
-        照会形式と合わないため登録しない (現行は 8 バイトに揃う。初期
-        SCID 長起点であり、将来の非 8 バイトは安全側に破棄される)。
+        8 バイト以外の CID は索引の照会形式と合わないため登録しない
+        (現行は 8 バイトに揃う。初期 SCID 長起点であり、将来の非 8 バイト
+        は安全側に破棄される)。索引の更新は _dcid_index に集約する。
         """
         # 未登録の接続には何もしない (除去直後の再登録を防ぐ防御)
         if connection not in self._conn_addr:
             return
-        current = {cid for cid in connection.scid if len(cid) == 8}
-        previous = self._conn_dcids.get(connection, set())
-        for retired in previous - current:
-            if self._dcid_index.get(retired) is connection:
-                del self._dcid_index[retired]
-        for issued in current - previous:
-            self._dcid_index[issued] = connection
-        self._conn_dcids[connection] = current
+        refresh_dcid_index(self._dcid_index, self._conn_dcids, connection, connection.scid)
 
     def _drop_dcid_index(self, connection: quic_low.Connection) -> None:
         """接続の索引登録を全て破棄する"""
-        for cid in self._conn_dcids.pop(connection, set()):
-            if self._dcid_index.get(cid) is connection:
-                del self._dcid_index[cid]
+        drop_dcid_index(self._dcid_index, self._conn_dcids, connection)
 
     def _remove_connection(self, connection: quic_low.Connection) -> None:
         """接続の登録を全て外す (アドレス・逆引き・索引)"""
@@ -785,22 +775,9 @@ class Server:
     def _timeout_seconds(self) -> float:
         """全接続のうち最も早い QUIC タイマー期限までの秒数を返す
 
-        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。1 回の受信待ちは
-        0.001〜0.1 秒に収める。下限を設けないと期限がマイクロ秒単位で来た
-        ときに受信待ちがほぼ常にタイムアウトし、送れるようになった直後に
-        送り出せない。
+        タイマーが無い場合は受信待ちの上限 (0.1 秒) を返す。
         """
-        deadline: float | None = None
-        for connection in self._conn_addr:
-            timeout_ns = connection.get_timeout()
-            if timeout_ns is None:
-                continue
-            seconds = timeout_ns / 1e9
-            if deadline is None or seconds < deadline:
-                deadline = seconds
-        if deadline is None:
-            return 0.1
-        return min(max(deadline, 0.001), 0.1)
+        return server_timeout_seconds(connection.get_timeout() for connection in self._conn_addr)
 
     def _handle_datagram(self, data: bytes, raw_addr: tuple[Any, ...]) -> bool:
         """受信した 1 データグラムを接続へ振り分ける
