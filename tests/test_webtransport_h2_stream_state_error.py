@@ -174,9 +174,7 @@ def test_wt_stream_after_fin_sends_state_error() -> None:
 
     # 検知側 (サーバー) に Error イベント (0x51) が通知される
     # (受信フロー制御違反 0x50 と同じ方式)
-    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
+    _assert_state_error_event(_drain_events(server), 0)
 
 
 def test_empty_wt_stream_fin_after_fin_ignored() -> None:
@@ -582,9 +580,7 @@ def test_wt_stream_flow_control_excess_on_terminal_stream_sends_state_error() ->
 
     # 0x51 の Error イベントが push され、0x50 ではない (順序が入れ替わると
     # 0x50 の Error イベントが push されて 0x51 は送出されない)
-    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
+    _assert_state_error_event(_drain_events(server), 0)
 
 
 def test_wt_stop_sending_first_delivers_event() -> None:
@@ -629,11 +625,8 @@ def test_wt_stop_sending_second_sends_state_error() -> None:
     assert ret > 0, "2 回目の WT_STOP_SENDING カプセルの注入に失敗しました"
     events = _drain_events(server)
     stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
-    error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert stop_events == []
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
-    assert error_events[0].stream_id == 0
+    _assert_state_error_event(events, 0)
     _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
 
 
@@ -651,12 +644,9 @@ def test_wt_stop_sending_duplicate_in_same_receive_sends_state_error() -> None:
     assert ret > 0, "連結した WT_STOP_SENDING カプセルの注入に失敗しました"
     events = _drain_events(server)
     stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
-    error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(stop_events) == 1
     assert stop_events[0].error_code == 1
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
-    assert error_events[0].stream_id == 0
+    _assert_state_error_event(events, 0)
     _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
 
 
@@ -690,11 +680,8 @@ def test_wt_stop_sending_unknown_stream_second_sends_state_error() -> None:
     assert server.get_stream_ids(session_id) == []
     events = _drain_events(server)
     stop_events = [event for event in events if event.type == h2.EventType.STOP_SENDING]
-    error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert stop_events == []
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
-    assert error_events[0].stream_id == unknown_stream_id
+    _assert_state_error_event(events, unknown_stream_id)
     _assert_state_error_sent(server, _WT_STOP_SENDING_DUPLICATE)
 
 
@@ -754,10 +741,7 @@ def test_wt_max_stream_data_after_stop_sending_sends_state_error() -> None:
     _assert_state_error_sent(server, _WT_MAX_STREAM_DATA_AFTER_STOP_SENDING)
 
     # エラー検知側に Error イベント (0x51) が通知される
-    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
-    assert error_events[0].stream_id == 0
+    _assert_state_error_event(_drain_events(server), 0)
 
 
 def test_wt_max_stream_data_after_stop_sending_unknown_stream_sends_state_error() -> None:
@@ -939,10 +923,7 @@ def test_wt_stream_data_blocked_for_terminal_stream_sends_state_error() -> None:
     _assert_state_error_sent(server, _WT_STREAM_DATA_BLOCKED_TERMINAL)
 
     # エラー検知側に Error イベント (0x51) が通知される
-    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
-    assert error_events[0].stream_id == 0
+    _assert_state_error_event(_drain_events(server), 0)
 
 
 def test_wt_stream_data_blocked_after_reset_sends_state_error() -> None:
@@ -972,10 +953,7 @@ def test_wt_stream_data_blocked_after_reset_sends_state_error() -> None:
     _assert_state_error_sent(server, _WT_STREAM_DATA_BLOCKED_TERMINAL)
 
     # エラー検知側に Error イベント (0x51) が通知される
-    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
-    assert len(error_events) == 1
-    assert error_events[0].error_code == WT_STREAM_STATE_ERROR
-    assert error_events[0].stream_id == 0
+    _assert_state_error_event(_drain_events(server), 0)
 
 
 def _release_peer_uni_stream(server: h2.Session, session_id: int, stream_id: int) -> None:
@@ -996,9 +974,13 @@ def _release_peer_uni_stream(server: h2.Session, session_id: int, stream_id: int
     _drain_events(server)
 
 
-def _assert_error_event(server: h2.Session, stream_id: int) -> None:
-    """WT_STREAM_STATE_ERROR (0x51) の Error イベントが 1 件通知されることを確認する"""
-    error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
+def _assert_state_error_event(events: list[h2.Event], stream_id: int) -> None:
+    """WT_STREAM_STATE_ERROR (0x51) の Error イベントが 1 件通知されることを確認する
+
+    Error イベントが 1 件だけ通知される・error_code が WT_STREAM_STATE_ERROR・
+    stream_id が期待値である、の 3 点を検証する。
+    """
+    error_events = [event for event in events if event.type == h2.EventType.ERROR]
     assert len(error_events) == 1
     assert error_events[0].error_code == WT_STREAM_STATE_ERROR
     assert error_events[0].stream_id == stream_id
@@ -1025,7 +1007,7 @@ def test_wt_stream_after_release_sends_state_error() -> None:
     )
     assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_STREAM_RELEASED)
-    _assert_error_event(server, stream_id)
+    _assert_state_error_event(_drain_events(server), stream_id)
     assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
 
 
@@ -1059,7 +1041,7 @@ def test_wt_reset_stream_after_release_sends_state_error() -> None:
     )
     assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_RESET_RELEASED)
-    _assert_error_event(server, stream_id)
+    _assert_state_error_event(_drain_events(server), stream_id)
     assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
 
 
@@ -1104,7 +1086,7 @@ def test_wt_stream_data_blocked_after_release_sends_state_error() -> None:
     )
     assert ret > 0, "WT_STREAM_DATA_BLOCKED カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_STREAM_DATA_BLOCKED_RELEASED)
-    _assert_error_event(server, stream_id)
+    _assert_state_error_event(_drain_events(server), stream_id)
     assert server.get_stream_ids(session_id) == [], "ストリームが再作成されました"
 
 
@@ -1126,4 +1108,4 @@ def test_wt_reset_stream_after_release_prefers_released_over_reliable_size() -> 
     )
     assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_RESET_RELEASED)
-    _assert_error_event(server, stream_id)
+    _assert_state_error_event(_drain_events(server), stream_id)
