@@ -1,7 +1,7 @@
 # 規約から外れている箇所を列挙して解消する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-fix-convention-violations
 - Polished: 2026-09-15
 - Updated: 2026-10-05
@@ -76,10 +76,11 @@ prek の実行順 (`shiguredo-python` の「`priority` で `ruff-format` → `ru
 
 ## 解決方法
 
-- `src/bindings/` の各ファイルの英語の説明コメントと列挙ラベルを日本語化する (対象外の閉じラベル・英文引用・節参照・コードポイント名は触らない)
-- `src/bindings/quic.cpp` の `QuicConnection::reset_stream` の `streamfrq` のコメントを、ngtcp2 の再送待ち送信フレームキューを指す旨に書き換える
-- `tests/prop_quic_handshake.py` と `tests/test_e2e_http2.py` のメッセージを日本語にする
-- 列挙した 6 ファイルから issue 番号を削除し、回帰ピンの意図を「何が壊れると落ちるか」で書き直す
-- `src/webtransport/http2/server.py` の `Server._handle_client` と `src/webtransport/http3/server.py` の `Server._drain_quic_events` の `assert` を `if` + `raise RuntimeError` に置き換える
-- `prek.toml` の ty フックに `priority = 20` を追加する
-- `dev.py` のコミットメッセージを `[canary] バージョンを {new_version} に上げる` にし、ドライラン出力の文字列も同じメッセージを印字するように直す
+- `src/bindings` の英語の列挙ラベルと説明コメントを日本語化した (バインディング登録の区切り、capsule のフィールド名、QPACK ストリーム名、ストリーム ID のビット割り当て、1xx の中間応答、ALPN の説明など)。閉じラベル、仕様の英文引用、節参照のみのコメント、コードポイント名のみのコメントは変更していない
+- `QuicConnection::reset_stream` の `streamfrq` のコメントを、ngtcp2 が再送用に保持する送信済み未 ACK の STREAM フレームキュー (`ngtcp2_strm::tx.streamfrq`) を指す旨に書き換えた
+- `tests/prop_quic_handshake.py` と `tests/test_e2e_http2.py` の表明メッセージを日本語にした
+- 列挙した 6 ファイルから issue 番号を削除し、回帰ピンの意図を「何が壊れると落ちるか」で書き直した
+- `src` の本番 `assert` 3 箇所 (`http2/server.py` の `read_task`、`http3/server.py` の `quic_connection` / `http3_connection`) を `if` + `raise RuntimeError` に置き換えた。列挙後に `qmux/server.py` に増えていた `self._server` の 1 箇所も同じ規約違反のため合わせて置き換えた
+- `prek.toml` の ty フックに `priority = 20` を追加し、`ruff-format` → `ruff-check` → `ty` → `pytest` の順を設定に固定した
+- `dev.py` のコミットメッセージを `[canary] バージョンを {new_version} に上げる` にし、ドライラン出力も同じメッセージを印字するように直した
+- `ruff` / `ty` / `pytest` と `make develop` のスタブ一致検査が通過することを確認した
