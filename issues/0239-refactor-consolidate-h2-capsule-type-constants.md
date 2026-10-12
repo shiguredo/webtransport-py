@@ -1,7 +1,7 @@
 # h2 のテストでカプセル種別の定数が複数ファイルに重複定義されているのを集約する
 
 - Created: 2026-09-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-consolidate-h2-capsule-type-constants
 - Polished: 2026-10-03
 
@@ -175,3 +175,11 @@ Section 3.5 の DATAGRAM) が、テストファイルごとのローカル `_WT_
   (数値リテラル直書きと `bytes([0x99, ...])` / `b"\x68\x43"` の手組み Type
   バイト列を含む)
 - 生成されるバイト列が変わっていない (全テストが通過する)
+
+## 解決方法
+
+- `tests/conftest.py` にカプセル種別の数値の出典 (`_WT_DATAGRAM` / `_WT_PADDING` / `_WT_RESET_STREAM` / `_WT_STOP_SENDING` / `_WT_STREAM_FIN` / `_WT_STREAM` / `_WT_MAX_DATA` / `_WT_MAX_STREAM_DATA` / `_WT_MAX_STREAMS_BIDI` / `_WT_MAX_STREAMS_UNI` / `_WT_DATA_BLOCKED` / `_WT_STREAM_DATA_BLOCKED` / `_WT_STREAMS_BLOCKED_BIDI` / `_WT_STREAMS_BLOCKED_UNI` / `_WT_CLOSE_SESSION` / `_WT_DRAIN_SESSION`) を追加した。既存の `_WT_CLOSE_SESSION_TYPE_BYTES` は `_encode_varint(_WT_CLOSE_SESSION)`、`_encode_wt_max_stream_data_capsule` / `_encode_wt_stream_data_blocked_capsule` は定数から導出する形にした
+- h2 系テストのローカル `_WT_*` 定義を削除し、conftest から import するようにした
+- 生リテラル (`0x190B4D3X` / `0x190B4D4X` / `0x2843` / `0x78AE`) と手組み Type バイト列 (`bytes([0x99, 0x0B, 0x4D, ...])` / `b"\x68\x43"` / `b"\x99\x0b\x4d\x3e"` / `b"\x99\x0b\x4d\x3d"`) を `_encode_varint(_WT_*)` または `_encode_capsule(_WT_*, ...)` に置き換えた
+- 説明コメントと docstring は数値ではなくカプセル種別名で記述し直した
+- 生成バイト列が変わらないことを h2 テスト 429 件と全テスト 1465 件の通過で確認した
