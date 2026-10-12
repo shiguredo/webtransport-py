@@ -1,7 +1,7 @@
 # h2 のテストで RST_STREAM フレーム生成ヘルパが複数ファイルに重複しているのを集約する
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/refactor-consolidate-rst-stream-frame-helper
 - Polished: 2026-10-03
 
@@ -35,3 +35,9 @@
 - ローカル定義を持っていた 2 ファイルが conftest の定義を import して使っている
 - 生成されるバイト列が変わっていない (既存テストが通過する)
 - 全テストが通過する
+
+## 解決方法
+
+- `tests/conftest.py` の `_encode_rst_stream_frame` の docstring に、ワイヤ注入 (receive) と RST_STREAM 検出の 2 用途を追記した
+- `tests/test_webtransport_h2_recv_flow_control.py` と `tests/test_webtransport_h2_reject_session.py` のローカル定義を削除し、conftest の定義を import するようにした (既定引数 `error_code=0` を維持)
+- 生成されるバイト列が変わらないことを全テストの通過で確認した
