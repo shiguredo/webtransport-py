@@ -25,10 +25,13 @@ WT_ERROR = WtErrorCode.WT_ERROR.value
 
 def _encode_h2_wt_stream_data_frame(http2_stream_id: int, wt_stream_id: int, data: bytes) -> bytes:
     """CONNECT ストリームへ載せる WT_STREAM (FIN なし) の DATA フレームを組み立てる"""
-    from conftest import _encode_varint
+    from conftest import (
+        _WT_STREAM,
+        _encode_varint,
+    )
 
     payload = _encode_varint(wt_stream_id) + data
-    capsule = _encode_varint(0x190B4D3C) + _encode_varint(len(payload)) + payload
+    capsule = _encode_varint(_WT_STREAM) + _encode_varint(len(payload)) + payload
     return (
         len(capsule).to_bytes(3, "big")
         + bytes([0x00, 0x00])

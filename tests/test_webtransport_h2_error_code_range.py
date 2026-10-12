@@ -9,6 +9,10 @@ StreamReset / StopSending が届く。終端状態や二重受信と同時に立
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
+    _WT_STREAM_FIN,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -39,7 +43,7 @@ def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_si
     Error Code は varint のため、 0xffffffff 超の注入にも使う。
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
-    return _encode_capsule(0x190B4D39, payload)
+    return _encode_capsule(_WT_RESET_STREAM, payload)
 
 
 def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
@@ -48,7 +52,7 @@ def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
     Error Code は varint のため、 0xffffffff 超の注入にも使う。
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code)
-    return _encode_capsule(0x190B4D3A, payload)
+    return _encode_capsule(_WT_STOP_SENDING, payload)
 
 
 def _encode_wt_stream_fin_capsule(stream_id: int, data: bytes) -> bytes:
@@ -56,12 +60,14 @@ def _encode_wt_stream_fin_capsule(stream_id: int, data: bytes) -> bytes:
 
     DataRecvd にしたストリームへ範囲外の WT_RESET_STREAM を注入するために使う。
     """
-    return _encode_capsule(0x190B4D3B, _encode_varint(stream_id) + data)
+    return _encode_capsule(_WT_STREAM_FIN, _encode_varint(stream_id) + data)
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる"""
-    return _encode_capsule(0x2843, error_code.to_bytes(4, "big") + error_message.encode("utf-8"))
+    return _encode_capsule(
+        _WT_CLOSE_SESSION, error_code.to_bytes(4, "big") + error_message.encode("utf-8")
+    )
 
 
 def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
@@ -79,12 +85,12 @@ def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
 def _assert_no_wt_error_sent(server: h2.Session) -> None:
     """WT_CLOSE_SESSION が送出されないことを確認
 
-    0x68 0x43 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint。
+    0x68 0x43 は WT_CLOSE_SESSION (Type WT_CLOSE_SESSION) の 2 バイト varint。
     エラー検知 (close_session 呼び出し) があれば必ずワイヤに現れるため、
     Type の非存在でエラー送出なしを検証できる。
     """
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
 
 def test_wt_reset_stream_error_code_over_max_sends_wt_error() -> None:

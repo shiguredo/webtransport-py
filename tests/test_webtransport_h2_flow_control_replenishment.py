@@ -14,6 +14,17 @@ WT_STOP_SENDING を複数回送出しないこと (Section 6.3 の MUST NOT) も
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATA_BLOCKED,
+    _WT_MAX_DATA,
+    _WT_MAX_STREAM_DATA,
+    _WT_MAX_STREAMS_UNI,
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
+    _WT_STREAM,
+    _WT_STREAM_DATA_BLOCKED,
+    _WT_STREAM_FIN,
+    _WT_STREAMS_BLOCKED_BIDI,
     _connect_h2_session,
     _create_h2_session_pair,
     _create_small_stream_limit_h2_session_pair,
@@ -27,18 +38,12 @@ from conftest import (
 
 from webtransport import h2
 
-_WT_MAX_DATA = 0x190B4D3D
-_WT_STOP_SENDING = 0x190B4D3A
 # WT_STOP_SENDING (Type 0x190B4D3A) の 4 バイト可変長整数表現。Error Code の
 # 値に依存せずカプセル種別だけで判定するために使う
 _WT_STOP_SENDING_TYPE_BYTES = _encode_varint(_WT_STOP_SENDING)
-_WT_STREAM = 0x190B4D3C
-_WT_STREAM_FIN = 0x190B4D3B
-_WT_STREAM_DATA_BLOCKED = 0x190B4D42
 # 解放済み ID の記録の固定上限 (src/bindings/webtransport_h2.cpp の
 # kMaxReceivedMapEntries)。上限を超えた解放は記録されない
 _RELEASED_MAP_LIMIT = 4096
-_WT_DATA_BLOCKED = 0x190B4D41
 
 
 def _pump_all(client: h2.Session, server: h2.Session, rounds: int = 8) -> None:
@@ -80,13 +85,13 @@ def _create_wide_window_h2_session_pair() -> tuple[h2.Session, h2.Session]:
 def _assert_no_max_stream_data_sent(session: h2.Session) -> None:
     """WT_MAX_STREAM_DATA がワイヤへ送出されていないことを確認する
 
-    カプセル種別 (0x190B4D3E) の 4 バイト可変長整数表現で判定する。補充量の
+    カプセル種別 (WT_MAX_STREAM_DATA) の 4 バイト可変長整数表現で判定する。補充量の
     値に依存しないため、補充の算出式が変わっても表明が空振りしない。値その
     ものの固定は対照テスト test_max_stream_data_on_wire_without_stop_sending
     が担う。
     """
     wire = session.send()
-    assert wire is None or b"\x99\x0b\x4d\x3e" not in wire
+    assert wire is None or _encode_varint(_WT_MAX_STREAM_DATA) not in wire
 
 
 def test_session_transfer_beyond_1mib() -> None:
@@ -327,11 +332,13 @@ def test_streams_blocked_on_wire() -> None:
     assert client.open_stream(session_id, False) == -1
     wire = client.send()
     assert wire is not None
-    assert _encode_capsule(0x190B4D43, _encode_varint(0)) in wire
+    assert _encode_capsule(_WT_STREAMS_BLOCKED_BIDI, _encode_varint(0)) in wire
     # 重複送出しない
     assert client.open_stream(session_id, False) == -1
     wire2 = client.send()
-    assert wire2 is None or _encode_capsule(0x190B4D43, _encode_varint(0)) not in wire2
+    assert (
+        wire2 is None or _encode_capsule(_WT_STREAMS_BLOCKED_BIDI, _encode_varint(0)) not in wire2
+    )
 
 
 def test_uni_reset_releases_and_replenishes() -> None:
@@ -349,7 +356,7 @@ def test_uni_reset_releases_and_replenishes() -> None:
     # サーバー側でリセットを受信させる (WT_RESET_STREAM を注入する。
     # Reliable Size は受信済み 2 バイトと一致させる)
     reset_payload = _encode_varint(stream_id) + _encode_varint(0) + _encode_varint(2)
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D39, reset_payload)))
+    server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_RESET_STREAM, reset_payload)))
     _pump_all(client, server)
     # 受信終端のみで解放され、WT_MAX_STREAMS_UNI が補充される
     assert stream_id not in server.get_stream_ids(session_id)
@@ -368,13 +375,13 @@ def test_uni_release_replenishes_max_streams_on_wire() -> None:
     # 対向へ WT_RESET_STREAM を注入して受信終端させる (Reliable Size は
     # 受信済み 2 バイトと一致させる)
     reset_payload = _encode_varint(stream_id) + _encode_varint(0) + _encode_varint(2)
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D39, reset_payload)))
+    server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_RESET_STREAM, reset_payload)))
     assert stream_id not in server.get_stream_ids(session_id)
 
     # WT_MAX_STREAMS_UNI (0x190B4D40) が 101 で送出される
     wire = server.send()
     assert wire is not None
-    assert _encode_capsule(0x190B4D40, _encode_varint(101)) in wire
+    assert _encode_capsule(_WT_MAX_STREAMS_UNI, _encode_varint(101)) in wire
 
 
 def test_reverse_initiator_reset_does_not_replenish() -> None:
@@ -385,10 +392,10 @@ def test_reverse_initiator_reset_does_not_replenish() -> None:
     # サーバー開始単方向 ID (3) へ WT_RESET_STREAM を注入する (本来は
     # サーバーが開く ID であり、クライアント起点としては不正に近い)
     reset_payload = _encode_varint(3) + _encode_varint(0) + _encode_varint(0)
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D39, reset_payload)))
+    server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_RESET_STREAM, reset_payload)))
     # エントリは作られても自起点扱いのため解放されず、補充も送出されない
     wire = server.send()
-    assert wire is None or _encode_capsule(0x190B4D40, _encode_varint(101)) not in wire
+    assert wire is None or _encode_capsule(_WT_MAX_STREAMS_UNI, _encode_varint(101)) not in wire
 
 
 def test_partial_fin_resume() -> None:
@@ -430,7 +437,7 @@ def test_partial_fin_resume() -> None:
 def _assert_no_stop_sending_sent(session: h2.Session) -> None:
     """WT_STOP_SENDING がワイヤへ送出されていないことを確認する
 
-    カプセル種別 (0x190B4D3A) の 4 バイト可変長整数表現で判定する。Error Code
+    カプセル種別 (WT_STOP_SENDING) の 4 バイト可変長整数表現で判定する。Error Code
     の値に依存しないため、抑止する Error Code が変わっても表明が空振りしない。
     """
     wire = session.send()
@@ -530,7 +537,9 @@ def test_max_stream_data_accepted_after_local_stop_sending() -> None:
     )
     assert ret > 0, "WT_MAX_STREAM_DATA カプセルの注入に失敗しました"
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire, "セッションが閉じられました"
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire, (
+        "セッションが閉じられました"
+    )
     assert server.get_session_ids() == [session_id]
 
     # クレジットが反映され、初期上限 8 を超える 10 バイトを送出できる

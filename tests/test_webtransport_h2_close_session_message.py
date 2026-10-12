@@ -22,6 +22,7 @@ Section 6.12 の "The message takes up the remainder of the capsule" に下限�
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,
+    _WT_CLOSE_SESSION,
     _WT_CLOSE_SESSION_TYPE_BYTES,
     _assert_session_closed_by_protocol_error,
     _connect_h2_session,
@@ -64,7 +65,7 @@ def _encode_wt_close_session_capsule(error_code: int, message: bytes) -> bytes:
     メッセージは bytes のまま載せる。WT_ERROR の WT_CLOSE_SESSION が送出された
     ことを検証する期待値の組み立てに使う。
     """
-    return _encode_capsule(0x2843, _encode_wt_close_session_payload(error_code, message))
+    return _encode_capsule(_WT_CLOSE_SESSION, _encode_wt_close_session_payload(error_code, message))
 
 
 def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
@@ -82,7 +83,7 @@ def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
 def _assert_accepted_without_error_signals(server: h2.Session, session_id: int) -> None:
     """受理された WT_CLOSE_SESSION で PROTOCOL_ERROR の RST_STREAM も WT_CLOSE_SESSION も送出されないことを確認
 
-    _WT_CLOSE_SESSION_TYPE_BYTES は WT_CLOSE_SESSION (Type 0x2843) の Type バイト
+    _WT_CLOSE_SESSION_TYPE_BYTES は WT_CLOSE_SESSION (Type WT_CLOSE_SESSION) の Type バイト
     列であり、エラー検知 (close_session 呼び出し) があれば必ずワイヤに現れる。
     応答カプセルを送らないのは draft-15 Section 6.12 が許容する省略 (MUST NOT
     ではない) であり、本実装のポリシーである。一方、同節は受信者に
@@ -112,7 +113,9 @@ def _inject_close_session_payload(server: h2.Session, session_id: int, payload: 
     4 バイト未満のペイロード (Application Error Code の欠落) と、任意の
     error code を再現するために使う。
     """
-    ret = server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, payload)))
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_capsule(_WT_CLOSE_SESSION, payload))
+    )
     assert ret > 0, "WT_CLOSE_SESSION カプセルの注入に失敗しました"
 
 

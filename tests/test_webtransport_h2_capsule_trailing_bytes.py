@@ -23,6 +23,19 @@ import pytest
 from conftest import (
     _PROTOCOL_ERROR,
     _WT_CLOSE_SESSION_TYPE_BYTES,
+    _WT_DATA_BLOCKED,
+    _WT_DATAGRAM,
+    _WT_DRAIN_SESSION,
+    _WT_MAX_DATA,
+    _WT_MAX_STREAM_DATA,
+    _WT_MAX_STREAMS_BIDI,
+    _WT_MAX_STREAMS_UNI,
+    _WT_PADDING,
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
+    _WT_STREAM_DATA_BLOCKED,
+    _WT_STREAMS_BLOCKED_BIDI,
+    _WT_STREAMS_BLOCKED_UNI,
     _assert_session_closed_by_protocol_error,
     _connect_h2_session,
     _create_h2_session_pair,
@@ -42,19 +55,6 @@ _WT_ERROR = WtErrorCode.WT_ERROR.value
 
 # カプセル種別 (draft-ietf-webtrans-http2-15 Section 6。WT_DRAIN_SESSION の
 # 0x78ae は draft-ietf-webtrans-http3-16 Section 4.6 の登録値である)
-_WT_RESET_STREAM = 0x190B4D39
-_WT_STOP_SENDING = 0x190B4D3A
-_WT_MAX_DATA = 0x190B4D3D
-_WT_MAX_STREAM_DATA = 0x190B4D3E
-_WT_MAX_STREAMS_BIDI = 0x190B4D3F
-_WT_MAX_STREAMS_UNI = 0x190B4D40
-_WT_DATA_BLOCKED = 0x190B4D41
-_WT_STREAM_DATA_BLOCKED = 0x190B4D42
-_WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
-_WT_STREAMS_BLOCKED_UNI = 0x190B4D44
-_WT_DRAIN_SESSION = 0x78AE
-_WT_PADDING = 0x190B4D38
-_WT_DATAGRAM = 0x00
 
 # 余分なバイト (1 バイトと複数バイト)
 _TRAILING_BYTE = b"\x00"

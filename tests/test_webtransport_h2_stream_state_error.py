@@ -15,6 +15,11 @@ MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
+    _WT_STREAM,
+    _WT_STREAM_FIN,
     _connect_h2_session,
     _create_h2_session_pair,
     _create_small_stream_limit_h2_session_pair,
@@ -39,50 +44,50 @@ WT_ERROR = WtErrorCode.WT_ERROR.value
 def _encode_wt_stream_capsule(stream_id: int, data: bytes, fin: bool = False) -> bytes:
     """WT_STREAM / WT_STREAM_FIN capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D3C (FIN なし) / 0x190B4D3B (FIN 付き) は 4 バイト varint
+    Type WT_STREAM (FIN なし) / WT_STREAM_FIN (FIN 付き) は 4 バイト varint
     + Length + Stream ID (varint) + Data。Length は 1 バイト varint のみ
     対応する (テストで使う小さい値のみ。64 バイト未満のペイロード前提)。
     """
     payload = _encode_varint(stream_id) + data
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    capsule_type = 0x190B4D3B if fin else 0x190B4D3C
-    return bytes([0x99, 0x0B, 0x4D, capsule_type & 0xFF, len(payload)]) + payload
+    capsule_type = _WT_STREAM_FIN if fin else _WT_STREAM
+    return _encode_varint(capsule_type) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
     """WT_RESET_STREAM capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D39 (4 バイト varint) + Length + Stream ID (varint) +
+    Type WT_RESET_STREAM (4 バイト varint) + Length + Stream ID (varint) +
     Error Code (varint) + Reliable Size (varint)。Length は 1 バイト varint
     のみ対応する (テストで使う小さい値のみ。64 バイト未満のペイロード前提)。
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return bytes([0x99, 0x0B, 0x4D, 0x39, len(payload)]) + payload
+    return _encode_varint(_WT_RESET_STREAM) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
     """WT_STOP_SENDING capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D3A (4 バイト varint) + Length + Stream ID (varint) +
+    Type WT_STOP_SENDING (4 バイト varint) + Length + Stream ID (varint) +
     Error Code (varint)。Length は 1 バイト varint のみ対応する (テストで
     使う小さい値のみ。64 バイト未満のペイロード前提)。
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code)
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return bytes([0x99, 0x0B, 0x4D, 0x3A, len(payload)]) + payload
+    return _encode_varint(_WT_STOP_SENDING) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str = "") -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる
 
-    Type 0x2843 は 2 バイト varint [0x68, 0x43] + Length + Application Error
+    Type WT_CLOSE_SESSION は 2 バイト varint [0x68, 0x43] + Length + Application Error
     Code (32bit) + Message。Length は 1 バイト varint のみ対応する (テストで
     使う小さい値のみ。64 バイト未満のペイロード前提)。
     """
     payload = error_code.to_bytes(4, "big") + error_message.encode("utf-8")
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return b"\x68\x43" + bytes([len(payload)]) + payload
+    return _encode_varint(_WT_CLOSE_SESSION) + bytes([len(payload)]) + payload
 
 
 # エラー検知時に close_session へ渡すメッセージ (テストのワイヤ検証と一致させる)
@@ -114,12 +119,12 @@ def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
 def _assert_no_state_error_sent(server: h2.Session) -> None:
     """WT_CLOSE_SESSION が送出されないことを確認
 
-    0x68 0x43 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint。
+    0x68 0x43 は WT_CLOSE_SESSION (Type WT_CLOSE_SESSION) の 2 バイト varint。
     エラー検知 (close_session 呼び出し) があれば必ずワイヤに現れるため、
     Type の非存在でエラー送出なしを検証できる。
     """
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
 
 def test_wt_stream_after_reset_stream_sends_state_error() -> None:

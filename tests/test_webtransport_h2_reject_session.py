@@ -24,6 +24,8 @@ session is established when the server sends a 2xx response」により、非 2x
 
 import pytest
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATAGRAM,
     _create_h2_http2_pair,
     _create_h2_session_pair,
     _drain_events,
@@ -31,6 +33,7 @@ from conftest import (
     _encode_data_frame,
     _encode_headers_frame,
     _encode_status_header_block,
+    _encode_varint,
     _h2_pump,
 )
 
@@ -86,7 +89,7 @@ def test_client_non_2xx_reject_removes_session(status_code: int) -> None:
     # 拒否後の send_datagram はワイヤへ送出されない
     client.send_datagram(session_id, b"after-reject")
     wire = client.send()
-    assert wire is None or _encode_capsule(0x00, b"after-reject") not in wire
+    assert wire is None or _encode_capsule(_WT_DATAGRAM, b"after-reject") not in wire
 
 
 def test_client_non_2xx_reject_no_session_closed_event() -> None:
@@ -133,7 +136,7 @@ def test_client_non_2xx_reject_close_session_noop() -> None:
     client.close_session(session_id, 0)
     wire = client.send()
     # 0x6843 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
     # ピアに何も届かず、両側で SessionClosed が発火しない
     _h2_pump(client, server)
@@ -206,7 +209,7 @@ def test_client_receive_1xx_keeps_session() -> None:
     client.send_datagram(session_id, b"after-1xx")
     wire = client.send()
     assert wire is not None
-    assert _encode_capsule(0x00, b"after-1xx") in wire
+    assert _encode_capsule(_WT_DATAGRAM, b"after-1xx") in wire
 
 
 def test_client_receive_1xx_then_final_response_keeps_session() -> None:
@@ -235,7 +238,7 @@ def test_client_receive_1xx_then_final_response_keeps_session() -> None:
     client.send_datagram(session_id, b"after-1xx-403")
     wire = client.send()
     assert wire is not None
-    assert _encode_capsule(0x00, b"after-1xx-403") in wire
+    assert _encode_capsule(_WT_DATAGRAM, b"after-1xx-403") in wire
 
 
 def test_client_accept_200_normal_session_unaffected() -> None:
@@ -290,7 +293,7 @@ def test_client_reject_other_session_unaffected() -> None:
     # 拒否されたセッションへの送信は送出されない
     client.send_datagram(second_session_id, b"rejected")
     wire = client.send()
-    assert wire is None or _encode_capsule(0x00, b"rejected") not in wire
+    assert wire is None or _encode_capsule(_WT_DATAGRAM, b"rejected") not in wire
 
     # 生存セッションへの送信は送出され、ピアに届く
     client.send_datagram(first_session_id, b"alive")
@@ -543,7 +546,7 @@ def test_client_response_201_without_end_stream_keeps_session() -> None:
     client.send_datagram(session_id, b"alive")
     wire = client.send()
     assert wire is not None
-    assert _encode_capsule(0x00, b"alive") in wire
+    assert _encode_capsule(_WT_DATAGRAM, b"alive") in wire
 
 
 def test_client_non_2xx_overflow_status_rounds_zero_by_wire_injection() -> None:

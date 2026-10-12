@@ -8,6 +8,10 @@ WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ�
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_RESET_STREAM,
+    _WT_STREAM,
+    _WT_STREAM_FIN,
     _connect_h2_session,
     _drain_events,
     _encode_capsule,
@@ -31,19 +35,21 @@ _MSG_STREAM_LIMIT = "peer exceeded Maximum Streams limit"
 
 def _encode_wt_stream_capsule(stream_id: int, data: bytes, fin: bool = False) -> bytes:
     """WT_STREAM / WT_STREAM_FIN capsule のワイヤバイト列を組み立てる"""
-    capsule_type = 0x190B4D3B if fin else 0x190B4D3C
+    capsule_type = _WT_STREAM_FIN if fin else _WT_STREAM
     return _encode_capsule(capsule_type, _encode_varint(stream_id) + data)
 
 
 def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
     """WT_RESET_STREAM capsule のワイヤバイト列を組み立てる"""
     payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
-    return _encode_capsule(0x190B4D39, payload)
+    return _encode_capsule(_WT_RESET_STREAM, payload)
 
 
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる"""
-    return _encode_capsule(0x2843, error_code.to_bytes(4, "big") + error_message.encode("utf-8"))
+    return _encode_capsule(
+        _WT_CLOSE_SESSION, error_code.to_bytes(4, "big") + error_message.encode("utf-8")
+    )
 
 
 def _assert_flow_control_error_sent(server: h2.Session) -> None:
@@ -57,10 +63,10 @@ def _assert_flow_control_error_sent(server: h2.Session) -> None:
 def _assert_no_close_session_sent(server: h2.Session) -> None:
     """WT_CLOSE_SESSION が送出されないことを確認
 
-    0x68 0x43 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint。
+    0x68 0x43 は WT_CLOSE_SESSION (Type WT_CLOSE_SESSION) の 2 バイト varint。
     """
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
 
 def _create_server_with_stream_limits(

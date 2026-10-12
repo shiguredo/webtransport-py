@@ -8,6 +8,9 @@ Length を送出する手段が存在しないため)。
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATAGRAM,
+    _WT_STREAM,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -25,10 +28,6 @@ from webtransport.webtransport_ext.h2 import WtErrorCode
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
 WT_ERROR = WtErrorCode.WT_ERROR.value
-
-
-_WT_STREAM = 0x190B4D3C
-_WT_CLOSE_SESSION = 0x2843
 
 
 def _drain_wire(source: h2.Session) -> bytes:
@@ -111,7 +110,7 @@ def test_boundary_payload_accepted() -> None:
     session_id = _connect_h2_session(client, server)
 
     payload = b"y" * 32768
-    capsule = _encode_capsule(0x00, payload)
+    capsule = _encode_capsule(_WT_DATAGRAM, payload)
     for offset in range(0, len(capsule), 4096):
         server.receive(_encode_data_frame(session_id, capsule[offset : offset + 4096]))
     datagram_events = [e for e in _drain_events(server) if e.type == h2.EventType.DATAGRAM]
@@ -175,7 +174,7 @@ def test_custom_limit_boundary_accepted() -> None:
 
     # 100 バイトの DATAGRAM ペイロードは受理される
     payload = b"q" * 100
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x00, payload)))
+    server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_DATAGRAM, payload)))
     datagram_events = [e for e in _drain_events(server) if e.type == h2.EventType.DATAGRAM]
     assert len(datagram_events) == 1
     assert datagram_events[0].data == payload
@@ -232,7 +231,7 @@ def test_trailing_capsule_blocked_in_same_receive() -> None:
     session_id = _connect_h2_session(client, server)
 
     evil = _encode_varint(_WT_STREAM) + _encode_varint(1 << 30)
-    good = _encode_capsule(0x00, b"should-not-arrive")
+    good = _encode_capsule(_WT_DATAGRAM, b"should-not-arrive")
     server.receive(_encode_data_frame(session_id, evil + good))
     assert server.get_session_ids() == []
     assert [e for e in _drain_events(server) if e.type == h2.EventType.DATAGRAM] == []

@@ -21,6 +21,9 @@ WT_CLOSE_SESSION 受信後・ピアの END_STREAM 受信後・クライアント
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_MAX_STREAM_DATA,
+    _WT_STREAM_DATA_BLOCKED,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -43,7 +46,7 @@ WT_ERROR = WtErrorCode.WT_ERROR.value
 def _encode_wt_close_session_capsule(error_code: int, error_message: str = "") -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる
 
-    Type 0x2843 は 2 バイト varint [0x68, 0x43] + Length + Application Error
+    Type WT_CLOSE_SESSION は 2 バイト varint [0x68, 0x43] + Length + Application Error
     Code (32bit) + Message。Length は 1 バイト varint のみ対応する (テストで
     使う小さい値のみ。64 バイト未満のペイロード前提)。HTTP/2 DATA フレームの
     ペイロードはカプセルバイト列そのもののため、ワイヤデータに対する部分列
@@ -51,7 +54,7 @@ def _encode_wt_close_session_capsule(error_code: int, error_message: str = "") -
     """
     payload = error_code.to_bytes(4, "big") + error_message.encode("utf-8")
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return b"\x68\x43" + bytes([len(payload)]) + payload
+    return _encode_varint(_WT_CLOSE_SESSION) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_close_session_capsule_bytes(error_code: int, message: bytes) -> bytes:
@@ -64,7 +67,7 @@ def _encode_wt_close_session_capsule_bytes(error_code: int, message: bytes) -> b
     収まるため、ワイヤ部分列チェックで送出を検証できる。
     """
     return (
-        _encode_varint(0x2843)
+        _encode_varint(_WT_CLOSE_SESSION)
         + _encode_varint(4 + len(message))
         + error_code.to_bytes(4, "big")
         + message
@@ -205,7 +208,10 @@ def test_close_session_flow_control_violation_internal_call_delivered() -> None:
         not in wire
     )
     # WT_STREAM_DATA_BLOCKED が送出される
-    assert _encode_capsule(0x190B4D42, _encode_varint(stream_id) + _encode_varint(4)) in wire
+    assert (
+        _encode_capsule(_WT_STREAM_DATA_BLOCKED, _encode_varint(stream_id) + _encode_varint(4))
+        in wire
+    )
 
     # 先行分 (残量内の 4 バイト) をサーバーへ配送する
     server.receive(wire)
@@ -215,7 +221,7 @@ def test_close_session_flow_control_violation_internal_call_delivered() -> None:
     client.receive(
         _encode_data_frame(
             session_id,
-            _encode_capsule(0x190B4D3E, _encode_varint(stream_id) + _encode_varint(1024)),
+            _encode_capsule(_WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1024)),
         )
     )
     _h2_pump(client, server)

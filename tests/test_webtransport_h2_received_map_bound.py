@@ -8,6 +8,8 @@ DoS への防御 (固定上限の安全弁) を検証する。上限超過の新
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_STOP_SENDING,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -27,9 +29,6 @@ WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
 WT_ERROR = WtErrorCode.WT_ERROR.value
 
-
-_WT_STREAM = 0x190B4D3C
-_WT_STOP_SENDING = 0x190B4D3A
 
 # 1 つの DATA フレームにまとめるカプセル数。カプセルごとに receive を
 # 呼ぶと Python → C++ 呼び出しが増えて遅いためバッチ注入する
@@ -154,7 +153,7 @@ def test_max_stream_data_over_limit_new_id_not_retained() -> None:
     _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(over_id, 1 << 19)])
     assert not _error_events(server)
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
     assert server.get_session_ids() == [session_id]
 
 
@@ -186,7 +185,7 @@ def test_max_stream_data_existing_stream_decrease_detected_after_limit() -> None
     _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(stream_id, 1 << 19)])
     wire = server.send()
     assert wire is not None
-    assert b"\x68\x43" in wire
+    assert _encode_varint(_WT_CLOSE_SESSION) in wire
 
 
 def test_stop_sending_within_limit_emits_event() -> None:

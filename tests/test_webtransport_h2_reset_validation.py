@@ -8,6 +8,8 @@ reset_stream の Reliable Size は送信済みバイト数と一致しなけれ�
 
 import pytest
 from conftest import (
+    _WT_RESET_STREAM,
+    _WT_STREAM,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -21,23 +23,23 @@ from webtransport import h2
 def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
     """WT_RESET_STREAM capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D39 (4 バイト varint) + Length + Stream ID + Error Code +
+    Type WT_RESET_STREAM (4 バイト varint) + Length + Stream ID + Error Code +
     Reliable Size。Length は 1 バイト varint のみ対応する (小さい値のみ)。
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return bytes([0x99, 0x0B, 0x4D, 0x39, len(payload)]) + payload
+    return _encode_varint(_WT_RESET_STREAM) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_stream_capsule(stream_id: int, data: bytes) -> bytes:
     """WT_STREAM capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D3C (4 バイト varint) + Length + Stream ID + Stream Data。
+    Type WT_STREAM (4 バイト varint) + Length + Stream ID + Stream Data。
     Length は 1 バイト varint のみ対応する (小さい値のみ)。
     """
     payload = _encode_varint(stream_id) + data
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return bytes([0x99, 0x0B, 0x4D, 0x3C, len(payload)]) + payload
+    return _encode_varint(_WT_STREAM) + bytes([len(payload)]) + payload
 
 
 def test_reset_stream_uses_bytes_sent_as_reliable_size() -> None:

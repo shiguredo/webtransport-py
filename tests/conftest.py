@@ -243,6 +243,26 @@ def _encode_varint(value: int) -> bytes:
     return (0xC000000000000000 | value).to_bytes(8, "big")
 
 
+# WebTransport over HTTP/2 のカプセル種別の数値の出典。テストからはこれを
+# import して使う (draft-ietf-webtrans-http2-15 Section 6 / RFC 9297 Section 3.5)
+_WT_DATAGRAM = 0x00
+_WT_PADDING = 0x190B4D38
+_WT_RESET_STREAM = 0x190B4D39
+_WT_STOP_SENDING = 0x190B4D3A
+_WT_STREAM_FIN = 0x190B4D3B
+_WT_STREAM = 0x190B4D3C
+_WT_MAX_DATA = 0x190B4D3D
+_WT_MAX_STREAM_DATA = 0x190B4D3E
+_WT_MAX_STREAMS_BIDI = 0x190B4D3F
+_WT_MAX_STREAMS_UNI = 0x190B4D40
+_WT_DATA_BLOCKED = 0x190B4D41
+_WT_STREAM_DATA_BLOCKED = 0x190B4D42
+_WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
+_WT_STREAMS_BLOCKED_UNI = 0x190B4D44
+_WT_CLOSE_SESSION = 0x2843
+_WT_DRAIN_SESSION = 0x78AE
+
+
 def _encode_capsule(capsule_type: int, payload: bytes) -> bytes:
     """Capsule Protocol のカプセルバイト列を組み立てる (RFC 9297 Section 3.2)
 
@@ -354,7 +374,7 @@ _PROTOCOL_ERROR = 0x01
 
 # WT_CLOSE_SESSION の Type varint。このバイト列がワイヤに現れれば
 # WT_CLOSE_SESSION が送出されたことになる
-_WT_CLOSE_SESSION_TYPE_BYTES = _encode_varint(0x2843)
+_WT_CLOSE_SESSION_TYPE_BYTES = _encode_varint(_WT_CLOSE_SESSION)
 
 
 def _encode_rst_stream_frame(stream_id: int, error_code: int = 0) -> bytes:
@@ -402,7 +422,9 @@ def _encode_wt_max_stream_data_capsule(stream_id: int, max_stream_data: int) -> 
     形式は Type 0x190B4D3E (draft-ietf-webtrans-http2-15 Section 6.6) +
     Length + Stream ID (可変長整数) + Maximum Stream Data (可変長整数)。
     """
-    return _encode_capsule(0x190B4D3E, _encode_varint(stream_id) + _encode_varint(max_stream_data))
+    return _encode_capsule(
+        _WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(max_stream_data)
+    )
 
 
 def _encode_wt_stream_data_blocked_capsule(stream_id: int, max_stream_data: int) -> bytes:
@@ -411,7 +433,9 @@ def _encode_wt_stream_data_blocked_capsule(stream_id: int, max_stream_data: int)
     形式は Type 0x190B4D42 (draft-ietf-webtrans-http2-15 Section 6.9) +
     Length + Stream ID (可変長整数) + Maximum Stream Data (可変長整数)。
     """
-    return _encode_capsule(0x190B4D42, _encode_varint(stream_id) + _encode_varint(max_stream_data))
+    return _encode_capsule(
+        _WT_STREAM_DATA_BLOCKED, _encode_varint(stream_id) + _encode_varint(max_stream_data)
+    )
 
 
 def _setup_connect(

@@ -15,6 +15,9 @@ send_stream_data は送信側クレジットで塞がれ、超過分を送れな
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATAGRAM,
+    _WT_STREAM,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -34,7 +37,6 @@ WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
 WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
-_WT_STREAM = 0x190B4D3C
 _PEER_EXCEEDED = "peer exceeded flow control limit"
 
 # nghttp2 がコネクションレベルの WINDOW_UPDATE を積むのは、返却量が接続の
@@ -56,7 +58,7 @@ def _encode_wt_stream_capsule(stream_id: int, data: bytes) -> bytes:
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる"""
     payload = error_code.to_bytes(4, "big") + error_message.encode("utf-8")
-    return _encode_capsule(0x2843, payload)
+    return _encode_capsule(_WT_CLOSE_SESSION, payload)
 
 
 def _assert_flow_control_error_sent(server: h2.Session) -> None:
@@ -73,7 +75,7 @@ def _assert_flow_control_error_sent(server: h2.Session) -> None:
 def _assert_no_close_session_sent(server: h2.Session) -> None:
     """WT_CLOSE_SESSION が送出されないことを確認"""
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
 
 def _inject_wt_stream(server: h2.Session, session_id: int, stream_id: int, data: bytes) -> None:
@@ -530,7 +532,7 @@ def test_peer_close_session_releases_unconsumed_recv_bytes() -> None:
     # 未完成カプセルの末尾 + WT_CLOSE_SESSION (エラーコード 0) + 後続カプセル
     tail = b"abcd" * 3
     close_capsule = _encode_wt_close_session_capsule(0, "")
-    trailing_capsule = _encode_capsule(0x00, b"zz")
+    trailing_capsule = _encode_capsule(_WT_DATAGRAM, b"zz")
     ret = server.receive(_encode_data_frame(session_id, tail + close_capsule + trailing_capsule))
     assert ret > 0, "WT_CLOSE_SESSION カプセルの注入に失敗しました"
     _drain_events(server)

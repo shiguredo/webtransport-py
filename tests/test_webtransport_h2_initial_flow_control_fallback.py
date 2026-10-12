@@ -10,6 +10,12 @@ open_stream が -1 を返す。カプセル受信で送信クレジットが前�
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATA_BLOCKED,
+    _WT_MAX_DATA,
+    _WT_MAX_STREAM_DATA,
+    _WT_MAX_STREAMS_BIDI,
+    _WT_MAX_STREAMS_UNI,
     _connect_h2_session,
     _encode_capsule,
     _encode_data_frame,
@@ -27,22 +33,16 @@ WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
 WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
-_WT_MAX_DATA = 0x190B4D3D
-_WT_MAX_STREAM_DATA = 0x190B4D3E
-_WT_MAX_STREAMS_BIDI = 0x190B4D3F
-_WT_MAX_STREAMS_UNI = 0x190B4D40
-
-
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる
 
-    Type 0x2843 は 2 バイト varint [0x68, 0x43] + Length + Application Error
+    Type WT_CLOSE_SESSION は 2 バイト varint [0x68, 0x43] + Length + Application Error
     Code (32bit) + Message。WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15
     Section 3.4 の 0xTBD) のプレースホルダ。
     """
     payload = error_code.to_bytes(4, "big") + error_message.encode("utf-8")
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return b"\x68\x43" + bytes([len(payload)]) + payload
+    return _encode_varint(_WT_CLOSE_SESSION) + bytes([len(payload)]) + payload
 
 
 def _create_h2_session_pair_with_limits(
@@ -161,7 +161,7 @@ def test_zero_peer_initial_data_limit_send_raises_flow_control_error() -> None:
         not in wire
     )
     # WT_DATA_BLOCKED が送出される
-    assert _encode_capsule(0x190B4D41, _encode_varint(0)) in wire
+    assert _encode_capsule(_WT_DATA_BLOCKED, _encode_varint(0)) in wire
 
     # WT_MAX_DATA 受信で保留データの送出が再開される (ワイヤ注入で
     # 対向の付与を再現する。サーバー config 自体が 0 のため自然付与は

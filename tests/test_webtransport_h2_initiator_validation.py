@@ -9,6 +9,10 @@ QUIC 互換ストリーム ID (Bit 0 = initiator、Bit 1 = 方向) の検証を
 """
 
 from conftest import (
+    _WT_MAX_STREAM_DATA,
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
+    _WT_STREAM,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -27,12 +31,6 @@ from webtransport.webtransport_ext.h2 import WtErrorCode
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
 WT_ERROR = WtErrorCode.WT_ERROR.value
-
-
-_WT_STREAM = 0x190B4D3C
-_WT_STOP_SENDING = 0x190B4D3A
-_WT_MAX_STREAM_DATA = 0x190B4D3E
-_WT_RESET_STREAM = 0x190B4D39
 
 
 def _inject(server: h2.Session, session_id: int, capsule: bytes) -> None:

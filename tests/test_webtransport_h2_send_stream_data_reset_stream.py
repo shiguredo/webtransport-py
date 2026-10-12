@@ -16,6 +16,9 @@ API からは観測できない (stop_sending / drain_session のテスト docst
 """
 
 from conftest import (
+    _WT_RESET_STREAM,
+    _WT_STREAM,
+    _WT_STREAM_FIN,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -29,7 +32,7 @@ from webtransport import h2
 def _encode_wt_stream_capsule(stream_id: int, data: bytes, fin: bool = False) -> bytes:
     """WT_STREAM / WT_STREAM_FIN capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D3C (FIN なし) / 0x190B4D3B (FIN 付き) は 4 バイト varint
+    Type WT_STREAM (FIN なし) / WT_STREAM_FIN (FIN 付き) は 4 バイト varint
     + Length + Stream ID (varint) + Data。Length は 1 バイト varint のみ
     対応する (テストで使う小さい値のみ。64 バイト未満のペイロード前提)。
     HTTP/2 DATA フレームのペイロードはカプセルバイト列そのもののため、
@@ -37,14 +40,14 @@ def _encode_wt_stream_capsule(stream_id: int, data: bytes, fin: bool = False) ->
     """
     payload = _encode_varint(stream_id) + data
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    capsule_type = 0x190B4D3B if fin else 0x190B4D3C
-    return bytes([0x99, 0x0B, 0x4D, capsule_type & 0xFF, len(payload)]) + payload
+    capsule_type = _WT_STREAM_FIN if fin else _WT_STREAM
+    return _encode_varint(capsule_type) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
     """WT_RESET_STREAM capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D39 (4 バイト varint) + Length + Stream ID (varint) +
+    Type WT_RESET_STREAM (4 バイト varint) + Length + Stream ID (varint) +
     Error Code (varint) + Reliable Size (varint)。Length は 1 バイト varint
     のみ対応する (テストで使う小さい値のみ。64 バイト未満のペイロード前提)。
     HTTP/2 DATA フレームのペイロードはカプセルバイト列そのもののため、
@@ -52,7 +55,7 @@ def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_si
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return bytes([0x99, 0x0B, 0x4D, 0x39, len(payload)]) + payload
+    return _encode_varint(_WT_RESET_STREAM) + bytes([len(payload)]) + payload
 
 
 def test_send_stream_data_after_local_close_session_not_sent() -> None:

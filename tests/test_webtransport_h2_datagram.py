@@ -12,6 +12,10 @@ MUST」と Section 3.4 の「セッション終了 = CONNECT ストリームの�
 """
 
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATAGRAM,
+    _WT_MAX_DATA,
+    _WT_STREAM,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -213,7 +217,7 @@ def test_send_datagram_client_optimistic_delivered() -> None:
     client.send_datagram(session_id, b"optimistic")
     wire = client.send()
     assert wire is not None
-    assert _encode_capsule(0x00, b"optimistic") in wire
+    assert _encode_capsule(_WT_DATAGRAM, b"optimistic") in wire
 
 
 def test_send_datagram_server_optimistic_delivered() -> None:
@@ -341,7 +345,7 @@ def test_pre_accept_stream_data_delivered_after_accept() -> None:
 
     # WT_STREAM カプセル (ストリーム 0、データ付き) を受理前に注入する
     stream_payload = _encode_varint(0) + b"stream-early"
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D3C, stream_payload)))
+    server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_STREAM, stream_payload)))
 
     # 受理前は StreamData が発火しない
     events = _drain_events(server)
@@ -413,7 +417,9 @@ def test_pre_accept_close_session_single_fire() -> None:
 
     # WT_CLOSE_SESSION を受理前に注入する
     close_payload = (0).to_bytes(4, "big")
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, close_payload)))
+    server.receive(
+        _encode_data_frame(session_id, _encode_capsule(_WT_CLOSE_SESSION, close_payload))
+    )
 
     # 受理前は SessionClosed が発火しない
     assert not [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
@@ -532,11 +538,11 @@ def test_pre_accept_error_capsule_skips_initial_credit() -> None:
 
     # 不正 WT_CLOSE_SESSION (メッセージ 1025 バイト) を受理前に注入する
     bad_payload = (0).to_bytes(4, "big") + b"x" * 1025
-    server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, bad_payload)))
+    server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_CLOSE_SESSION, bad_payload)))
 
     # 受理で排出されると Error が発火し、初期クレジットは送出されない
     assert server.accept_session(session_id) is True
     error_events = [e for e in _drain_events(server) if e.type == h2.EventType.ERROR]
     assert len(error_events) == 1
     wire = server.send()
-    assert wire is None or _encode_capsule(0x190B4D3D, _encode_varint(1048576)) not in wire
+    assert wire is None or _encode_capsule(_WT_MAX_DATA, _encode_varint(1048576)) not in wire

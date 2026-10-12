@@ -14,6 +14,8 @@ reject_session 2xx 送出経路はデータプロバイダ未登録のため修�
 """
 
 from conftest import (
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -28,20 +30,20 @@ from webtransport import h2
 def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
     """WT_STOP_SENDING capsule のワイヤバイト列を組み立てる
 
-    Type 0x190B4D3A (4 バイト varint) + Length + Stream ID (varint) +
+    Type WT_STOP_SENDING (4 バイト varint) + Length + Stream ID (varint) +
     Error Code (varint)。Length は 1 バイト varint のみ対応する (テストで
     使う小さい値のみ。64 バイト未満のペイロード前提)。HTTP/2 DATA フレームの
     ペイロードはカプセルバイト列そのもののため、ワイヤデータに対する部分列
     チェックで送出を検証できる。
     """
     payload = _encode_varint(stream_id) + _encode_varint(error_code)
-    return bytes([0x99, 0x0B, 0x4D, 0x3A, len(payload)]) + payload
+    return _encode_varint(_WT_STOP_SENDING) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_drain_session_capsule() -> bytes:
     """WT_DRAIN_SESSION capsule のワイヤバイト列を組み立てる
 
-    Type 0x78AE は QUIC varint では 4 バイト (0x40000000 未満のため
+    Type WT_DRAIN_SESSION は QUIC varint では 4 バイト (0x40000000 未満のため
     [0x80, 0x00, 0x78, 0xAE]) + Length 0 (空ペイロード)。ワイヤデータに
     対する部分列チェックで送出を検証できる。
     """
@@ -314,13 +316,13 @@ def test_drain_session_unestablished_session_id_ignored() -> None:
 def _encode_wt_stop_sending_capsule(stream_id: int, error_code: int) -> bytes:
     """WT_STOP_SENDING capsule のワイヤバイト列を組み立てる"""
     payload = _encode_varint(stream_id) + _encode_varint(error_code)
-    return bytes([0x99, 0x0B, 0x4D, 0x3A, len(payload)]) + payload
+    return _encode_varint(_WT_STOP_SENDING) + bytes([len(payload)]) + payload
 
 
 def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_size: int) -> bytes:
     """WT_RESET_STREAM capsule のワイヤバイト列を組み立てる"""
     payload = _encode_varint(stream_id) + _encode_varint(error_code) + _encode_varint(reliable_size)
-    return bytes([0x99, 0x0B, 0x4D, 0x39, len(payload)]) + payload
+    return _encode_varint(_WT_RESET_STREAM) + bytes([len(payload)]) + payload
 
 
 def test_stop_sending_on_ready_stream_auto_resets() -> None:

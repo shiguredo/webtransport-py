@@ -27,7 +27,20 @@ Stream ID すら含まれず「識別フィールドの終端に達していな�
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,
+    _WT_CLOSE_SESSION,
     _WT_CLOSE_SESSION_TYPE_BYTES,
+    _WT_DATA_BLOCKED,
+    _WT_MAX_DATA,
+    _WT_MAX_STREAM_DATA,
+    _WT_MAX_STREAMS_BIDI,
+    _WT_MAX_STREAMS_UNI,
+    _WT_RESET_STREAM,
+    _WT_STOP_SENDING,
+    _WT_STREAM,
+    _WT_STREAM_DATA_BLOCKED,
+    _WT_STREAM_FIN,
+    _WT_STREAMS_BLOCKED_BIDI,
+    _WT_STREAMS_BLOCKED_UNI,
     _assert_session_closed_by_protocol_error,
     _connect_h2_session,
     _create_h2_session_pair,
@@ -42,19 +55,6 @@ from conftest import (
 from webtransport import h2
 
 # カプセル種別 (draft-ietf-webtrans-http2-15 Section 6)
-_WT_RESET_STREAM = 0x190B4D39
-_WT_STOP_SENDING = 0x190B4D3A
-_WT_STREAM_FIN = 0x190B4D3B
-_WT_STREAM = 0x190B4D3C
-_WT_MAX_DATA = 0x190B4D3D
-_WT_MAX_STREAM_DATA = 0x190B4D3E
-_WT_MAX_STREAMS_BIDI = 0x190B4D3F
-_WT_MAX_STREAMS_UNI = 0x190B4D40
-_WT_DATA_BLOCKED = 0x190B4D41
-_WT_STREAM_DATA_BLOCKED = 0x190B4D42
-_WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
-_WT_STREAMS_BLOCKED_UNI = 0x190B4D44
-_WT_CLOSE_SESSION = 0x2843
 
 # 不完全な可変長整数。0x40 は 2 バイト、0x80 は 4 バイト、0xc0 は 8 バイト
 # varint のプレフィックスであり、いずれも 1 バイトしか無いためデコードに失敗する

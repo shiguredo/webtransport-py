@@ -22,6 +22,16 @@ tests/test_webtransport_h2_capsule_trailing_bytes.py が担う。
 
 import pytest
 from conftest import (
+    _WT_CLOSE_SESSION,
+    _WT_DATA_BLOCKED,
+    _WT_MAX_DATA,
+    _WT_MAX_STREAM_DATA,
+    _WT_MAX_STREAMS_BIDI,
+    _WT_MAX_STREAMS_UNI,
+    _WT_STREAM_DATA_BLOCKED,
+    _WT_STREAM_FIN,
+    _WT_STREAMS_BLOCKED_BIDI,
+    _WT_STREAMS_BLOCKED_UNI,
     _connect_h2_session,
     _create_h2_session_pair,
     _drain_events,
@@ -42,15 +52,6 @@ WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
 # Capsule Type (draft-15 Section 6)
-_WT_MAX_DATA = 0x190B4D3D
-_WT_MAX_STREAM_DATA = 0x190B4D3E
-_WT_MAX_STREAMS_BIDI = 0x190B4D3F
-_WT_MAX_STREAMS_UNI = 0x190B4D40
-_WT_DATA_BLOCKED = 0x190B4D41
-_WT_STREAM_DATA_BLOCKED = 0x190B4D42
-_WT_STREAM_FIN = 0x190B4D3B
-_WT_STREAMS_BLOCKED_BIDI = 0x190B4D43
-_WT_STREAMS_BLOCKED_UNI = 0x190B4D44
 
 # Maximum Streams の上限は 2^60
 _MAX_STREAMS_LIMIT = 1 << 60
@@ -70,13 +71,13 @@ _DATA_BLOCKED_VARINTS = [
 def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> bytes:
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる
 
-    Type 0x2843 は 2 バイト varint [0x68, 0x43] + Length + Application Error
+    Type WT_CLOSE_SESSION は 2 バイト varint [0x68, 0x43] + Length + Application Error
     Code (32bit) + Message。Length は 1 バイト varint のみ対応する (テストで
     使う小さい値のみ。64 バイト未満のペイロード前提)。
     """
     payload = error_code.to_bytes(4, "big") + error_message.encode("utf-8")
     assert len(payload) < 0x40, "Length が 1 バイト varint に収まる前提が崩れています"
-    return b"\x68\x43" + bytes([len(payload)]) + payload
+    return _encode_varint(_WT_CLOSE_SESSION) + bytes([len(payload)]) + payload
 
 
 def _assert_flow_control_error_sent(server: h2.Session, error_message: str) -> None:
@@ -93,12 +94,12 @@ def _assert_flow_control_error_sent(server: h2.Session, error_message: str) -> N
 def _assert_no_flow_control_error_sent(server: h2.Session) -> None:
     """WT_CLOSE_SESSION が送出されないことを確認
 
-    0x68 0x43 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint。
+    0x68 0x43 は WT_CLOSE_SESSION (Type WT_CLOSE_SESSION) の 2 バイト varint。
     エラー検知 (close_session 呼び出し) があれば必ずワイヤに現れるため、
     Type の非存在でエラー送出なしを検証できる。
     """
     wire = server.send()
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
 
 def _inject_capsule(server: h2.Session, session_id: int, capsule_type: int, payload: bytes) -> None:
@@ -182,7 +183,9 @@ def test_wt_max_stream_data_increase_raises_send_credit() -> None:
     server.send_stream_data(session_id, stream_id, b"y" * 262145)
     wire = server.send()
     assert wire is not None, "送信クレジットが増えていないため送信できませんでした"
-    assert b"\x68\x43" not in wire, "フロー制御超過でセッションが閉じられました"
+    assert _encode_varint(_WT_CLOSE_SESSION) not in wire, (
+        "フロー制御超過でセッションが閉じられました"
+    )
 
 
 def test_wt_max_stream_data_increase_on_existing_stream_raises_send_credit() -> None:
@@ -210,7 +213,9 @@ def test_wt_max_stream_data_increase_on_existing_stream_raises_send_credit() -> 
     server.send_stream_data(session_id, stream_id, b"y" * 262145)
     wire = server.send()
     assert wire is not None, "送信クレジットが増えていないため送信できませんでした"
-    assert b"\x68\x43" not in wire, "フロー制御超過でセッションが閉じられました"
+    assert _encode_varint(_WT_CLOSE_SESSION) not in wire, (
+        "フロー制御超過でセッションが閉じられました"
+    )
 
 
 def test_wt_max_stream_data_decrease_on_existing_stream() -> None:

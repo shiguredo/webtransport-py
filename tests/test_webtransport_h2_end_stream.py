@@ -32,6 +32,13 @@ PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) になるこ
 import pytest
 from conftest import (
     _PROTOCOL_ERROR,
+    _WT_CLOSE_SESSION,
+    _WT_DATAGRAM,
+    _WT_DRAIN_SESSION,
+    _WT_MAX_DATA,
+    _WT_MAX_STREAMS_BIDI,
+    _WT_MAX_STREAMS_UNI,
+    _WT_PADDING,
     _assert_session_closed_by_protocol_error,
     _connect_h2_session,
     _create_h2_http2_pair,
@@ -50,7 +57,7 @@ from webtransport import h2, http2
 
 # WT_MAX_DATA の Type (4 バイト可変長整数)。切り詰めの 5 通り (Type varint
 # 途中 / Type のみ / Length varint 途中 / Length のみ / ペイロード途中) を組み立てる
-_WT_MAX_DATA_TYPE_VARINT: bytes = _encode_varint(0x190B4D3D)
+_WT_MAX_DATA_TYPE_VARINT: bytes = _encode_varint(_WT_MAX_DATA)
 _TRUNCATED_CAPSULES: list[bytes] = [
     _WT_MAX_DATA_TYPE_VARINT[:2],
     _WT_MAX_DATA_TYPE_VARINT,
@@ -92,7 +99,7 @@ def test_end_stream_only_closes_session() -> None:
     # END_STREAM 検知後の send_datagram はワイヤへ送出されない
     client.send_datagram(session_id, b"after-end-stream")
     wire = client.send()
-    assert wire is None or _encode_capsule(0x00, b"after-end-stream") not in wire
+    assert wire is None or _encode_capsule(_WT_DATAGRAM, b"after-end-stream") not in wire
 
     # 応答 END_STREAM (空 DATA + END_STREAM) が送出される。RST_STREAM の
     # フレームには同じバイト列が部分列として現れるため、リセットへの退行を
@@ -170,7 +177,7 @@ def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
     session_id = _connect_h2_session(client, server)
 
     # 完成したカプセル (PADDING。draft-15 Section 6.1) を届けてバッファを空にする
-    ret = server.receive(_encode_data_frame(session_id, _encode_capsule(0x190B4D38, b"")))
+    ret = server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_PADDING, b"")))
     assert ret > 0, "カプセルの注入に失敗しました"
     assert server._test_unfinished_capsule_bytes(session_id) == 0, (
         "完成したカプセルでバッファが空になっていません"
@@ -391,7 +398,7 @@ def test_queued_capsule_discarded_after_recv_wt_close_session() -> None:
 
     # 受信処理時にキュー済みのカプセルが破棄され、データグラムは送出されない
     wire = server.send()
-    assert wire is None or _encode_capsule(0x00, b"pre-close") not in wire
+    assert wire is None or _encode_capsule(_WT_DATAGRAM, b"pre-close") not in wire
 
 
 def test_close_session_after_recv_wt_close_session_no_double() -> None:
@@ -440,7 +447,7 @@ def test_close_session_after_recv_wt_close_session_noop() -> None:
     server.close_session(session_id, 0)
     wire = server.send()
     # 0x6843 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
 
 def test_send_stream_data_after_recv_wt_close_session_noop() -> None:
@@ -487,7 +494,7 @@ def test_end_stream_close_session_noop() -> None:
     client.close_session(session_id, 0)
     wire = client.send()
     # 0x6843 は WT_CLOSE_SESSION (Type 0x2843) の 2 バイト varint
-    assert wire is None or b"\x68\x43" not in wire
+    assert wire is None or _encode_varint(_WT_CLOSE_SESSION) not in wire
 
     # send_stream_data も no-op になる (ワイヤに送出されない)
     client.send_stream_data(session_id, 0, b"after-end-stream")
@@ -694,12 +701,12 @@ def test_headers_200_end_stream_ready_and_closed() -> None:
     # エントリ削除により send_datagram は送出されない
     client.send_datagram(session_id, b"after-200-end")
     wire = client.send()
-    assert wire is None or _encode_capsule(0x00, b"after-200-end") not in wire
+    assert wire is None or _encode_capsule(_WT_DATAGRAM, b"after-200-end") not in wire
 
     # 確立処理でキューされた初期フロー制御カプセル (WT_MAX_DATA /
     # WT_MAX_STREAMS) もセッション終了後に送出されない
     # 0x99 0x0b 0x4d 0x3d は WT_MAX_DATA (Type 0x190b4d3d) の 4 バイト varint
-    assert wire is None or b"\x99\x0b\x4d\x3d" not in wire
+    assert wire is None or _encode_varint(_WT_MAX_DATA) not in wire
 
 
 def test_end_stream_server_pre_accept_end_stream_terminates_after_accept() -> None:
@@ -735,9 +742,11 @@ def test_end_stream_server_pre_accept_end_stream_terminates_after_accept() -> No
     assert wire is not None, "受理の応答が送出されていません"
     assert b"\x88" in wire, "2xx (:status 200) の応答ヘッダーが送出されていません"
     # 初期フロー制御カプセルは終了するセッションへ送出しない
-    assert _encode_varint(0x190B4D3D) not in wire, "WT_MAX_DATA が送出されました"
-    assert _encode_varint(0x190B4D3F) not in wire, "WT_MAX_STREAMS (BIDI) が送出されました"
-    assert _encode_varint(0x190B4D40) not in wire, "WT_MAX_STREAMS (UNI) が送出されました"
+    assert _encode_varint(_WT_MAX_DATA) not in wire, "WT_MAX_DATA が送出されました"
+    assert _encode_varint(_WT_MAX_STREAMS_BIDI) not in wire, (
+        "WT_MAX_STREAMS (BIDI) が送出されました"
+    )
+    assert _encode_varint(_WT_MAX_STREAMS_UNI) not in wire, "WT_MAX_STREAMS (UNI) が送出されました"
     assert _encode_rst_stream_frame(1, _PROTOCOL_ERROR) not in wire, (
         "クリーンな受理前 END_STREAM で RST_STREAM が送出されました"
     )
@@ -906,7 +915,7 @@ def test_end_stream_server_pre_accept_end_stream_drain_session_ignored() -> None
     assert server.accept_session(1) is True, "セッションの受理に失敗しました"
     wire = server.send()
     assert wire is not None, "受理の応答が送出されていません"
-    assert _encode_capsule(0x78AE, b"") not in wire, (
+    assert _encode_capsule(_WT_DRAIN_SESSION, b"") not in wire, (
         "検知後の drain_session がワイヤへ送出されました"
     )
     closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
@@ -934,7 +943,9 @@ def test_end_stream_pre_accept_wt_close_session_and_end_stream_single_fire(
 
     # 受理前に WT_CLOSE_SESSION を届ける (蓄積される)
     close_payload = close_error_code.to_bytes(4, "big")
-    ret = server.receive(_encode_data_frame(session_id, _encode_capsule(0x2843, close_payload)))
+    ret = server.receive(
+        _encode_data_frame(session_id, _encode_capsule(_WT_CLOSE_SESSION, close_payload))
+    )
     assert ret > 0, "WT_CLOSE_SESSION の注入に失敗しました"
 
     # 受理前に空の DATA + END_STREAM でピアがストリームを閉じる
