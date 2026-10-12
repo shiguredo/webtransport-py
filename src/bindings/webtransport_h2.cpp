@@ -183,10 +183,10 @@ void H2Session::reset_stream_for_malformed_capsule(int32_t session_id) {
     // on_stream_close_callback がエントリごと破棄する
     wt_session->is_terminated = true;
     wt_session->is_established = false;
+    // エントリを残したまま終了を学習するため、受理前 END_STREAM の検知
+    // フラグも落とす
+    wt_session->pre_accept_end_stream = false;
   }
-  // 受理前 END_STREAM の保留記録も除去する (malformed のストリームエラーで
-  // 終了するため)
-  pending_pre_accept_end_stream_session_ids_.erase(session_id);
   if (!session_) {
     return;
   }
@@ -1238,8 +1238,6 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   // 送出するため、この点は共通である)
   http2_stream_buffers_.erase(session_id);
   wt_sessions_.erase(session_id);
-  // 受理前 END_STREAM の保留記録も除去する
-  pending_pre_accept_end_stream_session_ids_.erase(session_id);
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
   end_stream_pending_.insert(session_id);
@@ -1293,7 +1291,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
     // クローズ)
     if (is_server_ && wt_session != nullptr && !wt_session->is_established &&
         !wt_session->is_terminated) {
-      pending_pre_accept_end_stream_session_ids_.insert(session_id);
+      wt_session->pre_accept_end_stream = true;
     }
     return;
   }
@@ -1396,7 +1394,6 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   wt_sessions_.erase(session_id);
   // エントリ削除で consume_recv_bytes の経路が塞がるため、記録を解放する
   discard_stream_recv_bytes(session_id);
-  pending_pre_accept_end_stream_session_ids_.erase(session_id);
   end_stream_pending_.insert(session_id);
   nghttp2_session_resume_data(session_, session_id);
 }
@@ -1556,6 +1553,15 @@ std::optional<int64_t> H2Session::test_unconsumed_recv_bytes(
     return std::nullopt;
   }
   return static_cast<int64_t>(it->second);
+}
+
+std::optional<bool> H2Session::test_has_pre_accept_end_stream(
+    int32_t session_id) const {
+  auto it = wt_sessions_.find(session_id);
+  if (it == wt_sessions_.end()) {
+    return std::nullopt;
+  }
+  return it->second.pre_accept_end_stream;
 }
 
 std::optional<int32_t> H2Session::test_effective_recv_data_length() const {
@@ -2315,16 +2321,12 @@ bool H2Session::accept_session(int32_t session_id) {
   // 終了済み) は、初期クレジットを送出しない
   auto* established_session = get_wt_session(session_id);
   if (!established_session || established_session->is_terminated) {
-    // 遅延処理 (process_capsules) で WT_CLOSE_SESSION を処理した場合や不正
-    // カプセルのリセット時は、エントリ削除・is_terminated の各経路が保留記録を
-    // 除去済みである。経路追加への防御としてここでも除去する
-    pending_pre_accept_end_stream_session_ids_.erase(session_id);
     return true;
   }
 
   // 受理前 END_STREAM を検知したセッションは、2xx 送出と受理前蓄積の遅延処理
   // まで完了したここで終了処理を行う。初期フロー制御カプセルは送出しない
-  if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
+  if (established_session->pre_accept_end_stream) {
     terminate_pre_accept_end_stream_session(session_id);
     return true;
   }
@@ -2429,8 +2431,6 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   // accept_session で受理済みのセッションに呼んだ場合は未定義 (誤用)
   if (status_code / 100 != 2) {
     wt_sessions_.erase(session_id);
-    // 受理前 END_STREAM の保留記録も除去する
-    pending_pre_accept_end_stream_session_ids_.erase(session_id);
     // エントリ削除で consume_recv_bytes の経路が塞がるため、受理前に受信した
     // 記録を解放する
     discard_stream_recv_bytes(session_id);
@@ -2438,9 +2438,9 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
     auto* wt_session = get_wt_session(session_id);
     if (wt_session) {
       wt_session->is_terminated = true;
-      // 受理前 END_STREAM の保留記録も除去する (エントリを残したまま終了を
-      // 学習するため、エントリ削除に依存しない)
-      pending_pre_accept_end_stream_session_ids_.erase(session_id);
+      // エントリを残したまま終了を学習するため、受理前 END_STREAM の検知
+      // フラグも落とす
+      wt_session->pre_accept_end_stream = false;
       // 蓄積も破棄する (以後処理しない)
       wt_session->capsule_buffer.clear();
       // 破棄した蓄積分はアプリへ配送されないため、未消費の受信バイト記録も
@@ -2830,7 +2830,7 @@ void H2Session::send_datagram(int32_t session_id,
   // 検知前にキュー済みの DATAGRAM は accept_session の nghttp2_session_send で
   // 送出され得る (handle_wt_close_session のように検知時点で破棄する経路では
   // ない)
-  if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
+  if (wt_session->pre_accept_end_stream) {
     return;
   }
 
@@ -2914,9 +2914,9 @@ void H2Session::close_session(int32_t session_id,
   // ゲート) も停止する (h3 側の close_stream と同様の終了後後始末)
   wt_session->is_terminated = true;
   wt_session->is_established = false;
-  // 受理前 END_STREAM の保留記録も除去する (エントリを残したまま終了を学習
-  // するため、エントリ削除に依存しない)
-  pending_pre_accept_end_stream_session_ids_.erase(session_id);
+  // エントリを残したまま終了を学習するため、受理前 END_STREAM の検知
+  // フラグも落とす
+  wt_session->pre_accept_end_stream = false;
 
   // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
   // RST_STREAM ではアプリケーション終了を正しく伝えられない
@@ -2948,7 +2948,7 @@ void H2Session::drain_session(int32_t session_id) {
   }
   // 受理前 END_STREAM を検知したセッションは終了を学習した状態であり、
   // 終了処理 (accept_session 後) までにキューされる WT_DRAIN_SESSION を塞ぐ
-  if (pending_pre_accept_end_stream_session_ids_.contains(session_id)) {
+  if (wt_session->pre_accept_end_stream) {
     return;
   }
 
@@ -3465,9 +3465,6 @@ int H2Session::on_stream_close_callback(nghttp2_session* session,
     h2_session->push_event(std::move(event));
     h2_session->wt_sessions_.erase(stream_id);
   }
-  // 受理前 END_STREAM の保留記録も除去する (エントリを削除する経路)
-  h2_session->pending_pre_accept_end_stream_session_ids_.erase(stream_id);
-
   h2_session->http2_stream_buffers_.erase(stream_id);
   // ストリームが閉じた場合は END_STREAM 応答 (end_stream_pending_) も不要
   h2_session->end_stream_pending_.erase(stream_id);
@@ -3762,6 +3759,12 @@ void bind_webtransport_h2(nb::module_& m) {
            nb::sig("def _test_unconsumed_recv_bytes(self, session_id: int) -> "
                    "int | None"),
            "テスト専用: 未消費の受信バイト記録の残量 (キーはセッション ID)")
+      .def("_test_has_pre_accept_end_stream",
+           &H2Session::test_has_pre_accept_end_stream, nb::lock_self(),
+           nb::arg("session_id"),
+           nb::sig("def _test_has_pre_accept_end_stream(self, session_id: int) "
+                   "-> bool | None"),
+           "テスト専用: 受理前 END_STREAM の検知フラグ (エントリ無しは None)")
       .def("_test_effective_recv_data_length",
            &H2Session::test_effective_recv_data_length, nb::lock_self(),
            nb::sig("def _test_effective_recv_data_length(self) -> int | None"),

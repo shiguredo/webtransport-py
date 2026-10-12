@@ -266,6 +266,16 @@ struct WtSessionInfo {
   // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
 
+  // サーバーが 2xx を送出する前にピアが WT_CLOSE_SESSION 無しの END_STREAM で
+  // CONNECT ストリームを閉じたことを検知したか (受理前 END_STREAM)。検知時点
+  // では終了処理を行わず、accept_session が 2xx を送出し受理前の蓄積カプセルを
+  // 遅延処理した後に terminate_pre_accept_end_stream_session で後始末する
+  // (draft-15 Section 3.4 のセッション終了条件のうち、確立前の CONNECT
+  // ストリームクローズ)。終了状態 (is_terminated) とは意味が異なり、
+  // process_capsules の蓄積破棄を起こさない。エントリを残したまま
+  // is_terminated を立てる経路では is_terminated と同一箇所で false に戻す
+  bool pre_accept_end_stream = false;
+
   // フロー制御 (送信側)
   uint64_t bytes_sent = 0;
   uint64_t max_data_local = 0;
@@ -656,6 +666,15 @@ class H2Session {
   std::optional<int64_t> test_unconsumed_recv_bytes(int32_t session_id) const;
 
   /**
+   * テスト専用: 受理前 END_STREAM の検知フラグを返す
+   * (production からは呼ばない。検知と後始末の回帰ピン)
+   *
+   * @param session_id セッション ID (HTTP/2 ストリーム ID)
+   * @return エントリが無ければ nullopt。あればフラグ値
+   */
+  std::optional<bool> test_has_pre_accept_end_stream(int32_t session_id) const;
+
+  /**
    * テスト専用: コネクションレベルで未返却の受信バイト数を返す
    * (production からは呼ばない。破棄したバイトの返却の回帰ピン)
    *
@@ -954,14 +973,6 @@ class H2Session {
   // half-close のほか、ピアの WT_CLOSE_SESSION への応答と、WT_CLOSE_SESSION 無しの
   // クリーンな終了への応答。Section 6.12)
   std::set<int32_t> end_stream_pending_;
-
-  // サーバーが 2xx を送出する前にピアが WT_CLOSE_SESSION 無しの END_STREAM で
-  // CONNECT ストリームを閉じたセッション ID (受理前 END_STREAM)。検知時点では
-  // 終了処理を行わず、accept_session が 2xx を送出し受理前の蓄積カプセルを
-  // 遅延処理した後に terminate_pre_accept_end_stream_session で後始末する
-  // (draft-15 Section 3.4 のセッション終了条件のうち、確立前の CONNECT
-  // ストリームクローズ)
-  std::set<int32_t> pending_pre_accept_end_stream_session_ids_;
 
   // 対向 SETTINGS (draft-15 Section 3.1 / 4.3.1)
   bool peer_enable_connect_protocol_ = false;

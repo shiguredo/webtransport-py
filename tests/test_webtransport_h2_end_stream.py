@@ -777,14 +777,18 @@ def test_end_stream_server_pre_accept_end_stream_after_headers_terminates_after_
     assert len(ready_events) == 1, "SESSION_READY が 1 件だけ発火していません"
 
     # 受理前に空の DATA + END_STREAM でピアがストリームを閉じる
+    assert server._test_has_pre_accept_end_stream(session_id) is False
     ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
     assert ret > 0, "END_STREAM の注入に失敗しました"
+    assert server._test_has_pre_accept_end_stream(session_id) is True
     assert all(e.type != h2.EventType.SESSION_CLOSED for e in _drain_events(server))
 
     # 受理すると 2xx が送出され、その後にセッション終了として処理される
     assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
     wire = server.send()
     assert wire is not None, "受理の応答が送出されていません"
+    # 受理と同時にエントリが削除されるため、検知フラグは None になる
+    assert server._test_has_pre_accept_end_stream(session_id) is None
     closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
     assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
     assert closed_events[0].session_id == session_id
@@ -827,6 +831,28 @@ def test_end_stream_server_pre_accept_end_stream_datagram_ignored() -> None:
     )
     closed_events = [e for e in _drain_events(server) if e.type == h2.EventType.SESSION_CLOSED]
     assert len(closed_events) == 1, "SessionClosed が 1 件だけ発火していません"
+
+
+def test_test_has_pre_accept_end_stream_cleared_on_close_session() -> None:
+    """受理前 END_STREAM 検知後の close_session でフラグが False に戻ることを確認する
+
+    テスト専用アクセサ _test_has_pre_accept_end_stream の回帰ピン。エントリを
+    残したまま is_terminated を立てる経路では、is_terminated と同一箇所で
+    フラグも落とす。検知後に close_session を呼んでも True のまま残らない。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = client.connect("https://localhost/webtransport")
+    assert session_id >= 0, "CONNECT リクエストの送信に失敗しました"
+    _h2_pump(client, server)
+    _drain_events(server)
+
+    ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
+    assert ret > 0, "END_STREAM の注入に失敗しました"
+    assert server._test_has_pre_accept_end_stream(session_id) is True
+
+    # close_session はエントリを残したまま is_terminated を立て、フラグを落とす
+    server.close_session(session_id, 0)
+    assert server._test_has_pre_accept_end_stream(session_id) is False
 
 
 def test_end_stream_server_pre_accept_truncated_capsule_resets_stream_after_accept() -> None:
