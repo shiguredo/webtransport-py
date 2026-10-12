@@ -23,6 +23,7 @@ from conftest import (
     _drain_events,
     _encode_capsule,
     _encode_data_frame,
+    _encode_rst_stream_frame,
     _encode_varint,
     _h2_pump,
 )
@@ -120,22 +121,6 @@ def _has_connection_window_update(wire: bytes) -> bool:
             return True
         offset += 9 + length
     return False
-
-
-def _encode_rst_stream_frame(stream_id: int, error_code: int = 0) -> bytes:
-    """RST_STREAM フレーム (Type 0x03) のワイヤバイト列を組み立てる
-
-    h2 の公開 API に HTTP/2 ストリーム自体のリセットを送出する手段が無い
-    ため、ワイヤ注入で再現する (RFC 9113 Section 6.4)。既定の error_code 0 は
-    同節の NO_ERROR。
-    """
-    payload = error_code.to_bytes(4, "big")
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x03, 0x00])
-        + (stream_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 def _inject_incomplete_capsule(server: h2.Session, session_id: int) -> None:

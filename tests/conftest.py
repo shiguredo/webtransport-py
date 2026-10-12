@@ -390,6 +390,10 @@ def _encode_rst_stream_frame(stream_id: int, error_code: int = 0) -> bytes:
     Type 0x03、ペイロードは 4 バイトのエラーコードである (RFC 9113
     Section 6.4)。既定の error_code 0 は同節の NO_ERROR。nghttp2 はフラグを
     付けずに送出する。
+
+    2 通りの用途で使う。h2 の公開 API に HTTP/2 ストリームのリセットを
+    送出する手段が無いため、ワイヤ注入 (receive) で再現する用途と、送信
+    されたワイヤバイト列に RST_STREAM が含まれるかを検出する用途である。
     """
     payload = error_code.to_bytes(4, "big")
     return (

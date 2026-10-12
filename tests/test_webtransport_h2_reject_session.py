@@ -32,6 +32,7 @@ from conftest import (
     _encode_capsule,
     _encode_data_frame,
     _encode_headers_frame,
+    _encode_rst_stream_frame,
     _encode_status_header_block,
     _encode_varint,
     _h2_pump,
@@ -47,21 +48,6 @@ def _encode_status_headers(session_id: int, status_code: int) -> bytes:
     ヘルパーに集約する。
     """
     return _encode_headers_frame(session_id, _encode_status_header_block(status_code))
-
-
-def _encode_rst_stream_frame(stream_id: int, error_code: int) -> bytes:
-    """RST_STREAM フレームのワイヤバイト列を組み立てる
-
-    HTTP/2 の RST_STREAM は type 0x03、長さ 4 (エラーコード) のフレームである
-    (RFC 9113 Section 6.4)。テストからストリームを閉じるために使う。
-    """
-    payload = error_code.to_bytes(4, "big")
-    return (
-        len(payload).to_bytes(3, "big")
-        + bytes([0x03, 0x00])
-        + (stream_id & 0x7FFFFFFF).to_bytes(4, "big")
-        + payload
-    )
 
 
 @pytest.mark.parametrize(
