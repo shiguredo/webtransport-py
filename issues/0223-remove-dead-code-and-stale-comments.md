@@ -1,7 +1,7 @@
 # デッドコードと取り残されたコメントを削除する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/remove-dead-code-and-stale-comments
 - Polished: 2026-09-15
 - Updated: 2026-10-05
@@ -45,9 +45,10 @@
 
 ## 解決方法
 
-- `src/webtransport/http2/server.py` から `Server.submit_response` と `Server.send_data` を削除する
-- `skills/webtransport-py/SKILL.md` の 1 MiB 上限の説明から `http2.Server` を外す (存在しなくなる `Server.send_data` の案内を残さない。`http2.Client` と `ResponseWriter` の説明は残す)
-- `src/bindings/webtransport_h3.h` / `http3.h` から `PendingData` / `PendingStreamData` / `pending_sends_` を削除し、ムーブ操作の参照も消す
-- `H2Session` / `H3Session` / `QuicConnection` のムーブコンストラクタとムーブ代入演算子を `= delete` する
-- `src/bindings/http3.h` の `Http3Connection::goaway` / `Http3Connection::close_stream` / `Http3Connection::reset_stream` の直前に残る孤立 doc ブロックと、`src/bindings/webtransport_h3.h` の `H3Session::is_valid_local_uni_stream_id` 直前のコメントを削除する (現行のブロックは残し、`H3Session::bind_control_stream` にコメントを移す)
-- `CHANGES.md` は変更しない (`CODEBASE.md` の「変更履歴を `CHANGES.md` に残さないこと」に従う)
+- `src/webtransport/http2/server.py` から `Server.submit_response` と `Server.send_data` を削除した。`ResponseWriter` が同等機能を公開 API として持つため、呼び出し箇所は無い
+- `skills/webtransport-py/SKILL.md` の 1 MiB 上限の説明から `http2.Server` を外し、`http2.Client` と `ResponseWriter` の説明だけを残した
+- `src/bindings/webtransport_h3.h` から `struct PendingData` と `H3Session::pending_sends_`、`src/bindings/http3.h` から `struct PendingStreamData` と `Http3Connection::pending_sends_` を削除した (qmux の `PendingStreamData` は使用中のため対象外)
+- `H2Session` / `H3Session` / `QuicConnection` / `Http3Connection` のムーブコンストラクタとムーブ代入演算子を `= delete` にした。いずれも `std::unique_ptr(new ...)` でしか生成されず一度もムーブされておらず、`H2Session` は受信フロー制御の会計 (`unconsumed_recv_bytes_`) を移動できず、`H3Session` / `Http3Connection` は nghttp3 へ登録したコールバックが移動元の `this` を指すためである
+- `src/bindings/http3.h` の `Http3Connection::goaway` / `close_stream` / `reset_stream` の直前に残っていた孤立 doc ブロック 3 つと、`src/bindings/webtransport_h3.h` の `H3Session::is_valid_local_uni_stream_id` 直前の「QUIC コントロールストリーム ID を設定」コメントを削除し、後者は `H3Session::bind_control_stream` へ移した
+- `make develop` (C++ 再ビルド + スタブ一致検査)、`ruff`、`ty`、`pytest` (prek の全フック) が通過することを確認した
+- `CHANGES.md` は変更していない
