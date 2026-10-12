@@ -7,6 +7,7 @@
 #include "quic.h"
 
 #include "python_input.h"
+#include "quic_varint.h"
 
 #include <openssl/err.h>
 #include <openssl/pool.h>
@@ -38,22 +39,6 @@ uint64_t get_timestamp_ns() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              now.time_since_epoch())
       .count();
-}
-
-// QUIC varint のエンコード済みバイト長 (RFC 9000 Section 16。ngtcp2 の
-// ngtcp2_put_uvarintlen と同じ境界計算。ngtcp2_pkt_datagram_framelen は
-// type + この値 + データ長の合計)
-static size_t quic_varint_length(uint64_t value) {
-  if (value <= 63) {
-    return 1;
-  }
-  if (value <= 16383) {
-    return 2;
-  }
-  if (value <= 1073741823) {
-    return 4;
-  }
-  return 8;
 }
 
 // ALPN を構築
@@ -971,31 +956,6 @@ bool QuicConnection::update_path_addresses(const std::string& local_host,
   return true;
 }
 
-// QUIC の可変長整数 (varint) をデコードする (RFC 9000 Section 16)
-// 先頭 2 ビットでエンコード長 (1 / 2 / 4 / 8 バイト) が決まる。
-// @return デコードした値。不正な入力 (長さ不足) の場合は 0 を返し、
-//   *consumed に 0 をセットする
-static uint64_t decode_varint(const uint8_t* data,
-                              size_t len,
-                              size_t* consumed) {
-  if (len == 0) {
-    *consumed = 0;
-    return 0;
-  }
-  uint8_t prefix = data[0] >> 6;
-  size_t varint_len = static_cast<size_t>(1) << prefix;
-  if (len < varint_len) {
-    *consumed = 0;
-    return 0;
-  }
-  uint64_t value = data[0] & 0x3f;
-  for (size_t i = 1; i < varint_len; ++i) {
-    value = (value << 8) | data[i];
-  }
-  *consumed = varint_len;
-  return value;
-}
-
 // データグラム内に short header (1RTT) パケットが含まれるか判定する
 //
 // RFC 9000 Section 12.2 により、1 つの UDP データグラムに複数の QUIC パケット
@@ -1047,28 +1007,26 @@ static bool contains_short_header_packet(const uint8_t* data, size_t len) {
     // Initial (type 0x00) は token フィールドを持つ (RFC 9000 Section 17.2.2)
     uint8_t type = (pkt[0] >> 4) & 0x03;
     if (type == 0x00) {
-      size_t consumed = 0;
-      uint64_t token_len = decode_varint(pkt + pos, remaining - pos, &consumed);
-      if (consumed == 0) {
+      auto token = bindings::decode_quic_varint(pkt + pos, remaining - pos);
+      if (!token) {
         return false;
       }
-      pos += consumed;
-      if (remaining < pos + token_len) {
+      pos += token->second;
+      if (remaining < pos + token->first) {
         return false;
       }
-      pos += token_len;
+      pos += token->first;
     }
     // length フィールド (varint) でパケット全体の長さを決定する
-    size_t consumed = 0;
-    uint64_t packet_len = decode_varint(pkt + pos, remaining - pos, &consumed);
-    if (consumed == 0) {
+    auto packet = bindings::decode_quic_varint(pkt + pos, remaining - pos);
+    if (!packet) {
       return false;
     }
-    pos += consumed;
-    if (remaining < pos + packet_len) {
+    pos += packet->second;
+    if (remaining < pos + packet->first) {
       return false;
     }
-    offset += pos + packet_len;
+    offset += pos + packet->first;
   }
   return false;
 }
@@ -1921,7 +1879,8 @@ void QuicConnection::send_datagram(const std::vector<uint8_t>& data) {
   // (INVALID_ARGUMENT 時の先頭エントリ破棄) に委ねる
   auto remote_limit = remote_max_datagram_frame_size();
   if (remote_limit.has_value()) {
-    size_t frame_len = 1 + quic_varint_length(data.size()) + data.size();
+    size_t frame_len =
+        1 + bindings::quic_varint_length(data.size()) + data.size();
     if (frame_len > *remote_limit) {
       return;
     }

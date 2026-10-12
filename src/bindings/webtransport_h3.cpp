@@ -6,6 +6,7 @@
 
 #include "header_convert.h"
 #include "python_input.h"
+#include "text_util.h"
 
 #include <algorithm>
 #include <charconv>
@@ -30,53 +31,6 @@ uint64_t webtransport_code_to_http_code(uint64_t n) {
     throw std::invalid_argument("application error code out of uint32 range");
   }
   return kWtApplicationErrorFirst + n + (n / 0x1eULL);
-}
-
-// draft-16 Section 6 の "valid UTF-8" を RFC 3629 の well-formed UTF-8 として
-// 検査する。overlong 符号化、サロゲート (U+D800..U+DFFF)、U+10FFFF 超、
-// 不完全シーケンス、非先頭バイトを拒否する。受信検証 (recv_wt_close_session_cb)
-// と送信トリミング (close_session) の両方で使う
-bool is_valid_utf8(const uint8_t* data, size_t length) {
-  size_t offset = 0;
-  while (offset < length) {
-    if (data[offset] <= 0x7F) {
-      offset += 1;
-      continue;
-    }
-    size_t extra = 0;
-    uint32_t min_codepoint = 0;
-    uint32_t codepoint = 0;
-    if ((data[offset] & 0xE0) == 0xC0) {
-      extra = 1;
-      min_codepoint = 0x80;
-      codepoint = data[offset] & 0x1F;
-    } else if ((data[offset] & 0xF0) == 0xE0) {
-      extra = 2;
-      min_codepoint = 0x800;
-      codepoint = data[offset] & 0x0F;
-    } else if ((data[offset] & 0xF8) == 0xF0) {
-      extra = 3;
-      min_codepoint = 0x10000;
-      codepoint = data[offset] & 0x07;
-    } else {
-      return false;
-    }
-    if (offset + 1 + extra > length) {
-      return false;
-    }
-    for (size_t index = 1; index <= extra; ++index) {
-      if ((data[offset + index] & 0xC0) != 0x80) {
-        return false;
-      }
-      codepoint = (codepoint << 6) | (data[offset + index] & 0x3F);
-    }
-    if (codepoint < min_codepoint || codepoint > 0x10FFFF ||
-        (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
-      return false;
-    }
-    offset += 1 + extra;
-  }
-  return true;
 }
 
 // WT_CLOSE_SESSION の Application Error Message の最大長 (draft-16 Section 6
@@ -1815,9 +1769,10 @@ void H3Session::close_session(int64_t session_id,
   std::string trimmed_message = error_message;
   if (trimmed_message.size() > kMaxApplicationErrorMessageBytes) {
     size_t message_len = kMaxApplicationErrorMessageBytes;
-    while (message_len > 0 && !is_valid_utf8(reinterpret_cast<const uint8_t*>(
-                                                 trimmed_message.data()),
-                                             message_len)) {
+    while (message_len > 0 &&
+           !bindings::is_valid_utf8(
+               reinterpret_cast<const uint8_t*>(trimmed_message.data()),
+               message_len)) {
       message_len -= 1;
     }
     trimmed_message.resize(message_len);
@@ -2494,7 +2449,7 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
   // (receive_stream_data の負値分岐 / accept_session の確認失敗分岐) で
   // handle_wt_close_session_error を実行する
   if (msglen > kMaxApplicationErrorMessageBytes ||
-      (msglen > 0 && !is_valid_utf8(msg, msglen))) {
+      (msglen > 0 && !bindings::is_valid_utf8(msg, msglen))) {
     session->pending_wt_close_session_error_session_id_ = session_id;
     return NGHTTP3_ERR_H3_MESSAGE_ERROR;
   }

@@ -693,11 +693,6 @@ class H2Session {
 
   bool initialize();
 
-  // Capsule エンコード/デコード
-  static std::vector<uint8_t> encode_varint(uint64_t value);
-  static std::optional<std::pair<uint64_t, size_t>> decode_varint(
-      const uint8_t* data,
-      size_t length);
   // ペイロードの可変長整数を読み出す。失敗時はセッションを終了させる
   // (reset_stream_for_malformed_capsule) ため、呼び出し側は失敗で return する
   // だけでよい。根拠は定義側を参照

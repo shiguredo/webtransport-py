@@ -4,7 +4,7 @@ draft-ietf-webtrans-http3-16 Section 4.4 / Figure 4 の変換と配信整形を�
 """
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from webtransport.h3._error_codes import (
@@ -199,6 +199,31 @@ def test_session_map_send_error_code_unregistered_stream() -> None:
     assert session.map_send_error_code(4, 0x01) == webtransport_code_to_http_code(0x01)
     with pytest.raises(ValueError, match="uint32"):
         session.map_send_error_code(4, 0x100000000)
+
+
+def test_session_map_send_error_code_matches_python_oracle() -> None:
+    """C++ の写像が Python のオラクルと端点・境界で一致することを確認する
+
+    C++ 側 (webtransport_code_to_http_code) と Python 側
+    (webtransport.h3._error_codes.webtransport_code_to_http_code) が同じ式を
+    二重に持つため、片側だけ改訂されるとワイヤ値が食い違う。公開 API の
+    map_send_error_code をオラクルと突き合わせ、端点と予約済み境界を含めて
+    全 uint32 で一致することを hypothesis で検証する。
+    """
+    from webtransport.h3 import Config, Session
+
+    session = Session.create_client(Config())
+
+    @example(0)
+    @example(0x1D)
+    @example(0x1E)
+    @example(0x1F)
+    @example(0xFFFFFFFF)
+    @given(st.integers(min_value=0, max_value=0xFFFFFFFF))
+    def check(app_code: int) -> None:
+        assert session.map_send_error_code(4, app_code) == webtransport_code_to_http_code(app_code)
+
+    check()
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,8 @@
 
 #include "header_convert.h"
 #include "python_input.h"
+#include "quic_varint.h"
+#include "text_util.h"
 
 #include <algorithm>
 #include <cctype>
@@ -47,9 +49,6 @@ void record_received_limit(std::optional<uint64_t>& received, uint64_t value) {
 
 // draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
 constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
-
-// RFC 9000 Section 16: varint で表現できる最大値 (2^62 - 1)
-constexpr uint64_t kMaxVarint = (1ULL << 62) - 1;
 
 // HTTP/2 SETTINGS の値は uint32 (RFC 9113 Section 6.5.1)。WebTransport の
 // 初期フロー制御値の上限 (2^32 - 1) として使う
@@ -148,120 +147,13 @@ bool has_received_stop_sending(const WtSessionInfo& wt_session,
          stream_it->second.stop_sending_received;
 }
 
-// draft-15 Section 6.12 の "valid UTF-8" を RFC 3629 の well-formed UTF-8
-// として検査する。
-// overlong 符号化、サロゲート (U+D800..U+DFFF)、 U+10FFFF 超、
-// 不完全シーケンス、非先頭バイトを拒否する
-bool is_valid_utf8(const uint8_t* data, size_t length) {
-  size_t offset = 0;
-  while (offset < length) {
-    if (data[offset] <= 0x7F) {
-      offset += 1;
-      continue;
-    }
-    size_t extra = 0;
-    uint32_t min_codepoint = 0;
-    uint32_t codepoint = 0;
-    if ((data[offset] & 0xE0) == 0xC0) {
-      extra = 1;
-      min_codepoint = 0x80;
-      codepoint = data[offset] & 0x1F;
-    } else if ((data[offset] & 0xF0) == 0xE0) {
-      extra = 2;
-      min_codepoint = 0x800;
-      codepoint = data[offset] & 0x0F;
-    } else if ((data[offset] & 0xF8) == 0xF0) {
-      extra = 3;
-      min_codepoint = 0x10000;
-      codepoint = data[offset] & 0x07;
-    } else {
-      return false;
-    }
-    if (offset + 1 + extra > length) {
-      return false;
-    }
-    for (size_t index = 1; index <= extra; ++index) {
-      if ((data[offset + index] & 0xC0) != 0x80) {
-        return false;
-      }
-      codepoint = (codepoint << 6) | (data[offset + index] & 0x3F);
-    }
-    if (codepoint < min_codepoint || codepoint > 0x10FFFF ||
-        (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
-      return false;
-    }
-    offset += 1 + extra;
-  }
-  return true;
-}
-
 }  // namespace
-
-// ========== Varint エンコード/デコード (QUIC 形式) ==========
-
-std::vector<uint8_t> H2Session::encode_varint(uint64_t value) {
-  // RFC 9000 Section 16: varint は 2^62 - 1 まで。超過は上位 2 ビットの長さ
-  // 表現が壊れ、デコード時に別の値になるため防御的に拒否する (呼び出し元は
-  // Python 境界の入力検証か、Config 生成時検査・カウンタのクランプ済み)
-  if (value > kMaxVarint) {
-    throw std::invalid_argument("varint value must be less than 2^62: " +
-                                std::to_string(value));
-  }
-
-  std::vector<uint8_t> result;
-
-  if (value < 64) {
-    result.push_back(static_cast<uint8_t>(value));
-  } else if (value < 16384) {
-    result.push_back(static_cast<uint8_t>((value >> 8) | 0x40));
-    result.push_back(static_cast<uint8_t>(value & 0xFF));
-  } else if (value < 1073741824) {
-    result.push_back(static_cast<uint8_t>((value >> 24) | 0x80));
-    result.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
-    result.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-    result.push_back(static_cast<uint8_t>(value & 0xFF));
-  } else {
-    result.push_back(static_cast<uint8_t>((value >> 56) | 0xC0));
-    result.push_back(static_cast<uint8_t>((value >> 48) & 0xFF));
-    result.push_back(static_cast<uint8_t>((value >> 40) & 0xFF));
-    result.push_back(static_cast<uint8_t>((value >> 32) & 0xFF));
-    result.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
-    result.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
-    result.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-    result.push_back(static_cast<uint8_t>(value & 0xFF));
-  }
-
-  return result;
-}
-
-std::optional<std::pair<uint64_t, size_t>> H2Session::decode_varint(
-    const uint8_t* data,
-    size_t length) {
-  if (length == 0) {
-    return std::nullopt;
-  }
-
-  uint8_t first = data[0];
-  uint8_t prefix = first >> 6;
-
-  size_t var_length = 1 << prefix;
-  if (length < var_length) {
-    return std::nullopt;
-  }
-
-  uint64_t value = first & 0x3F;
-  for (size_t i = 1; i < var_length; ++i) {
-    value = (value << 8) | data[i];
-  }
-
-  return std::make_pair(value, var_length);
-}
 
 std::optional<std::pair<uint64_t, size_t>> H2Session::read_capsule_varint(
     int32_t session_id,
     const uint8_t* data,
     size_t length) {
-  auto result = decode_varint(data, length);
+  auto result = bindings::decode_quic_varint(data, length);
   if (!result) {
     // RFC 9297 Section 3.3: カプセルのペイロードが識別フィールドの終端に
     // 達していない場合は malformed / incomplete な HTTP メッセージとして
@@ -338,8 +230,8 @@ std::vector<uint8_t> H2Session::encode_capsule(
     const std::vector<uint8_t>& payload) {
   std::vector<uint8_t> result;
 
-  auto type_bytes = encode_varint(static_cast<uint64_t>(type));
-  auto length_bytes = encode_varint(payload.size());
+  auto type_bytes = bindings::encode_quic_varint(static_cast<uint64_t>(type));
+  auto length_bytes = bindings::encode_quic_varint(payload.size());
 
   result.insert(result.end(), type_bytes.begin(), type_bytes.end());
   result.insert(result.end(), length_bytes.begin(), length_bytes.end());
@@ -388,7 +280,7 @@ void H2Session::process_capsules(int32_t session_id,
     size_t buf_len = wt_session->capsule_buffer.size();
 
     // Type をデコード
-    auto type_result = decode_varint(buf, buf_len);
+    auto type_result = bindings::decode_quic_varint(buf, buf_len);
     if (!type_result) {
       break;
     }
@@ -398,7 +290,8 @@ void H2Session::process_capsules(int32_t session_id,
     if (buf_len < type_len) {
       break;
     }
-    auto length_result = decode_varint(buf + type_len, buf_len - type_len);
+    auto length_result =
+        bindings::decode_quic_varint(buf + type_len, buf_len - type_len);
     if (!length_result) {
       break;
     }
@@ -1307,7 +1200,7 @@ void H2Session::handle_wt_close_session(int32_t session_id,
     report_wt_error(session_id, "WT_CLOSE_SESSION message exceeds 1024 bytes");
     return;
   }
-  if (message_len > 0 && !is_valid_utf8(message_bytes, message_len)) {
+  if (message_len > 0 && !bindings::is_valid_utf8(message_bytes, message_len)) {
     report_wt_error(session_id, "WT_CLOSE_SESSION message is not valid UTF-8");
     return;
   }
@@ -1924,14 +1817,16 @@ void H2Session::maybe_send_max_data(int32_t session_id) {
     return;
   }
   uint64_t updated = wt_session->bytes_received + config_.wt_initial_max_data;
-  if (updated < wt_session->bytes_received || updated > kMaxVarint) {
-    updated = kMaxVarint;
+  if (updated < wt_session->bytes_received ||
+      updated > bindings::kMaxQuicVarint) {
+    updated = bindings::kMaxQuicVarint;
   }
   if (updated <= wt_session->max_data_remote) {
     return;
   }
   wt_session->max_data_remote = updated;
-  send_capsule(session_id, CapsuleType::WtMaxData, encode_varint(updated));
+  send_capsule(session_id, CapsuleType::WtMaxData,
+               bindings::encode_quic_varint(updated));
 }
 
 void H2Session::maybe_send_max_stream_data(int32_t session_id,
@@ -1959,15 +1854,16 @@ void H2Session::maybe_send_max_stream_data(int32_t session_id,
   }
   uint64_t updated =
       stream_info.bytes_received + config_.wt_initial_max_stream_data;
-  if (updated < stream_info.bytes_received || updated > kMaxVarint) {
-    updated = kMaxVarint;
+  if (updated < stream_info.bytes_received ||
+      updated > bindings::kMaxQuicVarint) {
+    updated = bindings::kMaxQuicVarint;
   }
   if (updated <= stream_info.max_stream_data_remote) {
     return;
   }
   stream_info.max_stream_data_remote = updated;
-  std::vector<uint8_t> payload = encode_varint(stream_id);
-  auto max_bytes = encode_varint(updated);
+  std::vector<uint8_t> payload = bindings::encode_quic_varint(stream_id);
+  auto max_bytes = bindings::encode_quic_varint(updated);
   payload.insert(payload.end(), max_bytes.begin(), max_bytes.end());
   send_capsule(session_id, CapsuleType::WtMaxStreamData, payload);
 }
@@ -2020,14 +1916,16 @@ void H2Session::maybe_release_stream(int32_t session_id, uint64_t stream_id) {
     if (is_uni) {
       if (wt_session->max_streams_uni_remote < kMaxStreamsLimit) {
         wt_session->max_streams_uni_remote += 1;
-        send_capsule(session_id, CapsuleType::WtMaxStreamsUni,
-                     encode_varint(wt_session->max_streams_uni_remote));
+        send_capsule(
+            session_id, CapsuleType::WtMaxStreamsUni,
+            bindings::encode_quic_varint(wt_session->max_streams_uni_remote));
       }
     } else {
       if (wt_session->max_streams_bidi_remote < kMaxStreamsLimit) {
         wt_session->max_streams_bidi_remote += 1;
-        send_capsule(session_id, CapsuleType::WtMaxStreamsBidi,
-                     encode_varint(wt_session->max_streams_bidi_remote));
+        send_capsule(
+            session_id, CapsuleType::WtMaxStreamsBidi,
+            bindings::encode_quic_varint(wt_session->max_streams_bidi_remote));
       }
     }
   }
@@ -2085,7 +1983,7 @@ void H2Session::flush_pending_sends(int32_t session_id) {
           break;
         }
         bool partial = sendable < pending.data.size();
-        std::vector<uint8_t> payload = encode_varint(stream_id);
+        std::vector<uint8_t> payload = bindings::encode_quic_varint(stream_id);
         payload.insert(
             payload.end(), pending.data.begin(),
             pending.data.begin() + static_cast<std::ptrdiff_t>(sendable));
@@ -2433,16 +2331,16 @@ bool H2Session::accept_session(int32_t session_id) {
 
   // 初期フロー制御 Capsule を送信
   std::vector<uint8_t> max_data_payload =
-      encode_varint(config_.wt_initial_max_data);
+      bindings::encode_quic_varint(config_.wt_initial_max_data);
   send_capsule(session_id, CapsuleType::WtMaxData, max_data_payload);
 
   std::vector<uint8_t> max_streams_bidi_payload =
-      encode_varint(config_.wt_initial_max_streams_bidi);
+      bindings::encode_quic_varint(config_.wt_initial_max_streams_bidi);
   send_capsule(session_id, CapsuleType::WtMaxStreamsBidi,
                max_streams_bidi_payload);
 
   std::vector<uint8_t> max_streams_uni_payload =
-      encode_varint(config_.wt_initial_max_streams_uni);
+      bindings::encode_quic_varint(config_.wt_initial_max_streams_uni);
   send_capsule(session_id, CapsuleType::WtMaxStreamsUni,
                max_streams_uni_payload);
 
@@ -2566,8 +2464,9 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   if (is_unidirectional) {
     if (wt_session->streams_uni_opened >= wt_session->max_streams_uni_local) {
       if (!wt_session->streams_blocked_uni_sent) {
-        send_capsule(session_id, CapsuleType::WtStreamsBlockedUni,
-                     encode_varint(wt_session->max_streams_uni_local));
+        send_capsule(
+            session_id, CapsuleType::WtStreamsBlockedUni,
+            bindings::encode_quic_varint(wt_session->max_streams_uni_local));
         wt_session->streams_blocked_uni_sent = true;
       }
       return -1;
@@ -2575,8 +2474,9 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   } else {
     if (wt_session->streams_bidi_opened >= wt_session->max_streams_bidi_local) {
       if (!wt_session->streams_blocked_bidi_sent) {
-        send_capsule(session_id, CapsuleType::WtStreamsBlockedBidi,
-                     encode_varint(wt_session->max_streams_bidi_local));
+        send_capsule(
+            session_id, CapsuleType::WtStreamsBlockedBidi,
+            bindings::encode_quic_varint(wt_session->max_streams_bidi_local));
         wt_session->streams_blocked_bidi_sent = true;
       }
       return -1;
@@ -2700,7 +2600,8 @@ void H2Session::send_stream_data(int32_t session_id,
   if (sendable < data.size()) {
     // 残量分があれば先に送出する (受信側の補充を進めるため全保留にしない)
     if (sendable > 0) {
-      std::vector<uint8_t> prefix_payload = encode_varint(stream_id);
+      std::vector<uint8_t> prefix_payload =
+          bindings::encode_quic_varint(stream_id);
       prefix_payload.insert(
           prefix_payload.end(), data.begin(),
           data.begin() + static_cast<std::ptrdiff_t>(sendable));
@@ -2714,12 +2615,13 @@ void H2Session::send_stream_data(int32_t session_id,
         sendable < data.size() && stream_avail <= session_avail;
     if (session_exceeded && !wt_session->data_blocked_sent) {
       send_capsule(session_id, CapsuleType::WtDataBlocked,
-                   encode_varint(wt_session->max_data_local));
+                   bindings::encode_quic_varint(wt_session->max_data_local));
       wt_session->data_blocked_sent = true;
     }
     if (stream_exceeded && !stream_info.stream_data_blocked_sent) {
-      std::vector<uint8_t> payload = encode_varint(stream_id);
-      auto limit_bytes = encode_varint(stream_info.max_stream_data_local);
+      std::vector<uint8_t> payload = bindings::encode_quic_varint(stream_id);
+      auto limit_bytes =
+          bindings::encode_quic_varint(stream_info.max_stream_data_local);
       payload.insert(payload.end(), limit_bytes.begin(), limit_bytes.end());
       send_capsule(session_id, CapsuleType::WtStreamDataBlocked, payload);
       stream_info.stream_data_blocked_sent = true;
@@ -2733,7 +2635,7 @@ void H2Session::send_stream_data(int32_t session_id,
   }
 
   // WT_STREAM capsule ペイロード: Stream ID + Data
-  std::vector<uint8_t> payload = encode_varint(stream_id);
+  std::vector<uint8_t> payload = bindings::encode_quic_varint(stream_id);
   payload.insert(payload.end(), data.begin(), data.end());
 
   CapsuleType type = fin ? CapsuleType::WtStreamFin : CapsuleType::WtStream;
@@ -2760,7 +2662,7 @@ void H2Session::reset_stream(int32_t session_id,
   // RFC 9000 Section 16: ワイヤに載る varint は 2^62 - 1 まで。超過は
   // エンコード時に上位ビットが壊れ別のストリームをリセットするため、
   // 未知ストリーム検査より先に入力検証する (超過値は必ず未知でもある)
-  if (stream_id > kMaxVarint) {
+  if (stream_id > bindings::kMaxQuicVarint) {
     throw std::invalid_argument(
         "reset_stream stream_id must be less than 2^62: " +
         std::to_string(stream_id));
@@ -2803,9 +2705,9 @@ void H2Session::reset_stream(int32_t session_id,
 
   // WT_RESET_STREAM capsule: Stream ID + Error Code + Reliable Size
   std::vector<uint8_t> payload;
-  auto stream_id_bytes = encode_varint(stream_id);
-  auto error_code_bytes = encode_varint(error_code);
-  auto reliable_size_bytes = encode_varint(reliable_size);
+  auto stream_id_bytes = bindings::encode_quic_varint(stream_id);
+  auto error_code_bytes = bindings::encode_quic_varint(error_code);
+  auto reliable_size_bytes = bindings::encode_quic_varint(reliable_size);
 
   payload.insert(payload.end(), stream_id_bytes.begin(), stream_id_bytes.end());
   payload.insert(payload.end(), error_code_bytes.begin(),
@@ -2836,7 +2738,7 @@ void H2Session::stop_sending(int32_t session_id,
   // RFC 9000 Section 16: ワイヤに載る varint は 2^62 - 1 まで。超過は
   // エンコード時に上位ビットが壊れ別のストリームを指すため、
   // 未知ストリーム検査より先に入力検証する
-  if (stream_id > kMaxVarint) {
+  if (stream_id > bindings::kMaxQuicVarint) {
     throw std::invalid_argument(
         "stop_sending stream_id must be less than 2^62: " +
         std::to_string(stream_id));
@@ -2881,8 +2783,8 @@ void H2Session::stop_sending(int32_t session_id,
 
   // WT_STOP_SENDING capsule: Stream ID + Error Code
   std::vector<uint8_t> payload;
-  auto stream_id_bytes = encode_varint(stream_id);
-  auto error_code_bytes = encode_varint(error_code);
+  auto stream_id_bytes = bindings::encode_quic_varint(stream_id);
+  auto error_code_bytes = bindings::encode_quic_varint(error_code);
 
   payload.insert(payload.end(), stream_id_bytes.begin(), stream_id_bytes.end());
   payload.insert(payload.end(), error_code_bytes.begin(),
@@ -2986,9 +2888,10 @@ void H2Session::close_session(int32_t session_id,
     // 従来どおり 1024 バイトで切り詰められる
     size_t message_len =
         std::min(error_message.size(), kMaxApplicationErrorMessageBytes);
-    while (message_len > 0 && !is_valid_utf8(reinterpret_cast<const uint8_t*>(
-                                                 error_message.data()),
-                                             message_len)) {
+    while (message_len > 0 &&
+           !bindings::is_valid_utf8(
+               reinterpret_cast<const uint8_t*>(error_message.data()),
+               message_len)) {
       message_len -= 1;
     }
     payload.insert(
@@ -3361,19 +3264,20 @@ int H2Session::on_frame_recv_callback(nghttp2_session* session,
             h2_session->push_event(std::move(event));
 
             // 初期フロー制御 Capsule を送信
-            std::vector<uint8_t> max_data_payload = h2_session->encode_varint(
-                h2_session->config_.wt_initial_max_data);
+            std::vector<uint8_t> max_data_payload =
+                bindings::encode_quic_varint(
+                    h2_session->config_.wt_initial_max_data);
             h2_session->send_capsule(stream_id, CapsuleType::WtMaxData,
                                      max_data_payload);
 
             std::vector<uint8_t> max_streams_bidi_payload =
-                h2_session->encode_varint(
+                bindings::encode_quic_varint(
                     h2_session->config_.wt_initial_max_streams_bidi);
             h2_session->send_capsule(stream_id, CapsuleType::WtMaxStreamsBidi,
                                      max_streams_bidi_payload);
 
             std::vector<uint8_t> max_streams_uni_payload =
-                h2_session->encode_varint(
+                bindings::encode_quic_varint(
                     h2_session->config_.wt_initial_max_streams_uni);
             h2_session->send_capsule(stream_id, CapsuleType::WtMaxStreamsUni,
                                      max_streams_uni_payload);
