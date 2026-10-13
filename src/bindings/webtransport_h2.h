@@ -14,7 +14,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
-#include <nghttp2/nghttp2.h>
+#include <nghttp2v2/nghttp2.h>
 
 #include <cstdint>
 #include <deque>
@@ -92,6 +92,24 @@ constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL = 0x2b63;
 constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAMS_UNI = 0x2b64;
 constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI = 0x2b65;
 constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE = 0x2b66;
+
+// SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441)。nghttp2-v2 の公開
+// ヘッダーは SETTINGS ID のマクロを公開しないため、ここで定義する。
+// サーバーは nghttp2_settings.enable_connect_protocol で送信でき、
+// クライアントは (ライブラリが無視するため) extra_settings で送信する
+constexpr uint16_t SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x08;
+
+/**
+ * HTTP/2 DATA フレームとして送信するカプセルのバッファ
+ *
+ * nghttp2-v2 は read_data で nghttp2_vec にアプリのバッファを直接指し、
+ * 書き込み確認 (write_stream_data_offset) まで保持を要求する。そのため
+ * 送出済みバイト数を offset で進め、書き込み確認でエントリを捨てる
+ */
+struct H2StreamData {
+  std::vector<uint8_t> data;
+  size_t offset = 0;
+};
 
 /**
  * WebTransport over HTTP/2 設定
@@ -678,8 +696,9 @@ class H2Session {
    * テスト専用: コネクションレベルで未返却の受信バイト数を返す
    * (production からは呼ばない。破棄したバイトの返却の回帰ピン)
    *
-   * nghttp2_session_get_effective_recv_data_length の値であり、WINDOW_UPDATE
-   * を積んだ時点で積んだ分だけ減算される (送出前でも減るが 0 になるとは限らない)
+   * 受信した DATA のうち、まだコネクションレベルの WINDOW_UPDATE を
+   * 返していないバイト数。消費が受信ウィンドウの半分に達した時点で
+   * 返却分だけ減算される
    *
    * @return 未返却の受信バイト数
    */
@@ -711,6 +730,9 @@ class H2Session {
   H2Session(bool is_server, const H2SessionConfig& config);
 
   bool initialize();
+
+  // データプロバイダ (nghttp2-v2 の read_data コールバック)
+  static const nghttp2_data_reader* data_reader();
 
   // ペイロードの可変長整数を読み出す。失敗時はセッションを終了させる
   // (reset_stream_for_malformed_capsule) ため、呼び出し側は失敗で return する
@@ -799,7 +821,7 @@ class H2Session {
   // 境界で終わっていれば SessionClosed (error_code 0) を通知し、切り詰めが
   // 残る場合は PROTOCOL_ERROR のストリームエラーにして RST_STREAM を送出する
   // (通知とエントリの後始末を呼び出し元の send() に依存させないため、この
-  // 分岐は nghttp2_session_send を呼ぶ)。nghttp2_session_send を呼ぶため、
+  // 分岐は flush_output を呼ぶ)。flush_output を呼ぶため、
   // この関数は nghttp2 コールバック外 (accept_session 経由) からのみ呼ぶこと
   void terminate_pre_accept_end_stream_session(int32_t session_id);
 
@@ -811,67 +833,95 @@ class H2Session {
   // ストリーム ID 割り当て (QUIC 互換)
   uint64_t allocate_stream_id(int32_t session_id, bool is_unidirectional);
 
-  // nghttp2 コールバック
-  static nghttp2_ssize send_callback(nghttp2_session* session,
-                                     const uint8_t* data,
-                                     size_t length,
-                                     int flags,
+  // nghttp2-v2 コールバック
+  static int on_stream_open_callback(nghttp2_conn* conn,
+                                     int64_t stream_id,
                                      void* user_data) noexcept;
-  static int on_frame_recv_callback(nghttp2_session* session,
-                                    const nghttp2_frame* frame,
-                                    void* user_data) noexcept;
-  static int on_data_chunk_recv_callback(nghttp2_session* session,
-                                         uint8_t flags,
-                                         int32_t stream_id,
-                                         const uint8_t* data,
-                                         size_t len,
-                                         void* user_data) noexcept;
-  static int on_stream_close_callback(nghttp2_session* session,
-                                      int32_t stream_id,
+  static int on_stream_close_callback(nghttp2_conn* conn,
+                                      uint32_t flags,
+                                      int64_t stream_id,
                                       uint32_t error_code,
-                                      void* user_data) noexcept;
-  // HEADERS フレームが送出されなかった場合の通知。応答 (reject_session /
-  // accept_session) の submit は成功したが、送出時に非 fatal なエラー
-  // (STREAM_SHUT_WR / STREAM_CLOSED 等) で破棄されたことを Error イベントで
-  // 観測可能にする。nghttp2 のセッション操作 API は呼ばない (再入防止)
-  static int on_frame_not_send_callback(nghttp2_session* session,
-                                        const nghttp2_frame* frame,
-                                        int lib_error_code,
-                                        void* user_data) noexcept;
-  static int on_header_callback(nghttp2_session* session,
-                                const nghttp2_frame* frame,
-                                const uint8_t* name,
-                                size_t namelen,
-                                const uint8_t* value,
-                                size_t valuelen,
-                                uint8_t flags,
-                                void* user_data) noexcept;
-  static int on_begin_headers_callback(nghttp2_session* session,
-                                       const nghttp2_frame* frame,
-                                       void* user_data) noexcept;
-  static nghttp2_ssize data_source_read_callback(nghttp2_session* session,
-                                                 int32_t stream_id,
-                                                 uint8_t* buf,
-                                                 size_t length,
-                                                 uint32_t* data_flags,
-                                                 nghttp2_data_source* source,
-                                                 void* user_data) noexcept;
+                                      void* user_data,
+                                      void* stream_user_data) noexcept;
+  static int on_recv_settings_entry_callback(nghttp2_conn* conn,
+                                             const nghttp2_settings_entry* ent,
+                                             void* user_data) noexcept;
+  static int on_begin_headers_callback(nghttp2_conn* conn,
+                                       int64_t stream_id,
+                                       void* user_data,
+                                       void* stream_user_data) noexcept;
+  static int on_recv_header_callback(nghttp2_conn* conn,
+                                     int64_t stream_id,
+                                     int32_t token,
+                                     nghttp2_rcbuf* name,
+                                     nghttp2_rcbuf* value,
+                                     uint8_t flags,
+                                     void* user_data,
+                                     void* stream_user_data) noexcept;
+  static int on_end_headers_callback(nghttp2_conn* conn,
+                                     int64_t stream_id,
+                                     int fin,
+                                     void* user_data,
+                                     void* stream_user_data) noexcept;
+  static int on_end_trailers_callback(nghttp2_conn* conn,
+                                      int64_t stream_id,
+                                      int fin,
+                                      void* user_data,
+                                      void* stream_user_data) noexcept;
+  static int on_recv_data_callback(nghttp2_conn* conn,
+                                   int64_t stream_id,
+                                   const uint8_t* data,
+                                   size_t datalen,
+                                   void* user_data,
+                                   void* stream_user_data) noexcept;
+  static int on_remote_end_stream_callback(nghttp2_conn* conn,
+                                           int64_t stream_id,
+                                           void* user_data,
+                                           void* stream_user_data) noexcept;
+  static int on_shutdown_callback(nghttp2_conn* conn,
+                                  int64_t last_stream_id,
+                                  uint32_t error_code,
+                                  void* user_data) noexcept;
+  static nghttp2_ssize on_read_data_callback(nghttp2_conn* conn,
+                                             int64_t stream_id,
+                                             nghttp2_vec* vec,
+                                             size_t veccnt,
+                                             uint32_t* pflags,
+                                             void* user_data,
+                                             void* stream_user_data) noexcept;
+  static int on_write_stream_data_offset_callback(
+      nghttp2_conn* conn,
+      int64_t stream_id,
+      uint64_t offset,
+      size_t len,
+      void* user_data,
+      void* stream_user_data) noexcept;
+  static void on_rand_callback(uint8_t* dest, size_t destlen) noexcept;
 
   // ヘルパー
   void push_event(H2Event event);
 
   /**
+   * nghttp2_conn_write で送信フレームを send_buffer_ へ蓄積する
+   *
+   * nghttp2-v2 はアプリ提供バッファに書き込む方式のため、旧来の
+   * 送信コールバックの代わりにここで吸い上げる。nghttp2_conn_write が
+   * 0 を返すまで繰り返す
+   */
+  void flush_output();
+
+  /**
    * アプリへ渡した受信 DATA のバイト数を消費済みとして記録する
    *
-   * 自動 WINDOW_UPDATE を無効化しているため、ここで消費した分だけ
-   * nghttp2_session_consume が WINDOW_UPDATE を積む。アプリの消費が
-   * 止まれば受信ウィンドウが開かず、ピアの送信が止まる (背圧)
+   * nghttp2-v2 では受信ウィンドウをアプリが管理するため、ここで消費した分
+   * だけ extend して WINDOW_UPDATE を積む。アプリの消費が止まれば受信
+   * ウィンドウが開かず、ピアの送信が止まる (背圧)
    */
   void consume_recv_bytes(int32_t stream_id, size_t size);
   // ストリーム終了時の未消費受信バイトの後始末。記録を削除し、破棄した分の
-  // コネクションレベル受信ウィンドウを返す (nghttp2_session_consume は
-  // ストリームの WINDOW_UPDATE も積むため、終了するストリームには使わず
-  // コネクションレベルだけを返す nghttp2_session_consume_connection を使う)
+  // コネクションレベル受信ウィンドウを返す (ストリームの WINDOW_UPDATE も
+  // 積む consume_recv_bytes は終了するストリームには使わず、コネクション
+  // レベルだけを返す consume_connection_recv_bytes を使う)
   void discard_stream_recv_bytes(int32_t stream_id);
   // アプリへ配送せず破棄する DATA の分をコネクションレベル受信ウィンドウへ返す
   void consume_connection_recv_bytes(size_t size);
@@ -948,7 +998,7 @@ class H2Session {
 
   bool is_server_;
   H2SessionConfig config_;
-  nghttp2_session* session_ = nullptr;
+  nghttp2_conn* conn_ = nullptr;
 
   // イベントキュー
   std::deque<H2Event> events_;
@@ -957,7 +1007,19 @@ class H2Session {
   std::vector<uint8_t> send_buffer_;
 
   // HTTP/2 ストリームデータ (送信待ち)
-  std::map<int32_t, std::deque<std::vector<uint8_t>>> http2_stream_buffers_;
+  std::map<int32_t, std::deque<H2StreamData>> http2_stream_buffers_;
+
+  // ライブラリが送出確認した絶対オフセット (write_stream_data_offset)
+  std::map<int32_t, uint64_t> http2_stream_data_sent_;
+
+  // コネクションレベルの受信ウィンドウ追跡
+  //
+  // nghttp2-v2 は受信ウィンドウをアプリが管理する。アプリが消費した分だけ
+  // extend し、v1 と同じく受信ウィンドウの半分に達したら WINDOW_UPDATE を
+  // 返す。test_effective_recv_data_length は受信済みで未返却の量を返す
+  int64_t conn_local_window_size_ = NGHTTP2_INITIAL_WINDOW_SIZE;
+  int64_t conn_recv_window_size_ = 0;
+  int64_t conn_consumed_size_ = 0;
 
   // ストリームごとの未消費受信バイト数 (自動 WINDOW_UPDATE 無効時の背圧用)
   std::map<int32_t, size_t> unconsumed_recv_bytes_;

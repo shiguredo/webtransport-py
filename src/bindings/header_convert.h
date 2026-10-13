@@ -10,7 +10,7 @@
 #ifndef WEBTRANSPORT_BINDINGS_HEADER_CONVERT_H_
 #define WEBTRANSPORT_BINDINGS_HEADER_CONVERT_H_
 
-#include <nghttp2/nghttp2.h>
+#include <nghttp2v2/nghttp2.h>
 #include <nghttp3/nghttp3.h>
 
 #include <cstdint>

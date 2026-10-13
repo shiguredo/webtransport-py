@@ -1,4 +1,4 @@
-"""HTTP/2 protocol (nghttp2)"""
+"""HTTP/2 protocol (nghttp2-v2)"""
 
 import enum
 
@@ -20,7 +20,7 @@ class Config:
     def max_concurrent_streams(self, arg: int, /) -> None: ...
     @property
     def max_frame_size(self) -> int:
-        """最大フレームサイズ"""
+        """最大フレームサイズ (nghttp2-v2 では 16384 固定)"""
 
     @max_frame_size.setter
     def max_frame_size(self, arg: int, /) -> None: ...
@@ -38,7 +38,7 @@ class Config:
     def is_server(self, arg: bool, /) -> None: ...
     @property
     def no_rfc7540_priorities(self) -> bool:
-        """SETTINGS_NO_RFC7540_PRIORITIES を送信するか"""
+        """SETTINGS_NO_RFC7540_PRIORITIES を送信するか (nghttp2-v2 は常に送信するため設定は無効)"""
 
     @no_rfc7540_priorities.setter
     def no_rfc7540_priorities(self, arg: bool, /) -> None: ...
@@ -56,19 +56,13 @@ class EventType(enum.Enum):
 
     GO_AWAY = 4
 
-    WINDOW_UPDATE = 5
+    SETTINGS = 5
 
-    SETTINGS = 6
+    PING = 6
 
-    PING = 7
+    INFORMATIONAL = 7
 
-    PUSH_PROMISE = 8
-
-    PRIORITY_UPDATE = 9
-
-    INFORMATIONAL = 10
-
-    TRAILERS = 11
+    TRAILERS = 8
 
 class Event:
     """HTTP/2 イベント"""
@@ -99,24 +93,12 @@ class Event:
         """GOAWAY の last_stream_id"""
 
     @property
-    def promised_stream_id(self) -> int:
-        """PUSH_PROMISE の promised stream ID"""
-
-    @property
-    def priority_field_value(self) -> str:
-        """PRIORITY_UPDATE の priority field value"""
-
-    @property
     def opaque_data(self) -> bytes:
-        """PING の opaque data (RFC 9113 Section 6.7)"""
+        """PING ACK の opaque data (RFC 9113 Section 6.7)"""
 
     @property
-    def ack(self) -> bool:
-        """PING ACK かどうか"""
-
-    @property
-    def window_size_increment(self) -> int:
-        """WINDOW_UPDATE の増分値 (RFC 9113 Section 6.9)"""
+    def ping_rtt_ns(self) -> int:
+        """PING ACK の RTT (ナノ秒)"""
 
 class Connection:
     """HTTP/2 コネクション (Sans-IO)"""
@@ -148,7 +130,7 @@ class Connection:
         """ストリームをリセット"""
 
     def goaway(self, error_code: int = 0) -> None:
-        """GOAWAY を送信"""
+        """GOAWAY を送信して graceful shutdown を開始"""
 
     def _test_force_close(self) -> None:
         """テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)"""
@@ -160,7 +142,7 @@ class Connection:
         """テスト専用: 送信バッファ先頭の残バイト数を返す"""
 
     def _test_stream_buffer_offset(self, stream_id: int) -> int:
-        """テスト専用: 送信バッファ先頭の送信済みオフセットを返す"""
+        """テスト専用: 送信バッファ先頭の送出確認済みオフセットを返す"""
 
     def ping(self, opaque_data: bytes = b"") -> None:
         """PING を送信 (opaque_data は 8 バイト固定。1 MiB 超の場合は ValueError)"""
@@ -182,9 +164,6 @@ class Connection:
     ) -> bool:
         """ストリームの優先度を変更"""
 
-    def submit_push_promise(self, stream_id: int, headers: list[tuple[str, str]]) -> int:
-        """Server Push を宣言"""
-
     def next_event(self) -> Event | None:
         """次のイベントを取得"""
 
@@ -203,14 +182,6 @@ class Connection:
         """ローカルの SETTINGS の値を取得"""
 
     @property
-    def outbound_queue_size(self) -> int | None:
-        """送信キューのフレーム数を取得"""
-
-    @property
-    def remote_window_size(self) -> int | None:
-        """コネクションのリモートウィンドウ残量を取得"""
-
-    @property
     def local_window_size(self) -> int | None:
         """コネクションのローカルウィンドウ残量を取得"""
 
@@ -221,9 +192,6 @@ class Connection:
     @property
     def request_allowed(self) -> bool | None:
         """新しいリクエストを送信できるかを取得"""
-
-    def stream_remote_window_size(self, stream_id: int) -> int | None:
-        """ストリームのリモートウィンドウ残量を取得"""
 
     def stream_local_window_size(self, stream_id: int) -> int | None:
         """ストリームのローカルウィンドウ残量を取得"""

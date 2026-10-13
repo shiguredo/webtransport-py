@@ -544,8 +544,8 @@ async def test_client_run_exits_on_close(test_certificates):
 async def test_client_run_exits_on_low_level_force_close(test_certificates):
     """低レベルの自主クローズで Client.run() が終了することを単独検証する
 
-    フレームエラーで `nghttp2_session_mem_recv` / `mem_send` が負値を返した
-    経路では GO_AWAY イベントも TCP EOF も発火しないため、`run()` は
+    フレームエラーで `nghttp2_conn_read` / `nghttp2_conn_write` が負値を
+    返した経路では GO_AWAY イベントも TCP EOF も発火しないため、`run()` は
     低レベルの `is_closed()` を見て終了する。この負値経路は Python から
     誘発困難なため、テスト専用 `_test_force_close()` で同じ状態を作る。
     """
@@ -696,10 +696,9 @@ async def test_stop_while_client_connected(test_certificates):
 async def test_server_large_response_throughput(test_certificates):
     """4 MiB のレスポンスがサーバーから短時間で転送されることを確認
 
-    nghttp2_session_mem_send2 は 1 回の呼び出しで 1 フレームしか返さない。
-    Server が send() を 1 回だけ呼ぶ実装だと 1 ループ 1 フレームに律速され、
-    4 MiB の転送に十数秒かかっていた。send() が空を返すまで drain する
-    実装では数秒以内に完了する。
+    nghttp2-v2 の nghttp2_conn_write は 1 回の呼び出しでアプリ提供バッファ
+    (16384 バイト) 分のフレーム群を返す。Server が send() を空が返るまで
+    drain する実装で 4 MiB の転送が数秒以内に完了することを確認する。
     """
     from webtransport.http2 import Client, Server
 
@@ -787,10 +786,9 @@ async def test_server_large_response_throughput(test_certificates):
 async def test_response_writer_drains_all_pending_frames(test_certificates):
     """ResponseWriter.drain が送信待ちフレームをすべて送出することを確認
 
-    nghttp2_session_mem_send2 は 1 回の呼び出しで 1 フレームしか返さない。
-    send() を 1 回だけ呼ぶ実装では 2 つ以上のフレームが送信待ちに残る。
-    drain が空を返すまで繰り返すことを、フレーム数が 2 以上になる
-    レスポンスで確認する。
+    nghttp2-v2 の nghttp2_conn_write はバッファに収まる範囲のフレームを
+    まとめて返す。drain が空を返すまで繰り返すことを、複数フレームに
+    なるレスポンスで確認する。
     """
     from webtransport.http2 import Client, Server
 

@@ -39,9 +39,15 @@ _CALLBACK_NAME = re.compile(rf"\b(\w+_(?:{_SUFFIX_ALTERNATION}))\s*\(")
 _NOT_A_TYPE = ("return", "if", "else", "while", "for", "switch")
 
 # コールバック構造体のフィールド (右辺は任意の識別子。命名規則の検査は test3 で行う)
+# nghttp2-v2 は nghttp2_data_reader を designated initializer で組み立てるため、
+# `.read_data = ...` の形も登録箇所として拾う
 _CALLBACK_FIELD_ASSIGNMENT = re.compile(
     r"^\s*(?:callbacks\.\w+|dr\.read_data|data_prd\.read_callback|"
-    r"conn_ref_\.get_conn)\s*=\s*&?(?:\w+::)*([A-Za-z_]\w*)\s*;"
+    r"conn_ref_\.get_conn|\.read_data|\.write_stream_data_offset|"
+    r"\.begin_headers|\.recv_header|\.end_headers|\.recv_data|"
+    r"\.remote_end_stream|\.local_end_stream|\.recv_ping_ack|\.shutdown|"
+    r"\.begin_trailers|\.recv_trailer|\.end_trailers)"
+    r"\s*=\s*&?(?:\w+::)*([A-Za-z_]\w*)\s*[,;}]"
 )
 # nghttp2 のコールバックセッター (`..._set_xxx_callback(任意, xxx_cb)`)
 _CALLBACK_SETTER = re.compile(r"nghttp2_session_callbacks_set_\w+\(\s*\w+\s*,\s*(\w+)\s*\)")

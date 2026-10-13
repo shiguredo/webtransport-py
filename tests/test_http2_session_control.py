@@ -48,38 +48,31 @@ def test_http2_terminate_session() -> None:
     ]
     assert len(goaway_events) == 1
     assert goaway_events[0].error_code == 42
-    assert goaway_events[0].last_stream_id == 2
+    # nghttp2-v2 の nghttp2_conn_terminate は last_stream_id にライブラリが
+    # 処理済みの値 (この時点では 0) を使うため、指定値 2 は反映されない
+    assert goaway_events[0].last_stream_id == 0
 
 
 def test_http2_terminate_session_after_goaway() -> None:
-    """goaway() の後に terminate_session() を呼ぶと GOAWAY が 2 枚送出されることを確認
+    """goaway() の後に terminate_session() を呼んでも GOAWAY が重複しないことを確認
 
-    goaway() は graceful shutdown、terminate_session() は即時終了であり、
-    両者は独立した操作 (RFC 9113 6.8 では複数 GOAWAY が許容される)。
-    goaway_sent_ は goaway() 専用のため terminate_session() には影響しない。
-    受信側は 1 枚目の GOAWAY で graceful shutdown になり、2 枚目も
-    受信処理される (GO_AWAY イベントは 1 件のみ。nghttp2 の内部処理に
-    依存する)
+    nghttp2-v2 の GOAWAY は接続に 1 つだけ予約される (nghttp2_conn_shutdown
+    のあとに nghttp2_conn_terminate を呼ぶと、同じ GOAWAY が即時終了の
+    指定で上書きされる)。v1 のように 2 枚は送出されない。
     """
     client, server = _create_http2_pair()
 
     client.goaway()
     assert client.terminate_session(0, 0) is True
 
-    # 送信キューには GOAWAY が 2 枚積まれ、1 回の send() で 1 枚ずつ送出される
+    # 送信キューには GOAWAY が 1 枚だけ積まれる
     first = client.send()
     assert first is not None
-    assert client.want_write() is True
-    second = client.send()
-    assert second is not None
     assert client.want_write() is False
+    assert client.send() is None
 
-    # 受信側はどちらの GOAWAY も graceful shutdown として受信し、接続は
-    # 閉じない (2 枚目の GOAWAY は nghttp2 の内部処理でイベント化されない
-    # ため、GO_AWAY イベントは 1 件のみ。nghttp2 の実装詳細に依存する)
+    # 受信側は GOAWAY を 1 件受信し、接続は閉じない
     server.receive(first)
-    assert server.is_closed() is False
-    assert server.receive(second) > 0
     assert server.is_closed() is False
     goaway_events = [
         event for event in _drain_events(server) if event.type == http2.EventType.GO_AWAY
@@ -116,7 +109,12 @@ def test_http2_terminate_session_last_stream_id_parity() -> None:
 
 
 def test_http2_set_local_window_size_increase() -> None:
-    """ローカルウィンドウの増加が WINDOW_UPDATE でピアへ通知されることを確認"""
+    """ローカルウィンドウの増加が受信量として反映されることを確認
+
+    nghttp2-v2 は WINDOW_UPDATE の受信や送信をアプリへ通知しないため、
+    ウィンドウ残量の getter と、初期ウィンドウ (65535) を超えるデータが
+    実際に受信できることで検証する
+    """
     client, server = _create_http2_pair()
 
     # コネクションのローカルウィンドウを増加させる
@@ -125,26 +123,32 @@ def test_http2_set_local_window_size_increase() -> None:
     # ローカル側のウィンドウサイズも絶対値で設定される
     assert client.local_window_size == 131072
 
-    # WINDOW_UPDATE が送出され、ピアのリモートウィンドウ残量が増える
     _h2_pump(client, server)
-    assert server.remote_window_size == 131072
-    assert any(
-        event.type == http2.EventType.WINDOW_UPDATE and event.stream_id == 0
-        for event in _drain_events(server)
-    )
 
-    # ストリームのローカルウィンドウも増加させるとストリーム単位で通知される
+    # ストリームのローカルウィンドウも増加させる
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
     _h2_pump(client, server)
 
     assert client.set_local_window_size(stream_id, 131072) is True
+    assert client.stream_local_window_size(stream_id) == 131072
     _h2_pump(client, server)
-    assert server.stream_remote_window_size(stream_id) == 131072
-    assert any(
-        event.type == http2.EventType.WINDOW_UPDATE and event.stream_id == stream_id
-        for event in _drain_events(server)
-    )
+
+    # 初期ウィンドウ (65535) を超える 120000 バイトが受信できる
+    # (コネクションとストリームの両方を増やした効果をワイヤで確認する)
+    body = b"x" * 120000
+    server.submit_response(stream_id, [(":status", "200")])
+    server.send_data(stream_id, body, True)
+    received = bytearray()
+    for _ in range(400):
+        _h2_pump(server, client)
+        for event in _drain_events(client):
+            if event.type == http2.EventType.DATA:
+                received.extend(event.data)
+        _h2_pump(client, server)
+        if len(received) == len(body):
+            break
+    assert bytes(received) == body
 
 
 def test_http2_set_local_window_size_decrease() -> None:
@@ -177,8 +181,9 @@ def test_http2_set_local_window_size_decrease() -> None:
     server.send_data(stream_id, b"0" * 32767, False)
     _h2_pump(server, client)
 
+    # 受信側から WINDOW_UPDATE は送出されない。nghttp2-v2 は WINDOW_UPDATE
+    # をイベント化しないため、送信待ちが無いことで確認する
     assert client.want_write() is False
-    assert not any(event.type == http2.EventType.WINDOW_UPDATE for event in _drain_events(server))
 
 
 def test_http2_session_control_guards() -> None:

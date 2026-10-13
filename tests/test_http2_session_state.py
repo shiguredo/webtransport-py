@@ -34,16 +34,21 @@ def test_http2_remote_settings_defaults() -> None:
 
 
 def test_http2_local_settings_defaults() -> None:
-    """ローカルの SETTINGS が ACK 前にデフォルト値になることを確認"""
+    """ローカルの SETTINGS が送信する値になることを確認
+
+    nghttp2-v2 は ACK の適用状態を公開しないため、ACK 前後で同じ値を返す。
+    クライアントは自身が開始するストリームしか持たないため
+    SETTINGS_MAX_CONCURRENT_STREAMS として 0 を広告する。
+    """
     client = http2.Connection.create_client(http2.Config())
 
     local = client.local_settings
     assert local is not None
-    # ピアの ACK 前は nghttp2 のデフォルト値 (max_concurrent_streams は
-    # 上限なしの 4294967295)
-    assert local["max_concurrent_streams"] == 4294967295
+    assert local["max_concurrent_streams"] == 0
     assert local["initial_window_size"] == 65535
     assert local["max_frame_size"] == 16384
+    # nghttp2-v2 はローカルの最大ヘッダーリストサイズを管理しないため
+    # 上限なしを返す
     assert local["max_header_list_size"] == 4294967295
 
 
@@ -58,63 +63,72 @@ def test_http2_settings_after_exchange() -> None:
     server = http2.Connection.create_server(server_config)
     _exchange_http2_settings(client, server)
 
-    # ピア (サーバー) の SETTINGS はサーバーの Http2Config の値になる
-    # (max_concurrent_streams と max_frame_size はデフォルト値のまま)
+    # ピア (サーバー) の SETTINGS はサーバーの Http2Config の値になる。
+    # nghttp2-v2 は SETTINGS_MAX_HEADER_LIST_SIZE を送信しないため、
+    # ピア側では上限なしのままになる
     remote = client.remote_settings
     assert remote is not None
     assert remote["max_concurrent_streams"] == 100
     assert remote["initial_window_size"] == 131072
     assert remote["max_frame_size"] == 16384
-    assert remote["max_header_list_size"] == 262144
+    assert remote["max_header_list_size"] == 4294967295
 
-    # ローカルの SETTINGS はピアの ACK 後に Http2Config の値になる
+    # ローカルの SETTINGS は自身が広告する値になる
     local = client.local_settings
     assert local is not None
-    assert local["max_concurrent_streams"] == 100
+    assert local["max_concurrent_streams"] == 0
     assert local["initial_window_size"] == 65535
     assert local["max_frame_size"] == 16384
-    assert local["max_header_list_size"] == 65536
+    assert local["max_header_list_size"] == 4294967295
 
-    # サーバー側も同様にピア (クライアント) の設定値が取得できる
+    # サーバー側から見たピア (クライアント) の設定値は、クライアントが
+    # 広告した SETTINGS_MAX_CONCURRENT_STREAMS = 0 と初期ウィンドウになる
     remote_server = server.remote_settings
     assert remote_server is not None
-    assert remote_server["max_concurrent_streams"] == 100
-    assert remote_server["max_header_list_size"] == 65536
+    assert remote_server["max_concurrent_streams"] == 0
+    assert remote_server["initial_window_size"] == 65535
+    assert remote_server["max_header_list_size"] == 4294967295
 
-    # サーバーのローカル SETTINGS はクライアントの ACK 後に
-    # サーバーの Http2Config の値になる
+    # サーバーのローカル SETTINGS はサーバーが広告する値になる
     local_server = server.local_settings
     assert local_server is not None
+    assert local_server["max_concurrent_streams"] == 100
     assert local_server["initial_window_size"] == 131072
-    assert local_server["max_header_list_size"] == 262144
+    assert local_server["max_header_list_size"] == 4294967295
 
 
-def test_http2_outbound_queue_size() -> None:
-    """送信キューのフレーム数が取得できることを確認"""
+def test_http2_want_write_after_submit() -> None:
+    """送信待ちの有無が want_write で観測できることを確認
+
+    nghttp2-v2 は送信キューのフレーム数 (v1 の outbound_queue_size) を
+    公開しないため、送信待ちの有無だけを観測する
+    """
     client, _server = _create_http2_pair()
 
-    # SETTINGS 交換後は送信キューが空
-    assert client.outbound_queue_size == 0
+    # SETTINGS 交換後は送信待ちが無い
+    assert client.want_write() is False
 
-    # リクエストを積むと送信キューにフレームが入る
+    # リクエストを積むと送信待ちになる
     client.submit_request(_request_headers())
-    assert client.outbound_queue_size >= 1
+    assert client.want_write() is True
 
-    # send でフレームが送出されると送信キューが空に戻る
-    client.send()
-    assert client.outbound_queue_size == 0
+    # send で送出すると送信待ちが無くなる
+    assert client.send() is not None
+    assert client.want_write() is False
 
 
 def test_http2_connection_window_sizes() -> None:
-    """コネクションのウィンドウ残量が取得できることを確認"""
+    """コネクションのローカルウィンドウ残量が取得できることを確認
+
+    nghttp2-v2 は送信側 (リモート) のウィンドウを公開しないため、受信側
+    (ローカル) のウィンドウと WINDOW_UPDATE 未送信量だけを検証する
+    """
     client, server = _create_http2_pair()
 
     # 初期値はコネクションウィンドウサイズの 65535
-    # (nghttp2 の NGHTTP2_INITIAL_CONNECTION_WINDOW_SIZE)
-    assert client.remote_window_size == 65535
     assert client.local_window_size == 65535
+    assert client.effective_recv_data_length == 0
 
-    # サーバーがレスポンスデータを送信するとウィンドウ残量が減る
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
     _h2_pump(client, server)
@@ -123,46 +137,49 @@ def test_http2_connection_window_sizes() -> None:
     server.send_data(stream_id, b"0123456789", False)
 
     # 送信前はウィンドウが減っていない
-    assert server.remote_window_size == 65535
+    assert server.effective_recv_data_length == 0
 
     _h2_pump(server, client)
 
-    # 送信側のリモートウィンドウと受信側のローカルウィンドウが
-    # DATA 10 バイト分だけ減る
-    assert server.remote_window_size == 65535 - 10
+    # 受信側のローカルウィンドウと WINDOW_UPDATE 未送信量が DATA 10
+    # バイト分だけ変化する
     assert client.local_window_size == 65535 - 10
+    assert client.effective_recv_data_length == 10
 
 
 def test_http2_stream_window_sizes() -> None:
-    """ストリームのウィンドウ残量が取得できることを確認"""
+    """ストリームの受信側ウィンドウ残量が取得できることを確認
+
+    nghttp2-v2 は送信側 (リモート) のストリームウィンドウを公開しないため、
+    受信側 (ローカル) のウィンドウと WINDOW_UPDATE 未送信量だけを検証する
+    """
     client, server = _create_http2_pair()
 
     # 存在しないストリームは None (ストリーム ID 3 は未使用の奇数 ID)
-    assert client.stream_remote_window_size(3) is None
-    assert client.stream_remote_window_size(-1) is None
     assert client.stream_local_window_size(3) is None
+    assert client.stream_local_window_size(-1) is None
+    assert client.stream_effective_recv_data_length(3) is None
 
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
 
-    # リクエスト HEADERS が送出されるまではストリームが存在しない
-    # (nghttp2 は HEADERS の送出時にストリームを開く)
-    assert client.stream_remote_window_size(stream_id) is None
+    # nghttp2-v2 は submit の時点でストリームを登録する
+    assert client.stream_local_window_size(stream_id) == 65535
 
     _h2_pump(client, server)
 
     # ストリームのウィンドウ残量は初期値の 65535
     # (SETTINGS_INITIAL_WINDOW_SIZE の値)
-    assert client.stream_remote_window_size(stream_id) == 65535
     assert client.stream_local_window_size(stream_id) == 65535
     assert server.stream_local_window_size(stream_id) == 65535
 
-    # サーバーがレスポンスデータを送信するとストリームの
-    # リモートウィンドウが DATA 10 バイト分だけ減る
+    # サーバーがレスポンスデータを送信すると受信側のストリームウィンドウが
+    # DATA 10 バイト分だけ減る
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"0123456789", False)
     _h2_pump(server, client)
-    assert server.stream_remote_window_size(stream_id) == 65535 - 10
+    assert client.stream_local_window_size(stream_id) == 65535 - 10
+    assert client.stream_effective_recv_data_length(stream_id) == 10
 
 
 def test_http2_effective_recv_data_length() -> None:
@@ -243,9 +260,10 @@ def test_http2_stream_close() -> None:
     stream_id = client.submit_request(_request_headers())
     assert stream_id > 0
 
-    # HEADERS 送出前はストリームが存在しないため None になる
-    # (nghttp2 は HEADERS の送出時にストリームを開く)
-    assert client.stream_local_close(stream_id) is None
+    # nghttp2-v2 は submit の時点でストリームを登録するため、half-closed
+    # 状態はどちらも False になる
+    assert client.stream_local_close(stream_id) is False
+    assert client.stream_remote_close(stream_id) is False
 
     # eof=True の DATA を送出するとローカル側が half-closed になる
     client.send_data(stream_id, b"", eof=True)
@@ -256,18 +274,15 @@ def test_http2_stream_close() -> None:
     assert server.stream_remote_close(stream_id) is True
     assert server.stream_local_close(stream_id) is False
 
-    # レスポンスの DATA を eof=True で送信してストリームの送信側を閉じる
-    # (完了条件の send_data 経由の検証)。サーバーは既にリクエストの
-    # END_STREAM を受信しているため、 DATA 送出と同時に両方向が閉じて
-    # ストリームが nghttp2 の管理から外れ、 stream_local_close は True では
-    # なく None になる (half-closed の True はクライアント側の eof=True
-    # DATA 送出で検証済み)
+    # レスポンスの DATA を eof=True で送信してストリームの送信側を閉じる。
+    # サーバーは既にリクエストの END_STREAM を受信しているため、DATA 送出と
+    # 同時に両方向が閉じてストリームが nghttp2 の管理から外れ、
+    # stream_local_close は True ではなく None になる
     server.submit_response(stream_id, [(":status", "200")])
     server.send_data(stream_id, b"response", True)
     _h2_pump(server, client)
     assert server.stream_local_close(stream_id) is None
     assert server.stream_remote_close(stream_id) is None
-    assert server.stream_remote_window_size(stream_id) is None
     assert server.stream_local_window_size(stream_id) is None
     assert server.stream_effective_recv_data_length(stream_id) is None
     assert client.stream_remote_close(stream_id) is None
@@ -286,13 +301,11 @@ def test_http2_goaway_connection_keeps_state() -> None:
     client.goaway()
     _h2_pump(client, server)
     assert client.is_closed() is False
-    assert client.remote_window_size == 65535
-    # request_allowed は GOAWAY 送信後に False になる (アクティブストリーム
-    # が無い場合、GOAWAY 送信後に want_read / want_write が 0 になり
-    # セッションが終了状態になるため)
+    assert client.local_window_size == 65535
+    # request_allowed は GOAWAY 送信後に False になる
     assert client.request_allowed is False
 
     # サーバーは GOAWAY を受信しても閉鎖扱いにならず、getter は値を返す
     assert server.is_closed() is False
-    assert server.remote_window_size == 65535
+    assert server.local_window_size == 65535
     assert server.request_allowed is not None

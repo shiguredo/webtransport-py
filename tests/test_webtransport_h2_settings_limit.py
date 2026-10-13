@@ -67,3 +67,19 @@ def test_create_session_with_settings_value_over_max_raises_value_error(
         # エラーメッセージにフィールド名と実際の値が含まれる
         with pytest.raises(ValueError, match=rf"{field} must be less than 2\^32: {invalid_value}"):
             factory(config)
+
+
+def test_create_session_with_initial_window_size_over_max_raises_value_error() -> None:
+    """initial_window_size が INT32_MAX 超でセッション生成が ValueError になることを確認
+
+    nghttp2-v2 の接続生成は SETTINGS_INITIAL_WINDOW_SIZE を INT32_MAX 以下で
+    assert する (失敗するとプロセスが abort する)。バインディングの境界で
+    ValueError にして abort を防ぐ。
+    """
+    for factory in (h2.Session.create_client, h2.Session.create_server):
+        config = h2.Config()
+        config.initial_window_size = 2**31
+        with pytest.raises(
+            ValueError, match=r"initial_window_size must be less than 2\^31: 2147483648"
+        ):
+            factory(config)

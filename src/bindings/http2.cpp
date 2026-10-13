@@ -1,5 +1,5 @@
 /**
- * HTTP/2 バインディング (nghttp2 ラッパー)
+ * HTTP/2 バインディング (nghttp2-v2 ラッパー)
  *
  * Sans-IO スタイルの HTTP/2 実装
  */
@@ -9,11 +9,36 @@
 #include "header_convert.h"
 #include "python_input.h"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstring>
+#include <random>
 #include <stdexcept>
 
 namespace webtransport {
 namespace http2 {
+
+namespace {
+
+// nghttp2_v2 のタイムスタンプはナノ秒解像度 (nghttp2_tstamp)
+nghttp2_tstamp now_ts() {
+  return static_cast<nghttp2_tstamp>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+}  // namespace
+
+// データプロバイダ。nghttp2-v2 は v1 の data_source を廃止し、
+// nghttp2_vec にアプリのバッファを直接指す方式になった
+const nghttp2_data_reader* Http2Connection::data_reader() {
+  static const nghttp2_data_reader dr = {
+      .read_data = &Http2Connection::on_read_data_callback,
+  };
+  return &dr;
+}
 
 // ========== Http2Connection 実装 ==========
 
@@ -21,42 +46,67 @@ Http2Connection::Http2Connection(bool is_server, const Http2Config& config)
     : is_server_(is_server), config_(config) {}
 
 Http2Connection::~Http2Connection() {
-  if (session_) {
-    nghttp2_session_del(session_);
+  if (conn_) {
+    nghttp2_conn_del(conn_);
   }
 }
 
 Http2Connection::Http2Connection(Http2Connection&& other) noexcept
     : is_server_(other.is_server_),
       config_(std::move(other.config_)),
-      session_(other.session_),
+      conn_(other.conn_),
       events_(std::move(other.events_)),
+      pending_out_(std::move(other.pending_out_)),
       stream_buffers_(std::move(other.stream_buffers_)),
+      stream_data_sent_(std::move(other.stream_data_sent_)),
+      trailers_submitted_(std::move(other.trailers_submitted_)),
+      local_resets_(std::move(other.local_resets_)),
+      streams_(std::move(other.streams_)),
       pending_headers_(std::move(other.pending_headers_)),
       pending_trailers_(std::move(other.pending_trailers_)),
+      conn_local_window_size_(other.conn_local_window_size_),
+      conn_recv_window_size_(other.conn_recv_window_size_),
+      conn_recv_reduction_(other.conn_recv_reduction_),
+      stream_local_window_size_(std::move(other.stream_local_window_size_)),
+      stream_recv_window_size_(std::move(other.stream_recv_window_size_)),
+      stream_recv_reduction_(std::move(other.stream_recv_reduction_)),
       closed_(other.closed_),
+      closing_(other.closing_),
       goaway_sent_(other.goaway_sent_),
       goaway_received_(other.goaway_received_) {
-  other.session_ = nullptr;
+  other.conn_ = nullptr;
 }
 
 Http2Connection& Http2Connection::operator=(Http2Connection&& other) noexcept {
   if (this != &other) {
-    if (session_)
-      nghttp2_session_del(session_);
+    if (conn_) {
+      nghttp2_conn_del(conn_);
+    }
 
     is_server_ = other.is_server_;
     config_ = std::move(other.config_);
-    session_ = other.session_;
+    conn_ = other.conn_;
     events_ = std::move(other.events_);
+    pending_out_ = std::move(other.pending_out_);
     stream_buffers_ = std::move(other.stream_buffers_);
+    stream_data_sent_ = std::move(other.stream_data_sent_);
+    trailers_submitted_ = std::move(other.trailers_submitted_);
+    local_resets_ = std::move(other.local_resets_);
+    streams_ = std::move(other.streams_);
     pending_headers_ = std::move(other.pending_headers_);
     pending_trailers_ = std::move(other.pending_trailers_);
+    conn_local_window_size_ = other.conn_local_window_size_;
+    conn_recv_window_size_ = other.conn_recv_window_size_;
+    conn_recv_reduction_ = other.conn_recv_reduction_;
+    stream_local_window_size_ = std::move(other.stream_local_window_size_);
+    stream_recv_window_size_ = std::move(other.stream_recv_window_size_);
+    stream_recv_reduction_ = std::move(other.stream_recv_reduction_);
     closed_ = other.closed_;
+    closing_ = other.closing_;
     goaway_sent_ = other.goaway_sent_;
     goaway_received_ = other.goaway_received_;
 
-    other.session_ = nullptr;
+    other.conn_ = nullptr;
   }
   return *this;
 }
@@ -86,68 +136,57 @@ std::unique_ptr<Http2Connection> Http2Connection::create_server(
 }
 
 bool Http2Connection::initialize() {
-  nghttp2_session_callbacks* callbacks = nullptr;
-
-  int rv = nghttp2_session_callbacks_new(&callbacks);
-  if (rv != 0) {
+  // nghttp2_conn_server_new / nghttp2_conn_client_new は
+  // settings.initial_max_stream_data を INT32_MAX 以下で assert する。
+  // assert 失敗はプロセスの abort になるため境界で拒否する
+  if (config_.initial_window_size > static_cast<uint32_t>(INT32_MAX)) {
     return false;
   }
 
-  // コールバックを設定 (送信は nghttp2_session_mem_send2 で行うため
-  // send_callback は登録しない。nghttp2.h の mem_send2 の説明に従う)
-  nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
-                                                       on_frame_recv_callback);
-  nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
-      callbacks, on_data_chunk_recv_callback);
-  nghttp2_session_callbacks_set_on_stream_close_callback(
-      callbacks, on_stream_close_callback);
-  nghttp2_session_callbacks_set_on_header_callback(callbacks,
-                                                   on_header_callback);
-  nghttp2_session_callbacks_set_on_begin_headers_callback(
-      callbacks, on_begin_headers_callback);
+  // nghttp2-v2 のコールバックは nghttp2_callbacks 構造体で渡す。rand は
+  // 必須 (接続生成時にレートリミッタの種に使われる)
+  nghttp2_callbacks callbacks = {};
+  callbacks.rand = &Http2Connection::on_rand_callback;
+  callbacks.stream_open = &Http2Connection::on_stream_open_callback;
+  callbacks.stream_close = &Http2Connection::on_stream_close_callback;
+  callbacks.recv_settings_entry =
+      &Http2Connection::on_recv_settings_entry_callback;
+  callbacks.recv_settings = &Http2Connection::on_recv_settings_callback;
+  callbacks.recv_settings_ack = &Http2Connection::on_recv_settings_ack_callback;
+  callbacks.begin_headers = &Http2Connection::on_begin_headers_callback;
+  callbacks.recv_header = &Http2Connection::on_recv_header_callback;
+  callbacks.end_headers = &Http2Connection::on_end_headers_callback;
+  callbacks.begin_trailers = &Http2Connection::on_begin_trailers_callback;
+  callbacks.recv_trailer = &Http2Connection::on_recv_trailer_callback;
+  callbacks.end_trailers = &Http2Connection::on_end_trailers_callback;
+  callbacks.recv_data = &Http2Connection::on_recv_data_callback;
+  callbacks.remote_end_stream = &Http2Connection::on_remote_end_stream_callback;
+  callbacks.local_end_stream = &Http2Connection::on_local_end_stream_callback;
+  callbacks.recv_ping_ack = &Http2Connection::on_recv_ping_ack_callback;
+  callbacks.shutdown = &Http2Connection::on_shutdown_callback;
+  callbacks.write_stream_data_offset =
+      &Http2Connection::on_write_stream_data_offset_callback;
 
-  // PRIORITY_UPDATE (RFC 9218) を拡張フレームとして受信するための
-  // オプションを設定する。PRIORITY_UPDATE はクライアントのみが送信する
-  // フレーム (nghttp2 もサーバーセッションの送信を拒否する) のため、
-  // サーバーセッションのみ登録する。クライアントセッションに登録すると
-  // 不正なサーバーから受信した際に nghttp2 が PROTOCOL_ERROR でセッション
-  // を終了するため、登録せず未知フレームとして無視させる
-  nghttp2_option* option = nullptr;
-  rv = nghttp2_option_new(&option);
-  if (rv != 0) {
-    nghttp2_session_callbacks_del(callbacks);
-    return false;
-  }
-  if (is_server_) {
-    nghttp2_option_set_builtin_recv_extension_type(option,
-                                                   NGHTTP2_PRIORITY_UPDATE);
-  }
+  nghttp2_settings settings;
+  nghttp2_settings_default(&settings);
+  settings.initial_ts = now_ts();
+  // SETTINGS_MAX_CONCURRENT_STREAMS として広告する値
+  settings.max_concurrent_streams_remote = config_.max_concurrent_streams;
+  // SETTINGS_INITIAL_WINDOW_SIZE として広告する値。nghttp2-v2 は受信ウィンドウ
+  // の管理をアプリに委ねるため、この値がストリームの受信ウィンドウの初期値に
+  // なる (本クラスは v1 相当の自動 WINDOW_UPDATE を実装する)
+  settings.initial_max_stream_data = config_.initial_window_size;
+  // SETTINGS_MAX_FRAME_SIZE / SETTINGS_MAX_HEADER_LIST_SIZE は nghttp2-v2 が
+  // 扱わないため送信しない (フレームサイズは 16384 固定、ヘッダーリスト
+  // サイズはローカルでは無制限)
 
-  // セッションを作成
+  int rv;
   if (is_server_) {
-    rv = nghttp2_session_server_new2(&session_, callbacks, this, option);
+    rv = nghttp2_conn_server_new(&conn_, &callbacks, &settings, nullptr, this);
   } else {
-    rv = nghttp2_session_client_new2(&session_, callbacks, this, option);
+    rv = nghttp2_conn_client_new(&conn_, &callbacks, &settings, nullptr, this);
   }
 
-  nghttp2_option_del(option);
-  nghttp2_session_callbacks_del(callbacks);
-
-  if (rv != 0) {
-    return false;
-  }
-
-  // 設定を送信
-  nghttp2_settings_entry iv[] = {
-      {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, config_.max_concurrent_streams},
-      {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, config_.initial_window_size},
-      {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, config_.max_frame_size},
-      {NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, config_.max_header_list_size},
-      {NGHTTP2_SETTINGS_NO_RFC7540_PRIORITIES, config_.no_rfc7540_priorities},
-  };
-
-  rv = nghttp2_submit_settings(session_, NGHTTP2_FLAG_NONE, iv,
-                               sizeof(iv) / sizeof(iv[0]));
   if (rv != 0) {
     return false;
   }
@@ -155,144 +194,178 @@ bool Http2Connection::initialize() {
   return true;
 }
 
+bool Http2Connection::ensure_pending_out() {
+  if (!conn_ || closed_ || closing_) {
+    return false;
+  }
+
+  if (!pending_out_.empty()) {
+    return true;
+  }
+
+  // nghttp2-v2 はアプリ提供バッファへ書き込む。TLS レコードに収まる
+  // 16384 バイトを 1 チャンクとして取り出す
+  std::array<uint8_t, 16384> buf;
+  nghttp2_ssize n = nghttp2_conn_write(conn_, buf.data(), buf.size(), now_ts());
+  if (n < 0) {
+    if (n == NGHTTP2_ERR_CLOSING) {
+      // GOAWAY の送出が完了し、接続を閉じてよい状態
+      closing_ = true;
+      return false;
+    }
+    closed_ = true;
+    return false;
+  }
+
+  if (n == 0) {
+    return false;
+  }
+
+  pending_out_.assign(buf.data(), buf.data() + n);
+  return true;
+}
+
 size_t Http2Connection::receive(const std::vector<uint8_t>& data) {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return 0;
   }
 
-  nghttp2_ssize rv =
-      nghttp2_session_mem_recv2(session_, data.data(), data.size());
-  if (rv < 0) {
+  // nghttp2-v2 の nghttp2_conn_read は入力全体を処理する (v1 の
+  // nghttp2_session_mem_recv2 と異なり処理バイト数を返さない)
+  int rv = nghttp2_conn_read(conn_, data.data(), data.size(), now_ts());
+  if (rv != 0) {
     closed_ = true;
     return 0;
   }
 
-  return static_cast<size_t>(rv);
+  return data.size();
 }
 
 std::optional<std::vector<uint8_t>> Http2Connection::send() {
-  if (!session_ || closed_) {
+  if (!ensure_pending_out()) {
     return std::nullopt;
   }
 
-  // セッションから送信データを取得
-  const uint8_t* data = nullptr;
-  nghttp2_ssize len = nghttp2_session_mem_send2(session_, &data);
-
-  if (len < 0) {
-    closed_ = true;
-    return std::nullopt;
-  }
-
-  if (len == 0) {
-    return std::nullopt;
-  }
-
-  return std::vector<uint8_t>(data, data + len);
+  std::vector<uint8_t> result;
+  result.swap(pending_out_);
+  return result;
 }
 
-int32_t Http2Connection::submit_request(
+int64_t Http2Connection::submit_request(
     const std::vector<std::pair<std::string, std::string>>& headers) {
-  if (!session_ || closed_ || is_server_ || goaway_received_) {
+  if (!conn_ || closed_ || is_server_ || goaway_received_) {
     return -1;
   }
 
-  // ヘッダーを nghttp2_nv に変換
   std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
 
   // データプロバイダを常に渡す。未設定だと nghttp2 が HEADERS に
   // END_STREAM を付け、後続の send_data が DATA を送出できなくなる。
   // リクエストの終端は send_data(..., eof=True) で行う
-  nghttp2_data_provider2 data_prd;
-  data_prd.source.ptr = this;
-  data_prd.read_callback = data_source_read_callback;
-
-  int32_t stream_id = nghttp2_submit_request2(session_, nullptr, nva.data(),
-                                              nva.size(), &data_prd, nullptr);
+  int64_t stream_id = nghttp2_conn_submit_request(conn_, nva.data(), nva.size(),
+                                                  data_reader(), this);
 
   if (stream_id < 0) {
     return -1;
   }
 
+  register_stream(stream_id);
   stream_buffers_[stream_id].clear();
   return stream_id;
 }
 
 void Http2Connection::submit_response(
-    int32_t stream_id,
+    int64_t stream_id,
     const std::vector<std::pair<std::string, std::string>>& headers) {
-  if (!session_ || closed_ || !is_server_) {
+  // nghttp2-v2 はストリーム ID を assert で検証する (失敗するとプロセスが
+  // abort する) ため、不正な ID は境界で弾く
+  if (!conn_ || closed_ || !is_server_ || stream_id <= 0 ||
+      stream_id > INT32_MAX || (stream_id & 1) == 0) {
     return;
   }
 
-  // ヘッダーを nghttp2_nv に変換
   std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
-
-  // データプロバイダの設定
-  nghttp2_data_provider2 data_prd;
-  data_prd.source.ptr = this;
-  data_prd.read_callback = data_source_read_callback;
 
   stream_buffers_[stream_id].clear();
 
-  nghttp2_submit_response2(session_, stream_id, nva.data(), nva.size(),
-                           &data_prd);
-}
+  // 1xx 中間応答は nghttp2-v2 では nghttp2_conn_submit_info で送る
+  // (submit_response は最終応答用で 1 回のみ。v1 互換のため :status の
+  // 値で振り分ける)
+  bool informational = false;
+  for (const auto& [name, value] : headers) {
+    if (name == ":status" && !value.empty() && value[0] == '1') {
+      informational = true;
+      break;
+    }
+  }
 
-void Http2Connection::send_data(int32_t stream_id,
-                                const std::vector<uint8_t>& data,
-                                bool eof) {
-  if (!session_ || closed_) {
+  if (informational) {
+    nghttp2_conn_submit_info(conn_, stream_id, nva.data(), nva.size());
     return;
   }
 
-  // トレーラを予約済みのストリームでは、トレーラ HEADERS が END_STREAM
-  // を担うため eof=True の END_STREAM 付与を無効化する (eof=True の DATA
-  // 送出でローカル側が half-closed になるとトレーラを送れなくなるため。
-  // トレーラの予約が無ければ従来どおり eof=True で終端する)
-  if (eof && pending_trailers_.count(stream_id) != 0) {
+  nghttp2_conn_submit_response(conn_, stream_id, nva.data(), nva.size(),
+                               data_reader());
+}
+
+void Http2Connection::send_data(int64_t stream_id,
+                                const std::vector<uint8_t>& data,
+                                bool eof) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // トレーラを送信済みのストリームでは、トレーラ HEADERS が END_STREAM
+  // を担うため eof=True の END_STREAM 付与を無効化する
+  if (eof && trailers_submitted_.count(stream_id) != 0) {
     eof = false;
   }
 
-  // 集約初期化は宣言順に値を割り当てるため、offset を飛ばして eof を渡す
-  // つもりで {data, eof} と書くと offset に eof の値が入る (先頭 1 バイトが
-  // 欠落する)。指定初期化子で明示的にフィールドを指定する
   stream_buffers_[stream_id].push_back({.data = data, .eof = eof});
-  nghttp2_session_resume_data(session_, stream_id);
+  // nghttp2-v2 では read_data が NGHTTP2_ERR_WOULDBLOCK を返した後に
+  // resume_stream で再開する
+  nghttp2_conn_resume_stream(conn_, stream_id);
 }
 
-void Http2Connection::reset_stream(int32_t stream_id, uint32_t error_code) {
-  if (!session_ || closed_) {
+void Http2Connection::reset_stream(int64_t stream_id, uint32_t error_code) {
+  if (!conn_ || closed_ || stream_id <= 0 || stream_id > INT32_MAX) {
     return;
   }
 
-  nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE, stream_id, error_code);
+  local_resets_.insert(stream_id);
+  nghttp2_conn_shutdown_stream(conn_, 0, stream_id, error_code);
   stream_buffers_.erase(stream_id);
 }
 
 void Http2Connection::goaway(uint32_t error_code) {
-  if (!session_ || closed_ || goaway_sent_) {
+  if (!conn_ || closed_ || goaway_sent_) {
     return;
   }
 
-  int32_t last_stream_id = nghttp2_session_get_last_proc_stream_id(session_);
-  nghttp2_submit_goaway(session_, NGHTTP2_FLAG_NONE, last_stream_id, error_code,
-                        nullptr, 0);
+  if (error_code != NGHTTP2_NO_ERROR) {
+    // nghttp2-v2 の graceful shutdown はエラーコードに NO_ERROR を固定する
+    // ため、0 以外は即時終了にフォールバックしてコードを伝える
+    terminate_session(error_code, 0);
+    return;
+  }
+
+  // last_stream_id にはライブラリが処理済みの最大ストリーム ID を使う
+  nghttp2_conn_shutdown(conn_);
   goaway_sent_ = true;
 }
 
 void Http2Connection::test_force_close() {
-  // テスト専用。nghttp2 の mem_recv / mem_send が負値を返した経路と同じ
-  // 状態 (closed_ のみを立て、イベントは push しない)
+  // テスト専用。nghttp2_conn_read / nghttp2_conn_write が負値を返した経路と
+  // 同じ状態 (closed_ のみを立て、イベントは push しない)
   closed_ = true;
 }
 
-size_t Http2Connection::test_stream_buffer_count(int32_t stream_id) const {
+size_t Http2Connection::test_stream_buffer_count(int64_t stream_id) const {
   auto it = stream_buffers_.find(stream_id);
   return it == stream_buffers_.end() ? 0 : it->second.size();
 }
 
-size_t Http2Connection::test_stream_buffer_remaining(int32_t stream_id) const {
+size_t Http2Connection::test_stream_buffer_remaining(int64_t stream_id) const {
   auto it = stream_buffers_.find(stream_id);
   if (it == stream_buffers_.end() || it->second.empty()) {
     return 0;
@@ -301,7 +374,7 @@ size_t Http2Connection::test_stream_buffer_remaining(int32_t stream_id) const {
   return front.data.size() - front.offset;
 }
 
-size_t Http2Connection::test_stream_buffer_offset(int32_t stream_id) const {
+size_t Http2Connection::test_stream_buffer_offset(int64_t stream_id) const {
   auto it = stream_buffers_.find(stream_id);
   if (it == stream_buffers_.end() || it->second.empty()) {
     return 0;
@@ -310,32 +383,36 @@ size_t Http2Connection::test_stream_buffer_offset(int32_t stream_id) const {
 }
 
 void Http2Connection::ping(const std::vector<uint8_t>& opaque_data) {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return;
   }
 
   // RFC 9113 Section 6.7 の PING は 8 バイト固定。空 (未指定) はゼロ 8 バイト
-  // を送る nghttp2 の既定挙動に任せる
   if (!opaque_data.empty() && opaque_data.size() != 8) {
     throw std::runtime_error("ping opaque_data must be exactly 8 bytes");
   }
 
-  nghttp2_submit_ping(session_, NGHTTP2_FLAG_NONE,
-                      opaque_data.empty() ? nullptr : opaque_data.data());
+  nghttp2_ping_data data;
+  std::memset(data.data, 0, sizeof(data.data));
+  if (!opaque_data.empty()) {
+    std::memcpy(data.data, opaque_data.data(), sizeof(data.data));
+  }
+
+  // nghttp2-v2 は同時に 1 つの PING のみ in-flight を許す。既に in-flight の
+  // 場合は NGHTTP2_ERR_INVALID_STATE が返るが、v1 互換のため黙って無視する
+  (void)nghttp2_conn_submit_ping(conn_, &data);
 }
 
 bool Http2Connection::terminate_session(uint32_t error_code,
-                                        int32_t last_stream_id) {
-  if (!session_ || closed_) {
+                                        int64_t last_stream_id) {
+  if (!conn_ || closed_) {
     return false;
   }
 
   // last_stream_id はピアが開始したストリーム ID (0 は全ストリーム終了)。
   // クライアントセッションでは偶数 / サーバーセッションでは奇数が有効。
-  // パリティ違反を nghttp2 に渡すと INVALID_ARGUMENT を返すが、その前に
-  // セッションの受信処理を無視状態 (IB_IGN_ALL) にしてしまうため、
-  // 事前にガードする。負の値も nghttp2 を素通りして不正な GOAWAY を
-  // 送出してしまうため同様に拒否する
+  // nghttp2-v2 の nghttp2_conn_terminate は last_stream_id を受け取らない
+  // ため、従来と同じ入力検証だけを行い、値はライブラリに任せる
   if (last_stream_id != 0) {
     bool is_even = (last_stream_id & 0x1) == 0;
     bool valid = is_server_ ? !is_even : is_even;
@@ -344,60 +421,107 @@ bool Http2Connection::terminate_session(uint32_t error_code,
     }
   }
 
-  // GOAWAY を送信してセッションを即時終了する。呼び出し直後から受信
-  // フレームを無視し、GOAWAY 送出後に want_read / want_write が 0 になる。
-  // closed_ にはしない (send() を止めないため)。2 回目以降の呼び出しは
-  // GOAWAY_TERM_ON_SEND が立っているため何もせず成功を返す
-  return nghttp2_session_terminate_session2(session_, last_stream_id,
-                                            error_code) == 0;
+  // GOAWAY を送出し、以後の受信フレームを破棄する即時終了
+  nghttp2_conn_terminate(conn_, error_code);
+  goaway_sent_ = true;
+  return true;
 }
 
-bool Http2Connection::set_local_window_size(int32_t stream_id,
+bool Http2Connection::set_local_window_size(int64_t stream_id,
                                             int32_t window_size) {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return false;
   }
 
-  // 負のウィンドウサイズはガードする (nghttp2 も INVALID_ARGUMENT を返す)
   if (window_size < 0) {
     return false;
   }
 
-  // 増加時は WINDOW_UPDATE がキュー投入され、減少時はローカルでの
-  // 受信絞り込みのみになる。存在しないストリームと負の stream_id は
-  // 成功扱い (nghttp2 v1.70.0 の実装)
-  return nghttp2_session_set_local_window_size(session_, NGHTTP2_FLAG_NONE,
-                                               stream_id, window_size) == 0;
+  if (stream_id == 0) {
+    int64_t delta = static_cast<int64_t>(window_size) - conn_local_window_size_;
+    if (delta == 0) {
+      return true;
+    }
+    if (delta < 0) {
+      // 減少はピアへ通知せず、受信ウィンドウを絞る
+      conn_local_window_size_ += delta;
+      conn_recv_window_size_ += delta;
+      conn_recv_reduction_ -= delta;
+      return true;
+    }
+
+    // 増加は WINDOW_UPDATE で通知する。過去の減少分 (recv_reduction) を
+    // 先に取り戻してから、残りを extend する
+    conn_local_window_size_ += delta;
+    int64_t take = std::min(conn_recv_reduction_, delta);
+    conn_recv_reduction_ -= take;
+    conn_recv_window_size_ += take;
+    delta -= take;
+    if (delta > 0) {
+      (void)nghttp2_conn_extend_max_offset(conn_, static_cast<size_t>(delta));
+    }
+    return true;
+  }
+
+  // 存在しないストリームと負の stream_id は成功扱い (nghttp2 v1 と同じ)
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
+    return true;
+  }
+
+  int64_t& local = stream_local_window_size_[stream_id];
+  int64_t& recv = stream_recv_window_size_[stream_id];
+  int64_t& reduction = stream_recv_reduction_[stream_id];
+
+  int64_t delta = static_cast<int64_t>(window_size) - local;
+  if (delta == 0) {
+    return true;
+  }
+  if (delta < 0) {
+    local += delta;
+    recv += delta;
+    reduction -= delta;
+    return true;
+  }
+
+  local += delta;
+  int64_t take = std::min(reduction, delta);
+  reduction -= take;
+  recv += take;
+  delta -= take;
+  if (delta > 0) {
+    (void)nghttp2_conn_extend_max_stream_offset(conn_, stream_id,
+                                                static_cast<size_t>(delta));
+  }
+  return true;
 }
 
 // ========== メッセージング拡張 API ==========
 
 bool Http2Connection::submit_trailer(
-    int32_t stream_id,
+    int64_t stream_id,
     const std::vector<std::pair<std::string, std::string>>& headers) {
-  if (!session_ || closed_ || !is_server_) {
+  if (!conn_ || closed_ || !is_server_) {
     return false;
   }
 
-  // stream_id 0 はコネクション全体を指す特別な値のため受け付けない
-  if (stream_id <= 0) {
+  // stream_id 0 はコネクション全体を指す特別な値のため受け付けない。
+  // nghttp2_conn_submit_trailers はストリーム ID を assert で検証するため
+  // 上限とパリティ (クライアント起動ストリームは奇数) も弾く
+  if (stream_id <= 0 || stream_id > INT32_MAX || (stream_id & 1) == 0) {
     return false;
   }
 
   // ストリームが存在しない (まだ受信していない・既に閉じた) 場合は送信
   // できない。ローカル側が half-closed (END_STREAM 送出済み) のストリーム
   // にもトレーラを送れない (RFC 9113 8.1 節)
-  int local_close = nghttp2_session_get_stream_local_close(session_, stream_id);
-  if (local_close < 0) {
-    return false;
-  }
-  if (local_close != 0) {
+  auto stream_it = streams_.find(stream_id);
+  if (stream_it == streams_.end() || stream_it->second.local_closed) {
     return false;
   }
 
   // レスポンス (データプロバイダ) が設定されていないストリームには
-  // トレーラを送信できない (submit_response が stream_buffers_ を作成し、
-  // data_source_read_callback が呼ばれるための前提となる)
+  // トレーラを送信できない (submit_response が stream_buffers_ を作成する)
   auto it = stream_buffers_.find(stream_id);
   if (it == stream_buffers_.end()) {
     return false;
@@ -411,115 +535,76 @@ bool Http2Connection::submit_trailer(
     }
   }
 
-  // トレーラセクションは 1 つのみ (RFC 9113 8.1 節) のため、既に予約済み
-  // のストリームへの再予約は受け付けない
-  if (pending_trailers_.count(stream_id) != 0) {
+  // トレーラセクションは 1 つのみ (RFC 9113 8.1 節)
+  if (trailers_submitted_.count(stream_id) != 0) {
     return false;
   }
 
-  // トレーラは保留し、data_source_read_callback がデータの最終チャンクを
-  // 返す時点で nghttp2_submit_trailer を呼ぶ (直接キューに積むと
-  // ヘッダー系が DATA より先に送信されるため)
-  pending_trailers_[stream_id] = headers;
+  std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
+  if (nghttp2_conn_submit_trailers(conn_, stream_id, nva.data(), nva.size()) !=
+      0) {
+    return false;
+  }
 
-  // 送信データが既に flush され deferred 状態になっている場合は再開する
-  // (まだ送信待ちデータがある場合は resume が INVALID_ARGUMENT を返すが
-  // 無視してよい。データ送出後にトレーラが送信される)
-  nghttp2_session_resume_data(session_, stream_id);
-
+  trailers_submitted_.insert(stream_id);
+  // 送信データが既に flush され read_data が WOULDBLOCK を返している場合に
+  // EOF を渡してトレーラを送出させる
+  nghttp2_conn_resume_stream(conn_, stream_id);
   return true;
 }
 
-bool Http2Connection::submit_priority_update(int32_t stream_id,
+bool Http2Connection::submit_priority_update(int64_t stream_id,
                                              uint32_t urgency,
                                              bool incremental) {
-  if (!session_ || closed_ || is_server_) {
+  if (!conn_ || closed_ || is_server_) {
     return false;
   }
 
-  // stream_id 0 はコネクション全体を指す特別な値のため受け付けない
-  // (nghttp2 は noop 判定を stream_id 検証より先に行うため、ピア設定
-  // 次第で成功と失敗が切り替わる。C++ 側で一貫して拒否する)
-  if (stream_id <= 0) {
+  // stream_id 0 はコネクション全体を指す特別な値のため受け付けない。
+  // クライアント起動ストリームは奇数
+  if (stream_id <= 0 || stream_id > INT32_MAX || (stream_id & 1) == 0) {
     return false;
   }
 
   // RFC 9218 で定義された urgency の範囲 (0-7) を超える場合はガードする
-  // (nghttp2 は検証せず素通しするため、H3 側の client_stream_priority
-  // と同じセマンティクスで拒否する)
-  if (urgency > NGHTTP2_EXTPRI_URGENCY_LOW) {
+  if (urgency > NGHTTP2_URGENCY_LOW) {
     return false;
   }
 
   // Priority field value (RFC 9218 6.3 節) をシリアライズする
-  // (u={urgency}、incremental のとき , i)
   std::string field_value = "u=" + std::to_string(urgency);
   if (incremental) {
     field_value += ", i";
   }
 
-  // 動作にはピアの SETTINGS_NO_RFC7540_PRIORITIES=1 が必要 (ピアが SETTINGS
-  // で NO_RFC7540_PRIORITIES=0 を送信した場合のみ nghttp2 が noop で成功を
-  // 返す。未受信時は内部値が UINT32_MAX のためフレームが送出される)
-  return nghttp2_submit_priority_update(
-             session_, NGHTTP2_FLAG_NONE, stream_id,
-             reinterpret_cast<const uint8_t*>(field_value.c_str()),
+  // nghttp2-v2 はストリームが存在しない場合に 0 を返して何も送出しない
+  return nghttp2_conn_set_client_stream_priority(
+             conn_, stream_id,
+             reinterpret_cast<const uint8_t*>(field_value.data()),
              field_value.size()) == 0;
 }
 
-bool Http2Connection::change_extpri_stream_priority(int32_t stream_id,
+bool Http2Connection::change_extpri_stream_priority(int64_t stream_id,
                                                     uint32_t urgency,
                                                     bool incremental) {
-  if (!session_ || closed_ || !is_server_) {
+  if (!conn_ || closed_ || !is_server_) {
     return false;
   }
 
-  // stream_id 0 はコネクション全体を指す特別な値のため受け付けない
-  // (nghttp2 は noop 判定を stream_id 検証より先に行うため、ピア設定
-  // 次第で成功と失敗が切り替わる。C++ 側で一貫して拒否する)
-  if (stream_id <= 0) {
+  if (stream_id <= 0 || stream_id > INT32_MAX || (stream_id & 1) == 0) {
     return false;
   }
 
-  // RFC 9218 で定義された urgency の範囲 (0-7) を超える場合はガードする
-  // (nghttp2 は EXTPRI_URGENCY_LOW にクランプするだけのため、H3 側の
-  // server_stream_priority と同じセマンティクスで拒否する)
-  if (urgency > NGHTTP2_EXTPRI_URGENCY_LOW) {
+  if (urgency > NGHTTP2_URGENCY_LOW) {
     return false;
   }
 
-  nghttp2_extpri extpri;
-  extpri.urgency = urgency;
-  extpri.inc = incremental ? 1 : 0;
+  nghttp2_pri pri = {};
+  pri.urgency = urgency;
+  pri.inc = incremental ? 1 : 0;
 
-  // ignore_client_signal は常に 1 (サーバーが設定した優先度を優先し、
-  // クライアントからの優先度更新を無視する)。動作には自己の
-  // SETTINGS_NO_RFC7540_PRIORITIES=1 の送信が必要 (未送信時は nghttp2 が
-  // noop で成功を返す)
-  return nghttp2_session_change_extpri_stream_priority(session_, stream_id,
-                                                       &extpri, 1) == 0;
-}
-
-int32_t Http2Connection::submit_push_promise(
-    int32_t stream_id,
-    const std::vector<std::pair<std::string, std::string>>& headers) {
-  if (!session_ || closed_ || !is_server_ || goaway_received_) {
-    return -1;
-  }
-
-  // stream_id 0 はコネクション全体を指す特別な値のため受け付けない
-  if (stream_id <= 0) {
-    return -1;
-  }
-
-  // ヘッダーを nghttp2_nv に変換
-  std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
-
-  // 成功で promised stream ID を返す。失敗時は nghttp2 の負のエラーコード
-  // を -1 に正規化して返す (既存の submit_request と同じ契約)
-  int32_t rv = nghttp2_submit_push_promise(
-      session_, NGHTTP2_FLAG_NONE, stream_id, nva.data(), nva.size(), nullptr);
-  return rv < 0 ? -1 : rv;
+  // nghttp2-v2 はストリームが存在しない場合に 0 を返して何もしない
+  return nghttp2_conn_set_server_stream_priority(conn_, stream_id, &pri) == 0;
 }
 
 std::optional<Http2Event> Http2Connection::next_event() {
@@ -533,10 +618,8 @@ std::optional<Http2Event> Http2Connection::next_event() {
 }
 
 bool Http2Connection::want_write() const {
-  if (!session_ || closed_) {
-    return false;
-  }
-  return nghttp2_session_want_write(session_) != 0;
+  auto* self = const_cast<Http2Connection*>(this);
+  return self->ensure_pending_out();
 }
 
 bool Http2Connection::is_closed() const {
@@ -547,176 +630,328 @@ bool Http2Connection::is_closed() const {
 
 std::optional<std::map<std::string, uint32_t>>
 Http2Connection::remote_settings() const {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  // ピアが送信した SETTINGS の値 (受信前は nghttp2 のデフォルト値。
-  // max_concurrent_streams のみセッション生成時に 100 が設定され、最初の
-  // SETTINGS 受信時にリセットされた後、フレームのエントリ値が適用される)
+  const nghttp2_proto_settings* settings =
+      nghttp2_conn_get_remote_settings(conn_);
+  if (settings == nullptr) {
+    return std::nullopt;
+  }
+
+  // max_frame_size は nghttp2-v2 が SETTINGS を扱わず 16384 固定
   return std::map<std::string, uint32_t>{
       {"initial_window_size",
-       nghttp2_session_get_remote_settings(
-           session_, NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE)},
+       static_cast<uint32_t>(settings->initial_max_stream_data)},
       {"max_concurrent_streams",
-       nghttp2_session_get_remote_settings(
-           session_, NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS)},
-      {"max_frame_size", nghttp2_session_get_remote_settings(
-                             session_, NGHTTP2_SETTINGS_MAX_FRAME_SIZE)},
+       static_cast<uint32_t>(settings->max_concurrent_streams)},
+      {"max_frame_size", 16384},
       {"max_header_list_size",
-       nghttp2_session_get_remote_settings(
-           session_, NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE)},
+       static_cast<uint32_t>(settings->max_field_section_size)},
   };
 }
 
 std::optional<std::map<std::string, uint32_t>> Http2Connection::local_settings()
     const {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  // ピアが ACK したローカルの SETTINGS の値 (ACK 前は nghttp2 の
-  // デフォルト値)
+  const nghttp2_settings* settings = nghttp2_conn_get_settings(conn_);
+  if (settings == nullptr) {
+    return std::nullopt;
+  }
+
+  // max_frame_size は 16384 固定。max_header_list_size は nghttp2-v2 が
+  // ローカルの上限を管理しないため上限なしを返す
   return std::map<std::string, uint32_t>{
       {"initial_window_size",
-       nghttp2_session_get_local_settings(
-           session_, NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE)},
+       static_cast<uint32_t>(settings->initial_max_stream_data)},
       {"max_concurrent_streams",
-       nghttp2_session_get_local_settings(
-           session_, NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS)},
-      {"max_frame_size", nghttp2_session_get_local_settings(
-                             session_, NGHTTP2_SETTINGS_MAX_FRAME_SIZE)},
-      {"max_header_list_size",
-       nghttp2_session_get_local_settings(
-           session_, NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE)},
+       static_cast<uint32_t>(settings->max_concurrent_streams_remote)},
+      {"max_frame_size", 16384},
+      {"max_header_list_size", 4294967295u},
   };
 }
 
-std::optional<size_t> Http2Connection::outbound_queue_size() const {
-  if (!session_ || closed_) {
-    return std::nullopt;
-  }
-  return nghttp2_session_get_outbound_queue_size(session_);
-}
-
-std::optional<int32_t> Http2Connection::remote_window_size() const {
-  if (!session_ || closed_) {
-    return std::nullopt;
-  }
-  return nghttp2_session_get_remote_window_size(session_);
-}
-
 std::optional<int32_t> Http2Connection::local_window_size() const {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
-  return nghttp2_session_get_local_window_size(session_);
+  return static_cast<int32_t>(conn_local_window_size_ - conn_recv_window_size_);
 }
 
 std::optional<int32_t> Http2Connection::effective_recv_data_length() const {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
-  return nghttp2_session_get_effective_recv_data_length(session_);
+  return static_cast<int32_t>(std::max<int64_t>(0, conn_recv_window_size_));
 }
 
 std::optional<bool> Http2Connection::request_allowed() const {
-  if (!session_ || closed_) {
-    return std::nullopt;
-  }
-  return nghttp2_session_check_request_allowed(session_) != 0;
-}
-
-std::optional<int32_t> Http2Connection::stream_remote_window_size(
-    int32_t stream_id) const {
-  if (!session_ || closed_) {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  int32_t window_size =
-      nghttp2_session_get_stream_remote_window_size(session_, stream_id);
-  if (window_size < 0) {
-    // ストリームが存在しない場合は None を返す (完全に閉じたストリームも
-    // nghttp2 の管理から外れて存在しなくなる)
-    return std::nullopt;
+  if (is_server_) {
+    return false;
   }
-  return window_size;
+
+  if (goaway_sent_ || goaway_received_ || closing_) {
+    return false;
+  }
+
+  // nghttp2-v2 では GOAWAY 受信後に > INT32_MAX が返る
+  return nghttp2_conn_get_next_stream_id(conn_) <= INT32_MAX;
 }
 
 std::optional<int32_t> Http2Connection::stream_local_window_size(
-    int32_t stream_id) const {
-  if (!session_ || closed_) {
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  int32_t window_size =
-      nghttp2_session_get_stream_local_window_size(session_, stream_id);
-  if (window_size < 0) {
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
     return std::nullopt;
   }
-  return window_size;
+
+  int64_t local = 0;
+  auto local_it = stream_local_window_size_.find(stream_id);
+  if (local_it != stream_local_window_size_.end()) {
+    local = local_it->second;
+  }
+
+  int64_t recv = 0;
+  auto recv_it = stream_recv_window_size_.find(stream_id);
+  if (recv_it != stream_recv_window_size_.end()) {
+    recv = recv_it->second;
+  }
+
+  return static_cast<int32_t>(std::max<int64_t>(0, local - recv));
 }
 
 std::optional<int32_t> Http2Connection::stream_effective_recv_data_length(
-    int32_t stream_id) const {
-  if (!session_ || closed_) {
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  int32_t recv_data_length =
-      nghttp2_session_get_stream_effective_recv_data_length(session_,
-                                                            stream_id);
-  if (recv_data_length < 0) {
+  if (streams_.find(stream_id) == streams_.end()) {
     return std::nullopt;
   }
-  return recv_data_length;
+
+  int64_t recv = 0;
+  auto it = stream_recv_window_size_.find(stream_id);
+  if (it != stream_recv_window_size_.end()) {
+    recv = it->second;
+  }
+  return static_cast<int32_t>(std::max<int64_t>(0, recv));
 }
 
 std::optional<bool> Http2Connection::stream_local_close(
-    int32_t stream_id) const {
-  if (!session_ || closed_) {
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  int rv = nghttp2_session_get_stream_local_close(session_, stream_id);
-  if (rv < 0) {
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
     return std::nullopt;
   }
-  return rv != 0;
+  return it->second.local_closed;
 }
 
 std::optional<bool> Http2Connection::stream_remote_close(
-    int32_t stream_id) const {
-  if (!session_ || closed_) {
+    int64_t stream_id) const {
+  if (!conn_ || closed_) {
     return std::nullopt;
   }
 
-  int rv = nghttp2_session_get_stream_remote_close(session_, stream_id);
-  if (rv < 0) {
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
     return std::nullopt;
   }
-  return rv != 0;
+  return it->second.remote_closed;
+}
+
+// ========== ストリーム状態の追跡 ==========
+
+void Http2Connection::register_stream(int64_t stream_id) {
+  if (streams_.find(stream_id) == streams_.end()) {
+    streams_[stream_id] = StreamRuntime{};
+  }
+  if (stream_local_window_size_.find(stream_id) ==
+      stream_local_window_size_.end()) {
+    stream_local_window_size_[stream_id] = config_.initial_window_size;
+  }
+}
+
+void Http2Connection::unregister_stream(int64_t stream_id) {
+  streams_.erase(stream_id);
+  stream_buffers_.erase(stream_id);
+  stream_data_sent_.erase(stream_id);
+  trailers_submitted_.erase(stream_id);
+  stream_local_window_size_.erase(stream_id);
+  stream_recv_window_size_.erase(stream_id);
+  stream_recv_reduction_.erase(stream_id);
+  pending_headers_.erase(stream_id);
+  pending_trailers_.erase(stream_id);
 }
 
 void Http2Connection::push_event(Http2Event event) {
   events_.push_back(std::move(event));
 }
 
-// ========== nghttp2 コールバック ==========
+void Http2Connection::extend_recv_connection_window(size_t size) {
+  conn_recv_window_size_ += static_cast<int64_t>(size);
+
+  // v1 の nghttp2_should_send_window_update と同じく、受信ウィンドウの
+  // 半分以上を受け取ったら WINDOW_UPDATE を送る
+  if (conn_recv_window_size_ > 0 &&
+      conn_recv_window_size_ >= conn_local_window_size_ / 2) {
+    int64_t amount = conn_recv_window_size_;
+    conn_recv_window_size_ = 0;
+    (void)nghttp2_conn_extend_max_offset(conn_, static_cast<size_t>(amount));
+  }
+}
+
+void Http2Connection::extend_recv_stream_window(int64_t stream_id,
+                                                size_t size) {
+  auto local_it = stream_local_window_size_.find(stream_id);
+  if (local_it == stream_local_window_size_.end()) {
+    stream_local_window_size_[stream_id] = config_.initial_window_size;
+    local_it = stream_local_window_size_.find(stream_id);
+  }
+
+  int64_t& recv = stream_recv_window_size_[stream_id];
+  recv += static_cast<int64_t>(size);
+
+  if (recv > 0 && recv >= local_it->second / 2) {
+    int64_t amount = recv;
+    recv = 0;
+    (void)nghttp2_conn_extend_max_stream_offset(conn_, stream_id,
+                                                static_cast<size_t>(amount));
+  }
+}
+
+// ========== nghttp2-v2 コールバック ==========
+
+int Http2Connection::on_stream_open_callback(nghttp2_conn* conn,
+                                             int64_t stream_id,
+                                             void* user_data) noexcept {
+  (void)conn;
+  auto* self = static_cast<Http2Connection*>(user_data);
+  self->register_stream(stream_id);
+  return 0;
+}
+
+int Http2Connection::on_stream_close_callback(nghttp2_conn* conn,
+                                              uint32_t flags,
+                                              int64_t stream_id,
+                                              uint32_t error_code,
+                                              void* user_data,
+                                              void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  // 受信した RST_STREAM によるクローズだけを StreamReset として通知する。
+  // ローカルから shutdown_stream した場合は local_resets_ で判別する
+  if ((flags & NGHTTP2_STREAM_CLOSE_FLAG_ERROR_CODE_SET) &&
+      self->local_resets_.count(stream_id) == 0) {
+    Http2Event event;
+    event.type = Http2EventType::StreamReset;
+    event.stream_id = stream_id;
+    event.error_code = error_code;
+    self->push_event(std::move(event));
+  }
+
+  self->local_resets_.erase(stream_id);
+  self->unregister_stream(stream_id);
+  return 0;
+}
+
+int Http2Connection::on_recv_settings_entry_callback(
+    nghttp2_conn* conn,
+    const nghttp2_settings_entry* ent,
+    void* user_data) noexcept {
+  (void)conn;
+  (void)ent;
+  (void)user_data;
+  // 個々の SETTINGS エントリは公開 API で観測しない
+  return 0;
+}
+
+int Http2Connection::on_recv_settings_callback(
+    nghttp2_conn* conn,
+    const nghttp2_proto_settings* settings,
+    void* user_data) noexcept {
+  (void)conn;
+  (void)settings;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  Http2Event event;
+  event.type = Http2EventType::Settings;
+  self->push_event(std::move(event));
+  return 0;
+}
+
+int Http2Connection::on_recv_settings_ack_callback(nghttp2_conn* conn,
+                                                   void* user_data) noexcept {
+  (void)conn;
+  (void)user_data;
+  // ACK は公開 API で観測しない
+  return 0;
+}
+
+int Http2Connection::on_begin_headers_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+  self->pending_headers_[stream_id].clear();
+  return 0;
+}
+
+int Http2Connection::on_recv_header_callback(nghttp2_conn* conn,
+                                             int64_t stream_id,
+                                             int32_t token,
+                                             nghttp2_rcbuf* name,
+                                             nghttp2_rcbuf* value,
+                                             uint8_t flags,
+                                             void* user_data,
+                                             void* stream_user_data) noexcept {
+  (void)conn;
+  (void)token;
+  (void)flags;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  nghttp2_vec name_buf = nghttp2_rcbuf_get_buf(name);
+  nghttp2_vec value_buf = nghttp2_rcbuf_get_buf(value);
+  std::string name_str(reinterpret_cast<const char*>(name_buf.base),
+                       name_buf.len);
+  std::string value_str(reinterpret_cast<const char*>(value_buf.base),
+                        value_buf.len);
+  self->pending_headers_[stream_id].emplace_back(std::move(name_str),
+                                                 std::move(value_str));
+  return 0;
+}
 
 namespace {
 
-// HEADERS フレームを Headers / Informational / Trailers に分類する
+// ヘッダーセクションを Headers / Informational / Trailers に分類する
 //
-// nghttp2 の nghttp2_headers_category は「最初のレスポンスか、それ以外か」
-// しか表さず、1xx とトレーラを区別しない。実際 nghttp2 は 1xx を先に送ると
-// 最初の HEADERS を HCAT_RESPONSE、後続の最終レスポンスを HCAT_HEADERS と
-// する (nghttp2_session.c の session_predicate_response_headers_send) ため、
-// cat では分類できない。疑似ヘッダーで判定する:
+// nghttp2-v2 はトレーラを end_trailers で分離するため、ここでは
+// リクエスト / レスポンス / 1xx 中間応答のみを扱う。擬似ヘッダーで判定する:
 //   - `:method` を持つものはリクエスト (RFC 9113 Section 8.3)
 //   - `:status` を持つものはレスポンス。1xx なら interim response
-//     (RFC 9113 Section 8.1 / RFC 9110 Section 15)
-//   - どちらも持たない終端 HEADERS はトレーラ (RFC 9110 Section 6.5)
+//   - どちらも持たないものはトレーラ (RFC 9110 Section 6.5)
 Http2EventType classify_headers_event(
     const std::vector<std::pair<std::string, std::string>>& headers) {
   bool has_status = false;
@@ -729,7 +964,6 @@ Http2EventType classify_headers_event(
       continue;
     }
     has_status = true;
-    // ":status" は 3 桁の数字。1 桁目が '1' なら 1xx
     informational = !value.empty() && value[0] == '1';
   }
   if (!has_status) {
@@ -741,269 +975,328 @@ Http2EventType classify_headers_event(
 
 }  // namespace
 
-int Http2Connection::on_frame_recv_callback(nghttp2_session* session,
-                                            const nghttp2_frame* frame,
-                                            void* user_data) noexcept {
+int Http2Connection::on_end_headers_callback(nghttp2_conn* conn,
+                                             int64_t stream_id,
+                                             int fin,
+                                             void* user_data,
+                                             void* stream_user_data) noexcept {
+  (void)conn;
+  (void)fin;
+  (void)stream_user_data;
   auto* self = static_cast<Http2Connection*>(user_data);
 
-  switch (frame->hd.type) {
-    case NGHTTP2_HEADERS:
-      if (frame->hd.flags & NGHTTP2_FLAG_END_HEADERS) {
-        // ヘッダー受信完了。nghttp2 の cat は 1xx とトレーラを区別しない
-        // (NGHTTP2_HCAT_HEADERS に同居する) ため、:status の有無で判定する
-        // (RFC 9113 Section 8.1 の interim response と RFC 9110 Section 6.5
-        // の trailer section)。cat が REQUEST / RESPONSE 以外で :status が
-        // 無いものだけをトレーラとする
-        auto it = self->pending_headers_.find(frame->hd.stream_id);
-        if (it != self->pending_headers_.end()) {
-          Http2Event event;
-          event.stream_id = frame->hd.stream_id;
-          event.headers = std::move(it->second);
-          event.type = classify_headers_event(event.headers);
-          self->push_event(std::move(event));
-          self->pending_headers_.erase(it);
-        }
-      }
-      if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        Http2Event event;
-        event.type = Http2EventType::StreamEnd;
-        event.stream_id = frame->hd.stream_id;
-        self->push_event(std::move(event));
-      }
-      break;
-
-    case NGHTTP2_DATA:
-      if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        Http2Event event;
-        event.type = Http2EventType::StreamEnd;
-        event.stream_id = frame->hd.stream_id;
-        self->push_event(std::move(event));
-      }
-      break;
-
-    case NGHTTP2_SETTINGS:
-      if (!(frame->hd.flags & NGHTTP2_FLAG_ACK)) {
-        Http2Event event;
-        event.type = Http2EventType::Settings;
-        self->push_event(std::move(event));
-      }
-      break;
-
-    case NGHTTP2_PING: {
-      // ACK も含めてイベント化する (RFC 9113 Section 6.7)。RTT 測定や疎通確認
-      // では ACK の受信を観測する必要がある
-      Http2Event event;
-      event.type = Http2EventType::Ping;
-      event.opaque_data.assign(frame->ping.opaque_data,
-                               frame->ping.opaque_data + 8);
-      event.ack = (frame->hd.flags & NGHTTP2_FLAG_ACK) != 0;
-      self->push_event(std::move(event));
-    } break;
-
-    case NGHTTP2_GOAWAY: {
-      Http2Event event;
-      event.type = Http2EventType::GoAway;
-      event.error_code = frame->goaway.error_code;
-      event.last_stream_id = frame->goaway.last_stream_id;
-      self->push_event(std::move(event));
-      // RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も既存
-      // ストリームの送受信を継続する。closed_ にはせず、新規ストリーム
-      // 開始の抑止のみを goaway_received_ で行う (submit_request /
-      // submit_push_promise のガード)
-      self->goaway_received_ = true;
-    } break;
-
-    case NGHTTP2_RST_STREAM: {
-      Http2Event event;
-      event.type = Http2EventType::StreamReset;
-      event.stream_id = frame->hd.stream_id;
-      event.error_code = frame->rst_stream.error_code;
-      self->push_event(std::move(event));
-      self->stream_buffers_.erase(frame->hd.stream_id);
-    } break;
-
-    case NGHTTP2_WINDOW_UPDATE: {
-      Http2Event event;
-      event.type = Http2EventType::WindowUpdate;
-      event.stream_id = frame->hd.stream_id;
-      // RFC 9113 Section 6.9 の Window Size Increment (1〜2^31-1)
-      event.window_size_increment =
-          static_cast<uint32_t>(frame->window_update.window_size_increment);
-      self->push_event(std::move(event));
-    } break;
-
-    case NGHTTP2_PUSH_PROMISE:
-      if (frame->hd.flags & NGHTTP2_FLAG_END_HEADERS) {
-        // プッシュリクエストのヘッダー受信完了
-        auto it = self->pending_headers_.find(frame->hd.stream_id);
-        if (it != self->pending_headers_.end()) {
-          Http2Event event;
-          event.type = Http2EventType::PushPromise;
-          event.stream_id = frame->hd.stream_id;
-          event.promised_stream_id = frame->push_promise.promised_stream_id;
-          event.headers = std::move(it->second);
-          self->push_event(std::move(event));
-          self->pending_headers_.erase(it);
-        }
-      }
-      break;
-
-    case NGHTTP2_PRIORITY_UPDATE: {
-      // 拡張フレームのペイロードから優先度が更新されたストリーム ID と
-      // priority field value を取り出す (フレーム自身の stream_id は 0)。
-      // builtin recv extension として登録済みのため通常は必ずデコード
-      // されるが、防御的にガード
-      auto* ext = static_cast<nghttp2_ext_priority_update*>(frame->ext.payload);
-      if (ext == nullptr) {
-        break;
-      }
-      Http2Event event;
-      event.type = Http2EventType::PriorityUpdate;
-      event.stream_id = ext->stream_id;
-      // field_value は null 終端ではない (nghttp2.h の doc)。ペイロードが
-      // stream_id のみの場合は field_value が NULL になるためガードする
-      event.priority_field_value =
-          ext->field_value_len > 0
-              ? std::string(reinterpret_cast<const char*>(ext->field_value),
-                            ext->field_value_len)
-              : std::string();
-      self->push_event(std::move(event));
-    } break;
-
-    default:
-      break;
+  auto it = self->pending_headers_.find(stream_id);
+  if (it != self->pending_headers_.end()) {
+    Http2Event event;
+    event.stream_id = stream_id;
+    event.headers = std::move(it->second);
+    event.type = classify_headers_event(event.headers);
+    self->push_event(std::move(event));
+    self->pending_headers_.erase(it);
   }
-
   return 0;
 }
 
-int Http2Connection::on_data_chunk_recv_callback(nghttp2_session* session,
-                                                 uint8_t flags,
-                                                 int32_t stream_id,
-                                                 const uint8_t* data,
-                                                 size_t len,
-                                                 void* user_data) noexcept {
+int Http2Connection::on_begin_trailers_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
   auto* self = static_cast<Http2Connection*>(user_data);
+  self->pending_trailers_[stream_id].clear();
+  return 0;
+}
+
+int Http2Connection::on_recv_trailer_callback(nghttp2_conn* conn,
+                                              int64_t stream_id,
+                                              int32_t token,
+                                              nghttp2_rcbuf* name,
+                                              nghttp2_rcbuf* value,
+                                              uint8_t flags,
+                                              void* user_data,
+                                              void* stream_user_data) noexcept {
+  (void)conn;
+  (void)token;
+  (void)flags;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  nghttp2_vec name_buf = nghttp2_rcbuf_get_buf(name);
+  nghttp2_vec value_buf = nghttp2_rcbuf_get_buf(value);
+  std::string name_str(reinterpret_cast<const char*>(name_buf.base),
+                       name_buf.len);
+  std::string value_str(reinterpret_cast<const char*>(value_buf.base),
+                        value_buf.len);
+  self->pending_trailers_[stream_id].emplace_back(std::move(name_str),
+                                                  std::move(value_str));
+  return 0;
+}
+
+int Http2Connection::on_end_trailers_callback(nghttp2_conn* conn,
+                                              int64_t stream_id,
+                                              int fin,
+                                              void* user_data,
+                                              void* stream_user_data) noexcept {
+  (void)conn;
+  (void)fin;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  auto it = self->pending_trailers_.find(stream_id);
+  if (it != self->pending_trailers_.end()) {
+    Http2Event event;
+    event.type = Http2EventType::Trailers;
+    event.stream_id = stream_id;
+    event.headers = std::move(it->second);
+    self->push_event(std::move(event));
+    self->pending_trailers_.erase(it);
+  }
+  return 0;
+}
+
+int Http2Connection::on_recv_data_callback(nghttp2_conn* conn,
+                                           int64_t stream_id,
+                                           const uint8_t* data,
+                                           size_t datalen,
+                                           void* user_data,
+                                           void* stream_user_data) noexcept {
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  // nghttp2-v2 では受信ウィンドウの管理はアプリの責務。v1 相当の自動
+  // WINDOW_UPDATE を実装する
+  self->extend_recv_stream_window(stream_id, datalen);
+  self->extend_recv_connection_window(datalen);
 
   Http2Event event;
   event.type = Http2EventType::Data;
   event.stream_id = stream_id;
-  event.data = std::vector<uint8_t>(data, data + len);
+  event.data = std::vector<uint8_t>(data, data + datalen);
   self->push_event(std::move(event));
 
+  (void)conn;
   return 0;
 }
 
-int Http2Connection::on_stream_close_callback(nghttp2_session* session,
-                                              int32_t stream_id,
-                                              uint32_t error_code,
-                                              void* user_data) noexcept {
-  auto* self = static_cast<Http2Connection*>(user_data);
-  self->stream_buffers_.erase(stream_id);
-  self->pending_headers_.erase(stream_id);
-  // ストリームが閉じた時点でトレーラも送信できなくなるため、保留中の
-  // トレーラを破棄する (RST_STREAM 送信・受信などで残留しないようにする)
-  self->pending_trailers_.erase(stream_id);
-  return 0;
-}
-
-int Http2Connection::on_header_callback(nghttp2_session* session,
-                                        const nghttp2_frame* frame,
-                                        const uint8_t* name,
-                                        size_t namelen,
-                                        const uint8_t* value,
-                                        size_t valuelen,
-                                        uint8_t flags,
-                                        void* user_data) noexcept {
+int Http2Connection::on_remote_end_stream_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
   auto* self = static_cast<Http2Connection*>(user_data);
 
-  if (frame->hd.type == NGHTTP2_HEADERS ||
-      frame->hd.type == NGHTTP2_PUSH_PROMISE) {
-    std::string name_str(reinterpret_cast<const char*>(name), namelen);
-    std::string value_str(reinterpret_cast<const char*>(value), valuelen);
-    self->pending_headers_[frame->hd.stream_id].emplace_back(
-        std::move(name_str), std::move(value_str));
+  auto it = self->streams_.find(stream_id);
+  if (it != self->streams_.end()) {
+    it->second.remote_closed = true;
   }
 
+  Http2Event event;
+  event.type = Http2EventType::StreamEnd;
+  event.stream_id = stream_id;
+  self->push_event(std::move(event));
   return 0;
 }
 
-int Http2Connection::on_begin_headers_callback(nghttp2_session* session,
-                                               const nghttp2_frame* frame,
+int Http2Connection::on_local_end_stream_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  auto it = self->streams_.find(stream_id);
+  if (it != self->streams_.end()) {
+    it->second.local_closed = true;
+  }
+  return 0;
+}
+
+int Http2Connection::on_recv_ping_ack_callback(nghttp2_conn* conn,
+                                               const nghttp2_ping_data* data,
+                                               nghttp2_duration rtt,
                                                void* user_data) noexcept {
+  (void)conn;
   auto* self = static_cast<Http2Connection*>(user_data);
 
-  if (frame->hd.type == NGHTTP2_HEADERS ||
-      frame->hd.type == NGHTTP2_PUSH_PROMISE) {
-    self->pending_headers_[frame->hd.stream_id] = {};
-  }
-
+  Http2Event event;
+  event.type = Http2EventType::Ping;
+  event.opaque_data.assign(data->data, data->data + sizeof(data->data));
+  event.ping_rtt_ns = rtt;
+  self->push_event(std::move(event));
   return 0;
 }
 
-nghttp2_ssize Http2Connection::data_source_read_callback(
-    nghttp2_session* session,
-    int32_t stream_id,
-    uint8_t* buf,
-    size_t length,
-    uint32_t* data_flags,
-    nghttp2_data_source* source,
-    void* user_data) noexcept {
+int Http2Connection::on_shutdown_callback(nghttp2_conn* conn,
+                                          int64_t last_stream_id,
+                                          uint32_t error_code,
+                                          void* user_data) noexcept {
+  (void)conn;
   auto* self = static_cast<Http2Connection*>(user_data);
+
+  Http2Event event;
+  event.type = Http2EventType::GoAway;
+  event.error_code = error_code;
+  event.last_stream_id = last_stream_id;
+  self->push_event(std::move(event));
+
+  // RFC 9113 Section 6.8 の graceful shutdown: GOAWAY 受信後も既存
+  // ストリームの送受信を継続する。closed_ にはせず、新規ストリーム
+  // 開始の抑止のみを goaway_received_ で行う
+  self->goaway_received_ = true;
+  return 0;
+}
+
+nghttp2_ssize Http2Connection::on_read_data_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    nghttp2_vec* vec,
+    size_t veccnt,
+    uint32_t* pflags,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)veccnt;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  if (vec == nullptr || veccnt == 0) {
+    return NGHTTP2_ERR_CALLBACK_FAILURE;
+  }
 
   auto it = self->stream_buffers_.find(stream_id);
-  if (it == self->stream_buffers_.end() || it->second.empty()) {
-    // 送信データが尽きた。保留中のトレーラがあれば、ここで EOF を立てて
-    // トレーラ HEADERS を続けて送る (nghttp2.h の nghttp2_submit_trailer
-    // の説明に従う)。トレーラが無ければ従来どおり保留状態にする
-    auto trailer_it = self->pending_trailers_.find(stream_id);
-    if (trailer_it == self->pending_trailers_.end()) {
-      return NGHTTP2_ERR_DEFERRED;
+  for (;;) {
+    if (it != self->stream_buffers_.end() && !it->second.empty()) {
+      StreamData& front = it->second.front();
+      size_t remaining = front.data.size() - front.offset;
+      if (remaining == 0) {
+        if (front.eof) {
+          // 空の END_STREAM。バッファを返さず EOF だけ通知する
+          *pflags |= NGHTTP2_READ_DATA_FLAG_EOF;
+          it->second.pop_front();
+          vec[0] = nghttp2_vec{nullptr, 0};
+          return 1;
+        }
+        // 空データ (eof なし) は送出するものが無いため捨てる
+        it->second.pop_front();
+        continue;
+      }
+
+      // アプリのバッファを直接指す (nghttp2-v2 は書き込み確認まで
+      // アプリがバッファを保持する契約)
+      vec[0] = nghttp2_vec{
+          const_cast<uint8_t*>(front.data.data() + front.offset), remaining};
+      if (front.eof) {
+        *pflags |= NGHTTP2_READ_DATA_FLAG_EOF;
+      }
+      return 1;
     }
 
-    // トレーラを nghttp2_nv に変換
-    std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(trailer_it->second);
-
-    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-    if (nghttp2_submit_trailer(self->session_, stream_id, nva.data(),
-                               nva.size()) == 0) {
-      // トレーラ HEADERS が END_STREAM を担うため END_STREAM を立てない
-      *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+    // 送信データが尽きた。トレーラを送信済みなら EOF を渡して
+    // トレーラ HEADERS を送出させる
+    if (self->trailers_submitted_.count(stream_id) != 0) {
+      *pflags |= NGHTTP2_READ_DATA_FLAG_EOF;
+      vec[0] = nghttp2_vec{nullptr, 0};
+      return 1;
     }
-    self->pending_trailers_.erase(trailer_it);
+
+    return NGHTTP2_ERR_WOULDBLOCK;
+  }
+}
+
+int Http2Connection::on_write_stream_data_offset_callback(
+    nghttp2_conn* conn,
+    int64_t stream_id,
+    uint64_t offset,
+    size_t len,
+    void* user_data,
+    void* stream_user_data) noexcept {
+  (void)conn;
+  (void)stream_user_data;
+  auto* self = static_cast<Http2Connection*>(user_data);
+
+  uint64_t& sent = self->stream_data_sent_[stream_id];
+  uint64_t new_sent = offset + len;
+  if (new_sent <= sent) {
     return 0;
   }
 
-  auto& buffers = it->second;
-  auto& front = buffers.front();
+  uint64_t delta = new_sent - sent;
+  sent = new_sent;
 
-  // 送信済みバイト数を offset で持ち、部分送出では残データをシフトしない。
-  // 旧実装は部分コピーごとに front.data.erase で全残データをシフトしていた
-  // ため、大バッファをフレーム単位で送出するとコピーコストが二乗で増えて
-  // いた。nghttp2 が要求する長さは 1 フレーム分に収まるため、ここでの
-  // コピーは常にフレームサイズ相当になる
-  size_t remaining = front.data.size() - front.offset;
-  size_t copy_len = std::min(length, remaining);
-  std::memcpy(buf, front.data.data() + front.offset, copy_len);
+  auto it = self->stream_buffers_.find(stream_id);
+  if (it == self->stream_buffers_.end()) {
+    return 0;
+  }
 
-  front.offset += copy_len;
-
-  if (front.offset >= front.data.size()) {
-    bool is_eof = front.eof;
-    buffers.pop_front();
-
-    if (is_eof) {
-      *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+  while (delta > 0 && !it->second.empty()) {
+    StreamData& front = it->second.front();
+    size_t remaining = front.data.size() - front.offset;
+    size_t take = std::min<size_t>(static_cast<size_t>(delta), remaining);
+    front.offset += take;
+    delta -= take;
+    if (front.offset >= front.data.size()) {
+      it->second.pop_front();
     }
   }
 
-  return static_cast<nghttp2_ssize>(copy_len);
+  return 0;
+}
+
+void Http2Connection::on_rand_callback(uint8_t* dest, size_t destlen) noexcept {
+  // rand は接続生成時にレートリミッタの種として 1 度だけ呼ばれる
+  std::random_device rd;
+  std::uniform_int_distribution<unsigned int> dist(0, 255);
+  for (size_t i = 0; i < destlen; ++i) {
+    dest[i] = static_cast<uint8_t>(dist(rd));
+  }
 }
 
 // ========== Python バインディング ==========
 
+namespace {
+
+std::string get_nghttp2_version() {
+  // nghttp2-v2 はバージョン取得関数を公開していないため、コンパイル時に
+  // version.h へ展開されたマクロを使う
+  return NGHTTP2_VERSION;
+}
+
+// ALPN プロトコルリストから h2 / http/1.1 を選択する
+//
+// RFC 7301 のプロトコル名は 1-255 バイト。サーバー優先度は h2 > http/1.1
+std::optional<std::string> select_alpn(
+    const std::vector<std::string>& client_protocols) {
+  auto has_protocol = [&client_protocols](const char* name) {
+    for (const auto& proto : client_protocols) {
+      if (proto.size() > 255) {
+        continue;
+      }
+      if (proto == name) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (has_protocol("h2")) {
+    return std::string("h2");
+  }
+  if (has_protocol("http/1.1")) {
+    return std::string("http/1.1");
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 void bind_http2(nb::module_& m) {
-  auto http2_m = m.def_submodule("http2", "HTTP/2 protocol (nghttp2)");
+  auto http2_m = m.def_submodule("http2", "HTTP/2 protocol (nghttp2-v2)");
 
   // Http2Config のバインディング
   nb::class_<Http2Config>(http2_m, "Config", "HTTP/2 設定")
@@ -1013,12 +1306,13 @@ void bind_http2(nb::module_& m) {
       .def_rw("max_concurrent_streams", &Http2Config::max_concurrent_streams,
               "最大同時ストリーム数")
       .def_rw("max_frame_size", &Http2Config::max_frame_size,
-              "最大フレームサイズ")
+              "最大フレームサイズ (nghttp2-v2 では 16384 固定)")
       .def_rw("max_header_list_size", &Http2Config::max_header_list_size,
               "最大ヘッダーリストサイズ")
       .def_rw("is_server", &Http2Config::is_server, "サーバーモード")
       .def_rw("no_rfc7540_priorities", &Http2Config::no_rfc7540_priorities,
-              "SETTINGS_NO_RFC7540_PRIORITIES を送信するか");
+              "SETTINGS_NO_RFC7540_PRIORITIES を送信するか "
+              "(nghttp2-v2 は常に送信するため設定は無効)");
 
   // Http2EventType のバインディング
   nb::enum_<Http2EventType>(http2_m, "EventType", "HTTP/2 イベント種別")
@@ -1027,11 +1321,8 @@ void bind_http2(nb::module_& m) {
       .value("STREAM_END", Http2EventType::StreamEnd)
       .value("STREAM_RESET", Http2EventType::StreamReset)
       .value("GO_AWAY", Http2EventType::GoAway)
-      .value("WINDOW_UPDATE", Http2EventType::WindowUpdate)
       .value("SETTINGS", Http2EventType::Settings)
       .value("PING", Http2EventType::Ping)
-      .value("PUSH_PROMISE", Http2EventType::PushPromise)
-      .value("PRIORITY_UPDATE", Http2EventType::PriorityUpdate)
       .value("INFORMATIONAL", Http2EventType::Informational)
       .value("TRAILERS", Http2EventType::Trailers);
 
@@ -1051,10 +1342,6 @@ void bind_http2(nb::module_& m) {
       .def_ro("error_code", &Http2Event::error_code, "エラーコード")
       .def_ro("last_stream_id", &Http2Event::last_stream_id,
               "GOAWAY の last_stream_id")
-      .def_ro("promised_stream_id", &Http2Event::promised_stream_id,
-              "PUSH_PROMISE の promised stream ID")
-      .def_ro("priority_field_value", &Http2Event::priority_field_value,
-              "PRIORITY_UPDATE の priority field value")
       .def_prop_ro(
           "opaque_data",
           [](const Http2Event& e) {
@@ -1062,10 +1349,9 @@ void bind_http2(nb::module_& m) {
                 reinterpret_cast<const char*>(e.opaque_data.data()),
                 e.opaque_data.size());
           },
-          "PING の opaque data (RFC 9113 Section 6.7)")
-      .def_ro("ack", &Http2Event::ack, "PING ACK かどうか")
-      .def_ro("window_size_increment", &Http2Event::window_size_increment,
-              "WINDOW_UPDATE の増分値 (RFC 9113 Section 6.9)");
+          "PING ACK の opaque data (RFC 9113 Section 6.7)")
+      .def_ro("ping_rtt_ns", &Http2Event::ping_rtt_ns,
+              "PING ACK の RTT (ナノ秒)");
 
   // Http2Connection のバインディング
   nb::class_<Http2Connection>(http2_m, "Connection",
@@ -1130,7 +1416,7 @@ void bind_http2(nb::module_& m) {
            "レスポンスを送信")
       .def(
           "send_data",
-          [](Http2Connection& self, int32_t stream_id, nb::bytes data,
+          [](Http2Connection& self, int64_t stream_id, nb::bytes data,
              bool eof) {
             bindings::check_python_input_size("send_data data", data.size());
             self.send_data(
@@ -1151,7 +1437,7 @@ void bind_http2(nb::module_& m) {
       .def("goaway", &Http2Connection::goaway, nb::lock_self(),
            nb::arg("error_code") = 0,
            nb::sig("def goaway(self, error_code: int = 0) -> None"),
-           "GOAWAY を送信")
+           "GOAWAY を送信して graceful shutdown を開始")
       .def("_test_force_close", &Http2Connection::test_force_close,
            nb::lock_self(),
            "テスト専用: 低レベルを閉鎖状態にする (production からは呼ばない)")
@@ -1173,14 +1459,12 @@ void bind_http2(nb::module_& m) {
            nb::arg("stream_id"),
            nb::sig(
                "def _test_stream_buffer_offset(self, stream_id: int) -> int"),
-           "テスト専用: 送信バッファ先頭の送信済みオフセットを返す")
+           "テスト専用: 送信バッファ先頭の送出確認済みオフセットを返す")
       .def(
           "ping",
           [](Http2Connection& self, nb::bytes opaque_data) {
             bindings::check_python_input_size("ping opaque_data",
                                               opaque_data.size());
-            // bytes は std::vector<uint8_t> の型キャスト対象外 (nanobind は
-            // bytes / str をシーケンスとして受け付けない) ため明示変換する
             self.ping(std::vector<uint8_t>(
                 opaque_data.c_str(), opaque_data.c_str() + opaque_data.size()));
           },
@@ -1216,11 +1500,6 @@ void bind_http2(nb::module_& m) {
            nb::sig("def change_extpri_stream_priority(self, stream_id: int, "
                    "urgency: int, incremental: bool) -> bool"),
            "ストリームの優先度を変更")
-      .def("submit_push_promise", &Http2Connection::submit_push_promise,
-           nb::lock_self(), nb::arg("stream_id"), nb::arg("headers"),
-           nb::sig("def submit_push_promise(self, stream_id: int, headers: "
-                   "list[tuple[str, str]]) -> int"),
-           "Server Push を宣言")
       .def("next_event", &Http2Connection::next_event, nb::lock_self(),
            nb::sig("def next_event(self) -> Event | None"),
            "次のイベントを取得")
@@ -1236,14 +1515,6 @@ void bind_http2(nb::module_& m) {
                    nb::lock_self(),
                    nb::sig("def local_settings(self) -> dict[str, int] | None"),
                    "ローカルの SETTINGS の値を取得")
-      .def_prop_ro("outbound_queue_size", &Http2Connection::outbound_queue_size,
-                   nb::lock_self(),
-                   nb::sig("def outbound_queue_size(self) -> int | None"),
-                   "送信キューのフレーム数を取得")
-      .def_prop_ro("remote_window_size", &Http2Connection::remote_window_size,
-                   nb::lock_self(),
-                   nb::sig("def remote_window_size(self) -> int | None"),
-                   "コネクションのリモートウィンドウ残量を取得")
       .def_prop_ro("local_window_size", &Http2Connection::local_window_size,
                    nb::lock_self(),
                    nb::sig("def local_window_size(self) -> int | None"),
@@ -1257,12 +1528,6 @@ void bind_http2(nb::module_& m) {
                    nb::lock_self(),
                    nb::sig("def request_allowed(self) -> bool | None"),
                    "新しいリクエストを送信できるかを取得")
-      .def("stream_remote_window_size",
-           &Http2Connection::stream_remote_window_size, nb::lock_self(),
-           nb::arg("stream_id"),
-           nb::sig("def stream_remote_window_size(self, stream_id: int) -> "
-                   "int | None"),
-           "ストリームのリモートウィンドウ残量を取得")
       .def("stream_local_window_size",
            &Http2Connection::stream_local_window_size, nb::lock_self(),
            nb::arg("stream_id"),
@@ -1287,43 +1552,15 @@ void bind_http2(nb::module_& m) {
            "ストリームのリモート側が half-closed かを取得");
 
   // nghttp2 バージョン情報
-  http2_m.def(
-      "get_version",
-      []() {
-        auto* ver = nghttp2_version(0);
-        return std::string(ver->version_str);
-      },
-      nb::sig("def get_version() -> str"), "nghttp2 のバージョンを取得");
+  http2_m.def("get_version", &get_nghttp2_version,
+              nb::sig("def get_version() -> str"),
+              "nghttp2 のバージョンを取得");
 
   // ALPN プロトコル選択 (サーバー用ユーティリティ)
-  http2_m.def(
-      "select_alpn",
-      [](const std::vector<std::string>& client_protocols)
-          -> std::optional<std::string> {
-        // length-prefixed のワイヤ形式 (ALPN プロトコルリスト) に変換する。
-        // RFC 7301 のプロトコル名は 1-255 バイトのため、長さが 256 バイト
-        // 以上のエントリはワイヤ形式に変換できないので無視する
-        std::vector<uint8_t> wire;
-        for (const auto& proto : client_protocols) {
-          if (proto.size() > 255) {
-            continue;
-          }
-          wire.push_back(static_cast<uint8_t>(proto.size()));
-          wire.insert(wire.end(), proto.begin(), proto.end());
-        }
-
-        // 戻り値は 1 = h2 選択 / 0 = http/1.1 選択 / -1 = 一致なし
-        const uint8_t* out = nullptr;
-        uint8_t outlen = 0;
-        int rv = nghttp2_select_alpn(&out, &outlen, wire.data(), wire.size());
-        if (rv < 0) {
-          return std::nullopt;
-        }
-        return std::string(reinterpret_cast<const char*>(out), outlen);
-      },
-      nb::arg("client_protocols"),
-      nb::sig("def select_alpn(client_protocols: list[str]) -> str | None"),
-      "ALPN プロトコルを選択 (h2 / http/1.1 の優先順)");
+  http2_m.def("select_alpn", &select_alpn, nb::arg("client_protocols"),
+              nb::sig("def select_alpn(client_protocols: list[str]) -> "
+                      "str | None"),
+              "ALPN プロトコルを選択 (h2 / http/1.1 の優先順)");
 }
 
 }  // namespace http2
