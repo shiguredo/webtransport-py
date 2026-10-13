@@ -1,7 +1,7 @@
 # h3 低レベル e2e のサーバー側イベント待ちが QUIC 再送を駆動せず CI で flaky に失敗する
 
 - Created: 2026-10-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/test-fix-h3-low-level-server-event-wait
 - Reporter: @voluntas
 
@@ -55,4 +55,15 @@ CI の wheel ワークフローで断続的に失敗する
 
 ## 解決方法
 
-{どのように対応するのかを明確にすること}
+- `tests/test_e2e_webtransport_h3_low_level.py` の `_LowLevelClient` に
+  `wait_server_event` を追加した。待機中に `_receive()` と `_advance_timers()` を
+  回して満了した QUIC タイマーを処理し、再送を駆動する。`_pump()` は呼ばず、
+  h3 層の送信キューを掃わないことで、`open_stream` しただけで WT ヘッダーを
+  送らない前提の検証の決定性を保つ
+- 同ファイルの `asyncio.wait_for(info.*.wait(), timeout=5.0)` 25 箇所を
+  `client.wait_server_event(info.*)` へ置き換えた
+- 一時的な検証テストで `send_stream_data_withheld` によりパケットを保留した
+  まま待つと、修正前は再送されずタイムアウトし、`wait_server_event` では再送に
+  よりデータ到着を観測できることを確認した
+- 同ファイルのテストを 30 回連続実行して全通過、全体テスト (1466 件) の通過を
+  確認した
