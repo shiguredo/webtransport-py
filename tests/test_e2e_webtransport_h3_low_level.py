@@ -387,6 +387,33 @@ class _LowLevelClient:
                 return None
             await asyncio.sleep(0.01)
 
+    async def wait_server_event(self, event: asyncio.Event, timeout: float = 5.0) -> None:
+        """サーバー側コールバックのイベントを、クライアントの QUIC ループを駆動しながら待つ
+
+        高レベル Server のコールバックはサーバー側の run() が発火するが、
+        きっかけとなるクライアントの送信パケットが失われると、QUIC の再送は
+        handle_timeout() を明示的に呼ばない限り進まない。単に
+        asyncio.Event.wait() で待つと再送が駆動されず、パケット 1 つの損失で
+        タイムアウトし得る。待機中も受信と満了タイマーの処理を回して再送を
+        駆動する (ライブラリ本体の Client.run と同じ駆動)。
+
+        h3 層の送信キューは掃かない (_pump を呼ばない)。open_stream した
+        だけで WT ヘッダーを送らない前提の検証 (リセットでセッション ID を
+        復元できないことの確認) の決定性を壊さないため。
+
+        Raises:
+            AssertionError: タイムアウト以内にイベントが発火しなかった場合
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if event.is_set():
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await self._receive()
+            await self._advance_timers()
+        raise AssertionError(f"{timeout} 秒以内にサーバー側イベントを観測できませんでした")
+
 
 @dataclass
 class _ResetTestServerInfo:
@@ -573,7 +600,7 @@ async def test_stream_reset_second_session_id(test_certificates):
         # 同一 QUIC 接続上に 2 セッションを確立する
         first_session_id, second_session_id = await client.establish_two_sessions()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
         assert info.session_ids == [first_session_id, second_session_id]
 
         # 2 つ目のセッションでデータストリームを開いて送信する
@@ -581,13 +608,13 @@ async def test_stream_reset_second_session_id(test_certificates):
         await client.send_stream_data(stream_id, b"payload")
 
         # サーバー側の受信を確認してからリセットする
-        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.data_received)
         assert info.data_session_id == second_session_id
 
         await client.reset_stream(stream_id)
 
         # リセットされたストリームの属するセッション ID が渡る
-        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.reset_received)
         assert info.reset_stream_id == stream_id
         assert info.reset_session_id == second_session_id
     finally:
@@ -618,7 +645,7 @@ async def test_stream_reset_at_recovers_session_id(test_certificates):
 
         session_id = await client.establish_session()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         # データストリームを開いてデータを送信するが、パケットは保留する
         # (QUIC 層に書き込み済みの状態を作りつつ、データがリセットより先に
@@ -637,7 +664,7 @@ async def test_stream_reset_at_recovers_session_id(test_certificates):
         await client.send_withheld_packets()
 
         # 後から届いた WT ヘッダーでセッション ID が復元される
-        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.reset_received)
         assert info.reset_stream_id == stream_id
         assert info.reset_session_id == session_id
     finally:
@@ -667,7 +694,7 @@ async def test_stream_reset_before_data_received_minus_one(test_certificates):
 
         _first_session_id, second_session_id = await client.establish_two_sessions()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         # データストリームを開くが、データは送信しない
         stream_id = await client.open_stream(second_session_id)
@@ -676,7 +703,7 @@ async def test_stream_reset_before_data_received_minus_one(test_certificates):
         await client.reset_stream(stream_id)
 
         # セッション ID を復元できないため -1 が渡る
-        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.reset_received)
         assert info.reset_stream_id == stream_id
         assert info.reset_session_id == -1
     finally:
@@ -701,13 +728,13 @@ async def test_stream_reset_connect_stream_session_id(test_certificates):
 
         _first_session_id, second_session_id = await client.establish_two_sessions()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         # 2 つ目のセッションの CONNECT ストリームをリセットする
         await client.reset_stream(second_session_id)
 
         # セッション ID (= CONNECT ストリーム ID) が渡る
-        await asyncio.wait_for(info.reset_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.reset_received)
         assert info.reset_stream_id == second_session_id
         assert info.reset_session_id == second_session_id
     finally:
@@ -736,14 +763,14 @@ async def test_connect_stream_reset_notifies_session_closed(test_certificates):
 
         first_session_id, second_session_id = await client.establish_two_sessions()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
         assert info.session_ids == [first_session_id, second_session_id]
 
         # 1 つ目のセッションの CONNECT ストリームをリセットする
         await client.reset_stream(first_session_id, error_code=0x42)
 
         # on_session_closed が正しいセッション ID で 1 回だけ発火する
-        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        await client.wait_server_event(info.session_closed)
         assert info.closed_session_ids == [first_session_id]
 
         # クライアント側の SessionClosed イベントに error_code がローカル伝播する
@@ -770,7 +797,7 @@ async def test_connect_stream_reset_notifies_session_closed(test_certificates):
         stream_id = await client.open_stream(second_session_id)
         await client.send_stream_data(stream_id, b"still-alive")
 
-        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.data_received)
         assert info.data_session_id == second_session_id
     finally:
         await _cleanup_reset_test_server(server, server_task, client)
@@ -798,7 +825,7 @@ async def test_connect_stream_fin_notifies_session_closed(test_certificates):
 
         first_session_id, second_session_id = await client.establish_two_sessions()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
         assert info.session_ids == [first_session_id, second_session_id]
 
         # 1 つ目のセッションの CONNECT ストリームに空 FIN を直接注入して
@@ -808,7 +835,7 @@ async def test_connect_stream_fin_notifies_session_closed(test_certificates):
         await client._send_quic_only()
 
         # on_session_closed が正しいセッション ID で 1 回だけ発火する
-        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        await client.wait_server_event(info.session_closed)
         assert info.closed_session_ids == [first_session_id]
 
         # サーバーからの応答 FIN を受信して、クライアント側の SessionClosed
@@ -848,7 +875,7 @@ async def test_connect_stream_fin_notifies_session_closed(test_certificates):
         stream_id = await client.open_stream(second_session_id)
         await client.send_stream_data(stream_id, b"still-alive")
 
-        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.data_received)
         assert info.data_session_id == second_session_id
     finally:
         await _cleanup_reset_test_server(server, server_task, client)
@@ -970,7 +997,7 @@ async def test_datagram_closed_session_id_discarded(test_certificates):
 
         first_session_id, second_session_id = await client.establish_two_sessions()
 
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
         assert info.session_ids == [first_session_id, second_session_id]
 
         # サーバー側のクライアントアドレスを取得する (接続は 1 つだけ)
@@ -981,7 +1008,7 @@ async def test_datagram_closed_session_id_discarded(test_certificates):
         await client._pump()
 
         # サーバー側のセッション終了を待つ
-        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        await client.wait_server_event(info.session_closed)
         assert info.closed_session_ids == [first_session_id]
 
         # クライアント側でもセッションが閉じたことを確認する
@@ -1101,7 +1128,7 @@ async def test_server_close_session_sends_error_code_and_message(test_certificat
     try:
         await asyncio.wait_for(client.connect(), timeout=5.0)
         session_id = await asyncio.wait_for(client.establish_session(), timeout=5.0)
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         # サーバー側のクライアントアドレスを取得する (接続は 1 つだけ)
         (client_addr,) = server._clients.keys()
@@ -1115,7 +1142,7 @@ async def test_server_close_session_sends_error_code_and_message(test_certificat
         assert event.error_message == "protocol violation"
 
         # サーバー側でもセッション終了が通知される
-        await asyncio.wait_for(info.session_closed.wait(), timeout=5.0)
+        await client.wait_server_event(info.session_closed)
         assert info.closed_session_ids == [session_id]
 
         # 1 セッションだけを閉じるため、QUIC 接続は生存している
@@ -1140,7 +1167,7 @@ async def test_server_close_session_keeps_other_session(test_certificates):
     try:
         await asyncio.wait_for(client.connect(), timeout=5.0)
         first_session_id, second_session_id = await client.establish_two_sessions()
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         (client_addr,) = server._clients.keys()
 
@@ -1155,7 +1182,7 @@ async def test_server_close_session_keeps_other_session(test_certificates):
         # 2 つ目のセッションはデータ通信を継続できる
         stream_id = await client.open_stream(second_session_id)
         await client.send_stream_data(stream_id, b"second-alive")
-        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.data_received)
         assert info.data_session_id == second_session_id
     finally:
         await _cleanup_reset_test_server(server, server_task, client)
@@ -1176,7 +1203,7 @@ async def test_server_close_session_unknown_target_is_noop(test_certificates):
     try:
         await asyncio.wait_for(client.connect(), timeout=5.0)
         session_id = await asyncio.wait_for(client.establish_session(), timeout=5.0)
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         (client_addr,) = server._clients.keys()
 
@@ -1188,7 +1215,7 @@ async def test_server_close_session_unknown_target_is_noop(test_certificates):
         assert client._h3_session.get_session_ids() == [session_id]
         stream_id = await client.open_stream(session_id)
         await client.send_stream_data(stream_id, b"still-alive")
-        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.data_received)
         assert info.data_session_id == session_id
     finally:
         await _cleanup_reset_test_server(server, server_task, client)
@@ -1211,14 +1238,14 @@ async def test_server_stop_sending_remaps_error_code(test_certificates):
     try:
         await asyncio.wait_for(client.connect(), timeout=5.0)
         session_id = await asyncio.wait_for(client.establish_session(), timeout=5.0)
-        await asyncio.wait_for(info.sessions_ready.wait(), timeout=5.0)
+        await client.wait_server_event(info.sessions_ready)
 
         (client_addr,) = server._clients.keys()
 
         # サーバーが受信済みのデータストリームを対象にする
         stream_id = await client.open_stream(session_id)
         await client.send_stream_data(stream_id, b"payload")
-        await asyncio.wait_for(info.data_received.wait(), timeout=5.0)
+        await client.wait_server_event(info.data_received)
 
         await server.stop_sending(client_addr, stream_id, 5)
 
