@@ -420,6 +420,29 @@ class H3Session {
   void reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
+   * ストリームの書き込み側をシャットダウンする
+   *
+   * nghttp3 に書き込み側の終了 (SHUT_WR) を伝える。ピアの STOP_SENDING を
+   * 受けたときに高レベル層が呼ぶ。QUIC RESET_STREAM の送出は ngtcp2 が
+   * 行う (RFC 9000 Section 3.5 は Ready / Send 状態での送出を MUST、Data Sent
+   * 状態での延期を MAY と定める) ため、ここでは送出しない。
+   *
+   * シャットダウン済みのストリームへの send_stream_data は no-op になる。
+   * nghttp3 は SHUT_WR のストリームを送出対象にしないが、no-op にしないと
+   * 未送信データが stream_buffers_ に積み上がったまま残る。
+   *
+   * 受信方向は生存したままである。読み取り側の中断 (close_stream /
+   * reset_stream) はストリーム全体を破棄するため使わない。ピアが送信を
+   * 続けるデータは引き続き受信する。
+   *
+   * 接続が無い・閉じている場合は no-op (Http3Connection::shutdown_stream_write
+   * と同じ入力契約)。
+   *
+   * @param stream_id ストリーム ID
+   */
+  void shutdown_stream_write(int64_t stream_id);
+
+  /**
    * 送信時のエラーコードをワイヤ用に変換する
    *
    * CONNECT ストリーム (session_ids_) 以外は WT_APPLICATION_ERROR へ
@@ -923,6 +946,11 @@ class H3Session {
 
   // ストリームとセッションのマッピング
   std::map<int64_t, StreamInfo> stream_info_;
+
+  // shutdown_stream_write 済みのストリーム ID (send_stream_data の no-op 用。
+  // ストリーム終了時と close_stream で除去する。Http3Connection の同名
+  // メンバーと対称)
+  std::set<int64_t> shutdown_stream_ids_;
 
   // 制御ストリーム ID
   int64_t control_stream_id_ = -1;

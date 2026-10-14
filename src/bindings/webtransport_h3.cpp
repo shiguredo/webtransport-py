@@ -1424,6 +1424,14 @@ void H3Session::send_stream_data(int64_t stream_id,
     return;
   }
 
+  // 書き込み側シャットダウン済みのストリームは no-op とする。nghttp3 は
+  // SHUT_WR のストリームを送出対象にしないが、no-op にしないと未送信データが
+  // stream_buffers_ に積み上がったまま接続終了まで残る
+  // (Http3Connection::send_data と同じ扱い)
+  if (shutdown_stream_ids_.count(stream_id) > 0) {
+    return;
+  }
+
   // stream_info_ に未登録のストリームへの送信はセッション ID を復元できない
   // ため黙って無視する。セッション ID 集合の先頭要素をフォールバックに使う
   // と、複数セッション時に誤ったセッションへデータが属し得るため使わない
@@ -1616,6 +1624,9 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   // 走査の対象外のため自身のエントリをここで削除する)。リセット後は再送信が
   // 停止するため未送信データを保持する義務がない (RFC 9000 Section 19.4)
   stream_buffers_.erase(stream_id);
+  // シャットダウンの記録も削除する。nghttp3 のストリームは破棄されるため、
+  // 残しても no-op の判定に使われない
+  shutdown_stream_ids_.erase(stream_id);
 
   // WT ヘッダー未受信 (stream_info_ に未登録) のストリーム等は
   // NGHTTP3_ERR_STREAM_NOT_FOUND が返るため戻り値は無視し、
@@ -1675,6 +1686,17 @@ void H3Session::reset_stream(int64_t stream_id, uint64_t error_code) {
   close_stream(stream_id, wire_error_code);
 }
 
+void H3Session::shutdown_stream_write(int64_t stream_id) {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // nghttp3 に書き込み側の終了を伝える (SHUT_WR フラグを立て、スケジューラから
+  // も外す)。QUIC RESET_STREAM は ngtcp2 が送出する
+  nghttp3_conn_shutdown_stream_write(conn_, stream_id);
+  shutdown_stream_ids_.insert(stream_id);
+}
+
 void H3Session::erase_session_streams(int64_t session_id) {
   // 破棄されたストリームの未送信データを接続終了まで保持しない。
   // ローカル送信バッファの破棄は draft-ietf-webtrans-http3-16 Section 6 の
@@ -1688,6 +1710,9 @@ void H3Session::erase_session_streams(int64_t session_id) {
   for (int64_t stream_id : streams_to_remove) {
     stream_buffers_.erase(stream_id);
     stream_info_.erase(stream_id);
+    // 破棄されたストリームのシャットダウン記録も残さない (ストリーム ID は
+    // 接続内で一意なため、残しても再開しないが、接続の寿命まで無界に増える)
+    shutdown_stream_ids_.erase(stream_id);
   }
 }
 
@@ -2013,6 +2038,10 @@ int H3Session::stream_close_cb(nghttp3_conn* conn,
     event.session_id = it->second.session_id;
     session->stream_info_.erase(it);
   }
+
+  // 終了したストリームのシャットダウン記録を削除する。ストリーム ID は接続内で
+  // 一意なため、記録が no-op の判定に使われることはない
+  session->shutdown_stream_ids_.erase(stream_id);
 
   session->push_event(std::move(event));
   return 0;
@@ -2749,6 +2778,11 @@ void bind_webtransport_h3(nb::module_& m) {
                    "error_code: int) -> int"),
            "送信時のエラーコードをワイヤ用に変換する "
            "(データストリームは WT_APPLICATION_ERROR へリマップ)")
+      .def("shutdown_stream_write", &H3Session::shutdown_stream_write,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def shutdown_stream_write(self, stream_id: int) -> None"),
+           "ストリームの書き込み側をシャットダウンする (以後の "
+           "send_stream_data は no-op。受信方向は生存したまま)")
       .def("close_session", &H3Session::close_session, nb::lock_self(),
            nb::arg("session_id"), nb::arg("error_code") = 0,
            nb::arg("error_message") = "",

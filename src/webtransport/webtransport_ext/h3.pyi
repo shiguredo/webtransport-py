@@ -173,6 +173,9 @@ class Session:
     def map_send_error_code(self, stream_id: int, error_code: int) -> int:
         """送信時のエラーコードをワイヤ用に変換する (データストリームは WT_APPLICATION_ERROR へリマップ)"""
 
+    def shutdown_stream_write(self, stream_id: int) -> None:
+        """ストリームの書き込み側をシャットダウンする (以後の send_stream_data は no-op。受信方向は生存したまま)"""
+
     def close_session(self, session_id: int, error_code: int = 0, error_message: str = "") -> None:
         """WebTransport セッションを閉じる"""
 

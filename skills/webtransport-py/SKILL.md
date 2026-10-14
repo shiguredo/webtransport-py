@@ -144,7 +144,7 @@ asyncio.run(main())
 - `on_stream_reset(session, stream_id, error_code)`
 - `on_datagram(session, data)`
 - `on_goaway(...)`: HTTP/3 は `(goaway_id, addr)`、HTTP/2 は `(last_stream_id, error_code, addr)`
-- `on_stop_sending(session, stream_id, error_code)`: HTTP/2 のみ
+- `on_stop_sending(session, stream_id, error_code)`: HTTP/2 のみ。HTTP/3 は `server.h3` の `on_stop_sending(session_id, stream_id, error_code, addr)` を使う
 - `on_error(session, error_code, error_message)`: HTTP/2 のみ
 
 `Session` の共通 API は `session_id` / `addr` / `http_version` プロパティと `open_stream(unidirectional=True)` / `send_stream_data(stream_id, data, fin=False)` / `send_datagram(data)` / `reset_stream(stream_id, error_code=0)` / `stop_sending(stream_id, error_code=0)` / `close_session(error_code=0, error_message="")` である。`close_session` は接続を閉じずにこの WebTransport セッションだけを終了コードと理由付きで閉じ、HTTP/2 と HTTP/3 のどちらでも使える。`addr` は取得できない場合 None になる。プロトコル固有の操作は具象クラスにあり、HTTP/3 は `close_stream()` を持つ。`server.h3` / `server.h2` で実装へ降りられる。
@@ -307,6 +307,13 @@ async def main() -> None:
     #   WT_APPLICATION_ERROR レンジのワイヤコードをアプリコードへ逆変換した値、
     #   レンジ外または予約済みコードポイントでは None (draft-ietf-webtrans-http3-16
     #   Section 4.4 の「no application error code」)
+    # on_stop_sending(session_id: int, stream_id: int, error_code: int | None, addr: tuple[str, int])
+    #   ピアの送信停止要求 (STOP_SENDING) の通知。WebTransport データストリームのみが
+    #   対象で、セッション ID を解決できないストリーム (CONNECT ストリームと
+    #   WebTransport 以外のストリーム) では発火しない。受信すると nghttp3 へ書き込み側の
+    #   終了を伝え、以後そのストリームへの送信は行われない (受信方向は生存したまま)。
+    #   error_code の変換規則は on_stream_reset と同じ (draft-ietf-webtrans-http3-16
+    #   Section 4.4)
     # on_datagram(session_id: int, data: bytes, addr: tuple[str, int])
     #   on_datagram の session_id は Quarter Stream ID から復元する
     #   (draft-ietf-webtrans-http3-16 Section 4.5)。仕様逸脱ピアが巨大な
@@ -361,7 +368,7 @@ async def run() -> None
 async def stop() -> None
 ```
 
-`close_stream` は `reset_stream` に委譲する同一実装 (RESET_STREAM 送出)。`stop_sending` は QUIC STOP_SENDING を送出し、データストリームのエラーコードは WT_APPLICATION_ERROR レンジへリマップする (draft-ietf-webtrans-http3-16 Section 4.4 の MUST。`reset_stream` と違い nghttp3 の状態は変えない)。`close_session` は 1 セッションだけを終了コードと理由付きで閉じ (WT_CLOSE_SESSION)、接続と同一接続上の他セッションは継続する。セッション終了はピアからの WT_CLOSE_SESSION 受信と同じ経路で `on_session_closed` にも通知される。`open_stream` はデフォルト単方向で、双方向指定 (`unidirectional=False`) は `NotImplementedError`、失敗時は -1 を返す。`session_id` には `on_session_ready` で受け取った有効な値を渡す (サーバー起動の双方向ストリームは draft-ietf-webtrans-http3-16 Section 4.3 の "can" に基づく任意実装のため未実装。双方向ストリーム自体はクライアントから開ける)。起動は `async with server:` でも `start()` / `stop()` の明示呼び出しでも行え、`run()` がメインループである。
+`close_stream` は `reset_stream` に委譲する同一実装 (RESET_STREAM 送出)。`stop_sending` は QUIC STOP_SENDING を送出し、データストリームのエラーコードは WT_APPLICATION_ERROR レンジへリマップする (draft-ietf-webtrans-http3-16 Section 4.4 の MUST。`reset_stream` と違い nghttp3 の状態は変えない)。ピアからの STOP_SENDING は書き込み側の終了として nghttp3 へ転送され、`on_stop_sending` で通知される (受信方向は生存したまま。RESET_STREAM の送出は ngtcp2 が行う。RFC 9000 Section 3.5)。`close_session` は 1 セッションだけを終了コードと理由付きで閉じ (WT_CLOSE_SESSION)、接続と同一接続上の他セッションは継続する。セッション終了はピアからの WT_CLOSE_SESSION 受信と同じ経路で `on_session_closed` にも通知される。`open_stream` はデフォルト単方向で、双方向指定 (`unidirectional=False`) は `NotImplementedError`、失敗時は -1 を返す。`session_id` には `on_session_ready` で受け取った有効な値を渡す (サーバー起動の双方向ストリームは draft-ietf-webtrans-http3-16 Section 4.3 の "can" に基づく任意実装のため未実装。双方向ストリーム自体はクライアントから開ける)。起動は `async with server:` でも `start()` / `stop()` の明示呼び出しでも行え、`run()` がメインループである。
 
 送信系メソッドの `addr` は接続ごとのキーであり、コールバックで受け取った `addr` をそのまま渡す。キーに無い `addr` を渡した場合、エラーにならず処理が黙って捨てられる。`send_stream_data` / `send_datagram` は addr が登録済みで data が 1 MiB 超なら `ValueError` を送出する (addr の引き当てとセッション確認の後に走る C++ 側のローカル検査)。
 
@@ -385,6 +392,10 @@ async def main() -> None:
     # on_stream_reset(stream_id: int, error_code: int | None)
     #   error_code はレンジ外または予約済みコードポイントでは None
     #   (draft-ietf-webtrans-http3-16 Section 4.4)
+    # on_stop_sending(stream_id: int, error_code: int | None)
+    #   サーバー側と同じ規則 (WebTransport データストリームのみが対象。セッション ID を
+    #   解決できないストリームでは発火しない。error_code はレンジ外または予約済み
+    #   コードポイントでは None)
     # on_datagram(data: bytes)
     # on_goaway(goaway_id: int)
     #   GOAWAY 受信の通知。graceful shutdown の通知であり接続もセッションも
@@ -435,7 +446,7 @@ async def close(error_code: int = 0, error_message: str = "") -> None
 
 `migrate()` は接続と上位層の状態を維持したまま送受信のソケットとアドレスを差し替える (`quic.Client.migrate` と同じ手順)。サーバー側は DCID で接続を照合してアドレスキーを張り替える (RFC 9000 Section 9)。
 
-`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、`close()` を挟まずに再度呼ぶと `RuntimeError` になる (`close()` の後は再度接続できる)。対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は原因となった層の具体例外 (`ConnectTimeoutError` / `ConnectFailedError` / `QuicConnectionError` / `QuicHandshakeError` / `WebTransportProtocolError` / `WebTransportSessionRejectedError` / `WebTransportSessionClosedError`) を送出する。`run()` が受信ループであり、接続またはセッションがエラーで終了した場合は `run()` がその原因の例外を送出して終了する (正常終了では送出しない)。`close()` でセッションと接続を閉じる (`close(error_code, error_message)` は指定した終了コードと理由を持つ WT_CLOSE_SESSION を送出し、ピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる。1024 バイト超の理由は UTF-8 文字境界で切り詰められる。draft-ietf-webtrans-http3-16 Section 6)。`stop_sending(stream_id, error_code)` は QUIC STOP_SENDING を送出し、データストリームのエラーコードは WT_APPLICATION_ERROR レンジへリマップする (同 Section 4.4 の MUST)。`send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (h3 セッション未生成の `Client` は送信しないため例外にならない)。
+`close_stream` は `reset_stream` と同じ挙動 (RESET_STREAM 送出)。`open_stream` はデフォルト双方向で、失敗時は -1 を返す。失敗条件はセッション終了後・非 2xx 拒否後・未確立・接続クローズ済みに加え、Sans I/O の `h3.Session.open_stream` の登録失敗も含む (登録失敗時は開いた QUIC ストリームを RESET_STREAM で解放してから -1 を返す。サーバー側の `open_stream` と同じ)。`connect()` は deadline ベースで bounded に動作し、`close()` を挟まずに再度呼ぶと `RuntimeError` になる (`close()` の後は再度接続できる)。対向 SETTINGS の WebTransport 対応 3 設定 (WT_ENABLED / ENABLE_CONNECT_PROTOCOL / H3_DATAGRAM) を待ってから Extended CONNECT を送り、失敗時は原因となった層の具体例外 (`ConnectTimeoutError` / `ConnectFailedError` / `QuicConnectionError` / `QuicHandshakeError` / `WebTransportProtocolError` / `WebTransportSessionRejectedError` / `WebTransportSessionClosedError`) を送出する。`run()` が受信ループであり、接続またはセッションがエラーで終了した場合は `run()` がその原因の例外を送出して終了する (正常終了では送出しない)。`close()` でセッションと接続を閉じる (`close(error_code, error_message)` は指定した終了コードと理由を持つ WT_CLOSE_SESSION を送出し、ピアの CONNECT ストリームクローズを `close_wait_timeout` の上限まで待ってから接続を閉じる。1024 バイト超の理由は UTF-8 文字境界で切り詰められる。draft-ietf-webtrans-http3-16 Section 6)。`stop_sending(stream_id, error_code)` は QUIC STOP_SENDING を送出し、データストリームのエラーコードは WT_APPLICATION_ERROR レンジへリマップする (同 Section 4.4 の MUST)。ピアからの STOP_SENDING は書き込み側の終了として nghttp3 へ転送され、`on_stop_sending` で通知される (受信方向は生存したまま。RESET_STREAM の送出は ngtcp2 が行う。RFC 9000 Section 3.5)。`send_stream_data` / `send_datagram` は data が 1 MiB 超なら `ValueError` を送出する (h3 セッション未生成の `Client` は送信しないため例外にならない)。
 
 ### WebTransport over HTTP/2 (統一 API + `webtransport.h2` の Sans-IO)
 
@@ -790,6 +801,7 @@ def send_datagram(session_id: int, data: bytes) -> None
 def close_stream(stream_id: int, error_code: int = 0) -> int  # 戻り値はセッション ID (復元不可なら -1)
 def reset_stream(stream_id: int, error_code: int = 0) -> None  # エラーコードをリマップしてから close_stream する
 def map_send_error_code(stream_id: int, error_code: int) -> int  # 送信時のエラーコードをワイヤ用に変換 (データストリームは WT_APPLICATION_ERROR へリマップ)
+def shutdown_stream_write(stream_id: int) -> None  # 書き込み側をシャットダウン (以後の send_stream_data は no-op。受信方向は生存したまま)
 
 # ストリーム状態 (None はコネクションが無いか閉じている場合。0 / 1 はストリームの状態)
 def stream_writable(stream_id: int) -> int | None  # 1 書き込み可 / 0 書き込み不可
@@ -806,7 +818,7 @@ def set_max_client_streams_bidi(max_streams: int) -> None  # サーバー (リ�
 def next_event() -> Event | None
 ```
 
-`close_stream` は nghttp3 へのストリーム終了通知で、戻り値はリセットされたストリームが属するセッション ID (復元できない場合は -1)。`reset_stream` は `map_send_error_code` でワイヤ用のエラーコードに変換してから `close_stream` を呼ぶ (データストリームのアプリコードは WT_APPLICATION_ERROR レンジへ載せ替えられる。draft-ietf-webtrans-http3-16 Section 4.4)。QUIC RESET_STREAM の送出は asyncio ラッパーの `reset_stream` が QUIC 層への通知と合わせて行う (Sans I/O で直接使う場合は `quic.Connection.reset_stream()` を自分で呼ぶ)。`connect` の `origin` は Origin ヘッダー値で、空文字なら付与しない。
+`close_stream` は nghttp3 へのストリーム終了通知で、戻り値はリセットされたストリームが属するセッション ID (復元できない場合は -1)。`reset_stream` は `map_send_error_code` でワイヤ用のエラーコードに変換してから `close_stream` を呼ぶ (データストリームのアプリコードは WT_APPLICATION_ERROR レンジへ載せ替えられる。draft-ietf-webtrans-http3-16 Section 4.4)。QUIC RESET_STREAM の送出は asyncio ラッパーの `reset_stream` が QUIC 層への通知と合わせて行う (Sans I/O で直接使う場合は `quic.Connection.reset_stream()` を自分で呼ぶ)。`shutdown_stream_write` は nghttp3 に書き込み側の終了を伝える (以後の `send_stream_data` は no-op になり、受信方向は生存したまま)。ピアの STOP_SENDING を転送する用途で使う。このとき QUIC RESET_STREAM の送出は、STOP_SENDING の受信に対する ngtcp2 の処理として行われる (RFC 9000 Section 3.5)。`connect` の `origin` は Origin ヘッダー値で、空文字なら付与しない。
 
 `Config` のプロパティは `max_field_section_size` / `qpack_max_dtable_capacity` / `qpack_blocked_streams` / `wt_pre_accept_buffer_limit` / `is_server` / `allowed_origins`。`allowed_origins` は許可オリジンリストで、空リスト (未設定) なら全オリジンを受理する。`wt_pre_accept_buffer_limit` は受理前 WebTransport データストリーム 1 本あたりの累計受信バイト上限 (既定 65536) で、超過したストリームは WT_BUFFERED_STREAM_REJECTED で拒否される。
 

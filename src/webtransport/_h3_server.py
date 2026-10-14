@@ -111,6 +111,9 @@ class Server:
         self._on_stream_reset: (
             Callable[[int, int, int | None, tuple[str, int]], Awaitable[None]] | None
         ) = None
+        self._on_stop_sending: (
+            Callable[[int, int, int | None, tuple[str, int]], Awaitable[None]] | None
+        ) = None
         self._on_datagram: Callable[[int, bytes, tuple[str, int]], Awaitable[None]] | None = None
         self._on_goaway: Callable[[int, tuple[str, int]], Awaitable[None]] | None = None
 
@@ -235,6 +238,33 @@ class Server:
             callback: async def callback(session_id: int, stream_id: int, error_code: int | None, addr: tuple[str, int]) -> None
         """
         self._on_stream_reset = callback
+
+    def on_stop_sending(
+        self,
+        callback: Callable[[int, int, int | None, tuple[str, int]], Awaitable[None]],
+    ) -> None:
+        """ピアの送信停止要求 (STOP_SENDING) 受信時のコールバックを設定する
+
+        WebTransport のデータストリームのみが対象である。セッション ID を
+        解決できないストリーム (CONNECT ストリーム・WebTransport 以外の
+        ストリーム) では通知しない。
+
+        受信すると nghttp3 へ書き込み側の終了を伝え、以後そのストリームへの
+        送信は行われない。受信方向は生存したままである (ピアが送信を続ける
+        データは on_stream_data で届き続ける)。QUIC の RESET_STREAM 送出は
+        ngtcp2 が行う (RFC 9000 Section 3.5)。
+
+        session_id はストリームが属するセッション ID (解決できないストリーム
+        は通知対象外のため -1 にはならない)。error_code はデータストリームでは
+        WT_APPLICATION_ERROR レンジのワイヤコードを unsigned 32-bit のアプリ
+        コードへ逆変換して渡す (draft-ietf-webtrans-http3-16 Section 4.4)。
+        レンジ外、またはレンジ内の予約済みコードポイントの場合は None
+        (アプリエラーコードなし)。
+
+        Args:
+            callback: async def callback(session_id: int, stream_id: int, error_code: int | None, addr: tuple[str, int]) -> None
+        """
+        self._on_stop_sending = callback
 
     def on_datagram(
         self,
@@ -471,6 +501,32 @@ class Server:
                         deliver_stream_reset_error_code(
                             wire_error_code=quic_event.error_code,
                             is_connect_stream=is_connect_stream,
+                        ),
+                        addr,
+                    )
+            elif quic_event.type == quic.EventType.STOP_SENDING:
+                # ピアの送信停止要求を nghttp3 へ転送する (書き込み側の終了)。
+                # 転送しないと nghttp3 は書き込み側を生存とみなし、送信データを
+                # 返し続ける (RFC 9000 Section 3.5 は Ready / Send 状態での
+                # RESET_STREAM 送出を MUST、Data Sent 状態での延期を MAY と
+                # 定め、ngtcp2 が自動送出する)。読み取り側を中断する
+                # close_stream とは異なり、受信方向は生存したままである。
+                # WebTransport のデータストリーム以外 (CONNECT ストリーム・
+                # WebTransport 以外のストリーム) はセッション ID を解決できない
+                # ため、転送も通知もしない。CONNECT ストリームの書き込み側を
+                # 終端すると、セッション終了の経路 (WT_CLOSE_SESSION の送出等)
+                # と衝突する
+                session_id = client.webtransport_session.stream_wt_session_id(quic_event.stream_id)
+                if session_id is None:
+                    continue
+                client.webtransport_session.shutdown_stream_write(quic_event.stream_id)
+                if self._on_stop_sending is not None:
+                    await self._on_stop_sending(
+                        session_id,
+                        quic_event.stream_id,
+                        deliver_stream_reset_error_code(
+                            wire_error_code=quic_event.error_code,
+                            is_connect_stream=False,
                         ),
                         addr,
                     )
