@@ -196,6 +196,11 @@ async def test_server_notifies_peer_stop_sending(test_certificates) -> None:
         assert error_code == _APP_ERROR_CODE, (
             "error_code が WT_APPLICATION_ERROR レンジのアプリコードへ逆変換されていません"
         )
+        # 通知は 1 回だけである (ngtcp2 は同一ストリームの STOP_SENDING を 1 回だけ
+        # アプリへ届ける)
+        assert info.stop_sending == [(session_id, stream_id, _APP_ERROR_CODE, addr)], (
+            "STOP_SENDING の通知が 1 回だけではありません"
+        )
 
         # 転送されると nghttp3 の書き込み側が終了し、以後そのストリームは
         # 書き込み不可になる
@@ -271,8 +276,8 @@ async def test_client_notifies_peer_stop_sending(test_certificates) -> None:
             lambda: bool(observation.stop_sending),
             "ピアの STOP_SENDING 後も on_stop_sending が呼ばれません",
         )
-        assert observation.stop_sending[0] == (stream_id, _APP_ERROR_CODE), (
-            "error_code が WT_APPLICATION_ERROR レンジのアプリコードへ逆変換されていません"
+        assert observation.stop_sending == [(stream_id, _APP_ERROR_CODE)], (
+            "STOP_SENDING の通知が 1 回だけではありません"
         )
 
         # 転送されると nghttp3 の書き込み側が終了し、以後そのストリームは
@@ -304,9 +309,11 @@ async def test_client_notifies_peer_stop_sending(test_certificates) -> None:
             lambda: len(observation.stop_sending) == 2,
             "2 本目の STOP_SENDING で on_stop_sending が呼ばれません",
         )
-        assert observation.stop_sending[1] == (second_stream_id, None), (
-            "レンジ外の error_code が None になりません"
-        )
+        # 2 本目も 1 回だけ通知され、レンジ外の error_code は None になる
+        assert observation.stop_sending == [
+            (stream_id, _APP_ERROR_CODE),
+            (second_stream_id, None),
+        ], "レンジ外の error_code が None になりません"
     finally:
         if client_task is not None:
             client_task.cancel()
