@@ -1,7 +1,7 @@
 # h3 の高レベル層がピアの STOP_SENDING を扱わない
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/add-h3-peer-stop-sending-handling
 - Polished: 2026-10-04
 - Updated: 2026-10-05
@@ -45,3 +45,15 @@
 - アプリ起点の `reset_stream` / `close_stream` の挙動 (現状維持)
 - nghttp3 本体の変更 (バインディング層で吸収する。CODEBASE.md の「nghttp2 / nghttp3 / ngtcp2 をフォークしないこと」)
 - 送信を再開する API (RFC 9000 Section 3.5 / 19.4 により送信方向は終端し、再開できない)
+
+## 解決方法
+
+- `src/bindings/webtransport_h3.h` / `.cpp` の `H3Session` に `shutdown_stream_write(stream_id)` を追加した。nghttp3 に書き込み側の終了 (SHUT_WR) を伝え、`shutdown_stream_ids_` に記録してシャットダウン済みストリームへの `send_stream_data` を no-op にする (no-op にしないと未送信データが `stream_buffers_` に積み上がったまま残る)。接続が無い・閉じている場合は no-op (`Http3Connection::shutdown_stream_write` と同じ入力契約)。記録は `close_stream`、`stream_close_cb`、`erase_session_streams` で除去する
+- `src/webtransport/_h3_client.py` の `Client` と `src/webtransport/_h3_server.py` の `Server` に `on_stop_sending` を追加した。形と `error_code` の変換規則は `on_stream_reset` に揃え、`deliver_stream_reset_error_code` を使う (通知対象はデータストリームのみのため `is_connect_stream` は常に False)。QUIC の `STOP_SENDING` イベントで `Session.stream_wt_session_id` がセッション ID を返すストリームだけを対象に、`shutdown_stream_write` で転送してから通知する。CONNECT ストリームと WebTransport 以外のストリームは転送も通知もしない
+- 確立中の `connect()` 内ループは変更していない (確立前は CONNECT ストリームしか存在せず、対象外のため)
+- 変更対象にあった `src/webtransport/h3/client.py` / `server.py` は現存しない。高レベル h3 層は `src/webtransport/_h3_client.py` / `_h3_server.py` にあり (`webtransport.h3` は Sans-IO の低レベル API のみ)、そちらへ実装した
+- テスト: `tests/test_e2e_webtransport_h3_peer_stop_sending.py` を追加した。サーバー側 DUT はピアを `Client`、クライアント側 DUT はピアを `Server` とし、低レベルの `stop_sending` で STOP_SENDING だけを送出する。通知の引数、`error_code` の変換 (レンジ内はアプリコード、レンジ外は None)、`stream_writable` が 0 になること (転送)、`send_stream_data` がバッファも積まないこと (no-op) を表明する。対照は 2 つあり、DUT が開いた WT 管理外の双方向ストリームには WT ヘッダーだけをワイヤで送ってピアにストリームを持たせ (ピアの ngtcp2 はストリームを持たないストリームへの `shutdown_stream_read` を黙って無視するため、送らないと検証が空振りする)、CONNECT ストリームでは nghttp3 の書き込み側が生存のままであることも表明する。`tests/test_webtransport_h3_stream_control.py` には低レベル契約 (シャットダウン後は送出もバッファもしない、シャットダウン前に積んだデータも送出されない) を追加した
+- RED は 2 通りで実測した。Python の追加分岐を外すと e2e 2 件が失敗し、C++ の no-op ガードを外して再ビルドすると低レベルの no-op 表明が失敗する
+- `skills/webtransport-py/SKILL.md` の h3 クライアント / サーバーの節と Sans-IO `Session` の節を更新した。統一 API の `Server.on_stop_sending` は HTTP/2 のみのままで、HTTP/3 では `server.h3` の `on_stop_sending` を使う (`on_error` と同じくプロトコル固有 API を `h3` / `h2` から呼ぶ形)
+- `CHANGES.md` は CODEBASE.md の指示により更新しない。型スタブは `make develop` の生成結果と一致させた (公開 API として `shutdown_stream_write` が追加される)
+- 全テストが通過する (1472 passed)
