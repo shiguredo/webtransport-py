@@ -132,6 +132,40 @@ class QmuxConnection {
                         bool fin);
 
   /**
+   * ストリームの書き込み側を即時に終了する (RESET_STREAM を送出)
+   *
+   * 送信を止めて書き込み側をリセットする。graceful な終了は
+   * send_stream_data(fin=true) であり、こちらは QUIC の RESET_STREAM と同じ
+   * 意味である。リモートの単方向ストリーム (書き込み側が無い) に対しては
+   * DWNX_ERR_INVALID_ARGUMENT を返す。
+   *
+   * @return 0 以上は成功、負値は dwnx のライブラリエラー
+   */
+  int reset_stream(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
+   * ストリームの読み取り側を即時に終了する (STOP_SENDING を送出)
+   *
+   * ピアへ送信の停止を要求する (QUIC の STOP_SENDING と同じ意味)。ローカルの
+   * 単方向ストリーム (読み取り側が無い) に対しては DWNX_ERR_INVALID_ARGUMENT
+   * を返す。
+   *
+   * @return 0 以上は成功、負値は dwnx のライブラリエラー
+   */
+  int stop_sending(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
+   * ストリームの両方向を即時に終了する (RESET_STREAM と STOP_SENDING を送出)
+   *
+   * webtransport_ext.quic.Connection.close_stream と同じ意味である。単方向
+   * ストリームでは dwnx が存在する側だけを終了する。h3 層の close_stream
+   * (nghttp3 のストリーム終了) とはエラーコードの空間も意味も異なる。
+   *
+   * @return 0 以上は成功、負値は dwnx のライブラリエラー
+   */
+  int close_stream(int64_t stream_id, uint64_t error_code = 0);
+
+  /**
    * 接続を閉じる (CONNECTION_CLOSE を含むレコードを send() で取り出せるようにする)
    */
   void close(uint64_t error_code, const std::string& reason);

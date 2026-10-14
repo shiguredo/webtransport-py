@@ -277,6 +277,36 @@ class Client:
         """
         await self._require_driver().send_stream_data(stream_id, data, fin)
 
+    async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームの書き込み側を終了する (RESET_STREAM を送出)
+
+        Args:
+            stream_id: 対象のストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        await self._require_driver().reset_stream(stream_id, error_code)
+
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームの読み取り側を終了する (STOP_SENDING を送出)
+
+        Args:
+            stream_id: 対象のストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        await self._require_driver().stop_sending(stream_id, error_code)
+
+    async def close_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームの両方向を終了する (RESET_STREAM と STOP_SENDING を送出)
+
+        単方向ストリームでは dwnx が存在する側だけを終了する。graceful な
+        書き込み側の終了は `send_stream_data(fin=True)` を使う。
+
+        Args:
+            stream_id: 対象のストリーム ID
+            error_code: アプリケーションエラーコード
+        """
+        await self._require_driver().close_stream(stream_id, error_code)
+
     def _require_driver(self) -> ConnectionDriver:
         """ドライバを取り出す (未接続なら例外)"""
         if self._driver is None:

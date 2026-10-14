@@ -16,6 +16,9 @@ from webtransport import qmux
 # テストの待ち時間の上限 (秒)
 TIMEOUT = 10.0
 
+# ストリーム終了 (RESET_STREAM / STOP_SENDING) に載せるアプリケーションエラーコード
+_APP_ERROR_CODE = 0x2A
+
 
 async def _stop_server(server: qmux.Server, task: asyncio.Task[None]) -> None:
     """サーバーを停止し、実行タスクを片付ける"""
@@ -260,6 +263,12 @@ async def test_run_before_connect_raises() -> None:
         await client.run()
     with pytest.raises(RuntimeError, match="connect"):
         await client.send_stream_data(0, b"data")
+    with pytest.raises(RuntimeError, match="connect"):
+        await client.reset_stream(0)
+    with pytest.raises(RuntimeError, match="connect"):
+        await client.stop_sending(0)
+    with pytest.raises(RuntimeError, match="connect"):
+        await client.close_stream(0)
 
 
 @pytest.mark.asyncio
@@ -291,4 +300,175 @@ async def test_server_accepts_multiple_connections() -> None:
     finally:
         for client in clients:
             await client.close()
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_client_stop_sending_notifies_server() -> None:
+    """クライアントの stop_sending がサーバーの on_stop_sending で観測できる"""
+    server = qmux.Server("127.0.0.1", 0)
+    stop_sending: list[tuple[int, int]] = []
+    stop_sending_event = asyncio.Event()
+
+    async def on_server_stop_sending(
+        session: qmux.Session,
+        stream_id: int,
+        error_code: int,
+    ) -> None:
+        stop_sending.append((stream_id, error_code))
+        stop_sending_event.set()
+
+    server.on_stop_sending(on_server_stop_sending)
+
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        stream_id = await client.open_stream()
+        assert stream_id >= 0
+        # 双方向ストリームを両側に知らせてから停止を要求する
+        await client.send_stream_data(stream_id, b"hello", fin=False)
+        await client.stop_sending(stream_id, _APP_ERROR_CODE)
+        await asyncio.wait_for(stop_sending_event.wait(), TIMEOUT)
+        assert stop_sending == [(stream_id, _APP_ERROR_CODE)]
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_server_reset_stream_notifies_client() -> None:
+    """サーバーの reset_stream がクライアントの on_stream_reset で観測できる"""
+    server = qmux.Server("127.0.0.1", 0)
+    sessions: list[qmux.Session] = []
+    server_stream_ids: list[int] = []
+    data_received = asyncio.Event()
+
+    async def on_session_ready(session: qmux.Session) -> None:
+        sessions.append(session)
+        stream_id = await session.open_stream()
+        assert stream_id >= 0
+        server_stream_ids.append(stream_id)
+        # 送信側を開いたまま (FIN を付けずに) データを送る
+        await session.send_stream_data(stream_id, b"from server", fin=False)
+
+    server.on_session_ready(on_session_ready)
+
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    reset_events: list[tuple[int, int]] = []
+    reset_event = asyncio.Event()
+
+    async def on_client_stream_data(stream_id: int, data: bytes, fin: bool) -> None:
+        data_received.set()
+
+    async def on_client_stream_reset(stream_id: int, error_code: int) -> None:
+        reset_events.append((stream_id, error_code))
+        reset_event.set()
+
+    client.on_stream_data(on_client_stream_data)
+    client.on_stream_reset(on_client_stream_reset)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        await asyncio.wait_for(data_received.wait(), TIMEOUT)
+        assert server_stream_ids
+        await sessions[0].reset_stream(server_stream_ids[0], _APP_ERROR_CODE)
+        await asyncio.wait_for(reset_event.wait(), TIMEOUT)
+        assert reset_events == [(server_stream_ids[0], _APP_ERROR_CODE)]
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_client_close_stream_notifies_server_in_both_directions() -> None:
+    """クライアントの close_stream がサーバーで RESET_STREAM と STOP_SENDING の両方になる"""
+    server = qmux.Server("127.0.0.1", 0)
+    reset_events: list[tuple[int, int]] = []
+    stop_events: list[tuple[int, int]] = []
+    both_received = asyncio.Event()
+
+    def _set_if_both_received() -> None:
+        if reset_events and stop_events:
+            both_received.set()
+
+    async def on_server_stream_reset(
+        session: qmux.Session,
+        stream_id: int,
+        error_code: int,
+    ) -> None:
+        reset_events.append((stream_id, error_code))
+        _set_if_both_received()
+
+    async def on_server_stop_sending(
+        session: qmux.Session,
+        stream_id: int,
+        error_code: int,
+    ) -> None:
+        stop_events.append((stream_id, error_code))
+        _set_if_both_received()
+
+    server.on_stream_reset(on_server_stream_reset)
+    server.on_stop_sending(on_server_stop_sending)
+
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        stream_id = await client.open_stream()
+        assert stream_id >= 0
+        await client.send_stream_data(stream_id, b"hello", fin=False)
+        await client.close_stream(stream_id, _APP_ERROR_CODE)
+        await asyncio.wait_for(both_received.wait(), TIMEOUT)
+        assert reset_events == [(stream_id, _APP_ERROR_CODE)]
+        assert stop_events == [(stream_id, _APP_ERROR_CODE)]
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_direction_mismatch_raises_protocol_error() -> None:
+    """単方向ストリームの向き違いは QmuxProtocolError になる
+
+    ローカルの単方向ストリームには読み取り側が無いため stop_sending は拒否され、
+    書き込み側の reset_stream は通る (dwnx.h の契約)。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        stream_id = await client.open_stream(unidirectional=True)
+        assert stream_id >= 0
+        with pytest.raises(qmux.exceptions.QmuxProtocolError):
+            await client.stop_sending(stream_id, 0)
+        # 書き込み側は存在するため受理される
+        await client.reset_stream(stream_id, 0)
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
         await _stop_server(server, server_task)

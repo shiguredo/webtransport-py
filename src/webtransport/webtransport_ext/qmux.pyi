@@ -127,6 +127,17 @@ class Connection:
     def send_stream_data(self, stream_id: int, data: bytes, fin: bool = False) -> None:
         """ストリームデータの送信を予約する"""
 
+    def reset_stream(self, stream_id: int, error_code: int = 0) -> int:
+        """ストリームの書き込み側をリセットする (RESET_STREAM を送出。0 以上は成功、負値は dwnx のライブラリエラー)"""
+
+    def stop_sending(self, stream_id: int, error_code: int = 0) -> int:
+        """ストリームの読み取り側を終了する (STOP_SENDING を送出。0 以上は成功、負値は dwnx のライブラリエラー)"""
+
+    def close_stream(self, stream_id: int, error_code: int = 0) -> int:
+        """
+        ストリームの両方向を終了する (RESET_STREAM + STOP_SENDING。0 以上は成功、負値は dwnx のライブラリエラー)
+        """
+
     def close(self, error_code: int = 0, reason: str = "") -> None:
         """接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする)"""
 

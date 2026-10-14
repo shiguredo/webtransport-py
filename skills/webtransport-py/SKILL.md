@@ -173,6 +173,7 @@ record = client.pending_record
 - `pending_record -> bytes | None`: 送信すべき 1 レコード。無い場合は None
 - `timeout -> int | None` / `handle_timeout()`: 次のタイマー期限 (ナノ秒) とその処理
 - `open_stream(bidirectional) -> int` / `send_stream_data(stream_id, data, fin=False)` / `close(error_code=0, reason="")`
+- `reset_stream(stream_id, error_code=0) -> int` / `stop_sending(stream_id, error_code=0) -> int` / `close_stream(stream_id, error_code=0) -> int`: ローカルのストリーム終了。`reset_stream` は書き込み側の即時終了 (RESET_STREAM)、`stop_sending` は読み取り側の即時終了 (STOP_SENDING)、`close_stream` は両方向の即時終了 (RESET_STREAM + STOP_SENDING) である (`webtransport_ext.quic.Connection` と同じ意味。graceful な書き込み側の終了は `send_stream_data(fin=True)`)。単方向ストリームの向き違いは -201 (DWNX_ERR_INVALID_ARGUMENT)、存在しないストリームは 0 を返す。0 以上は成功、負値は dwnx のライブラリエラー
 - `next_event() -> Event | None`: `TRANSPORT_PARAMS_RECEIVED` / `STREAM_DATA` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING`
 - `get_version()`: dwnx のバージョン文字列
 
@@ -222,9 +223,9 @@ await client.close()
 - クライアントのコールバックは `on_connected()` / `on_closed()` / `on_stream_data(stream_id, data, fin)` / `on_stream_reset(stream_id, error_code)` / `on_stop_sending(stream_id, error_code)`
 - `Server(host, port, config=None, ssl=None, alpn_protocols=None)`: `start()` で待ち受け、`run()` で受け付け続け、`stop()` で接続ごと閉じる。`actual_port` で実際に待ち受けているポートが分かる
 - サーバーのコールバックは `Session` ハンドルを受け取る (`on_session_ready(session)` / `on_session_closed(session)` / `on_stream_data(session, stream_id, data, fin)` / `on_stream_reset(session, stream_id, error_code)` / `on_stop_sending(session, stream_id, error_code)`)
-- `Session` は `session_id` / `peer_address` / `is_closed` と `open_stream(unidirectional=False)` / `send_stream_data(stream_id, data, fin=False)` / `close(error_code=0, reason="")` を持つ。QMux の接続がそのまま多重化の単位で、プロトコルにアプリケーション層のセッション識別子は無いため、`session_id` はサーバーが接続ごとに振る連番である
+- `Session` は `session_id` / `peer_address` / `is_closed` と `open_stream(unidirectional=False)` / `send_stream_data(stream_id, data, fin=False)` / `reset_stream(stream_id, error_code=0)` / `stop_sending(stream_id, error_code=0)` / `close_stream(stream_id, error_code=0)` / `close(error_code=0, reason="")` を持つ。QMux の接続がそのまま多重化の単位で、プロトコルにアプリケーション層のセッション識別子は無いため、`session_id` はサーバーが接続ごとに振る連番である
 - 例外は `webtransport.qmux.exceptions` にある (`QmuxError` 基底 / `QmuxConnectionError` トランスポートの失敗 / `QmuxProtocolError` プロトコル違反と dwnx のライブラリエラー / `QmuxLibraryErrorCode`)
-- ストリームのリセットと送信停止 (`reset_stream` / `stop_sending`) は Sans-IO のバインディングが未対応のため asyncio API にも無い
+- ストリームの終了は `Client` と `Session` の `reset_stream(stream_id, error_code=0)` (書き込み側の即時終了。RESET_STREAM) / `stop_sending(stream_id, error_code=0)` (読み取り側の即時終了。STOP_SENDING) / `close_stream(stream_id, error_code=0)` (両方向の即時終了。RESET_STREAM + STOP_SENDING) で行う。`close_stream` は h3 層の同名 API (HTTP/3 のエラーコード空間でストリームを終了する) とは意味もエラーコードの空間も異なり、QMux の graceful な書き込み側の終了は `send_stream_data(fin=True)` である。単方向ストリームの向き違いは `QmuxProtocolError` になり、存在しないストリーム ID は黙って無視される
 - DATAGRAM (Unreliable Datagram Extension) は dwnx が未実装のため未対応である
 
 ## 例外

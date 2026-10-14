@@ -131,6 +131,64 @@ class ConnectionDriver:
             self._connection.send_stream_data(stream_id, data, fin)
             await self._flush_locked()
 
+    async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームの書き込み側を終了する (RESET_STREAM を送出)
+
+        Args:
+            stream_id: 対象のストリーム ID
+            error_code: アプリケーションエラーコード
+
+        Raises:
+            QmuxConnectionError: 接続が閉じている場合
+            QmuxProtocolError: リモートの単方向ストリーム (書き込み側が無い)
+                などで dwnx がライブラリエラーを返した場合
+        """
+        async with self._lock:
+            if self._closed:
+                raise QmuxConnectionError("QMux connection is closed")
+            self._raise_on_library_error(self._connection.reset_stream(stream_id, error_code))
+            await self._flush_locked()
+
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームの読み取り側を終了する (STOP_SENDING を送出)
+
+        Args:
+            stream_id: 対象のストリーム ID
+            error_code: アプリケーションエラーコード
+
+        Raises:
+            QmuxConnectionError: 接続が閉じている場合
+            QmuxProtocolError: ローカルの単方向ストリーム (読み取り側が無い)
+                などで dwnx がライブラリエラーを返した場合
+        """
+        async with self._lock:
+            if self._closed:
+                raise QmuxConnectionError("QMux connection is closed")
+            self._raise_on_library_error(self._connection.stop_sending(stream_id, error_code))
+            await self._flush_locked()
+
+    async def close_stream(self, stream_id: int, error_code: int = 0) -> None:
+        """ストリームの両方向を終了する (RESET_STREAM と STOP_SENDING を送出)
+
+        単方向ストリームでは dwnx が存在する側だけを終了する。h3 層の
+        `Session.close_stream` (HTTP/3 のエラーコード空間でストリームを終了
+        する) とはエラーコードの空間も意味も異なる。graceful な書き込み側の
+        終了は `send_stream_data(fin=True)` を使う。
+
+        Args:
+            stream_id: 対象のストリーム ID
+            error_code: アプリケーションエラーコード
+
+        Raises:
+            QmuxConnectionError: 接続が閉じている場合
+            QmuxProtocolError: dwnx がライブラリエラーを返した場合
+        """
+        async with self._lock:
+            if self._closed:
+                raise QmuxConnectionError("QMux connection is closed")
+            self._raise_on_library_error(self._connection.close_stream(stream_id, error_code))
+            await self._flush_locked()
+
     async def close(self, error_code: int = 0, reason: str = "") -> None:
         """CONNECTION_CLOSE を送って接続を閉じる
 
@@ -182,6 +240,26 @@ class ConnectionDriver:
             self._writer.write(record)
         await self._writer.drain()
 
+    @staticmethod
+    def _raise_on_library_error(result: int) -> None:
+        """dwnx のライブラリエラーを例外にする
+
+        0 以上と、接続の正常な終了を表すコード (CLOSING / DRAINING /
+        IDLE_CLOSE) は成功として扱う。
+
+        Args:
+            result: dwnx の関数が返した値
+
+        Raises:
+            QmuxProtocolError: dwnx がライブラリエラーを返した場合
+        """
+        if result >= 0 or is_graceful_termination(result):
+            return
+        message = qmux.Connection.strerror(result)
+        raise QmuxProtocolError(
+            f"QMux library error: {library_error_name(result)} ({result}) {message}"
+        )
+
     async def _pump_once(self) -> bool:
         """読み書きとタイマーを 1 巡させる
 
@@ -219,11 +297,7 @@ class ConnectionDriver:
         if data:
             async with self._lock:
                 result = self._connection.receive(data)
-            if result < 0 and not is_graceful_termination(result):
-                message = qmux.Connection.strerror(result)
-                raise QmuxProtocolError(
-                    f"QMux library error: {library_error_name(result)} ({result}) {message}"
-                )
+            self._raise_on_library_error(result)
 
         async with self._lock:
             if timeout_ns is not None and self._connection.timeout == 0:

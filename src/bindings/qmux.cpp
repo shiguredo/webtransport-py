@@ -364,6 +364,30 @@ void QmuxConnection::send_stream_data(int64_t stream_id,
   pending_stream_data_.push_back(std::move(pending));
 }
 
+int QmuxConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
+  if (conn_ == nullptr) {
+    return DWNX_ERR_INVALID_ARGUMENT;
+  }
+  // 予約された RESET_STREAM は後続の writev_stream / write_record が送出する
+  return dwnx_conn_shutdown_stream_write(conn_, 0, stream_id, error_code);
+}
+
+int QmuxConnection::stop_sending(int64_t stream_id, uint64_t error_code) {
+  if (conn_ == nullptr) {
+    return DWNX_ERR_INVALID_ARGUMENT;
+  }
+  // 予約された STOP_SENDING は後続の writev_stream / write_record が送出する
+  return dwnx_conn_shutdown_stream_read(conn_, 0, stream_id, error_code);
+}
+
+int QmuxConnection::close_stream(int64_t stream_id, uint64_t error_code) {
+  if (conn_ == nullptr) {
+    return DWNX_ERR_INVALID_ARGUMENT;
+  }
+  // 単方向ストリームでは dwnx が存在する側だけを終了する
+  return dwnx_conn_shutdown_stream(conn_, 0, stream_id, error_code);
+}
+
 void QmuxConnection::close(uint64_t error_code, const std::string& reason) {
   if (conn_ == nullptr) {
     return;
@@ -524,6 +548,24 @@ void bind_qmux(nb::module_& m) {
           },
           nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
           "ストリームデータの送信を予約する")
+      .def("reset_stream", &QmuxConnection::reset_stream, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
+                   "0) -> int"),
+           "ストリームの書き込み側をリセットする (RESET_STREAM を送出。"
+           "0 以上は成功、負値は dwnx のライブラリエラー)")
+      .def("stop_sending", &QmuxConnection::stop_sending, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def stop_sending(self, stream_id: int, error_code: int = "
+                   "0) -> int"),
+           "ストリームの読み取り側を終了する (STOP_SENDING を送出。"
+           "0 以上は成功、負値は dwnx のライブラリエラー)")
+      .def("close_stream", &QmuxConnection::close_stream, nb::arg("stream_id"),
+           nb::arg("error_code") = 0,
+           nb::sig("def close_stream(self, stream_id: int, error_code: int = "
+                   "0) -> int"),
+           "ストリームの両方向を終了する (RESET_STREAM + STOP_SENDING。"
+           "0 以上は成功、負値は dwnx のライブラリエラー)")
       .def("close", &QmuxConnection::close, nb::arg("error_code") = 0,
            nb::arg("reason") = "",
            "接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする)")
