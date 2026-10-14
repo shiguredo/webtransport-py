@@ -144,7 +144,7 @@ asyncio.run(main())
 - `on_stream_reset(session, stream_id, error_code)`
 - `on_datagram(session, data)`
 - `on_goaway(...)`: HTTP/3 は `(goaway_id, addr)`、HTTP/2 は `(last_stream_id, error_code, addr)`
-- `on_stop_sending(session, stream_id, error_code)`: HTTP/2 のみ。HTTP/3 は `server.h3` の `on_stop_sending(session_id, stream_id, error_code, addr)` を使う
+- `on_stop_sending(session, stream_id, error_code)`: HTTP/2 と HTTP/3。HTTP/3 では WebTransport のデータストリームのみが対象で、エラーコードはレンジ外のとき None になり得る (HTTP/2 は常に int)
 - `on_error(session, error_code, error_message)`: HTTP/2 のみ
 
 `Session` の共通 API は `session_id` / `addr` / `http_version` プロパティと `open_stream(unidirectional=True)` / `send_stream_data(stream_id, data, fin=False)` / `send_datagram(data)` / `reset_stream(stream_id, error_code=0)` / `stop_sending(stream_id, error_code=0)` / `close_session(error_code=0, error_message="")` である。`close_session` は接続を閉じずにこの WebTransport セッションだけを終了コードと理由付きで閉じ、HTTP/2 と HTTP/3 のどちらでも使える。`addr` は取得できない場合 None になる。プロトコル固有の操作は具象クラスにあり、HTTP/3 は `close_stream()` を持つ。`server.h3` / `server.h2` で実装へ降りられる。

@@ -164,3 +164,115 @@ async def test_session_request_rejection_over_unified_api(
         await asyncio.gather(server_task, return_exceptions=True)
         await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "http_version",
+    [HTTPVersion.HTTP2, HTTPVersion.HTTP3],
+    ids=["http2", "http3"],
+)
+async def test_stop_sending_over_unified_api(
+    http_version: HTTPVersion,
+    test_certificates,
+) -> None:
+    """ピアの STOP_SENDING が統一 API の on_stop_sending で通知される
+
+    同じシナリオを http_version の切り替えだけで両プロトコルで回す。DUT は
+    統一 Server、ピアは統一 Client である。ピアは双方向ストリームを開いて
+    データを送り、DUT 側でストリームがセッションへ解決されたことを確認して
+    から、プロトコル固有ハンドルの公開 API (stop_sending) で送信停止を
+    要求する。通知はプロトコルによらず (session, stream_id, error_code) の
+    形で届く。
+    """
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        http_version=http_version,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+    )
+
+    sessions: list[Session] = []
+    data_stream_ids: list[int] = []
+    stop_sending: list[tuple[Session, int, int | None]] = []
+    data_received = asyncio.Event()
+    stop_sending_received = asyncio.Event()
+
+    async def on_session_ready(session) -> None:
+        sessions.append(session)
+
+    async def on_stream_data(session, stream_id: int, data: bytes) -> None:
+        data_stream_ids.append(stream_id)
+        data_received.set()
+
+    async def on_stop_sending(session, stream_id: int, error_code: int | None) -> None:
+        stop_sending.append((session, stream_id, error_code))
+        stop_sending_received.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_stream_data(on_stream_data)
+    server.on_stop_sending(on_stop_sending)
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    await server.start()
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        http_version=http_version,
+        verify_peer=False,
+    )
+
+    client_task: asyncio.Task[None] | None = None
+    error_code = 0x2A
+    try:
+        await asyncio.wait_for(client.connect(), timeout=10.0)
+        client_task = asyncio.create_task(client.run())
+
+        # ピアが双方向ストリームでデータを送る。DUT がデータを受信した時点で
+        # ストリームはセッションへ解決されており、停止要求を受理できる
+        stream_id = await client.open_stream()
+        assert stream_id >= 0, "WebTransport ストリームを開けませんでした"
+        await client.send_stream_data(stream_id, b"stop-me")
+        await asyncio.wait_for(data_received.wait(), timeout=10.0)
+        assert data_stream_ids == [stream_id]
+
+        # 送信停止の要求はプロトコル固有ハンドルの公開 API から送る
+        if http_version is HTTPVersion.HTTP3:
+            assert client.h3 is not None
+            await client.h3.stop_sending(stream_id, error_code)
+        else:
+            assert client.h2 is not None
+            await client.h2.stop_sending(stream_id, error_code)
+
+        await asyncio.wait_for(stop_sending_received.wait(), timeout=10.0)
+        assert len(stop_sending) == 1, "on_stop_sending が 1 回だけ呼ばれません"
+        session, notified_stream_id, notified_error_code = stop_sending[0]
+        assert notified_stream_id == stream_id
+        assert notified_error_code == error_code
+        # セッションハンドルはプロトコルと接続に対応する
+        assert isinstance(session, Session)
+        assert session.http_version is http_version
+        assert session.session_id == client.session_id
+        assert session.addr is not None
+        assert [s.session_id for s in sessions] == [session.session_id]
+    finally:
+        if client_task is not None:
+            client_task.cancel()
+        # クライアントを先に閉じる。HTTP/2 の Server.run() はキャンセル時に
+        # wait_closed() で接続中ハンドラの終了を待つため、接続を残したまま
+        # server_task を cancel すると後片付けが完了しない
+        # (_h2_server.Server.stop() は close_clients() で先に接続を閉じる)
+        await client.close()
+        server_task.cancel()
+        await asyncio.gather(
+            *[task for task in (client_task, server_task) if task is not None],
+            return_exceptions=True,
+        )
+        await server.stop()

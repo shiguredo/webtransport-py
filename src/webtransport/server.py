@@ -396,21 +396,30 @@ class Server:
         """
         self._impl().on_goaway(callback)
 
-    def on_stop_sending(self, callback: Callable[[Session, int, int], Awaitable[None]]) -> None:
-        """送信停止要求のコールバックを設定する (HTTP/2 のみ)
+    def on_stop_sending(
+        self, callback: Callable[[Session, int, int | None], Awaitable[None]]
+    ) -> None:
+        """送信停止要求のコールバックを設定する
 
-        引数は `(session, stream_id, error_code)`。
+        引数は `(session, stream_id, error_code)`。HTTP/3 のエラーコードは
+        レンジ外のとき None になり得る (HTTP/2 は常に int)。HTTP/3 では
+        WebTransport のデータストリームだけが対象であり、CONNECT ストリームと
+        WebTransport 以外のストリームでは通知しない。
         """
-        if self._h2 is None:
-            raise ValueError(
-                "on_stop_sending is only available for WebTransport over HTTP/2 "
-                "(http_version=HTTPVersion.HTTP2)"
+        if self._h3 is not None:
+            # クロージャから参照するため、None 検査済みの値をローカルへ束縛する
+            h3_server = self._h3
+            h3_server.on_stop_sending(
+                lambda session_id, stream_id, error_code, addr: callback(
+                    _H3Session(h3_server, addr, session_id), stream_id, error_code
+                )
             )
-        self._h2.on_stop_sending(
-            lambda stream_id, error_code, writer: callback(
-                _H2Session(writer), stream_id, error_code
+        elif self._h2 is not None:
+            self._h2.on_stop_sending(
+                lambda stream_id, error_code, writer: callback(
+                    _H2Session(writer), stream_id, error_code
+                )
             )
-        )
 
     def on_error(self, callback: Callable[[Session, int, str], Awaitable[None]]) -> None:
         """プロトコルエラーのコールバックを設定する (HTTP/2 のみ)
