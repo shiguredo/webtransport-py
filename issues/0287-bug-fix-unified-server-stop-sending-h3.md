@@ -1,7 +1,7 @@
 # 統一 API の Server.on_stop_sending が HTTP/2 専用で HTTP/3 では ValueError になる
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-15
 - Branch: feature/fix-unified-server-stop-sending-h3
 - Reporter: @voluntas
 
@@ -45,4 +45,8 @@
 
 ## 解決方法
 
-{後で追記}
+- `src/webtransport/server.py` の `Server.on_stop_sending` を `on_stream_reset` と同じ形にし、`self._h3` があれば `h3_server.on_stop_sending` へ、`self._h2` があれば `self._h2.on_stop_sending` へ配線した。HTTP/3 を選んだときに送出していた `ValueError` は削除した。コールバックの型は `Callable[[Session, int, int | None], Awaitable[None]]` とし、h3 側のセッションハンドルは既存のコールバックと同じく `_H3Session(h3_server, addr, session_id)` を渡す (HTTP/3 ではレンジ外のエラーコードが None になり得るため、`on_stream_reset` と同じく None をそのまま渡す)
+- `tests/test_unified_api_e2e.py` に `test_stop_sending_over_unified_api` を追加した (`http_version` で HTTP/2 / HTTP/3 を切り替える 2 件)。DUT は統一 `Server`、ピアは統一 `Client` とし、ピアが双方向ストリームを開いてデータを送り、DUT の `on_stream_data` でストリームがセッションへ解決されたことを確認してから、プロトコル固有ハンドルの公開 API (`client.h3.stop_sending` / `client.h2.stop_sending`) で送信停止を要求する。`(session, stream_id, error_code)` の通知内容、`Session` ハンドルの `http_version` / `session_id` / `addr` が接続と一致すること、通知が 1 回だけであることを表明する。モックやスタブは使わず実 QUIC / 実 TCP で検証する
+- RED は 2 通りで実測した。修正前は HTTP/3 の登録が `ValueError` になり、修正後に h3 の分岐だけを外すと HTTP/3 のテストが通知を待ってタイムアウトする (HTTP/2 は通る)
+- `skills/webtransport-py/SKILL.md` の統一サーバーのコールバック一覧を「HTTP/2 と HTTP/3」に更新し、HTTP/3 では WebTransport のデータストリームのみが対象で、エラーコードはレンジ外のとき None になり得ることを書いた (`on_error` は HTTP/2 のみのまま)
+- 全テストが通過する (1474 passed。prek の全フックも通過)
