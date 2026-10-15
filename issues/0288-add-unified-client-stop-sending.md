@@ -1,7 +1,7 @@
 # 統一 API の Client に on_stop_sending と stop_sending が無い
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-15
 - Branch: feature/add-unified-client-stop-sending
 - Reporter: @voluntas
 
@@ -39,3 +39,13 @@
 - h2 層 / h3 層の `on_stop_sending` / `stop_sending` 自体の挙動
 - 統一 `Client` の `on_error` と、HTTP/3 固有の `migrate` / `close_stream` などプロトコル固有 API の統一
 - QMux 層の `stop_sending` (統一 API の対象ではない)
+
+## 解決方法
+
+- `src/webtransport/client.py` の `Client` に `stop_sending(stream_id, error_code=0)` と `on_stop_sending(callback)` を追加し、`self._impl()` 経由で選択した HTTP バージョンの実装へ委譲した。コールバックの型は統一 `Client.on_stream_reset` と統一 `Server.on_stop_sending` に揃えて `Callable[[int, int | None], Awaitable[None]]` とし、HTTP/3 ではデータストリームのエラーコードがレンジ外のとき None になり得る (HTTP/2 は常に int) ことと、HTTP/3 では WebTransport のデータストリームだけが対象であることを docstring に書いた
+- モジュール docstring の「プロトコル固有の API」の列挙から `stop_sending` を外した (`migrate` / `close_stream` / `on_error` は h3 / h2 固有のまま)
+- `tests/test_unified_api_e2e.py` の `test_stop_sending_over_unified_api` のピア側呼び出しをプロトコル固有ハンドルから統一 `Client.stop_sending` へ置き換え、逆向きの `test_on_stop_sending_over_unified_api` を追加した。どちらも `http_version` の parametrize で HTTP/2 と HTTP/3 を回し、実 QUIC / 実 TCP で `(stream_id, error_code)` が 1 回だけ通知されることを表明する
+- `tests/test_unified_client.py` に `test_on_stop_sending_registration_delegates` (h2 / h3 の実装へ委譲されること) と `test_stop_sending_before_connect_does_not_raise` (セッション未確立でも安全に呼べること) を追加した
+- RED は実装前に追加テスト 8 件が `AttributeError` で失敗することを実測した (`AttributeError: 'Client' object has no attribute 'on_stop_sending'` / `'stop_sending'`)。既存テストは通過したままである
+- `skills/webtransport-py/SKILL.md` の統一クライアントの節を更新した (共通 API に `stop_sending` と `on_stop_sending` を追加し、`client.h3` / `client.h2` の表から `stop_sending` を削除)
+- 対象テストは 24 passed、全テストは 1495 passed。prek の全フックも通過する
