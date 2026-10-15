@@ -1,7 +1,7 @@
 # QMux が TLS 終了時の ssl.SSLError を接続断として扱わない
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-15
 - Branch: feature/fix-qmux-tls-teardown-error
 - Reporter: @voluntas
 
@@ -52,3 +52,16 @@ QMux の asyncio 層で、TLS 終了処理中に発生する `ssl.SSLError` を�
 - QUIC / HTTP/3 層の TLS エラー処理
 - `_TRANSPORT_ERRORS` の意味を `OSError` 全体へ広げること
 - QMux の `reset_stream` / `stop_sending` のエラー形 (現状の `QmuxProtocolError` を維持する)
+
+## 解決方法
+
+- `src/webtransport/qmux/_connection.py` の `_TRANSPORT_ERRORS` を `TRANSPORT_ERRORS` に改名し、`ssl.SSLError` を加えた。QMux は TLS 上でも動くため、同時クローズ時の TLS 終了失敗を接続断として扱う。`OSError` 全体を握ると接続断ではない誤りまで隠れるため `ssl.SSLError` を明示する理由をコメントに書いた。`ConnectionDriver.run()` と `_close_transport()` は同じ組を使い続ける
+- `ConnectionDriver.wait_ready()` が `_pump_once()` の `TRANSPORT_ERRORS` を `QmuxConnectionError` に包むようにした。ハンドシェイク中の TLS 失敗も `connect()` の契約 (`QmuxConnectionError`) に揃う
+- `ConnectionDriver.close()` は `_flush_locked()` の `TRANSPORT_ERRORS` を許容し、`_close_transport()` と `_closed = True` を必ず通すようにした。終了処理は best-effort であり、すでに切れたトランスポートへ CONNECTION_CLOSE を書けなくても接続は閉じる。許容する対象は `TRANSPORT_ERRORS` に限定し、他の例外は再送出する
+- `src/webtransport/qmux/client.py` の `Client.connect()` の失敗時の後始末を `try` / `finally` にし、ALPN 失敗・ハンドシェイク失敗・キャンセルのいずれでも `self._driver` を必ず None に戻すようにした。ドライバが残ると後続の `close()` が `drain()` で同じ `ssl.SSLError` を送出し、再 `connect()` も `RuntimeError` になっていた
+- `src/webtransport/qmux/server.py` の ALPN 失敗経路の `except (ConnectionResetError, BrokenPipeError)` を `TRANSPORT_ERRORS` の共有へ揃え、例外の組の二重管理をなくした
+- `tests/test_qmux_asyncio.py` に 6 件のテストを追加した (`test_client_run_reports_tls_failure_as_connection_error` / `test_client_close_suppresses_tls_failure_during_shutdown` / `test_server_logs_tls_failure_as_connection_error` / `test_client_connect_reports_tls_failure_as_connection_error` / `test_client_close_suppresses_tls_failure_on_broken_transport` / `test_client_connect_cancellation_clears_driver`)。再現は実ソケット + 実 TLS で、ピアが `writer.get_extra_info("socket").dup()` で生ソケットへ壊れた TLS レコードを送る。モック・スタブは使っていない
+- RED は、`ssl.SSLError` を `TRANSPORT_ERRORS` から外すと 5 件、`wait_ready` の包みを外すとハンドシェイク経路の 1 件、`close()` の許容を外すと close 経路の 1 件、`connect()` の `try` / `finally` を戻すとキャンセル経路の 1 件が落ちることを実測した。追加テストは 18 回連続で安定して通過する
+- サーバーの接続ハンドラは未処理例外ではなく既存の警告ログ経路 (`qmux connection error (session_id=...)`) に乗ることを caplog で確認した
+- QMux の `reset_stream` / `stop_sending` の向き違いが `QmuxProtocolError` になる形は変更していない (既存の `test_direction_mismatch_raises_protocol_error` が固定しており、通過を確認)
+- 対象テストは 33 passed、全テストは 1495 passed。prek の全フックも通過する
