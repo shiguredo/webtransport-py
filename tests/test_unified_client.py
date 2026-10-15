@@ -107,6 +107,56 @@ def test_callback_registration_delegates() -> None:
     assert client.h2._on_datagram is on_datagram
 
 
+@pytest.mark.parametrize(
+    "http_version",
+    [HTTPVersion.HTTP2, HTTPVersion.HTTP3],
+    ids=["http2", "http3"],
+)
+def test_on_stop_sending_registration_delegates(http_version: HTTPVersion) -> None:
+    """on_stop_sending の登録が実装へ委譲される
+
+    コールバックの登録先は選択した HTTP バージョンの実装だけである。
+    """
+
+    async def on_stop_sending(stream_id: int, error_code: int | None) -> None:
+        pass
+
+    client = Client(
+        url="https://localhost:4433/webtransport",
+        http_version=http_version,
+    )
+    client.on_stop_sending(on_stop_sending)
+    if http_version is HTTPVersion.HTTP3:
+        assert client.h3 is not None
+        assert client.h3._on_stop_sending is on_stop_sending
+    else:
+        assert client.h2 is not None
+        assert client.h2._on_stop_sending is on_stop_sending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "http_version",
+    [HTTPVersion.HTTP2, HTTPVersion.HTTP3],
+    ids=["http2", "http3"],
+)
+async def test_stop_sending_before_connect_does_not_raise(http_version: HTTPVersion) -> None:
+    """セッション未確立の stop_sending は何も送出せず正常に戻る
+
+    実通信での送信停止の検証は e2e テストが担う。ここでは統一 API が両
+    プロトコルで公開されており、セッションが無い状態でも安全に呼べることを
+    確認する。
+    """
+    client = Client(
+        url="https://localhost:4433/webtransport",
+        http_version=http_version,
+    )
+    # セッションが無いため実装は何も送出しない。未接続でも例外にならない
+    await client.stop_sending(4, 0x2A)
+    # 未接続の close() も後始末として安全に完了する
+    await client.close()
+
+
 def test_unknown_http_version_is_rejected() -> None:
     """HTTPVersion に無い値は ValueError になる"""
     with pytest.raises(ValueError):

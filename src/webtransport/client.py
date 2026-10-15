@@ -2,7 +2,7 @@
 
 WebTransport over HTTP/3 と WebTransport over HTTP/2 を `HTTPVersion` enum で
 選べるようにする。プロトコル固有の API (`migrate` / `close_stream` /
-`stop_sending` / `on_error` など) は `h3` / `h2` プロパティから実装
+`on_error` など) は `h3` / `h2` プロパティから実装
 (`webtransport.h3.Client` / `webtransport.h2.Client`) へ降りて呼ぶ。
 """
 
@@ -209,6 +209,10 @@ class Client:
         """ストリームをリセットする"""
         await self._impl().reset_stream(stream_id, error_code)
 
+    async def stop_sending(self, stream_id: int, error_code: int = 0) -> None:
+        """ピアに送信停止を要求する"""
+        await self._impl().stop_sending(stream_id, error_code)
+
     def on_session_ready(self, callback: Callable[[int], Awaitable[None]]) -> None:
         """セッション確立時のコールバックを設定する"""
         self._impl().on_session_ready(callback)
@@ -228,6 +232,16 @@ class Client:
         アプリケーションエラーコードを持つ)。
         """
         self._impl().on_stream_reset(callback)
+
+    def on_stop_sending(self, callback: Callable[[int, int | None], Awaitable[None]]) -> None:
+        """送信停止要求のコールバックを設定する
+
+        引数は `(stream_id, error_code)`。HTTP/3 のエラーコードはレンジ外の
+        とき None になり得る (HTTP/2 は常に int)。HTTP/3 では WebTransport の
+        データストリームだけが対象であり、CONNECT ストリームと WebTransport
+        以外のストリームでは通知しない。
+        """
+        self._impl().on_stop_sending(callback)
 
     def on_datagram(self, callback: Callable[[bytes], Awaitable[None]]) -> None:
         """データグラム受信時のコールバックを設定する"""

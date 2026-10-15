@@ -87,14 +87,14 @@ asyncio.run(main())
 
 `Client(url, http_version=HTTPVersion.HTTP3, verify_peer=True, origin="", close_wait_timeout=3.0, idle_timeout_ns=30000000000, ca_file=None, verify_callback=None, quic_config=None, config=None)`。`idle_timeout_ns` / `ca_file` / `verify_callback` / `quic_config` は HTTP/3 のみ、`config` は HTTP/2 のみで、選択したバージョンと矛盾する引数を渡すと `ValueError` になる。`HTTPVersion` の値は ALPN の識別子と同じ `"h2"` / `"h3"` で、文字列からも作れる。
 
-共通 API は `url` / `host` / `port` / `is_connected` / `session_id` / `http_version` のプロパティと、`connect()` / `run()` / `close(error_code=0, error_message="")` / `open_stream()` / `send_stream_data()` / `send_datagram()` / `reset_stream()`、コールバック登録の `on_session_ready` / `on_session_closed` / `on_stream_data` / `on_stream_reset` / `on_datagram` / `on_goaway` である。`close()` の終了コードと理由は WT_CLOSE_SESSION でピアへ伝わる (1024 バイト超の理由は UTF-8 文字境界で切り詰められる)。
+共通 API は `url` / `host` / `port` / `is_connected` / `session_id` / `http_version` のプロパティと、`connect()` / `run()` / `close(error_code=0, error_message="")` / `open_stream()` / `send_stream_data()` / `send_datagram()` / `reset_stream()` / `stop_sending(stream_id, error_code=0)`、コールバック登録の `on_session_ready` / `on_session_closed` / `on_stream_data` / `on_stream_reset` / `on_stop_sending` / `on_datagram` / `on_goaway` である。`close()` の終了コードと理由は WT_CLOSE_SESSION でピアへ伝わる (1024 バイト超の理由は UTF-8 文字境界で切り詰められる)。`stop_sending` はピアへ送信停止 (STOP_SENDING / WT_STOP_SENDING) を要求し、HTTP/3 ではデータストリームのエラーコードを WT_APPLICATION_ERROR レンジへリマップする。`on_stop_sending` のコールバックは `(stream_id, error_code)` を受け取り、エラーコードは HTTP/3 ではレンジ外のとき None になり得る (HTTP/2 は常に int)。HTTP/3 では WebTransport のデータストリームだけが対象である。
 
 プロトコル固有の API は選択した側のハンドルから呼ぶ。選択していない側は None になる。
 
 | ハンドル | 使える API |
 |---|---|
-| `client.h3` | `close_stream(stream_id, error_code)` / `stop_sending(stream_id, error_code)` / `migrate()` / `initiate_key_update()` (HTTP/3 のクライアント) |
-| `client.h2` | `stop_sending(stream_id, error_code)` / `on_error(callback)` (HTTP/2 のクライアント) |
+| `client.h3` | `close_stream(stream_id, error_code)` / `migrate()` / `initiate_key_update()` (HTTP/3 のクライアント) |
+| `client.h2` | `on_error(callback)` (HTTP/2 のクライアント) |
 
 `on_goaway` のコールバック引数は HTTP バージョンで異なる (HTTP/3 は `(goaway_id)`、HTTP/2 は `(last_stream_id, error_code)`)。`on_stream_reset` のエラーコードは HTTP/3 ではレンジ外のとき None になり得る。
 
