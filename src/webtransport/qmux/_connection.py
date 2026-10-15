@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import ssl
 from collections.abc import Awaitable, Callable
 
 from webtransport.qmux.exceptions import (
@@ -19,7 +20,7 @@ from webtransport.qmux.exceptions import (
 )
 from webtransport.webtransport_ext import qmux
 
-__all__ = ["ConnectionDriver"]
+__all__ = ["TRANSPORT_ERRORS", "ConnectionDriver"]
 
 # 送受信ループのポーリング間隔 (秒)。送信待ちとタイマーをこの間隔で処理する
 POLL_INTERVAL = 0.05
@@ -28,7 +29,15 @@ POLL_INTERVAL = 0.05
 READ_SIZE = 65536
 
 # トランスポートが切れたことを表す例外
-_TRANSPORT_ERRORS = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
+#
+# QMux は TCP の上で、TLS を使う場合は TLS の上で動く。相手が先に閉じた
+# ときのソケットの失敗だけでなく、同時クローズ中の TLS 終了処理の失敗も
+# 「接続が切れた」として扱う。close_notify を送った直後にピアが
+# アプリケーションデータを送ると ssl.SSLError
+# (APPLICATION_DATA_AFTER_CLOSE_NOTIFY や RECORD_LAYER_FAILURE) になる。
+# OSError 全体を握ると、接続断ではないプログラム上の誤り (閉じた
+# ファイル記述子の利用など) まで隠れるため、ssl.SSLError を明示する。
+TRANSPORT_ERRORS = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, ssl.SSLError)
 
 
 class ConnectionDriver:
@@ -91,15 +100,24 @@ class ConnectionDriver:
             timeout: 待ち時間の上限 (秒)
 
         Raises:
-            QmuxConnectionError: タイムアウトした場合、または途中で接続が閉じた場合
+            QmuxConnectionError: タイムアウトした場合、または途中で接続が
+                切れた場合
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while not self._ready:
             if loop.time() >= deadline:
                 raise QmuxConnectionError("QMux handshake timed out")
-            if not await self._pump_once():
-                raise QmuxConnectionError("QMux connection closed during the handshake")
+            try:
+                if not await self._pump_once():
+                    raise QmuxConnectionError("QMux connection closed during the handshake")
+            except TRANSPORT_ERRORS as exc:
+                # ハンドシェイク中のトランスポートの失敗 (TLS 終了処理の失敗を
+                # 含む) は接続断として扱う。トランスポート層の例外を
+                # connect() の利用者へそのまま見せない
+                raise QmuxConnectionError(
+                    f"QMux connection lost during the handshake: {exc}"
+                ) from exc
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """ストリームを開く
@@ -200,7 +218,14 @@ class ConnectionDriver:
             if self._closed:
                 return
             self._connection.close(error_code, reason)
-            await self._flush_locked()
+            try:
+                await self._flush_locked()
+            except TRANSPORT_ERRORS:
+                # すでに切れたトランスポートへ CONNECTION_CLOSE を送れなくても
+                # 接続は閉じる。close() は best-effort な終了処理であり、送信の
+                # 失敗で終了そのものを止めない。握りつぶす対象は
+                # TRANSPORT_ERRORS に限定し、それ以外の例外は再送出する
+                pass
             self._closed = True
         await self._close_transport()
 
@@ -216,7 +241,7 @@ class ConnectionDriver:
                 if not await self._pump_once():
                     # ピアがトランスポートを閉じた
                     break
-        except _TRANSPORT_ERRORS as exc:
+        except TRANSPORT_ERRORS as exc:
             raise QmuxConnectionError(f"QMux connection lost: {exc}") from exc
         finally:
             self._closed = True
@@ -231,7 +256,7 @@ class ConnectionDriver:
         self._writer.close()
         try:
             await self._writer.wait_closed()
-        except _TRANSPORT_ERRORS:
+        except TRANSPORT_ERRORS:
             pass
 
     async def _flush_locked(self) -> None:

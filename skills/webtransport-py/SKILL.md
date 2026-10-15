@@ -220,6 +220,7 @@ await client.close()
 ```
 
 - `Client(host, port, config=None, ssl=None, alpn_protocols=None, close_reason="")`: `connect(timeout=10.0)` は TCP 接続とトランスポートパラメータの交換まで待つ。`run()` が受信ループで、`close()` が CONNECTION_CLOSE を送る。`peer_address` / `negotiated_alpn_protocol` / `is_connected` を持つ
+- TLS 上で使う場合、接続断と同時クローズ時の TLS 終了失敗 (`ssl.SSLError`。`APPLICATION_DATA_AFTER_CLOSE_NOTIFY` や `RECORD_LAYER_FAILURE` など) は接続断として扱う。`connect()` と `run()` は生の `ssl.SSLError` を漏らさず `QmuxConnectionError` を送出し (原因の `ssl.SSLError` は `__cause__` に残る)、`close()` はすでに切れた接続でも例外を出さない。サーバーの接続ハンドラも未処理例外にせず警告ログに記録する
 - クライアントのコールバックは `on_connected()` / `on_closed()` / `on_stream_data(stream_id, data, fin)` / `on_stream_reset(stream_id, error_code)` / `on_stop_sending(stream_id, error_code)`
 - `Server(host, port, config=None, ssl=None, alpn_protocols=None)`: `start()` で待ち受け、`run()` で受け付け続け、`stop()` で接続ごと閉じる。`actual_port` で実際に待ち受けているポートが分かる
 - サーバーのコールバックは `Session` ハンドルを受け取る (`on_session_ready(session)` / `on_session_closed(session)` / `on_stream_data(session, stream_id, data, fin)` / `on_stream_reset(session, stream_id, error_code)` / `on_stop_sending(session, stream_id, error_code)`)

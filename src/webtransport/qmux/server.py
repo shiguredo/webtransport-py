@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from itertools import count
 from typing import Self
 
-from webtransport.qmux._connection import ConnectionDriver
+from webtransport.qmux._connection import TRANSPORT_ERRORS, ConnectionDriver
 from webtransport.qmux.exceptions import QmuxConnectionError
 from webtransport.webtransport_ext import qmux
 
@@ -291,7 +291,10 @@ class Server:
                 writer.close()
                 try:
                     await writer.wait_closed()
-                except ConnectionResetError, BrokenPipeError:
+                except TRANSPORT_ERRORS:
+                    # 接続を閉じる際の失敗の扱いは ConnectionDriver と揃える。
+                    # 同じ例外の組をここへ書き写すと、片方だけを直したときに
+                    # 食い違うため _connection.py の定義を共有する
                     pass
                 return
 

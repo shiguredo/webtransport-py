@@ -158,8 +158,9 @@ class Client:
 
         Raises:
             RuntimeError: `connect()` を二度呼んだ場合
-            QmuxConnectionError: 接続に失敗した場合、またはハンドシェイクが
-                タイムアウトした場合
+            QmuxConnectionError: 接続に失敗した場合、ハンドシェイクが
+                タイムアウトした場合、またはハンドシェイク中に接続が
+                切れた場合
         """
         if self._driver is not None:
             raise RuntimeError("connect() has already been called")
@@ -185,19 +186,21 @@ class Client:
         self._driver = driver
         self._wire_callbacks(driver)
 
-        # サーバーと同じく、ALPN が交渉されていない接続は使わない
-        if self._ssl is not None and driver.negotiated_alpn_protocol is None:
-            await driver.close()
-            self._driver = None
-            raise QmuxConnectionError(
-                "ALPN negotiation failed: the server did not select an application protocol"
-            )
+        handshake_completed = False
         try:
+            # サーバーと同じく、ALPN が交渉されていない接続は使わない
+            if self._ssl is not None and driver.negotiated_alpn_protocol is None:
+                raise QmuxConnectionError(
+                    "ALPN negotiation failed: the server did not select an application protocol"
+                )
             await driver.wait_ready(timeout)
-        except QmuxConnectionError:
-            await driver.close()
-            self._driver = None
-            raise
+            handshake_completed = True
+        finally:
+            if not handshake_completed:
+                # 失敗した接続はドライバを手放してから閉じる。ドライバを残すと、
+                # 後続の close() が壊れたトランスポートへ書き込んで失敗する
+                self._driver = None
+                await driver.close()
 
     def _wire_callbacks(self, driver: ConnectionDriver) -> None:
         """コールバックをドライバへ配線する"""
