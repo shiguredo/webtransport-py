@@ -101,12 +101,14 @@ class Session:
     async def close(self, error_code: int = 0, reason: str = "") -> None:
         """CONNECTION_CLOSE を送って接続を閉じる
 
-        `reason` は CONNECTION_CLOSE のレコードに収まる長さでなければならない。
-        QMux は 1 つのフレームが 1 つのレコードに収まることを要求するため
-        (draft-ietf-quic-qmux-02 Section 3.2)、既定の設定 (`Config` の
-        `max_record_size` が 16384) では理由は約 16 KiB までしか載らない。
-        それを超えるとレコードを作れず、接続は閉じるが終了コードも理由も
-        ピアへ届かない。
+        `reason` が CONNECTION_CLOSE のレコードに収まらない場合は、収まる長さへ
+        UTF-8 の文字境界で切り詰めて送る。理由が長いことだけを理由に終了コードが
+        届かなくなることはない (ピアが先に接続を閉じた後やトランスポートが
+        切れている場合は、理由の長さによらず何も送らない)。QMux は 1 つの
+        フレームが 1 つのレコードに収まることを要求し
+        (draft-ietf-quic-qmux-02 Section 3.2)、RFC 9000 Section 19.19 も
+        CONNECTION_CLOSE を分割できないため理由の長さが制限されることを認めて
+        いる。切り詰めが起きるのは理由が約 16 KiB を超える場合である。
 
         Args:
             error_code: 送るエラーコード
@@ -243,11 +245,17 @@ class Server:
     async def start(self) -> None:
         """待ち受けを開始する
 
+        設定の検査は接続を作るときに行われる。接続ごとではなく待ち受けを始める
+        前に利用者へ知らせるため、ここで 1 度だけ接続を作って検査する。
+
         Raises:
             RuntimeError: すでに開始している場合
+            ValueError: `config` の値が範囲外の場合
         """
         if self._server is not None:
             raise RuntimeError("server is already started")
+        # 検査のためだけに作った接続は、そのまま破棄する (接続は持たない)
+        qmux.Connection.create_server(self._config)
         self._server = await asyncio.start_server(
             self._on_connection,
             self._host,

@@ -4,6 +4,8 @@
 #include <cstring>
 #include <random>
 
+#include "quic_varint.h"
+
 #include <dwnx/version.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -37,6 +39,170 @@ void rand_cb(uint8_t* dest, size_t destlen) noexcept {
     const size_t chunk = std::min(sizeof(value), destlen - offset);
     std::memcpy(dest + offset, &value, chunk);
     offset += chunk;
+  }
+}
+
+/**
+ * CONNECTION_CLOSE の理由に使える最大バイト数を返す
+ *
+ * dwnx はレコードの Frames フィールドを DWNX_DEFAULT_MAX_RECORD_SIZE (16382)
+ * バイトに制限する (dwnx_qre_start がレコード長を
+ * DWNX_QRE_RECORDLEN_SIZE + DWNX_DEFAULT_MAX_RECORD_SIZE に切り詰め、
+ * dwnx_qre_encode_frame が収まらないフレームに DWNX_ERR_NOBUF を返す)。
+ * アプリケーション側からこの上限を引き上げる手段は無く
+ * (dwnx_conn.c の "We do not let application increase max record size.")、
+ * ピアのトランスポートパラメータも DWNX_DEFAULT_MAX_RECORD_SIZE 以上で
+ * なければならないため、上限は接続の状態によらず一定である。
+ *
+ * CONNECTION_CLOSE (0x1d) のフレームは種別 (1 バイト)・終了コード (varint)・
+ * 理由の長さ (varint)・理由から成るため (RFC 9000 Section 19.19)、理由に
+ * 使えるのは残りである。理由の長さの varint 長は長さに依存するため、varint を
+ * 差し引いてから求め直す (この範囲では 2 バイトで収束する)。
+ */
+size_t connection_close_reason_limit(uint64_t error_code) {
+  size_t limit = DWNX_DEFAULT_MAX_RECORD_SIZE - 1 -
+                 bindings::quic_varint_length(error_code);
+  limit -= bindings::quic_varint_length(limit);
+  return limit;
+}
+
+/**
+ * 文字列を UTF-8 の文字境界で切り詰める
+ *
+ * 末尾の文字が途中で切れている場合は、その文字の先頭まで戻す。末尾が
+ * 継続バイト (0b10xxxxxx) で終わる場合だけでなく、リードバイト
+ * (0b11xxxxxx) で終わって後続バイトが欠けている場合も切れているため、
+ * リードバイトから数えた文字の長さと実際に残っている長さを比べる。
+ * RFC 9000 Section 19.19 は理由が UTF-8 であることを推奨しており、壊れた
+ * 文字を送らないためである。
+ */
+void truncate_utf8(std::string& value, size_t limit) {
+  if (value.size() <= limit) {
+    return;
+  }
+  value.resize(limit);
+
+  // UTF-8 の文字は最大 4 バイトなので、末尾から 3 バイト遡ればリードバイトが
+  // 見付かる。見付からなければ UTF-8 として不正なため、そのままにする
+  const size_t cursor = value.size();
+  const size_t lower_bound = cursor > 3 ? cursor - 3 : 0;
+  size_t head = cursor;
+  while (head > lower_bound &&
+         (static_cast<unsigned char>(value[head - 1]) & 0xc0) == 0x80) {
+    --head;
+  }
+  if (head == 0) {
+    return;
+  }
+
+  // リードバイトから期待される文字の長さを求める
+  const unsigned char lead = static_cast<unsigned char>(value[head - 1]);
+  size_t expected = 0;
+  if ((lead & 0x80) == 0x00) {
+    expected = 1;
+  } else if ((lead & 0xe0) == 0xc0) {
+    expected = 2;
+  } else if ((lead & 0xf0) == 0xe0) {
+    expected = 3;
+  } else if ((lead & 0xf8) == 0xf0) {
+    expected = 4;
+  }
+
+  if (expected != 0 && head - 1 + expected > cursor) {
+    // 末尾の文字が途中で切れている
+    value.resize(head - 1);
+  }
+}
+
+/**
+ * QUIC varint の上限を超えていれば std::invalid_argument を送出する
+ *
+ * nanobind の既定翻訳により Python 側では ValueError になる。
+ */
+void check_varint_value(uint64_t value, const char* name) {
+  if (value > DWNX_MAX_VARINT) {
+    throw std::invalid_argument(std::string(name) + " must be at most " +
+                                std::to_string(DWNX_MAX_VARINT) + ": got " +
+                                std::to_string(value));
+  }
+}
+
+/**
+ * 広告できるストリーム数の上限
+ *
+ * RFC 9000 Section 4.6 は max_streams のトランスポートパラメータと MAX_STREAMS
+ * フレームを 2^60 以下と定める (2^60 を超えるとストリーム ID を可変長整数で
+ * 表せなくなるため。パラメータの定義は Section 18.2、フレームの定義は
+ * Section 19.11)。QMux もこれらのトランスポートパラメータの定義をそのまま
+ * 使う (draft-ietf-quic-qmux-02 Section 5.1)。dwnx はデコーダで DWNX_MAX_STREAMS
+ * (1<<60) を超える値のピアを MALFORMED_TRANSPORT_PARAM として拒否するため、
+ * 超える値を広告すると接続が確立できない。
+ */
+constexpr uint64_t kMaxInitialStreams = 1ULL << 60;
+
+/**
+ * 1 レコードを書くための送信バッファの大きさ (バイト)
+ *
+ * dwnx は 1 レコードをレコード長 (2 バイト) + DWNX_DEFAULT_MAX_RECORD_SIZE に
+ * 制限し、アプリケーションから引き上げさせないため、設定値によらずこの
+ * 大きさで足りる。`max_record_size` をそのまま確保に使うと、大きな値を指定した
+ * 利用者がメモリを使い果たす。
+ */
+constexpr size_t kWriteBufferSize = DWNX_DEFAULT_MAX_RECORD_SIZE + 4096;
+
+/**
+ * QMux の設定値を検査する
+ *
+ * dwnx は conn_new とトランスポートパラメータの符号化で設定値を assert で
+ * 検査する。同梱の libdwnx は NDEBUG なしでビルドされているため、範囲外の値は
+ * Python の例外ではなくプロセスの abort (SIGABRT) になる。Python から渡された
+ * 値でプロセスを落とさないよう、接続を作る前にここで弾く。検査する条件は
+ * dwnx の assert と同じである (dwnx_conn.c / dwnx_conv.c)。
+ *
+ * Raises:
+ *     std::invalid_argument: QUIC varint の上限 (2^62-1) を超える値がある場合、
+ *         ストリーム数が 2^60 を超える場合、`max_record_size` が dwnx の下限
+ *         (16382) 未満の場合、または `max_idle_timeout_ns` が UINT64_MAX の場合
+ */
+void validate_qmux_config(const QmuxConfig& config) {
+  check_varint_value(config.initial_max_streams_bidi,
+                     "QMux config initial_max_streams_bidi");
+  check_varint_value(config.initial_max_streams_uni,
+                     "QMux config initial_max_streams_uni");
+  check_varint_value(config.initial_max_data, "QMux config initial_max_data");
+  check_varint_value(config.initial_max_stream_data_bidi_local,
+                     "QMux config initial_max_stream_data_bidi_local");
+  check_varint_value(config.initial_max_stream_data_bidi_remote,
+                     "QMux config initial_max_stream_data_bidi_remote");
+  check_varint_value(config.initial_max_stream_data_uni,
+                     "QMux config initial_max_stream_data_uni");
+  check_varint_value(config.max_record_size, "QMux config max_record_size");
+  // ストリーム数の上限は varint の上限より小さい
+  if (config.initial_max_streams_bidi > kMaxInitialStreams) {
+    throw std::invalid_argument(
+        "QMux config initial_max_streams_bidi must be at most " +
+        std::to_string(kMaxInitialStreams) + ": got " +
+        std::to_string(config.initial_max_streams_bidi));
+  }
+  if (config.initial_max_streams_uni > kMaxInitialStreams) {
+    throw std::invalid_argument(
+        "QMux config initial_max_streams_uni must be at most " +
+        std::to_string(kMaxInitialStreams) + ": got " +
+        std::to_string(config.initial_max_streams_uni));
+  }
+  // dwnx はアプリケーションからレコード長の上限を引き上げさせず、下限も
+  // DWNX_DEFAULT_MAX_RECORD_SIZE で固定している
+  if (config.max_record_size < DWNX_DEFAULT_MAX_RECORD_SIZE) {
+    throw std::invalid_argument(
+        "QMux config max_record_size must be at least " +
+        std::to_string(DWNX_DEFAULT_MAX_RECORD_SIZE) + ": got " +
+        std::to_string(config.max_record_size));
+  }
+  // UINT64_MAX は dwnx が「アイドルタイムアウト無し」の内部表現に使うため、
+  // アプリケーションからは指定できない
+  if (config.max_idle_timeout_ns == UINT64_MAX) {
+    throw std::invalid_argument("QMux config max_idle_timeout_ns must not be " +
+                                std::to_string(UINT64_MAX));
   }
 }
 
@@ -160,6 +326,9 @@ std::unique_ptr<QmuxConnection> QmuxConnection::create_server(
 }
 
 void QmuxConnection::initialize(const QmuxConfig& config, bool is_server) {
+  // 範囲外の設定値で dwnx の assert (プロセスの abort) に到達する前に弾く
+  validate_qmux_config(config);
+
   dwnx_settings settings;
   dwnx_settings_default(&settings);
   settings.initial_ts = now_ns();
@@ -203,7 +372,7 @@ void QmuxConnection::initialize(const QmuxConfig& config, bool is_server) {
                              strerror(rv));
   }
 
-  write_buffer_.resize(static_cast<size_t>(config.max_record_size) + 4096);
+  write_buffer_.resize(kWriteBufferSize);
 }
 
 QmuxConnection::~QmuxConnection() {
@@ -365,6 +534,8 @@ void QmuxConnection::send_stream_data(int64_t stream_id,
 }
 
 int QmuxConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
+  // dwnx は終了コードを varint として符号化する際に assert で上限を検査する
+  check_varint_value(error_code, "QMux error_code");
   if (conn_ == nullptr) {
     return DWNX_ERR_INVALID_ARGUMENT;
   }
@@ -373,6 +544,7 @@ int QmuxConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
 }
 
 int QmuxConnection::stop_sending(int64_t stream_id, uint64_t error_code) {
+  check_varint_value(error_code, "QMux error_code");
   if (conn_ == nullptr) {
     return DWNX_ERR_INVALID_ARGUMENT;
   }
@@ -381,6 +553,7 @@ int QmuxConnection::stop_sending(int64_t stream_id, uint64_t error_code) {
 }
 
 int QmuxConnection::close_stream(int64_t stream_id, uint64_t error_code) {
+  check_varint_value(error_code, "QMux error_code");
   if (conn_ == nullptr) {
     return DWNX_ERR_INVALID_ARGUMENT;
   }
@@ -389,6 +562,7 @@ int QmuxConnection::close_stream(int64_t stream_id, uint64_t error_code) {
 }
 
 void QmuxConnection::close(uint64_t error_code, const std::string& reason) {
+  check_varint_value(error_code, "QMux error_code");
   if (conn_ == nullptr) {
     return;
   }
@@ -399,6 +573,10 @@ void QmuxConnection::close(uint64_t error_code, const std::string& reason) {
   // 書き終わるまで生存させる。引数の reason は nanobind が Python の str から
   // 作る一時オブジェクトで、close() を抜けた時点で破棄される
   close_reason_ = reason;
+  // 理由が 1 レコードに収まらないと CONNECTION_CLOSE を 1 つも書けず、終了
+  // コードもピアへ届かない。理由の長さによって終了コードが失われないよう、
+  // 収まる長さへ UTF-8 の文字境界で切り詰める
+  truncate_utf8(close_reason_, connection_close_reason_limit(error_code));
   dwnx_ccerr_default(&close_ccerr_);
   dwnx_ccerr_set_application_error(
       &close_ccerr_, error_code,
@@ -458,9 +636,9 @@ void bind_qmux(nb::module_& m) {
   nb::class_<QmuxConfig>(qmux_m, "Config", "QMux 接続の設定")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
       .def_rw("initial_max_streams_bidi", &QmuxConfig::initial_max_streams_bidi,
-              "受け入れる同時双方向ストリーム数")
+              "受け入れる同時双方向ストリーム数。2^60 以下でなければならない")
       .def_rw("initial_max_streams_uni", &QmuxConfig::initial_max_streams_uni,
-              "受け入れる同時単方向ストリーム数")
+              "受け入れる同時単方向ストリーム数。2^60 以下でなければならない")
       .def_rw("initial_max_data", &QmuxConfig::initial_max_data,
               "コネクション全体のフロー制御上限 (バイト)")
       .def_rw("initial_max_stream_data_bidi_local",
@@ -475,7 +653,9 @@ void bind_qmux(nb::module_& m) {
       .def_rw("max_idle_timeout_ns", &QmuxConfig::max_idle_timeout_ns,
               "アイドルタイムアウト (ナノ秒)")
       .def_rw("max_record_size", &QmuxConfig::max_record_size,
-              "1 レコードの最大長 (バイト)");
+              "1 レコードの最大長 (バイト)。16382 以上でなければならない。"
+              "dwnx は送信のレコード長を 16382 に固定するため、それより大きい"
+              "値は記録長に影響しない");
 
   nb::enum_<QmuxEventType>(qmux_m, "EventType", "QMux イベント種別")
       .value("TRANSPORT_PARAMS_RECEIVED",
@@ -561,22 +741,28 @@ void bind_qmux(nb::module_& m) {
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
                    "0) -> int"),
            "ストリームの書き込み側をリセットする (RESET_STREAM を送出。"
-           "0 以上は成功、負値は dwnx のライブラリエラー)")
+           "0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC "
+           "varint の上限 (2^62-1) を超える場合は ValueError)")
       .def("stop_sending", &QmuxConnection::stop_sending, nb::arg("stream_id"),
            nb::arg("error_code") = 0,
            nb::sig("def stop_sending(self, stream_id: int, error_code: int = "
                    "0) -> int"),
            "ストリームの読み取り側を終了する (STOP_SENDING を送出。"
-           "0 以上は成功、負値は dwnx のライブラリエラー)")
+           "0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC "
+           "varint の上限 (2^62-1) を超える場合は ValueError)")
       .def("close_stream", &QmuxConnection::close_stream, nb::arg("stream_id"),
            nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "
                    "0) -> int"),
            "ストリームの両方向を終了する (RESET_STREAM + STOP_SENDING。"
-           "0 以上は成功、負値は dwnx のライブラリエラー)")
-      .def("close", &QmuxConnection::close, nb::arg("error_code") = 0,
-           nb::arg("reason") = "",
-           "接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする)")
+           "0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC "
+           "varint の上限 (2^62-1) を超える場合は ValueError)")
+      .def(
+          "close", &QmuxConnection::close, nb::arg("error_code") = 0,
+          nb::arg("reason") = "",
+          "接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする。"
+          "理由が 1 レコードに収まらない場合は UTF-8 の文字境界で切り詰める。"
+          "終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)")
       .def(
           "next_event",
           [](QmuxConnection& self) -> nb::object {

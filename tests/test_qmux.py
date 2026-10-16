@@ -6,6 +6,8 @@
 相手にする。
 """
 
+from collections.abc import Callable
+
 import pytest
 from qmux_relay import parse_connection_close
 
@@ -23,6 +25,19 @@ _APP_ERROR_CODE = 0x2A
 
 # 接続終了 (CONNECTION_CLOSE) に載せるアプリケーションエラーコード
 _CLOSE_ERROR_CODE = 0x2B
+
+# 1 つの QMux レコードの最大長。dwnx はレコード長 (2 バイト) と Frames フィールド
+# (DWNX_DEFAULT_MAX_RECORD_SIZE の 16382 バイト) の合計までしか書かない
+_MAX_RECORD_SIZE = 16384
+
+# QUIC varint で表せる最大値 (RFC 9000 Section 16)。終了コードの上限でもある
+_MAX_VARINT = 2**62 - 1
+
+# dwnx が固定する 1 レコードの最大長の下限 (DWNX_DEFAULT_MAX_RECORD_SIZE)
+_MIN_RECORD_SIZE = 16382
+
+# 広告できるストリーム数の上限 (RFC 9000 Section 4.6)
+_MAX_STREAMS = 2**60
 
 
 def pump(first: qmux.Connection, second: qmux.Connection, rounds: int = 100) -> None:
@@ -73,6 +88,109 @@ def test_create_client_and_server() -> None:
     pump(client, server)
     assert client.streams_bidi_left > 0
     assert client.streams_uni_left > 0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("initial_max_streams_bidi", _MAX_VARINT + 1),
+        ("initial_max_streams_uni", _MAX_VARINT + 1),
+        ("initial_max_streams_bidi", _MAX_STREAMS + 1),
+        ("initial_max_streams_uni", _MAX_STREAMS + 1),
+        ("initial_max_data", _MAX_VARINT + 1),
+        ("initial_max_stream_data_bidi_local", _MAX_VARINT + 1),
+        ("initial_max_stream_data_bidi_remote", _MAX_VARINT + 1),
+        ("initial_max_stream_data_uni", _MAX_VARINT + 1),
+        ("max_record_size", _MAX_VARINT + 1),
+        ("max_record_size", _MIN_RECORD_SIZE - 1),
+        ("max_idle_timeout_ns", 2**64 - 1),
+    ],
+    ids=[
+        "streams-bidi-over-varint",
+        "streams-uni-over-varint",
+        "streams-bidi-over-max-streams",
+        "streams-uni-over-max-streams",
+        "max-data-over-varint",
+        "stream-data-bidi-local-over-varint",
+        "stream-data-bidi-remote-over-varint",
+        "stream-data-uni-over-varint",
+        "record-size-over-varint",
+        "record-size-under-minimum",
+        "idle-timeout-uint64-max",
+    ],
+)
+def test_invalid_config_raises_value_error(field_name: str, value: int) -> None:
+    """範囲外の設定値が ValueError になり、プロセスが abort しない
+
+    dwnx は `conn_new` とトランスポートパラメータの符号化で設定値を assert で
+    検査する。同梱の libdwnx は NDEBUG なしでビルドされているため、範囲外の値は
+    Python の例外ではなくプロセスの abort (SIGABRT) になる。接続を作る前に
+    ValueError にして、Python から渡された値でプロセスを落とさないようにする。
+
+    検査する条件は dwnx の assert と同じで、QUIC varint の上限 (2^62-1) を
+    超えないこと、ストリーム数が 2^60 以下であること、`max_record_size` が
+    dwnx の下限 (16382) 以上であること、`max_idle_timeout_ns` が UINT64_MAX
+    (dwnx が「タイムアウト無し」に使う値) でないことである。`create_client` と
+    `create_server` は同じ初期化を通る。
+    """
+    config = qmux.Config()
+    # フィールド名でパラメトライズしているため動的に設定する
+    setattr(config, field_name, value)
+    with pytest.raises(ValueError):
+        qmux.Connection.create_server(config)
+
+
+def test_valid_config_boundary_values_are_accepted() -> None:
+    """上限ちょうどの設定値で接続を作り、ハンドシェイクできる
+
+    `initial_max_streams_bidi` / `initial_max_streams_uni` は 2^60、その他の値は
+    QUIC varint の上限ちょうど (2^62-1)、`max_record_size` は dwnx の下限ちょうど
+    (16382)、`max_idle_timeout_ns` は UINT64_MAX の 1 つ手前まで受け付ける。
+    値域の検査が有効な設定まで弾いていないことを、レコードを作れることだけで
+    なくハンドシェイクの完了まで確かめる (ストリーム数は 2^60 を超えると dwnx の
+    デコーダがピアを拒否するため、ハンドシェイクまで見る必要がある)。
+    """
+    config = qmux.Config()
+    config.initial_max_streams_bidi = _MAX_STREAMS
+    config.initial_max_streams_uni = _MAX_STREAMS
+    config.initial_max_data = _MAX_VARINT
+    config.initial_max_stream_data_bidi_local = _MAX_VARINT
+    config.initial_max_stream_data_bidi_remote = _MAX_VARINT
+    config.initial_max_stream_data_uni = _MAX_VARINT
+    config.max_record_size = _MIN_RECORD_SIZE
+    config.max_idle_timeout_ns = 2**64 - 2
+
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+
+    # トランスポートパラメータの交換が完了すると、開設可能なストリーム数が
+    # ピアの広告した値で確定する
+    assert client.streams_bidi_left == _MAX_STREAMS
+    assert server.streams_bidi_left == _MAX_STREAMS
+    assert client.streams_uni_left == _MAX_STREAMS
+    assert server.streams_uni_left == _MAX_STREAMS
+
+
+def test_large_max_record_size_does_not_reserve_memory() -> None:
+    """`max_record_size` を大きくしても送信バッファの確保が増えない
+
+    dwnx は送信するレコード長を 16382 バイトに固定し、アプリケーションから
+    引き上げさせないため、送信バッファもその大きさで足りる。設定値をそのまま
+    確保に使うと、大きな値を指定した利用者がメモリを使い果たす。
+    """
+    config = qmux.Config()
+    config.max_record_size = _MAX_VARINT
+
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+
+    # ストリームを開いてレコードを書けることまで確かめる
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+    client.send_stream_data(stream_id, b"hello", True)
+    assert client.pending_record is not None
 
 
 def test_handshake_exchanges_transport_params() -> None:
@@ -244,29 +362,115 @@ def test_close_carries_error_code_and_reason(side: str, reason: str) -> None:
     assert peer.receive(record) == DWNX_ERR_DRAINING
 
 
-def test_close_reason_larger_than_record_is_dropped() -> None:
-    """1 レコードに収まらない理由では CONNECTION_CLOSE が作られない
+@pytest.mark.parametrize(
+    ("error_code", "expected_reason_length"),
+    [
+        (_CLOSE_ERROR_CODE, 16378),
+        (2**62 - 1, 16371),
+    ],
+    ids=["1-byte-code", "8-byte-code"],
+)
+def test_close_truncates_reason_to_fit_one_record(
+    error_code: int, expected_reason_length: int
+) -> None:
+    """1 レコードに収まらない理由は、収まる長さへ切り詰めて送る
 
     QMux は 1 つのフレームが 1 つのレコードに収まることを要求する
-    (draft-ietf-quic-qmux-02 Section 3.2)。dwnx はレコードを `Config` の
-    `max_record_size` (既定 16384 バイト) に収めるため、理由が長すぎると
-    CONNECTION_CLOSE のレコードそのものを作れず、終了コードも理由もピアへ
-    届かない (接続は閉じる)。この上限は docstring と SKILL.md に明記している。
+    (draft-ietf-quic-qmux-02 Section 3.2)。dwnx はレコードの Frames フィールドを
+    16382 バイト (DWNX_DEFAULT_MAX_RECORD_SIZE) に制限するため、理由が長すぎると
+    CONNECTION_CLOSE のレコードそのものを作れず、終了コードもピアへ届かない。
+    終了コードを必ず届けるため、理由を収まる長さへ切り詰める。
 
-    このテストは、依存する dwnx の更新で上限や挙動 (切り詰めへの変更など) が
-    変わったときに、ドキュメントの記述ごと見直すために置く。実測した境界は
-    終了コード 0 で 16378 バイト、終了コード 0x7B で 16377 バイトである。
+    切り詰めた後のレコードは 16384 バイト (レコード長 2 バイト + Frames 16382
+    バイト) ちょうどになり、理由に使えるのはフレームの種別 (1 バイト) と終了
+    コード (varint) と理由の長さ (varint) を差し引いた残りである。終了コードが
+    8 バイトの varint になる場合は、その分だけ理由が短くなる。
     """
-    config = qmux.Config()
-    # 上限に十分収まる理由はレコードに載る
-    fits = qmux.Connection.create_server(config)
-    fits.close(_CLOSE_ERROR_CODE, "a" * 16000)
-    assert fits.pending_record is not None
+    connection = qmux.Connection.create_server(qmux.Config())
+    peer = qmux.Connection.create_client(qmux.Config())
+    pump(connection, peer)
 
-    # 上限を明確に超える理由ではレコードが作られない
-    too_long = qmux.Connection.create_server(config)
-    too_long.close(_CLOSE_ERROR_CODE, "a" * 20000)
-    assert too_long.pending_record is None
+    connection.close(error_code, "a" * 20000)
+    record = connection.pending_record
+    assert record is not None
+
+    assert len(record) == _MAX_RECORD_SIZE
+    close = parse_connection_close(bytes(record))
+    assert close is not None
+    assert close.error_code == error_code
+    assert close.reason == "a" * expected_reason_length
+
+    # 切り詰めてもレコードとしては妥当で、ピアは draining へ遷移する
+    assert peer.receive(record) == DWNX_ERR_DRAINING
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_bytes"),
+    [
+        ("a", 16378),
+        ("é", 16378),
+        ("あ", 16377),
+        ("😀", 16376),
+    ],
+    ids=["ascii", "2-byte", "3-byte", "4-byte"],
+)
+def test_close_truncates_reason_at_utf8_boundary(reason: str, expected_bytes: int) -> None:
+    """切り詰めはマルチバイト文字の途中で切らない
+
+    RFC 9000 Section 19.19 は理由が UTF-8 であることを推奨する。切り詰めの位置が
+    文字の途中に落ちる場合は、その文字の先頭まで戻す。末尾がリードバイトで
+    終わる場合 (後続バイトが欠けている) も切れているとみなす。
+
+    1 文字のバイト数によって切り詰め後の長さが変わることを、ASCII (1 バイト)・
+    é (2 バイト)・あ (3 バイト)・😀 (4 バイト) で確かめる。上限の 16378 バイトは
+    ASCII と é ではちょうど文字の区切りになるが、あ では 5460 文字目の 1 バイト目
+    (リードバイト) で終わり、😀 では 2 バイト目で終わるため、1 文字分戻る。
+    """
+    connection = qmux.Connection.create_server(qmux.Config())
+    connection.close(_CLOSE_ERROR_CODE, reason * 20000)
+    record = connection.pending_record
+    assert record is not None
+
+    close = parse_connection_close(bytes(record))
+    assert close is not None
+    assert close.error_code == _CLOSE_ERROR_CODE
+    assert len(close.reason.encode()) == expected_bytes
+    # 文字が壊れていないこと (元の文字列の接頭辞になっていること)
+    assert close.reason == (reason * 20000)[: len(close.reason)]
+    assert len(record) <= _MAX_RECORD_SIZE
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda connection: connection.close(_MAX_VARINT + 1, ""), id="close"),
+        pytest.param(
+            lambda connection: connection.reset_stream(0, _MAX_VARINT + 1),
+            id="reset_stream",
+        ),
+        pytest.param(
+            lambda connection: connection.stop_sending(0, _MAX_VARINT + 1),
+            id="stop_sending",
+        ),
+        pytest.param(
+            lambda connection: connection.close_stream(0, _MAX_VARINT + 1),
+            id="close_stream",
+        ),
+    ],
+)
+def test_invalid_error_code_raises_value_error(
+    call: Callable[[qmux.Connection], None],
+) -> None:
+    """QUIC varint の上限を超える終了コードが ValueError になる
+
+    dwnx は終了コードを QUIC varint として符号化する際に assert で上限を検査し、
+    超える値ではプロセスが abort する (SIGABRT)。ストリームの有無や接続の状態に
+    よらず dwnx を呼ぶ前に弾き、Python の例外にする。呼び出しはラムダで渡すため、
+    終了コードを受け取る 4 つの経路を同じ検査で覆える。
+    """
+    connection = qmux.Connection.create_client(qmux.Config())
+    with pytest.raises(ValueError):
+        call(connection)
 
 
 def test_reset_stream_notifies_peer() -> None:

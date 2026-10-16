@@ -172,10 +172,11 @@ record = client.pending_record
 - `receive(data) -> int`: 受信したバイト列を処理する。0 以上は成功、負値は dwnx のライブラリエラー。ピアの CONNECTION_CLOSE を受けた後は -224 (DWNX_ERR_DRAINING) を返す
 - `pending_record -> bytes | None`: 送信すべき 1 レコード。無い場合は None
 - `timeout -> int | None` / `handle_timeout()`: 次のタイマー期限 (ナノ秒) とその処理
-- `open_stream(bidirectional) -> int` / `send_stream_data(stream_id, data, fin=False)` / `close(error_code=0, reason="")`
+- `open_stream(bidirectional) -> int` / `send_stream_data(stream_id, data, fin=False)` / `close(error_code=0, reason="")`: `close` の理由が 1 レコードに収まらない場合は UTF-8 の文字境界で切り詰める
 - `reset_stream(stream_id, error_code=0) -> int` / `stop_sending(stream_id, error_code=0) -> int` / `close_stream(stream_id, error_code=0) -> int`: ローカルのストリーム終了。`reset_stream` は書き込み側の即時終了 (RESET_STREAM)、`stop_sending` は読み取り側の即時終了 (STOP_SENDING)、`close_stream` は両方向の即時終了 (RESET_STREAM + STOP_SENDING) である (`webtransport_ext.quic.Connection` と同じ意味。graceful な書き込み側の終了は `send_stream_data(fin=True)`)。単方向ストリームの向き違いは -201 (DWNX_ERR_INVALID_ARGUMENT)、存在しないストリームは 0 を返す。0 以上は成功、負値は dwnx のライブラリエラー
 - `next_event() -> Event | None`: `TRANSPORT_PARAMS_RECEIVED` / `STREAM_DATA` / `STREAM_CLOSED` / `STREAM_RESET` / `STOP_SENDING`
 - `get_version()`: dwnx のバージョン文字列
+- 設定値と終了コードは dwnx の assert に到達する前に検査する。QUIC varint の上限 (2^62-1) を超える値、ストリーム数が 2^60 を超える値 (RFC 9000 Section 4.6 の上限。超えるとピアが MALFORMED_TRANSPORT_PARAM で拒否する)、`max_record_size` が 16382 未満の値、`max_idle_timeout_ns` が UINT64_MAX の値は `ValueError` になる。同梱の libdwnx は NDEBUG なしでビルドされており、これらは Python の例外ではなくプロセスの abort (SIGABRT) になるため、接続を作る前・dwnx を呼ぶ前に弾いている。`max_record_size` は dwnx が送信のレコード長を 16382 に固定するため、それより大きい値は記録長にも確保量にも影響しない
 
 ### asyncio API (`Client` / `Server`)
 
@@ -219,7 +220,7 @@ await client.run()
 await client.close()
 ```
 
-- `Client(host, port, config=None, ssl=None, alpn_protocols=None)`: `connect(timeout=10.0)` は TCP 接続とトランスポートパラメータの交換まで待つ。`run()` が受信ループで、`close(error_code=0, reason="")` が終了コードと理由付きの CONNECTION_CLOSE を送る (draft-ietf-quic-qmux-02 Section 7.2 が定める終了で、終了コードはアプリケーションエラーコードとして載る)。理由は 1 レコードに収まる長さが上限で、既定 (`max_record_size` が 16384) では約 16 KiB までしか載らず、それを超えるとレコードを作れず終了コードも理由も届かない (QMux は 1 フレームが 1 レコードに収まることを Section 3.2 が要求する)。ピアが送った終了コードと理由は dwnx が公開していないため観測できない。`peer_address` / `negotiated_alpn_protocol` / `is_connected` を持つ
+- `Client(host, port, config=None, ssl=None, alpn_protocols=None)`: `connect(timeout=10.0)` は TCP 接続とトランスポートパラメータの交換まで待つ。`run()` が受信ループで、`close(error_code=0, reason="")` が終了コードと理由付きの CONNECTION_CLOSE を送る (draft-ietf-quic-qmux-02 Section 7.2 が定める終了で、終了コードはアプリケーションエラーコードとして載る)。理由が 1 レコード (16384 バイト) に収まらない場合は UTF-8 の文字境界で切り詰めて送るため、理由の長さによって終了コードが失われることはない (QMux は 1 フレームが 1 レコードに収まることを Section 3.2 が要求する)。ピアが送った終了コードと理由は dwnx が公開していないため観測できない。`peer_address` / `negotiated_alpn_protocol` / `is_connected` を持つ
 - TLS 上で使う場合、接続断と同時クローズ時の TLS 終了失敗 (`ssl.SSLError`。`APPLICATION_DATA_AFTER_CLOSE_NOTIFY` や `RECORD_LAYER_FAILURE` など) は接続断として扱う。`connect()` と `run()` は生の `ssl.SSLError` を漏らさず `QmuxConnectionError` を送出し (原因の `ssl.SSLError` は `__cause__` に残る)、`close()` はすでに切れた接続でも例外を出さない。サーバーの接続ハンドラも未処理例外にせず警告ログに記録する
 - クライアントのコールバックは `on_connected()` / `on_closed()` / `on_stream_data(stream_id, data, fin)` / `on_stream_reset(stream_id, error_code)` / `on_stop_sending(stream_id, error_code)`
 - `Server(host, port, config=None, ssl=None, alpn_protocols=None)`: `start()` で待ち受け、`run()` で受け付け続け、`stop()` で接続ごと閉じる。`actual_port` で実際に待ち受けているポートが分かる

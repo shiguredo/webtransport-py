@@ -273,6 +273,38 @@ async def test_client_close_sends_error_code_and_reason() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_close_truncates_over_long_reason() -> None:
+    """1 レコードに収まらない理由でも終了コードは届き、理由は切り詰められる
+
+    CONNECTION_CLOSE は 1 レコードに収める必要があるため、長すぎる理由は
+    UTF-8 の文字境界で切り詰めて送る。切り詰めても終了コードは必ず届くことを、
+    リレーで観測する。
+
+    理由に使えるのは 16382 バイトの Frames フィールドからフレームの種別
+    (1 バイト)・終了コード (varint)・理由の長さ (varint) を差し引いた残りで、
+    終了コード 0x2A は 1 バイト、理由の長さ 16378 は 2 バイトの varint になる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+    relay = await QmuxRelay.start("127.0.0.1", server.actual_port)
+
+    error_code = 0x2A
+    client = qmux.Client("127.0.0.1", relay.port)
+    try:
+        await client.connect()
+        await client.close(error_code=error_code, reason="z" * 30000)
+
+        close = await relay.wait_for_connection_close(TIMEOUT)
+        assert close.error_code == error_code
+        assert close.reason == "z" * 16378
+    finally:
+        await client.close()
+        await relay.stop()
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
 async def test_client_close_default_arguments_send_zero_code_and_empty_reason() -> None:
     """引数を省略した Client.close が終了コード 0 と空の理由を送る
 
@@ -393,6 +425,38 @@ async def test_client_close_before_connect_does_nothing() -> None:
     """
     client = qmux.Client("127.0.0.1", 1)
     await client.close(error_code=0x2C, reason="未接続")
+    assert client.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_server_start_rejects_invalid_config() -> None:
+    """範囲外の設定値では Server.start() が ValueError になる
+
+    設定の検査は接続を作るときに行われる。接続を受け付けてから接続ハンドラの
+    中で例外になると、利用者には asyncio の未処理例外としてしか見えない。
+    待ち受けを始める前に 1 度だけ検査して ValueError にし、待ち受けも開始
+    しないことを確かめる。
+    """
+    config = qmux.Config()
+    config.max_record_size = 100
+    server = qmux.Server("127.0.0.1", 0, config=config)
+    with pytest.raises(ValueError):
+        await server.start()
+    assert server.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_client_connect_rejects_invalid_config() -> None:
+    """範囲外の設定値では Client.connect() が ValueError になる
+
+    接続を作るのは TCP 接続より前なので、接続を試みる前に ValueError になる。
+    接続先は存在しないポート (1) にして、TCP 接続へ進まないことも確かめる。
+    """
+    config = qmux.Config()
+    config.max_record_size = 100
+    client = qmux.Client("127.0.0.1", 1, config=config)
+    with pytest.raises(ValueError):
+        await client.connect()
     assert client.is_connected is False
 
 

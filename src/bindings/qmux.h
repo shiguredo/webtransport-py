@@ -26,7 +26,8 @@ namespace webtransport::qmux {
  * QMux 接続の設定 (dwnx の settings と transport parameters)
  */
 struct QmuxConfig {
-  // ローカルが受け入れる同時ストリーム数
+  // ローカルが受け入れる同時ストリーム数。2^60 以下でなければならない
+  // (RFC 9000 Section 4.6)
   uint64_t initial_max_streams_bidi = 100;
   uint64_t initial_max_streams_uni = 100;
   // コネクション全体のフロー制御上限 (バイト)
@@ -37,7 +38,8 @@ struct QmuxConfig {
   uint64_t initial_max_stream_data_uni = 1 << 18;
   // アイドルタイムアウト (ナノ秒)
   uint64_t max_idle_timeout_ns = 30'000'000'000ULL;
-  // 1 レコードの最大長 (バイト)
+  // 1 レコードの最大長 (バイト)。dwnx は 16382 未満を受け付けず、送信の
+  // レコード長も 16382 に固定するため、それより大きい値は記録長に影響しない
   uint64_t max_record_size = 16384;
 };
 
@@ -140,6 +142,8 @@ class QmuxConnection {
    * DWNX_ERR_INVALID_ARGUMENT を返す。
    *
    * @return 0 以上は成功、負値は dwnx のライブラリエラー
+   * @throw std::invalid_argument 終了コードが QUIC varint の上限 (2^62-1) を
+   *                              超える場合
    */
   int reset_stream(int64_t stream_id, uint64_t error_code = 0);
 
@@ -151,6 +155,8 @@ class QmuxConnection {
    * を返す。
    *
    * @return 0 以上は成功、負値は dwnx のライブラリエラー
+   * @throw std::invalid_argument 終了コードが QUIC varint の上限 (2^62-1) を
+   *                              超える場合
    */
   int stop_sending(int64_t stream_id, uint64_t error_code = 0);
 
@@ -162,11 +168,19 @@ class QmuxConnection {
    * (nghttp3 のストリーム終了) とはエラーコードの空間も意味も異なる。
    *
    * @return 0 以上は成功、負値は dwnx のライブラリエラー
+   * @throw std::invalid_argument 終了コードが QUIC varint の上限 (2^62-1) を
+   *                              超える場合
    */
   int close_stream(int64_t stream_id, uint64_t error_code = 0);
 
   /**
    * 接続を閉じる (CONNECTION_CLOSE を含むレコードを send() で取り出せるようにする)
+   *
+   * 理由が 1 レコードに収まらない場合は、収まる長さへ UTF-8 の文字境界で
+   * 切り詰める (理由の長さによって終了コードが失われないようにするため)。
+   *
+   * @throw std::invalid_argument 終了コードが QUIC varint の上限 (2^62-1) を
+   *                              超える場合
    */
   void close(uint64_t error_code, const std::string& reason);
 

@@ -8,13 +8,13 @@ class Config:
     def __init__(self) -> None: ...
     @property
     def initial_max_streams_bidi(self) -> int:
-        """受け入れる同時双方向ストリーム数"""
+        """受け入れる同時双方向ストリーム数。2^60 以下でなければならない"""
 
     @initial_max_streams_bidi.setter
     def initial_max_streams_bidi(self, arg: int, /) -> None: ...
     @property
     def initial_max_streams_uni(self) -> int:
-        """受け入れる同時単方向ストリーム数"""
+        """受け入れる同時単方向ストリーム数。2^60 以下でなければならない"""
 
     @initial_max_streams_uni.setter
     def initial_max_streams_uni(self, arg: int, /) -> None: ...
@@ -50,7 +50,9 @@ class Config:
     def max_idle_timeout_ns(self, arg: int, /) -> None: ...
     @property
     def max_record_size(self) -> int:
-        """1 レコードの最大長 (バイト)"""
+        """
+        1 レコードの最大長 (バイト)。16382 以上でなければならない。dwnx は送信のレコード長を 16382 に固定するため、それより大きい値は記録長に影響しない
+        """
 
     @max_record_size.setter
     def max_record_size(self, arg: int, /) -> None: ...
@@ -128,18 +130,24 @@ class Connection:
         """ストリームデータの送信を予約する"""
 
     def reset_stream(self, stream_id: int, error_code: int = 0) -> int:
-        """ストリームの書き込み側をリセットする (RESET_STREAM を送出。0 以上は成功、負値は dwnx のライブラリエラー)"""
+        """
+        ストリームの書き込み側をリセットする (RESET_STREAM を送出。0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
+        """
 
     def stop_sending(self, stream_id: int, error_code: int = 0) -> int:
-        """ストリームの読み取り側を終了する (STOP_SENDING を送出。0 以上は成功、負値は dwnx のライブラリエラー)"""
+        """
+        ストリームの読み取り側を終了する (STOP_SENDING を送出。0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
+        """
 
     def close_stream(self, stream_id: int, error_code: int = 0) -> int:
         """
-        ストリームの両方向を終了する (RESET_STREAM + STOP_SENDING。0 以上は成功、負値は dwnx のライブラリエラー)
+        ストリームの両方向を終了する (RESET_STREAM + STOP_SENDING。0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
         """
 
     def close(self, error_code: int = 0, reason: str = "") -> None:
-        """接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする)"""
+        """
+        接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする。理由が 1 レコードに収まらない場合は UTF-8 の文字境界で切り詰める。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
+        """
 
     def next_event(self) -> Event | None:
         """次のイベントを取得する"""
