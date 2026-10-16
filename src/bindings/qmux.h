@@ -211,11 +211,13 @@ class QmuxConnection {
   dwnx_conn* conn_ = nullptr;
   std::deque<QmuxEvent> events_;
   std::deque<PendingStreamData> pending_stream_data_;
-  // close() で作った CONNECTION_CLOSE のレコード
-  std::optional<std::vector<uint8_t>> pending_close_record_;
   std::vector<uint8_t> write_buffer_;
   // close() で作った CONNECTION_CLOSE の内容 (send() で 1 回だけ取り出す)
   dwnx_ccerr close_ccerr_{};
+  // close() で受け取った理由の文字列。dwnx は reason をコピーしないため、
+  // close_ccerr_ の reason が指す実体を CONNECTION_CLOSE を書く send() まで
+  // 生存させる必要がある
+  std::string close_reason_;
   bool close_requested_ = false;
 
   friend int recv_transport_params_cb(dwnx_conn* conn,

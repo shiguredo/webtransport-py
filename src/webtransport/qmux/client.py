@@ -38,7 +38,6 @@ class Client:
         config: qmux.Config | None = None,
         ssl: ssl_module.SSLContext | None = None,
         alpn_protocols: list[str] | None = None,
-        close_reason: str = "",
     ) -> None:
         """クライアントを作る
 
@@ -48,7 +47,6 @@ class Client:
             config: QMux の設定 (省略時は既定値)
             ssl: TLS を使う場合の SSLContext
             alpn_protocols: TLS を使う場合に提示する ALPN プロトコル
-            close_reason: `close()` で送る理由の文字列
 
         Raises:
             ValueError: `ssl` を渡したのに `alpn_protocols` が空の場合、
@@ -70,7 +68,6 @@ class Client:
         self._config = config if config is not None else qmux.Config()
         self._ssl = ssl
         self._alpn_protocols = list(alpn_protocols) if alpn_protocols else []
-        self._close_reason = close_reason
         self._driver: ConnectionDriver | None = None
         self._callbacks: dict[str, Callable[..., Awaitable[None]] | None] = {
             "connected": None,
@@ -253,11 +250,35 @@ class Client:
             raise RuntimeError("connect() must be called before run()")
         await self._driver.run()
 
-    async def close(self) -> None:
-        """CONNECTION_CLOSE を送って接続を閉じる"""
+    async def close(self, error_code: int = 0, reason: str = "") -> None:
+        """CONNECTION_CLOSE を送って接続を閉じる
+
+        ピアへ送る終了コードと理由を指定できる。QMux にはアプリケーション層の
+        セッションが無いため、`error_code` は上位プロトコルの終了コードをその
+        ままアプリケーションエラーコードとして渡せる。MOQT のような
+        プロトコルが終了コードと理由をピアへ伝えるために使う。
+
+        QMux は CONNECTION_CLOSE で接続を閉じることを定めている
+        (draft-ietf-quic-qmux-02 Section 7.2。将来改訂される可能性がある)。
+        フレームの形は QUIC v1 の CONNECTION_CLOSE (RFC 9000 Section 19.19)
+        であり、`error_code` はアプリケーションエラーコードとして、
+        `reason` は理由句として載る。ピアが送った終了コードと理由は dwnx が
+        公開していないため、こちらからは観測できない。
+
+        `reason` は CONNECTION_CLOSE のレコードに収まる長さでなければならない。
+        QMux は 1 つのフレームが 1 つのレコードに収まることを要求するため
+        (draft-ietf-quic-qmux-02 Section 3.2)、既定の設定 (`Config` の
+        `max_record_size` が 16384) では理由は約 16 KiB までしか載らない。
+        それを超えるとレコードを作れず、接続は閉じるが終了コードも理由も
+        ピアへ届かない。
+
+        Args:
+            error_code: 送るアプリケーションエラーコード
+            reason: 理由の文字列
+        """
         if self._driver is None:
             return
-        await self._driver.close(reason=self._close_reason)
+        await self._driver.close(error_code, reason)
 
     async def open_stream(self, unidirectional: bool = False) -> int:
         """ストリームを開く

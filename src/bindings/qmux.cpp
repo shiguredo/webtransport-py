@@ -392,10 +392,18 @@ void QmuxConnection::close(uint64_t error_code, const std::string& reason) {
   if (conn_ == nullptr) {
     return;
   }
+  // dwnx_ccerr_set_application_error は reason をコピーしない (dwnx.h に
+  // 「This function does not make a copy of the reason phrase」と明記されて
+  // いる)。CONNECTION_CLOSE のレコードを書くのは後続の send()
+  // (write_connection_close) であるため、reason の実体をメンバに保持して
+  // 書き終わるまで生存させる。引数の reason は nanobind が Python の str から
+  // 作る一時オブジェクトで、close() を抜けた時点で破棄される
+  close_reason_ = reason;
   dwnx_ccerr_default(&close_ccerr_);
   dwnx_ccerr_set_application_error(
       &close_ccerr_, error_code,
-      reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
+      reinterpret_cast<const uint8_t*>(close_reason_.data()),
+      close_reason_.size());
   close_requested_ = true;
 }
 

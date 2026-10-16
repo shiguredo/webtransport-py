@@ -6,6 +6,9 @@
 相手にする。
 """
 
+import pytest
+from qmux_relay import parse_connection_close
+
 from webtransport import qmux
 
 # dwnx の DWNX_ERR_DRAINING (dwnx.h)。ピアの CONNECTION_CLOSE を受信した後は
@@ -17,6 +20,9 @@ DWNX_ERR_INVALID_ARGUMENT = -201
 
 # イベントに載るアプリケーションエラーコード
 _APP_ERROR_CODE = 0x2A
+
+# 接続終了 (CONNECTION_CLOSE) に載せるアプリケーションエラーコード
+_CLOSE_ERROR_CODE = 0x2B
 
 
 def pump(first: qmux.Connection, second: qmux.Connection, rounds: int = 100) -> None:
@@ -185,6 +191,82 @@ def test_close_writes_connection_close() -> None:
     assert len(record) > 0
     # 相手は CONNECTION_CLOSE を処理して draining へ遷移する (DWNX_ERR_DRAINING)
     assert server.receive(record) == DWNX_ERR_DRAINING
+
+
+@pytest.mark.parametrize("side", ["client", "server"], ids=["client", "server"])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "hello",
+        "server shutdown",
+        "サーバーからの終了理由",
+        "a" * 64,
+    ],
+    ids=["short-ascii", "sso-boundary-ascii", "utf8", "long-ascii"],
+)
+def test_close_carries_error_code_and_reason(side: str, reason: str) -> None:
+    """close() の終了コードと理由が CONNECTION_CLOSE のレコードに載る
+
+    dwnx の `dwnx_ccerr_set_application_error` は理由の文字列をコピーしない
+    (dwnx.h に明記されている)。理由の実体は、レコードを書く `pending_record`
+    の時点まで生存していなければならない。短い文字列の最適化に収まる長さだけで
+    なく、それを超える ASCII と UTF-8 のマルチバイトでも壊れないことを、生成
+    されたレコードを解析して確かめる (QMux ではピアが受け取った理由を観測する
+    API が無いため、レコードを直接見る)。
+
+    ピアへ届いた後に -224 (DWNX_ERR_DRAINING) が返ることも合わせて確認し、
+    レコードとして妥当であることを裏付ける。
+    """
+    factories = {
+        "client": qmux.Connection.create_client,
+        "server": qmux.Connection.create_server,
+    }
+    connection = factories[side](qmux.Config())
+    peer = (
+        qmux.Connection.create_server(qmux.Config())
+        if side == "client"
+        else qmux.Connection.create_client(qmux.Config())
+    )
+    pump(connection, peer)
+
+    connection.close(_CLOSE_ERROR_CODE, reason)
+    record = connection.pending_record
+    assert record is not None
+
+    close = parse_connection_close(bytes(record))
+    assert close is not None, "CONNECTION_CLOSE をレコードから取り出せない"
+    assert close.is_application is True
+    assert close.frame_type == 0x1D
+    assert close.error_code == _CLOSE_ERROR_CODE
+    assert close.reason == reason
+
+    # ピアは CONNECTION_CLOSE を処理して draining へ遷移する
+    assert peer.receive(record) == DWNX_ERR_DRAINING
+
+
+def test_close_reason_larger_than_record_is_dropped() -> None:
+    """1 レコードに収まらない理由では CONNECTION_CLOSE が作られない
+
+    QMux は 1 つのフレームが 1 つのレコードに収まることを要求する
+    (draft-ietf-quic-qmux-02 Section 3.2)。dwnx はレコードを `Config` の
+    `max_record_size` (既定 16384 バイト) に収めるため、理由が長すぎると
+    CONNECTION_CLOSE のレコードそのものを作れず、終了コードも理由もピアへ
+    届かない (接続は閉じる)。この上限は docstring と SKILL.md に明記している。
+
+    このテストは、依存する dwnx の更新で上限や挙動 (切り詰めへの変更など) が
+    変わったときに、ドキュメントの記述ごと見直すために置く。実測した境界は
+    終了コード 0 で 16378 バイト、終了コード 0x7B で 16377 バイトである。
+    """
+    config = qmux.Config()
+    # 上限に十分収まる理由はレコードに載る
+    fits = qmux.Connection.create_server(config)
+    fits.close(_CLOSE_ERROR_CODE, "a" * 16000)
+    assert fits.pending_record is not None
+
+    # 上限を明確に超える理由ではレコードが作られない
+    too_long = qmux.Connection.create_server(config)
+    too_long.close(_CLOSE_ERROR_CODE, "a" * 20000)
+    assert too_long.pending_record is None
 
 
 def test_reset_stream_notifies_peer() -> None:

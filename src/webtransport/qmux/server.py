@@ -101,6 +101,13 @@ class Session:
     async def close(self, error_code: int = 0, reason: str = "") -> None:
         """CONNECTION_CLOSE を送って接続を閉じる
 
+        `reason` は CONNECTION_CLOSE のレコードに収まる長さでなければならない。
+        QMux は 1 つのフレームが 1 つのレコードに収まることを要求するため
+        (draft-ietf-quic-qmux-02 Section 3.2)、既定の設定 (`Config` の
+        `max_record_size` が 16384) では理由は約 16 KiB までしか載らない。
+        それを超えるとレコードを作れず、接続は閉じるが終了コードも理由も
+        ピアへ届かない。
+
         Args:
             error_code: 送るエラーコード
             reason: 理由の文字列

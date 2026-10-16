@@ -219,7 +219,7 @@ await client.run()
 await client.close()
 ```
 
-- `Client(host, port, config=None, ssl=None, alpn_protocols=None, close_reason="")`: `connect(timeout=10.0)` は TCP 接続とトランスポートパラメータの交換まで待つ。`run()` が受信ループで、`close()` が CONNECTION_CLOSE を送る。`peer_address` / `negotiated_alpn_protocol` / `is_connected` を持つ
+- `Client(host, port, config=None, ssl=None, alpn_protocols=None)`: `connect(timeout=10.0)` は TCP 接続とトランスポートパラメータの交換まで待つ。`run()` が受信ループで、`close(error_code=0, reason="")` が終了コードと理由付きの CONNECTION_CLOSE を送る (draft-ietf-quic-qmux-02 Section 7.2 が定める終了で、終了コードはアプリケーションエラーコードとして載る)。理由は 1 レコードに収まる長さが上限で、既定 (`max_record_size` が 16384) では約 16 KiB までしか載らず、それを超えるとレコードを作れず終了コードも理由も届かない (QMux は 1 フレームが 1 レコードに収まることを Section 3.2 が要求する)。ピアが送った終了コードと理由は dwnx が公開していないため観測できない。`peer_address` / `negotiated_alpn_protocol` / `is_connected` を持つ
 - TLS 上で使う場合、接続断と同時クローズ時の TLS 終了失敗 (`ssl.SSLError`。`APPLICATION_DATA_AFTER_CLOSE_NOTIFY` や `RECORD_LAYER_FAILURE` など) は接続断として扱う。`connect()` と `run()` は生の `ssl.SSLError` を漏らさず `QmuxConnectionError` を送出し (原因の `ssl.SSLError` は `__cause__` に残る)、`close()` はすでに切れた接続でも例外を出さない。サーバーの接続ハンドラも未処理例外にせず警告ログに記録する
 - クライアントのコールバックは `on_connected()` / `on_closed()` / `on_stream_data(stream_id, data, fin)` / `on_stream_reset(stream_id, error_code)` / `on_stop_sending(stream_id, error_code)`
 - `Server(host, port, config=None, ssl=None, alpn_protocols=None)`: `start()` で待ち受け、`run()` で受け付け続け、`stop()` で接続ごと閉じる。`actual_port` で実際に待ち受けているポートが分かる

@@ -11,6 +11,7 @@ import logging
 import ssl
 
 import pytest
+from qmux_relay import QmuxRelay, parse_connection_close, split_records
 
 from webtransport import qmux
 from webtransport.qmux._connection import ConnectionDriver
@@ -219,7 +220,7 @@ async def test_client_close_notifies_server() -> None:
     await server.start()
     server_task = asyncio.create_task(server.run())
 
-    client = qmux.Client("127.0.0.1", server.actual_port, close_reason="bye")
+    client = qmux.Client("127.0.0.1", server.actual_port)
     try:
         await client.connect()
         assert client.is_connected is True
@@ -231,6 +232,168 @@ async def test_client_close_notifies_server() -> None:
     finally:
         await client.close()
         await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_client_close_sends_error_code_and_reason() -> None:
+    """Client.close の終了コードと理由が CONNECTION_CLOSE としてピアへ届く
+
+    asyncio の `Client.close(error_code, reason)` が実際に送出するバイト列を、
+    実 TCP のリレーで観測する。dwnx はピアが受け取った終了コードと理由を公開
+    しないため、ピア側の公開 API からは観測できない。ワイヤ上の
+    CONNECTION_CLOSE フレーム (RFC 9000 Section 19.19) を解析し、指定した値が
+    そのまま載ることを確かめる。
+
+    理由は日本語にして、UTF-8 のマルチバイト列が欠けずに渡ることも見る。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+    relay = await QmuxRelay.start("127.0.0.1", server.actual_port)
+
+    # 上位プロトコルの終了コードを想定した値 (QMux 自身は値に意味を持たない)
+    error_code = 0x2A
+    reason = "クライアントからの終了理由"
+    client = qmux.Client("127.0.0.1", relay.port)
+    try:
+        await client.connect()
+
+        # run() を回していなくても close() は CONNECTION_CLOSE を送出する
+        await client.close(error_code=error_code, reason=reason)
+
+        close = await relay.wait_for_connection_close(TIMEOUT)
+        assert close.is_application is True, "アプリケーションエラーの CONNECTION_CLOSE でない"
+        assert close.frame_type == 0x1D
+        assert close.error_code == error_code
+        assert close.reason == reason
+    finally:
+        await client.close()
+        await relay.stop()
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_client_close_default_arguments_send_zero_code_and_empty_reason() -> None:
+    """引数を省略した Client.close が終了コード 0 と空の理由を送る
+
+    既定値は終了コード 0 (アプリケーションエラーなし) と空の理由である。
+    理由を指定しない `close()` が、理由を持たない CONNECTION_CLOSE を送ることを
+    ワイヤ上で確かめる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+    relay = await QmuxRelay.start("127.0.0.1", server.actual_port)
+
+    client = qmux.Client("127.0.0.1", relay.port)
+    try:
+        await client.connect()
+        await client.close()
+
+        close = await relay.wait_for_connection_close(TIMEOUT)
+        assert close.is_application is True
+        assert close.error_code == 0
+        assert close.reason == ""
+    finally:
+        await client.close()
+        await relay.stop()
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_client_close_sends_connection_close_only_once() -> None:
+    """Client.close を繰り返しても CONNECTION_CLOSE は 1 回だけ送出される
+
+    2 回目以降の `close()` はすでに閉じた接続に対して何もしない。終了処理を
+    後始末として何度呼んでも、ピアへ余分な CONNECTION_CLOSE を送らないことを
+    ワイヤ上で確かめる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+    relay = await QmuxRelay.start("127.0.0.1", server.actual_port)
+
+    client = qmux.Client("127.0.0.1", relay.port)
+    try:
+        await client.connect()
+        await client.close(error_code=0x11, reason="first")
+        first = await relay.wait_for_connection_close(TIMEOUT)
+        assert first.error_code == 0x11
+
+        # 2 回目と 3 回目は何も送らない
+        await client.close(error_code=0x22, reason="second")
+        await client.close(error_code=0x33, reason="third")
+
+        closes = [
+            close
+            for record in split_records(relay.client_to_server_bytes)
+            if (close := parse_connection_close(record)) is not None
+        ]
+        assert len(closes) == 1, f"CONNECTION_CLOSE が {len(closes)} 回送出されている"
+        assert closes[0].error_code == 0x11
+        assert closes[0].reason == "first"
+    finally:
+        await client.close()
+        await relay.stop()
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_server_session_close_sends_error_code_and_reason() -> None:
+    """Session.close の終了コードと理由が CONNECTION_CLOSE としてピアへ届く
+
+    サーバー側の `Session.close(error_code, reason)` も `Client.close` と同じ
+    経路で CONNECTION_CLOSE を送出する。サーバー発の終了コードと理由がワイヤ上で
+    観測できることを確かめる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    sessions: list[qmux.Session] = []
+    session_ready = asyncio.Event()
+
+    async def on_session_ready(session: qmux.Session) -> None:
+        sessions.append(session)
+        session_ready.set()
+
+    server.on_session_ready(on_session_ready)
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+    relay = await QmuxRelay.start("127.0.0.1", server.actual_port)
+
+    # サーバーの終了コードを想定した値 (QMux 自身は値に意味を持たない)
+    error_code = 0x2B
+    reason = "サーバーからの終了理由"
+    client = qmux.Client("127.0.0.1", relay.port)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        await asyncio.wait_for(session_ready.wait(), TIMEOUT)
+        client_task = asyncio.create_task(client.run())
+
+        await sessions[0].close(error_code, reason)
+
+        close = await relay.wait_for_connection_close(TIMEOUT, direction="server_to_client")
+        assert close.is_application is True
+        assert close.frame_type == 0x1D
+        assert close.error_code == error_code
+        assert close.reason == reason
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await relay.stop()
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_client_close_before_connect_does_nothing() -> None:
+    """connect() 前の Client.close が接続を作らずに戻る
+
+    後始末として無条件に `close()` を呼べることを保証する。接続していない
+    クライアントの `close()` は例外を出さず、`is_connected` は False のままである。
+    """
+    client = qmux.Client("127.0.0.1", 1)
+    await client.close(error_code=0x2C, reason="未接続")
+    assert client.is_connected is False
 
 
 @pytest.mark.asyncio
