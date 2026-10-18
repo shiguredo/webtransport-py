@@ -16,7 +16,7 @@
     "url": "https://github.com/aws/aws-lc"
   },
   "dwnx": {
-    "ref": "85c43b506e48f268029e98514d26fe65c8ff749e",
+    "ref": "aeb481c7098a7d326047ffa52740c0f4e4fa2d48",
     "url": "https://github.com/ngtcp2/dwnx"
   }
 }
