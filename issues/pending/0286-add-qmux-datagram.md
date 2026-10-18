@@ -36,3 +36,8 @@ draft-ietf-quic-qmux-02 Section 9.1 は Unreliable Datagram Extension (RFC 9221)
 
 - フレームの送出と record のパースの両方が dwnx の内部にあり、webtransport-py 側の変更だけでは完了できない外部依存のため
 - dwnx 上流が DATAGRAM (RFC 9221) の送出 API と `max_datagram_frame_size` トランスポートパラメータを提供した時点で reopened にして設計方針を確定する。フォークしない方針が変わった場合も同様である
+
+## reopened にした理由
+
+- dwnx 上流 `aeb481c` が `max_datagram_frame_size` トランスポートパラメータ、`dwnx_conn_writev_datagram` / `dwnx_conn_write_datagram`、`dwnx_recv_datagram` コールバックを実装し、pending にした理由だった外部依存が解消したため
+- `deps.json` の dwnx を `aeb481c` に更新して取り込んだため、設計方針を確定して実装に着手できる状態になった
