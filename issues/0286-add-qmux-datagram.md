@@ -1,7 +1,7 @@
 # QMux に DATAGRAM (Unreliable Datagram Extension) を追加する
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-18
 - Branch: feature/add-qmux-datagram
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -41,3 +41,12 @@ draft-ietf-quic-qmux-02 Section 9.1 は Unreliable Datagram Extension (RFC 9221)
 
 - dwnx 上流 `aeb481c` が `max_datagram_frame_size` トランスポートパラメータ、`dwnx_conn_writev_datagram` / `dwnx_conn_write_datagram`、`dwnx_recv_datagram` コールバックを実装し、pending にした理由だった外部依存が解消したため
 - `deps.json` の dwnx を `aeb481c` に更新して取り込んだため、設計方針を確定して実装に着手できる状態になった
+
+## 解決方法
+
+- dwnx の DATAGRAM 対応を取り込み、`webtransport_ext.qmux.Config.max_datagram_frame_size` で受信上限を広告する (`0` なら広告も送信もしない。既定値は `16382`)
+- `webtransport_ext.qmux.Connection.send_datagram` を追加し、`dwnx_conn_writev_datagram` で record へ書く。ローカルまたはピアが DATAGRAM を広告していない場合、フレームが record を跨ぐ場合、ピアの上限を超える場合は黙って破棄し、ハンドシェイク前に予約された分は完了後に送る
+- `dwnx_recv_datagram` コールバックで部分受信を組み立て、`EventType.DATAGRAM` のイベントとしてペイロード全体を 1 回だけ通知する。`remote_max_datagram_frame_size` と `local_max_datagram_frame_size` で上限を観測できる
+- Sans-IO の `Connection.send_datagram` / `EventType.DATAGRAM` と、asyncio の `Client.send_datagram` / `Client.on_datagram` / `Server.on_datagram` / `Session.send_datagram` を追加し、quic 層と引数・形を揃えた
+- record 境界 (最大長の DATAGRAM が record を埋め尽くし、最後の 1 バイトを渡すまでイベントが発火しないこと) と、record に収まらないデータグラムの破棄、ピア上限による破棄、分割 record の再組み立て、非対応ピア・無効設定を、モックなしのテストで表明した (Sans-IO は 2 接続のメモリ直結、asyncio は実 TCP)
+- `make develop` の型スタブ差分チェックと全 1551 件のテストが通ることを確認した
