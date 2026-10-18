@@ -1155,3 +1155,128 @@ async def test_client_connect_cancellation_clears_driver(
         peer_release.set()
         peer_server.close()
         await peer_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_datagram_is_echoed_over_tcp() -> None:
+    """TCP 上の QMux で DATAGRAM が往復する
+
+    サーバーは受け取った DATAGRAM をそのままセッションへ送り返す。クライアント
+    の `on_datagram` とサーバーの `on_datagram` の両方が実 TCP で発火すること、
+    ペイロードが欠けずに届くことを確かめる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+    server_received: list[tuple[int, bytes]] = []
+
+    async def on_server_datagram(session: qmux.Session, data: bytes) -> None:
+        server_received.append((session.session_id, data))
+        await session.send_datagram(data)
+
+    server.on_datagram(on_server_datagram)
+
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    echoed: list[bytes] = []
+    echoed_event = asyncio.Event()
+
+    async def on_client_datagram(data: bytes) -> None:
+        echoed.append(data)
+        echoed_event.set()
+
+    client.on_datagram(on_client_datagram)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        await client.send_datagram(b"hello datagram")
+        await asyncio.wait_for(echoed_event.wait(), TIMEOUT)
+        assert echoed == [b"hello datagram"]
+        # session_id はサーバーが接続ごとに振る連番のため 1 になる
+        assert server_received == [(1, b"hello datagram")]
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_server_session_sends_datagram_over_tcp() -> None:
+    """サーバーのセッションから送った DATAGRAM がクライアントへ届く
+
+    ハンドシェイク完了直後の `on_session_ready` から `Session.send_datagram` を
+    呼び、実 TCP 越しにクライアントの `on_datagram` が発火することを確かめる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+
+    async def on_session_ready(session: qmux.Session) -> None:
+        await session.send_datagram(b"from server")
+
+    server.on_session_ready(on_session_ready)
+
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    received: list[bytes] = []
+    received_event = asyncio.Event()
+
+    async def on_client_datagram(data: bytes) -> None:
+        received.append(data)
+        received_event.set()
+
+    client.on_datagram(on_client_datagram)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        await asyncio.wait_for(received_event.wait(), TIMEOUT)
+        assert received == [b"from server"]
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await _stop_server(server, server_task)
+
+
+@pytest.mark.asyncio
+async def test_datagrams_are_delivered_in_order_over_tcp() -> None:
+    """複数の DATAGRAM が送った順に、欠落せずにクライアントへ届く
+
+    実 TCP 上でも、同じ record に載った複数の DATAGRAM が 1 つずつ順序どおり
+    イベントになることを確かめる。
+    """
+    server = qmux.Server("127.0.0.1", 0)
+
+    async def on_session_ready(session: qmux.Session) -> None:
+        for index in range(3):
+            await session.send_datagram(f"datagram-{index}".encode())
+
+    server.on_session_ready(on_session_ready)
+
+    await server.start()
+    server_task = asyncio.create_task(server.run())
+
+    client = qmux.Client("127.0.0.1", server.actual_port)
+    received: list[bytes] = []
+    all_received = asyncio.Event()
+
+    async def on_client_datagram(data: bytes) -> None:
+        received.append(data)
+        if len(received) == 3:
+            all_received.set()
+
+    client.on_datagram(on_client_datagram)
+    client_task: asyncio.Task[None] | None = None
+    try:
+        await client.connect()
+        client_task = asyncio.create_task(client.run())
+        await asyncio.wait_for(all_received.wait(), TIMEOUT)
+        assert received == [b"datagram-0", b"datagram-1", b"datagram-2"]
+    finally:
+        await client.close()
+        if client_task is not None:
+            await asyncio.wait_for(client_task, TIMEOUT)
+        await _stop_server(server, server_task)

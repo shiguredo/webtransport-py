@@ -41,6 +41,15 @@ struct QmuxConfig {
   // 1 レコードの最大長 (バイト)。dwnx は 16382 未満を受け付けず、送信の
   // レコード長も 16382 に固定するため、それより大きい値は記録長に影響しない
   uint64_t max_record_size = 16384;
+  // 受信できる DATAGRAM フレームの最大長 (バイト)。0 なら DATAGRAM を
+  // 広告せず、送信もしない。draft-ietf-quic-qmux-02 Section 9.1 は
+  // Unreliable Datagram Extension (RFC 9221) の使用を認めており、その
+  // フレームは QMux Record を跨げない。同じ節は、QUIC v1 で 65535 を
+  // 広告する場面に相当する上限は max_record_size だと述べているため、
+  // 既定値は record の Frames フィールドの上限 (16382) に合わせる。
+  // dwnx の受信検査はフレーム全長ではなくペイロード長を比べるが、これは
+  // 上流の実装に合わせる (RFC 9221 Section 3 の定義はフレーム全長)。
+  uint64_t max_datagram_frame_size = DWNX_DEFAULT_MAX_RECORD_SIZE;
 };
 
 /**
@@ -52,6 +61,7 @@ enum class QmuxEventType {
   StreamClosed,
   StreamReset,
   StopSending,
+  DatagramReceived,
 };
 
 /**
@@ -61,6 +71,8 @@ struct QmuxEvent {
   QmuxEventType type;
   int64_t stream_id = -1;
   uint64_t offset = 0;
+  // StreamData のときはストリームデータ、DatagramReceived のときは
+  // DATAGRAM のペイロード全体
   std::vector<uint8_t> data;
   bool fin = false;
   uint64_t error_code = 0;
@@ -134,6 +146,26 @@ class QmuxConnection {
                         bool fin);
 
   /**
+   * DATAGRAM の送信を予約する (実際の送出は send())
+   *
+   * QMux の DATAGRAM は QUIC の Unreliable Datagram Extension (RFC 9221) を
+   * そのまま使う (draft-ietf-quic-qmux-02 Section 9.1)。DATAGRAM フレームは
+   * record を跨げない (同 Section 3.2) が、1 つの record に複数の DATAGRAM
+   * フレームを詰めることはできる。この実装は record に空きがある限り複数の
+   * DATAGRAM を同じ record へ書く。次に該当するデータグラムは送信せず黙って
+   * 破棄する。
+   *
+   * - ローカルが DATAGRAM を広告していない (`max_datagram_frame_size` が 0)
+   * - record の Frames フィールドに収まらない (ペイロードが約 16 KiB 超)
+   * - ピアの `max_datagram_frame_size` をフレーム長が超えている
+   *   (RFC 9221 Section 3 の MUST NOT)
+   *
+   * 破棄を黙って行うのは、QUIC 層の `send_datagram` と同じ振る舞いに揃える
+   * ためである。
+   */
+  void send_datagram(const std::vector<uint8_t>& data);
+
+  /**
    * ストリームの書き込み側を即時に終了する (RESET_STREAM を送出)
    *
    * 送信を止めて書き込み側をリセットする。graceful な終了は
@@ -195,6 +227,20 @@ class QmuxConnection {
   uint64_t streams_uni_left() const;
 
   /**
+   * ピアの広告した DATAGRAM フレームの最大長 (バイト)
+   *
+   * ピアのトランスポートパラメータを受信するまでは nullopt。
+   */
+  std::optional<uint64_t> remote_max_datagram_frame_size() const;
+
+  /**
+   * ローカルが広告した DATAGRAM フレームの最大長 (バイト)
+   *
+   * 0 は DATAGRAM を広告していない (受信も送信もしない) ことを表す。
+   */
+  uint64_t local_max_datagram_frame_size() const;
+
+  /**
    * dwnx のライブラリエラーコードを文字列にする
    */
   static std::string strerror(int liberr);
@@ -216,16 +262,45 @@ class QmuxConnection {
 
   std::optional<std::vector<uint8_t>> write_pending_stream_data();
   /**
+   * 送信待ちの DATAGRAM を 1 レコードへ書く
+   *
+   * 書けるものがあれば 1 レコード分を返す。送信できないデータグラムは
+   * 破棄し、ピアのトランスポートパラメータ未受信で上限が不明な場合は
+   * 送信待ちに残したまま nullopt を返す。
+   */
+  std::optional<std::vector<uint8_t>> write_pending_datagrams();
+  /**
    * エンコード済みのストリームデータを送信待ちから取り除く
    */
   void consume_stream_data(dwnx_ssize datalen);
+  /**
+   * 受信中の DATAGRAM を組み立てる
+   *
+   * dwnx は record が分割されて届くと DATAGRAM も部分ごとに通知するため、
+   * 完結するまでバッファへ積み、完結した時点で 1 つのイベントにする。
+   */
+  void on_datagram_received(int fin,
+                            size_t dgramlen,
+                            size_t offset,
+                            const uint8_t* data,
+                            size_t datalen);
   std::optional<std::vector<uint8_t>> write_connection_close();
   void push_event(QmuxEvent event);
 
   dwnx_conn* conn_ = nullptr;
   std::deque<QmuxEvent> events_;
   std::deque<PendingStreamData> pending_stream_data_;
+  // 送信待ちの DATAGRAM (実際の送出は send())
+  std::deque<std::vector<uint8_t>> pending_datagrams_;
+  // 分割して届いた DATAGRAM の組み立て用バッファ
+  std::vector<uint8_t> datagram_buffer_;
   std::vector<uint8_t> write_buffer_;
+  // ローカルが広告した DATAGRAM フレームの最大長 (0 は DATAGRAM 無効)
+  uint64_t max_datagram_frame_size_ = 0;
+  // ピアのトランスポートパラメータを受信済みかどうか
+  bool remote_transport_params_received_ = false;
+  // ピアが広告した DATAGRAM フレームの最大長 (未受信時は 0)
+  uint64_t remote_max_datagram_frame_size_ = 0;
   // close() で作った CONNECTION_CLOSE の内容 (send() で 1 回だけ取り出す)
   dwnx_ccerr close_ccerr_{};
   // close() で受け取った理由の文字列。dwnx は reason をコピーしないため、
@@ -263,6 +338,13 @@ class QmuxConnection {
                                   uint64_t app_error_code,
                                   void* user_data,
                                   void* stream_user_data) noexcept;
+  friend int recv_datagram_cb(dwnx_conn* conn,
+                              int fin,
+                              size_t dgramlen,
+                              size_t offset,
+                              const uint8_t* data,
+                              size_t datalen,
+                              void* user_data) noexcept;
 };
 
 }  // namespace webtransport::qmux

@@ -61,6 +61,7 @@ class ConnectionDriver:
         self.on_stream_data: Callable[[int, bytes, bool], Awaitable[None]] | None = None
         self.on_stream_reset: Callable[[int, int], Awaitable[None]] | None = None
         self.on_stop_sending: Callable[[int, int], Awaitable[None]] | None = None
+        self.on_datagram: Callable[[bytes], Awaitable[None]] | None = None
 
     @property
     def connection(self) -> qmux.Connection:
@@ -147,6 +148,23 @@ class ConnectionDriver:
             if self._closed:
                 raise QmuxConnectionError("QMux connection is closed")
             self._connection.send_stream_data(stream_id, data, fin)
+            await self._flush_locked()
+
+    async def send_datagram(self, data: bytes) -> None:
+        """DATAGRAM を送る
+
+        QMux の DATAGRAM は QUIC の Unreliable Datagram Extension (RFC 9221)
+        をそのまま使う (draft-ietf-quic-qmux-02 Section 9.1)。ローカルまたは
+        ピアが DATAGRAM を広告していない場合、record に収まらない場合、ピアの
+        上限を超える場合は、送信せず黙って破棄する。
+
+        Args:
+            data: 送るバイト列
+        """
+        async with self._lock:
+            if self._closed:
+                raise QmuxConnectionError("QMux connection is closed")
+            self._connection.send_datagram(data)
             await self._flush_locked()
 
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
@@ -350,5 +368,8 @@ class ConnectionDriver:
             elif event.type is qmux.EventType.STOP_SENDING:
                 if self.on_stop_sending is not None:
                     await self.on_stop_sending(event.stream_id, event.error_code)
+            elif event.type is qmux.EventType.DATAGRAM:
+                if self.on_datagram is not None:
+                    await self.on_datagram(bytes(event.data))
             # STREAM_CLOSED はここでは通知しない (dwnx の完了通知であり、
             # アプリケーションから見たストリームの終端は FIN と RESET で分かる)

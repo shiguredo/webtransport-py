@@ -4,10 +4,12 @@
 #include <cstring>
 #include <random>
 
+#include "python_input.h"
 #include "quic_varint.h"
 
 #include <dwnx/version.h>
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -151,6 +153,19 @@ constexpr uint64_t kMaxInitialStreams = 1ULL << 60;
 constexpr size_t kWriteBufferSize = DWNX_DEFAULT_MAX_RECORD_SIZE + 4096;
 
 /**
+ * DATAGRAM フレームの全長 (バイト) を返す
+ *
+ * dwnx は DATAGRAM フレームを長さ付き (DWNX_FRAME_DATAGRAM_LEN) で符号化し、
+ * 全長は型 (1 バイト) + 長さの varint + ペイロードになる
+ * (dwnx_frame.c の dwnx_frame_datagram_framelen)。RFC 9221 Section 3 の
+ * `max_datagram_frame_size` はフレーム全長との比較であるため、送信側の
+ * 事前検査でも同じ計算を使う。
+ */
+size_t datagram_frame_length(size_t datalen) {
+  return 1 + bindings::quic_varint_length(datalen) + datalen;
+}
+
+/**
  * QMux の設定値を検査する
  *
  * dwnx は conn_new とトランスポートパラメータの符号化で設定値を assert で
@@ -177,6 +192,9 @@ void validate_qmux_config(const QmuxConfig& config) {
   check_varint_value(config.initial_max_stream_data_uni,
                      "QMux config initial_max_stream_data_uni");
   check_varint_value(config.max_record_size, "QMux config max_record_size");
+  // dwnx はトランスポートパラメータの符号化で varint の上限を assert で検査する
+  check_varint_value(config.max_datagram_frame_size,
+                     "QMux config max_datagram_frame_size");
   // ストリーム数の上限は varint の上限より小さい
   if (config.initial_max_streams_bidi > kMaxInitialStreams) {
     throw std::invalid_argument(
@@ -215,8 +233,10 @@ int recv_transport_params_cb(dwnx_conn* conn,
                              const dwnx_transport_params* params,
                              void* user_data) noexcept {
   (void)conn;
-  (void)params;
   auto* self = static_cast<QmuxConnection*>(user_data);
+  // DATAGRAM の送信可否と上限はピアの広告で決まる (RFC 9221 Section 3)
+  self->remote_transport_params_received_ = true;
+  self->remote_max_datagram_frame_size_ = params->max_datagram_frame_size;
   QmuxEvent event;
   event.type = QmuxEventType::TransportParamsReceived;
   self->push_event(std::move(event));
@@ -311,6 +331,22 @@ int recv_stop_sending_cb(dwnx_conn* conn,
   return 0;
 }
 
+/**
+ * DATAGRAM を受信した (全体または一部)
+ */
+int recv_datagram_cb(dwnx_conn* conn,
+                     int fin,
+                     size_t dgramlen,
+                     size_t offset,
+                     const uint8_t* data,
+                     size_t datalen,
+                     void* user_data) noexcept {
+  (void)conn;
+  auto* self = static_cast<QmuxConnection*>(user_data);
+  self->on_datagram_received(fin, dgramlen, offset, data, datalen);
+  return 0;
+}
+
 std::unique_ptr<QmuxConnection> QmuxConnection::create_client(
     const QmuxConfig& config) {
   auto connection = std::unique_ptr<QmuxConnection>(new QmuxConnection());
@@ -346,6 +382,8 @@ void QmuxConnection::initialize(const QmuxConfig& config, bool is_server) {
   params.initial_max_stream_data_uni = config.initial_max_stream_data_uni;
   params.max_idle_timeout = config.max_idle_timeout_ns;
   params.max_record_size = config.max_record_size;
+  params.max_datagram_frame_size = config.max_datagram_frame_size;
+  max_datagram_frame_size_ = config.max_datagram_frame_size;
 
   dwnx_callbacks callbacks{};
   callbacks.rand = rand_cb;
@@ -354,6 +392,7 @@ void QmuxConnection::initialize(const QmuxConfig& config, bool is_server) {
   callbacks.stream_close = stream_close_cb;
   callbacks.stream_reset = stream_reset_cb;
   callbacks.recv_stop_sending = recv_stop_sending_cb;
+  callbacks.recv_datagram = recv_datagram_cb;
 
   // dwnx_mem_default() は静的な既定アロケータを指すポインタを返す
   const dwnx_mem* mem = dwnx_mem_default();
@@ -443,6 +482,66 @@ QmuxConnection::write_pending_stream_data() {
   return std::nullopt;
 }
 
+std::optional<std::vector<uint8_t>> QmuxConnection::write_pending_datagrams() {
+  // dwnx の契約: WRITE_MORE の間は writev_stream / writev_datagram /
+  // write_record のいずれかを呼び続ける。ここでは DATAGRAM だけを書き、
+  // 続きが無くなったら send() の write_record が record を確定する
+  for (int attempt = 0; attempt < 64 && !pending_datagrams_.empty();
+       ++attempt) {
+    auto& data = pending_datagrams_.front();
+    dwnx_vec vec{};
+    vec.base = data.data();
+    vec.len = data.size();
+    int accepted = 0;
+    const dwnx_ssize n = dwnx_conn_writev_datagram(
+        conn_, write_buffer_.data(), write_buffer_.size(), &accepted,
+        DWNX_WRITE_DATAGRAM_FLAG_NONE, &vec, 1, now_ns());
+
+    if (n > 0) {
+      // 1 レコード分が完成した。DATAGRAM が載らなかった場合
+      // (accepted == 0) は、送信待ちに残して次の record へ回す
+      if (accepted != 0) {
+        pending_datagrams_.pop_front();
+      }
+      return std::vector<uint8_t>(write_buffer_.begin(),
+                                  write_buffer_.begin() + n);
+    }
+
+    if (n == DWNX_ERR_WRITE_MORE) {
+      // 同じレコードにまだ詰められる。載った分だけ消費して続ける
+      if (accepted != 0) {
+        pending_datagrams_.pop_front();
+        continue;
+      }
+      // 進捗が無い場合は次の送信機会に回す
+      break;
+    }
+
+    if (n == DWNX_ERR_INVALID_ARGUMENT) {
+      // ピアの max_datagram_frame_size をフレーム長が超えている
+      // (RFC 9221 Section 3 の MUST NOT)。送信待ちの先頭を破棄して
+      // 後続を詰まらせない
+      pending_datagrams_.pop_front();
+      continue;
+    }
+
+    if (n == DWNX_ERR_INVALID_STATE) {
+      if (remote_transport_params_received_) {
+        // ピアが DATAGRAM を広告していない。接続中は解消しないため破棄する
+        pending_datagrams_.pop_front();
+        continue;
+      }
+      // ピアのトランスポートパラメータを受信するまでは上限が不明である。
+      // 破棄せずに残し、次の送信機会に回す
+      break;
+    }
+
+    // 0 (書けるものが無い) とその他のエラー
+    break;
+  }
+  return std::nullopt;
+}
+
 void QmuxConnection::consume_stream_data(dwnx_ssize datalen) {
   if (datalen <= 0 || pending_stream_data_.empty()) {
     return;
@@ -454,6 +553,38 @@ void QmuxConnection::consume_stream_data(dwnx_ssize datalen) {
     return;
   }
   head.data.erase(head.data.begin(), head.data.begin() + consumed);
+}
+
+void QmuxConnection::on_datagram_received(int fin,
+                                          size_t dgramlen,
+                                          size_t offset,
+                                          const uint8_t* data,
+                                          size_t datalen) {
+  // offset == 0 はデータグラムの先頭である。前回のデータグラムが
+  // dgramlen と一致せず破棄された場合に備えて、ここでバッファを初期化する
+  if (offset == 0) {
+    datagram_buffer_.clear();
+  }
+  if (datalen != 0) {
+    datagram_buffer_.insert(datagram_buffer_.end(), data, data + datalen);
+  }
+  if (fin == 0) {
+    return;
+  }
+
+  // 組み立てた長さが dwnx の通知した全長と一致しない場合は、受信が
+  // 不連続だったとみなして破棄する。dwnx は record を順に処理するため
+  // 通常は起こらないが、壊れたデータグラムをアプリへ渡さない
+  if (datagram_buffer_.size() != dgramlen) {
+    datagram_buffer_.clear();
+    return;
+  }
+
+  QmuxEvent event;
+  event.type = QmuxEventType::DatagramReceived;
+  event.data = std::move(datagram_buffer_);
+  datagram_buffer_.clear();
+  push_event(std::move(event));
 }
 
 std::optional<std::vector<uint8_t>> QmuxConnection::write_connection_close() {
@@ -475,6 +606,14 @@ std::optional<std::vector<uint8_t>> QmuxConnection::send() {
     return write_connection_close();
   }
   if (auto record = write_pending_stream_data()) {
+    return record;
+  }
+  // ストリームデータを書き終えた record は上で確定しているため、DATAGRAM は
+  // 続く record へ書く。write_pending_datagrams が WRITE_MORE で record を
+  // 開始したまま戻った場合は、下の write_record がそれを確定する
+  // (dwnx の WRITE_MORE の契約は writev_stream / writev_datagram /
+  // write_record のいずれかを呼び続けることである)。
+  if (auto record = write_pending_datagrams()) {
     return record;
   }
   const uint64_t ts = now_ns();
@@ -531,6 +670,35 @@ void QmuxConnection::send_stream_data(int64_t stream_id,
   pending.data.assign(data, data + datalen);
   pending.fin = fin;
   pending_stream_data_.push_back(std::move(pending));
+}
+
+void QmuxConnection::send_datagram(const std::vector<uint8_t>& data) {
+  if (conn_ == nullptr || close_requested_) {
+    return;
+  }
+  // ローカルが DATAGRAM を広告していない場合は送信しない。QUIC 層の
+  // `send_datagram` も `enable_datagram` が無効なら何もしない
+  if (max_datagram_frame_size_ == 0) {
+    return;
+  }
+  const size_t frame_length = datagram_frame_length(data.size());
+  // QMux の DATAGRAM フレームは record を跨げない
+  // (draft-ietf-quic-qmux-02 Section 3.2 / Section 9.1)。record の Frames
+  // フィールドに収まらないデータグラムは送信できないため破棄する。
+  // dwnx は record の Frames フィールドを DWNX_DEFAULT_MAX_RECORD_SIZE に
+  // 固定しており、ピアの max_record_size もその値以上でなければならない
+  // (dwnx_conn.c の conn_recv_transport_params) ため、上限は接続の状態に
+  // よらず一定である
+  if (frame_length > DWNX_DEFAULT_MAX_RECORD_SIZE) {
+    return;
+  }
+  // ピアの上限が判明していれば、フレーム長がそれを超えるデータグラムは
+  // 送出しない (RFC 9221 Section 3 の MUST NOT)
+  if (remote_transport_params_received_ &&
+      frame_length > remote_max_datagram_frame_size_) {
+    return;
+  }
+  pending_datagrams_.emplace_back(data);
 }
 
 int QmuxConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
@@ -606,6 +774,17 @@ uint64_t QmuxConnection::streams_uni_left() const {
   return conn_ == nullptr ? 0 : dwnx_conn_get_streams_uni_left(conn_);
 }
 
+std::optional<uint64_t> QmuxConnection::remote_max_datagram_frame_size() const {
+  if (!remote_transport_params_received_) {
+    return std::nullopt;
+  }
+  return remote_max_datagram_frame_size_;
+}
+
+uint64_t QmuxConnection::local_max_datagram_frame_size() const {
+  return max_datagram_frame_size_;
+}
+
 std::string QmuxConnection::strerror(int liberr) {
   const char* message = dwnx_strerror(liberr);
   return message == nullptr ? std::string() : std::string(message);
@@ -655,7 +834,11 @@ void bind_qmux(nb::module_& m) {
       .def_rw("max_record_size", &QmuxConfig::max_record_size,
               "1 レコードの最大長 (バイト)。16382 以上でなければならない。"
               "dwnx は送信のレコード長を 16382 に固定するため、それより大きい"
-              "値は記録長に影響しない");
+              "値は記録長に影響しない")
+      .def_rw("max_datagram_frame_size", &QmuxConfig::max_datagram_frame_size,
+              "受信できる DATAGRAM フレームの最大長 (バイト)。0 なら DATAGRAM "
+              "を広告せず、send_datagram も無効になる。既定値は 16382 "
+              "(draft-ietf-quic-qmux-02 Section 9.1)");
 
   nb::enum_<QmuxEventType>(qmux_m, "EventType", "QMux イベント種別")
       .value("TRANSPORT_PARAMS_RECEIVED",
@@ -663,7 +846,8 @@ void bind_qmux(nb::module_& m) {
       .value("STREAM_DATA", QmuxEventType::StreamData)
       .value("STREAM_CLOSED", QmuxEventType::StreamClosed)
       .value("STREAM_RESET", QmuxEventType::StreamReset)
-      .value("STOP_SENDING", QmuxEventType::StopSending);
+      .value("STOP_SENDING", QmuxEventType::StopSending)
+      .value("DATAGRAM", QmuxEventType::DatagramReceived);
 
   nb::class_<QmuxEvent>(qmux_m, "Event", "QMux イベント")
       .def(nb::init<>(), nb::sig("def __init__(self) -> None"))
@@ -672,7 +856,9 @@ void bind_qmux(nb::module_& m) {
       .def_ro("offset", &QmuxEvent::offset, "ストリーム上のオフセット")
       .def_prop_ro(
           "data", [](const QmuxEvent& event) { return event_data(event.data); },
-          nb::sig("def data(self) -> bytes"), "ストリームデータ")
+          nb::sig("def data(self) -> bytes"),
+          "イベントのデータ (STREAM_DATA はストリームデータ、DATAGRAM は "
+          "DATAGRAM のペイロード全体)")
       .def_ro("fin", &QmuxEvent::fin, "FIN フラグ")
       .def_ro("error_code", &QmuxEvent::error_code, "エラーコード");
 
@@ -736,6 +922,19 @@ void bind_qmux(nb::module_& m) {
           },
           nb::arg("stream_id"), nb::arg("data"), nb::arg("fin") = false,
           "ストリームデータの送信を予約する")
+      .def(
+          "send_datagram",
+          [](QmuxConnection& self, nb::bytes data) {
+            webtransport::bindings::check_python_input_size(
+                "send_datagram data", data.size());
+            self.send_datagram(
+                std::vector<uint8_t>(data.c_str(), data.c_str() + data.size()));
+          },
+          nb::arg("data"),
+          nb::sig("def send_datagram(self, data: bytes) -> None"),
+          "DATAGRAM の送信を予約する (ローカルまたはピアが DATAGRAM を"
+          "広告していない場合、record に収まらない場合、ピアの上限を超える"
+          "場合は黙って破棄する。data が 1 MiB 超の場合は ValueError)")
       .def("reset_stream", &QmuxConnection::reset_stream, nb::arg("stream_id"),
            nb::arg("error_code") = 0,
            nb::sig("def reset_stream(self, stream_id: int, error_code: int = "
@@ -780,6 +979,13 @@ void bind_qmux(nb::module_& m) {
                    "開設可能な残り双方向ストリーム数")
       .def_prop_ro("streams_uni_left", &QmuxConnection::streams_uni_left,
                    "開設可能な残り単方向ストリーム数")
+      .def("remote_max_datagram_frame_size",
+           &QmuxConnection::remote_max_datagram_frame_size,
+           nb::sig("def remote_max_datagram_frame_size(self) -> int | None"),
+           "ピアの DATAGRAM フレームサイズ上限 (未受信なら None)")
+      .def_prop_ro("local_max_datagram_frame_size",
+                   &QmuxConnection::local_max_datagram_frame_size,
+                   "ローカルの DATAGRAM フレームサイズ上限 (0 は無効)")
       .def_static("strerror", &QmuxConnection::strerror, nb::arg("liberr"),
                   "ライブラリエラーコードを文字列にする");
 

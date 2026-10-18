@@ -39,6 +39,16 @@ _MIN_RECORD_SIZE = 16382
 # 広告できるストリーム数の上限 (RFC 9000 Section 4.6)
 _MAX_STREAMS = 2**60
 
+# dwnx の既定の DATAGRAM フレーム最大長 (DWNX_DEFAULT_MAX_RECORD_SIZE)。
+# record の Frames フィールドの上限であり、draft-ietf-quic-qmux-02
+# Section 9.1 が「QUIC v1 で 65535 を広告する場面に相当する上限」と述べる値
+_DEFAULT_DATAGRAM_FRAME_SIZE = 16382
+
+# 1 つの record に載せられる DATAGRAM ペイロードの最大長。record の Frames
+# フィールド (16382 バイト) から、フレーム種別 (1 バイト) と長さの varint
+# (この長さでは 2 バイト) を差し引いた値になる
+_MAX_DATAGRAM_PAYLOAD = _DEFAULT_DATAGRAM_FRAME_SIZE - 1 - 2
+
 
 def pump(first: qmux.Connection, second: qmux.Connection, rounds: int = 100) -> None:
     """2 つの接続の間でレコードを交換し尽くす
@@ -104,6 +114,7 @@ def test_create_client_and_server() -> None:
         ("max_record_size", _MAX_VARINT + 1),
         ("max_record_size", _MIN_RECORD_SIZE - 1),
         ("max_idle_timeout_ns", 2**64 - 1),
+        ("max_datagram_frame_size", _MAX_VARINT + 1),
     ],
     ids=[
         "streams-bidi-over-varint",
@@ -117,6 +128,7 @@ def test_create_client_and_server() -> None:
         "record-size-over-varint",
         "record-size-under-minimum",
         "idle-timeout-uint64-max",
+        "datagram-frame-size-over-varint",
     ],
 )
 def test_invalid_config_raises_value_error(field_name: str, value: int) -> None:
@@ -582,3 +594,315 @@ def test_stream_shutdown_for_unknown_stream_is_noop() -> None:
 
     pump(client, server)
     assert drain_events(server) == []
+
+
+def test_datagram_limits_are_exchanged_in_handshake() -> None:
+    """DATAGRAM の上限がトランスポートパラメータで交換される
+
+    QMux は QUIC の Unreliable Datagram Extension (RFC 9221) をそのまま使い、
+    `max_datagram_frame_size` トランスポートパラメータで受信可能なフレーム長を
+    広告する (draft-ietf-quic-qmux-02 Section 9.1)。ハンドシェイク前はピアの
+    上限が不明で、完了後に確定する。ローカルの上限は設定値がそのまま出る。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+
+    # ハンドシェイク前はピアの上限がまだ分からない
+    assert client.local_max_datagram_frame_size == _DEFAULT_DATAGRAM_FRAME_SIZE
+    assert client.remote_max_datagram_frame_size() is None
+    assert server.remote_max_datagram_frame_size() is None
+
+    pump(client, server)
+    assert client.remote_max_datagram_frame_size() == _DEFAULT_DATAGRAM_FRAME_SIZE
+    assert server.remote_max_datagram_frame_size() == _DEFAULT_DATAGRAM_FRAME_SIZE
+
+
+def test_datagram_is_delivered() -> None:
+    """クライアントから送った DATAGRAM がサーバーへ届く
+
+    DATAGRAM は Unreliable Datagram Extension の意味のまま運ばれ、
+    `EventType.DATAGRAM` のイベントとしてペイロード全体が 1 回だけ届く。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    # ハンドシェイクのイベントは判定に使わない
+    drain_events(client)
+    drain_events(server)
+
+    payload = b"hello datagram"
+    client.send_datagram(payload)
+    pump(client, server)
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert len(events) == 1
+    assert bytes(events[0].data) == payload
+    # クライアント自身の DATAGRAM は戻ってこない
+    assert [event for event in drain_events(client) if event.type is qmux.EventType.DATAGRAM] == []
+
+
+def test_datagram_from_server_is_delivered() -> None:
+    """サーバーから送った DATAGRAM がクライアントへ届く
+
+    トランスポートパラメータの交換は方向に依存せず、どちらの端点からも
+    DATAGRAM を送れることを確かめる。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(client)
+    drain_events(server)
+
+    payload = b"from server"
+    server.send_datagram(payload)
+    pump(client, server)
+
+    events = [event for event in drain_events(client) if event.type is qmux.EventType.DATAGRAM]
+    assert len(events) == 1
+    assert bytes(events[0].data) == payload
+
+
+def test_multiple_datagrams_are_delivered_in_order() -> None:
+    """複数の DATAGRAM が送った順に届く
+
+    QMux の DATAGRAM は信頼できるバイトストリーム上を運ばれるため、QUIC の
+    DATAGRAM と違って順序は保たれる。同じ record に複数載る場合も 1 つずつ
+    イベントになることを確かめる。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(server)
+
+    payloads = [f"datagram-{index}".encode() for index in range(3)]
+    for payload in payloads:
+        client.send_datagram(payload)
+    pump(client, server)
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert [bytes(event.data) for event in events] == payloads
+
+
+def test_empty_datagram_is_delivered() -> None:
+    """空の DATAGRAM も 1 つのイベントとして届く
+
+    DATAGRAM のペイロード長は 0 でもよく、長さ 0 のフレームとして届く。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(server)
+
+    client.send_datagram(b"")
+    pump(client, server)
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert len(events) == 1
+    assert bytes(events[0].data) == b""
+
+
+def test_split_record_delivers_one_complete_datagram() -> None:
+    """record が 1 バイトずつ届いても DATAGRAM は 1 つのイベントになる
+
+    dwnx の `recv_datagram` コールバックは、record が分割されて届くと
+    DATAGRAM も部分ごとに通知する。バインディング側で組み立てて、完結した
+    時点で 1 つのイベントにすることを確かめる。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(server)
+
+    payload = b"split datagram"
+    client.send_datagram(payload)
+    record = client.pending_record
+    assert record is not None
+
+    for index in range(len(record)):
+        server.receive(record[index : index + 1])
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert len(events) == 1
+    assert bytes(events[0].data) == payload
+
+
+def test_datagram_does_not_cross_records() -> None:
+    """DATAGRAM フレームが record を跨がないことを record 境界で表明する
+
+    QMux は 1 つのフレームが複数の record に跨ることを禁じている
+    (draft-ietf-quic-qmux-02 Section 3.2)。record を埋め尽くす最大長の
+    DATAGRAM を、record の最後の 1 バイトを残して渡した時点ではイベントが
+    発火せず、最後まで渡すと 1 つのイベントになることで、フレームが record
+    の終端で完結していることを確かめる。
+
+    最大長の DATAGRAM は record を埋め尽くすため、1 レコードは 16384 バイト
+    (レコード長 2 バイト + Frames 16382 バイト) になる。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(server)
+
+    payload = b"a" * _MAX_DATAGRAM_PAYLOAD
+    client.send_datagram(payload)
+    record = client.pending_record
+    assert record is not None
+    assert len(record) == _MAX_RECORD_SIZE
+
+    # 最後の 1 バイトを残した状態では DATAGRAM が未完でイベントは出ない
+    server.receive(record[:-1])
+    assert [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM] == []
+
+    # 残りを渡すと 1 つのイベントとして完結する
+    server.receive(record[-1:])
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert len(events) == 1
+    assert bytes(events[0].data) == payload
+
+
+def test_datagram_at_record_limit_then_next_record() -> None:
+    """record を埋め尽くす DATAGRAM の後に続く DATAGRAM が次の record で届く
+
+    最大長の DATAGRAM が 1 レコードを占有しても、続く DATAGRAM は次の
+    record で送られ、どちらも欠落せずに届く。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(server)
+
+    first = b"b" * _MAX_DATAGRAM_PAYLOAD
+    second = b"next record"
+    client.send_datagram(first)
+    client.send_datagram(second)
+
+    records = []
+    while (record := client.pending_record) is not None:
+        records.append(record)
+    # 最大長の DATAGRAM は 1 レコードを埋め尽くすため、2 レコードになる
+    assert len(records) == 2
+    assert len(records[0]) == _MAX_RECORD_SIZE
+
+    for record in records:
+        server.receive(record)
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert [bytes(event.data) for event in events] == [first, second]
+
+
+def test_oversized_datagram_is_dropped() -> None:
+    """record に収まらない DATAGRAM は黙って破棄される
+
+    QMux の DATAGRAM フレームは record を跨げないため、ペイロードが
+    record の Frames フィールドに収まらないデータグラムは送れない。
+    送信側はエラーにせず破棄し (QUIC 層の `send_datagram` と同じ振る舞い)、
+    レコードも作らない。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+    pump(client, server)
+    drain_events(server)
+
+    client.send_datagram(b"a" * (_MAX_DATAGRAM_PAYLOAD + 1))
+    pump(client, server)
+
+    assert client.pending_record is None
+    assert [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM] == []
+
+
+def test_datagram_over_peer_limit_is_dropped() -> None:
+    """ピアの上限を超える DATAGRAM は送らない
+
+    RFC 9221 Section 3 は、ピアの `max_datagram_frame_size` を超える
+    DATAGRAM フレームを送ってはならない (MUST NOT) と定める。QMux でも同じ
+    制限が適用される (draft-ietf-quic-qmux-02 Section 9.1)。
+
+    ピアが 100 バイトを広告した場合、フレーム長が 100 以下になるペイロード
+    (ここでは 97 バイト。型 1 + 長さ 2 + 97) は届き、100 を超えるもの
+    (98 バイト。型 1 + 長さ 2 + 98 = 101) は破棄される。
+    """
+    server_config = qmux.Config()
+    server_config.max_datagram_frame_size = 100
+    client = qmux.Connection.create_client(qmux.Config())
+    server = qmux.Connection.create_server(server_config)
+    pump(client, server)
+    drain_events(server)
+    assert client.remote_max_datagram_frame_size() == 100
+
+    client.send_datagram(b"x" * 97)
+    client.send_datagram(b"x" * 98)
+    pump(client, server)
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert [len(bytes(event.data)) for event in events] == [97]
+
+
+def test_datagram_is_not_advertised_when_disabled() -> None:
+    """DATAGRAM を無効にした接続は広告も送信もしない
+
+    `max_datagram_frame_size` が 0 の接続はトランスポートパラメータで
+    DATAGRAM を広告しない。ピアは上限 0 を受け取り、ローカルの送信も行わない
+    (QUIC 層の `send_datagram` が `enable_datagram` 無効時に何もしないのと
+    同じ振る舞い)。
+    """
+    client = qmux.Connection.create_client(qmux.Config())
+    server_config = qmux.Config()
+    server_config.max_datagram_frame_size = 0
+    server = qmux.Connection.create_server(server_config)
+    pump(client, server)
+    drain_events(client)
+    drain_events(server)
+
+    assert server.local_max_datagram_frame_size == 0
+    assert client.remote_max_datagram_frame_size() == 0
+
+    # ピア (サーバー) が DATAGRAM を広告していないため、送っても破棄される
+    client.send_datagram(b"dropped")
+    # ローカルで無効な接続からの送信は何もしない (クライアントは広告している)
+    server.send_datagram(b"local disabled")
+    pump(client, server)
+
+    assert client.pending_record is None
+    assert [event for event in drain_events(client) if event.type is qmux.EventType.DATAGRAM] == []
+    assert [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM] == []
+
+
+def test_datagram_queued_before_handshake_is_sent_after_handshake() -> None:
+    """ハンドシェイク前に予約した DATAGRAM が完了後に送られる
+
+    ピアのトランスポートパラメータを受信するまでは DATAGRAM の送信可否と
+    上限が不明である。予約を破棄せずに保留し、ハンドシェイク完了後に送る。
+    """
+    config = qmux.Config()
+    client = qmux.Connection.create_client(config)
+    server = qmux.Connection.create_server(config)
+
+    payload = b"queued before handshake"
+    client.send_datagram(payload)
+    pump(client, server)
+
+    events = [event for event in drain_events(server) if event.type is qmux.EventType.DATAGRAM]
+    assert len(events) == 1
+    assert bytes(events[0].data) == payload
+
+
+def test_send_datagram_rejects_oversized_python_input() -> None:
+    """1 MiB を超える Python 入力は ValueError になる
+
+    C++ 側へコピーする前に生の入力サイズを検査する (QUIC 層の
+    `send_datagram` と同じ上限)。QMux の DATAGRAM は record に収まらない
+    大きさになるため送信時には破棄されるが、入力サイズの検査はその手前で
+    行う。
+    """
+    connection = qmux.Connection.create_client(qmux.Config())
+    with pytest.raises(ValueError):
+        connection.send_datagram(b"a" * (1024 * 1024 + 1))

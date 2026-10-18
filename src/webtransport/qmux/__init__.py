@@ -25,6 +25,13 @@ Usage:
 接続はトランスポートパラメータを帯域内で交換するため、TLS が無くても 2 つの
 接続をバイト列で直結すればハンドシェイクできる。
 
+QMux は QUIC の Unreliable Datagram Extension (RFC 9221) を使える
+(draft-ietf-quic-qmux-02 Section 9.1)。Sans-IO では
+`Config.max_datagram_frame_size` で受信上限を広告し、`Connection.send_datagram`
+で送信、`EventType.DATAGRAM` のイベントで受信する。asyncio API では
+`Client.send_datagram` / `Client.on_datagram`、`Server.on_datagram` /
+`Session.send_datagram` を使う。
+
 asyncio API (`Client` / `Server`) は TCP で接続する。`ssl` に `SSLContext` を
 渡すと TLS 上で動き、その場合は `alpn_protocols` が必須になる
 (draft-ietf-quic-qmux-02 Section 8.1)。
@@ -37,6 +44,7 @@ Usage:
     await client.connect()
     stream_id = await client.open_stream()
     await client.send_stream_data(stream_id, b"hello", fin=True)
+    await client.send_datagram(b"hello")
     await client.run()
     await client.close()
 """

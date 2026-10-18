@@ -56,6 +56,14 @@ class Config:
 
     @max_record_size.setter
     def max_record_size(self, arg: int, /) -> None: ...
+    @property
+    def max_datagram_frame_size(self) -> int:
+        """
+        受信できる DATAGRAM フレームの最大長 (バイト)。0 なら DATAGRAM を広告せず、send_datagram も無効になる。既定値は 16382 (draft-ietf-quic-qmux-02 Section 9.1)
+        """
+
+    @max_datagram_frame_size.setter
+    def max_datagram_frame_size(self, arg: int, /) -> None: ...
 
 class EventType(enum.Enum):
     """QMux イベント種別"""
@@ -69,6 +77,8 @@ class EventType(enum.Enum):
     STREAM_RESET = 3
 
     STOP_SENDING = 4
+
+    DATAGRAM = 5
 
 class Event:
     """QMux イベント"""
@@ -88,7 +98,7 @@ class Event:
 
     @property
     def data(self) -> bytes:
-        """ストリームデータ"""
+        """イベントのデータ (STREAM_DATA はストリームデータ、DATAGRAM は DATAGRAM のペイロード全体)"""
 
     @property
     def fin(self) -> bool:
@@ -129,6 +139,11 @@ class Connection:
     def send_stream_data(self, stream_id: int, data: bytes, fin: bool = False) -> None:
         """ストリームデータの送信を予約する"""
 
+    def send_datagram(self, data: bytes) -> None:
+        """
+        DATAGRAM の送信を予約する (ローカルまたはピアが DATAGRAM を広告していない場合、record に収まらない場合、ピアの上限を超える場合は黙って破棄する。data が 1 MiB 超の場合は ValueError)
+        """
+
     def reset_stream(self, stream_id: int, error_code: int = 0) -> int:
         """
         ストリームの書き込み側をリセットする (RESET_STREAM を送出。0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
@@ -163,6 +178,13 @@ class Connection:
     @property
     def streams_uni_left(self) -> int:
         """開設可能な残り単方向ストリーム数"""
+
+    def remote_max_datagram_frame_size(self) -> int | None:
+        """ピアの DATAGRAM フレームサイズ上限 (未受信なら None)"""
+
+    @property
+    def local_max_datagram_frame_size(self) -> int:
+        """ローカルの DATAGRAM フレームサイズ上限 (0 は無効)"""
 
     @staticmethod
     def strerror(liberr: int) -> str:

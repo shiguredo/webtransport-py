@@ -23,9 +23,11 @@ class Client:
     Usage:
         client = Client("127.0.0.1", 4433)
         client.on_stream_data(on_stream_data)
+        client.on_datagram(on_datagram)
         await client.connect()
         stream_id = await client.open_stream()
         await client.send_stream_data(stream_id, b"hello", fin=True)
+        await client.send_datagram(b"hello")
         await client.run()
         await client.close()
     """
@@ -75,6 +77,7 @@ class Client:
             "stream_data": None,
             "stream_reset": None,
             "stop_sending": None,
+            "datagram": None,
         }
 
     @property
@@ -146,6 +149,17 @@ class Client:
             callback: `(stream_id, error_code)` を受け取るコルーチン
         """
         self._callbacks["stop_sending"] = callback
+
+    def on_datagram(
+        self,
+        callback: Callable[[bytes], Awaitable[None]],
+    ) -> None:
+        """DATAGRAM を受信したときに呼ばれるコールバックを登録する
+
+        Args:
+            callback: `(data)` を受け取るコルーチン
+        """
+        self._callbacks["datagram"] = callback
 
     async def connect(self, timeout: float = 10.0) -> None:
         """接続し、トランスポートパラメータの交換が終わるまで待つ
@@ -241,6 +255,14 @@ class Client:
 
             driver.on_stop_sending = on_stop_sending
 
+        datagram = self._callbacks["datagram"]
+        if datagram is not None:
+
+            async def on_datagram(data: bytes) -> None:
+                await datagram(data)
+
+            driver.on_datagram = on_datagram
+
     async def run(self) -> None:
         """受信ループ
 
@@ -302,6 +324,17 @@ class Client:
             fin: 送信側を閉じるかどうか
         """
         await self._require_driver().send_stream_data(stream_id, data, fin)
+
+    async def send_datagram(self, data: bytes) -> None:
+        """DATAGRAM を送る
+
+        ローカルまたはピアが DATAGRAM を広告していない場合、record に収まらない
+        場合、ピアの上限を超える場合は黙って破棄する。
+
+        Args:
+            data: 送るバイト列
+        """
+        await self._require_driver().send_datagram(data)
 
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームの書き込み側を終了する (RESET_STREAM を送出)

@@ -68,6 +68,17 @@ class Session:
         """
         await self._driver.send_stream_data(stream_id, data, fin)
 
+    async def send_datagram(self, data: bytes) -> None:
+        """DATAGRAM を送る
+
+        ローカルまたはピアが DATAGRAM を広告していない場合、record に収まらない
+        場合、ピアの上限を超える場合は黙って破棄する。
+
+        Args:
+            data: 送るバイト列
+        """
+        await self._driver.send_datagram(data)
+
     async def reset_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームの書き込み側を終了する (RESET_STREAM を送出)
 
@@ -174,6 +185,7 @@ class Server:
             "stream_data": None,
             "stream_reset": None,
             "stop_sending": None,
+            "datagram": None,
         }
 
     @property
@@ -241,6 +253,17 @@ class Server:
             callback: `(session, stream_id, error_code)` を受け取るコルーチン
         """
         self._callbacks["stop_sending"] = callback
+
+    def on_datagram(
+        self,
+        callback: Callable[[Session, bytes], Awaitable[None]],
+    ) -> None:
+        """DATAGRAM を受信したときに呼ばれるコールバックを登録する
+
+        Args:
+            callback: `(session, data)` を受け取るコルーチン
+        """
+        self._callbacks["datagram"] = callback
 
     async def start(self) -> None:
         """待ち受けを開始する
@@ -367,6 +390,14 @@ class Server:
                 await stop_sending(session, stream_id, error_code)
 
             driver.on_stop_sending = on_stop_sending
+
+        datagram = self._callbacks["datagram"]
+        if datagram is not None:
+
+            async def on_datagram(data: bytes) -> None:
+                await datagram(session, data)
+
+            driver.on_datagram = on_datagram
 
     async def __aenter__(self) -> Self:
         await self.start()
