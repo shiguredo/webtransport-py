@@ -1,7 +1,7 @@
 # h3 でストリームを開いた直後にリセットすると Reliable Size が WT ヘッダー長未満になる
 
 - Created: 2026-10-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-h3-reset-reliable-size
 
 ## 目的
@@ -35,3 +35,10 @@ draft-ietf-webtrans-http3-16 Section 4.4 の MUST「WebTransport implementations
 - 全テストが通過する
 
 ## 解決方法
+
+- `src/webtransport/_h3_client.py` の `Client.reset_stream` と `src/webtransport/_h3_server.py` の `Server.reset_stream` で、ピアが `reset_stream_at` を広告している場合にリセット送出前の送信待ちを掃き出すようにした。ngtcp2 の `NGTCP2_SHUT_STREAM_FLAG_FLUSH` はリセット時点の書き込み済みオフセットを Reliable Size に設定するため、WT ヘッダーを先に QUIC 層へ書き出すことで Reliable Size が WT ヘッダー長以上になる (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)
+- ngtcp2 の send() は pacing の期限までパケットを返さないため、pacing の期限待ちを挟んで再試行する。`src/bindings/quic.cpp` / `src/bindings/quic.h` に `QuicConnection::has_pending_stream_data` を追加し、QUIC 層へ書き込み済みで未パケット化のストリームデータが無くなるまで確認する
+- `src/bindings/webtransport_h3.cpp` の `H3Session::close_stream` で、WT ヘッダーのみ受信してアプリデータ未受信のストリーム (recv_wt_data_cb による stream_info_ 登録が無い) は `nghttp3_conn_get_stream_wt_session_id` からセッション ID を復元するようにした。この経路が無いと、ヘッダーが先に配信されても on_stream_reset に -1 が渡っていた
+- テスト: `tests/test_e2e_webtransport_h3.py` に `test_client_resets_stream_immediately_after_open` を追加し、ピアが広告する場合はセッション ID が復元され、広告しない場合は従来どおり -1 になることを実通信で検証した。`tests/test_quic.py` に `has_pending_stream_data` の単体テストを追加した。低レベル API の既存テスト (`test_stream_reset_at_recovers_session_id` / `test_stream_reset_before_data_received_minus_one`) は挙動を変えず通過する
+- `skills/webtransport-py/SKILL.md` の `reset_stream` / `close_stream` / `has_pending_stream_data` の記述を更新した
+- `make develop` でビルドし直し、prek の全フック (ruff-format / ruff-check / clang-format / ty / pytest) が通過することを確認した
