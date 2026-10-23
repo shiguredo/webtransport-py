@@ -74,7 +74,7 @@ struct QuicConfig {
   bool enable_datagram = true;
   uint64_t max_datagram_frame_size = 65536;
 
-  // RESET_STREAM_AT の受信対応の広告 (draft-ietf-quic-reliable-stream-reset-09
+  // RESET_STREAM_AT の受信対応の広告 (draft-ietf-quic-reliable-stream-reset-10
   // Section 3)。テストで欠落ピアを作るための制御フラグ
   bool enable_reset_stream_at = true;
 

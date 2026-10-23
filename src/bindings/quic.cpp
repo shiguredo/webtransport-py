@@ -451,9 +451,10 @@ bool QuicConnection::setup_server_early_data() {
       config_.max_stream_data_bidi_remote;
   params.initial_max_stream_data_uni = config_.max_stream_data_uni;
   params.initial_max_data = config_.max_data;
-  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
-  // Section 3)。0-RTT では両エンドポイントがこの値を記憶し、サーバーが 0-RTT を
-  // 受け入れる場合は再開コネクションで無効化してはならない (同 MUST) ため、
+  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-10
+  // Section 3)。0-RTT では両エンドポイントがサーバーによるこの拡張の広告の有無を
+  // 記憶し (RFC 9000 Section 7.4.1)、サーバーが 0-RTT を受け入れる場合は再開
+  // コネクションでこの拡張を無効化してはならない (同 Section 3 の MUST) ため、
   // early data context にも含めて恒常的に広告する
   params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
@@ -603,7 +604,7 @@ bool QuicConnection::initialize_client(const std::string& local_host,
   params.initial_max_stream_data_uni = config_.max_stream_data_uni;
   params.max_idle_timeout = config_.idle_timeout_ns;
 
-  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
+  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-10
   // Section 3。送出・受信の両方で必要。詳細は reset_stream のコメント参照)
   params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
@@ -730,7 +731,7 @@ bool QuicConnection::initialize_server() {
   params.max_idle_timeout = config_.idle_timeout_ns;
   params.original_dcid_present = 1;
 
-  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
+  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-10
   // Section 3。送出・受信の両方で必要。詳細は reset_stream のコメント参照)
   params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
@@ -876,7 +877,7 @@ bool QuicConnection::initialize_server_from_packet(
   params.max_idle_timeout = config_.idle_timeout_ns;
   params.original_dcid_present = 1;
 
-  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-09
+  // RESET_STREAM_AT の受信対応を広告する (draft-ietf-quic-reliable-stream-reset-10
   // Section 3。送出・受信の両方で必要。詳細は reset_stream のコメント参照)
   params.reset_stream_at = config_.enable_reset_stream_at ? 1 : 0;
 
@@ -1836,12 +1837,14 @@ void QuicConnection::reset_stream(int64_t stream_id, uint64_t error_code) {
   // 広告している場合は、リセット時点の書き込み済みオフセット全体を
   // Reliable Size に設定した RESET_STREAM_AT を送出する。Reliable Size までの
   // データ配信は ngtcp2 が保証し、ロス時は再送される (draft-ietf-quic-reliable-
-  // stream-reset-09 Section 5)。リセット送出時点で未パケット化データ
+  // stream-reset-10 Section 5.3)。リセット送出時点で未パケット化データ
   // (ngtcp2 が再送用に保持する送信済み未 ACK の STREAM フレームキュー。
   // ngtcp2_strm::tx.streamfrq) が無ければ、リセット送出パケットにデータは同梱されない
   // (writev_stream はアプリのデータ (vec) を直接パケットに書く設計のため、
   // データの配信は送信済みパケットが担う)。データ未書き込みのストリームは
-  // Reliable Size 0 になるため従来どおり RESET_STREAM が送出され、広告しない
+  // Reliable Size 0 になるため従来どおり RESET_STREAM が送出され (データ配信の
+  // 目的では Reliable Size 0 の RESET_STREAM_AT は RESET_STREAM と等価。
+  // draft-ietf-quic-reliable-stream-reset-10 Section 5)、広告しない
   // ピアには通常の RESET_STREAM が送出される。受信側も同パラメータの広告が
   // 必要 (自身が広告していないと RESET_STREAM_AT フレーム受信時に接続を
   // 閉じる。ngtcp2 の実装挙動)

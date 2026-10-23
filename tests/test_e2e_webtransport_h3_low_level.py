@@ -629,11 +629,12 @@ async def test_stream_reset_at_recovers_session_id(test_certificates):
     RESET_STREAM_AT (draft-ietf-webtrans-http3-16 Section 4.4 の MUST) により
     セッション ID が復元されることを確認する。RESET_STREAM_AT の Reliable Size
     は書き込み済みオフセット全体に設定されるため、ピアはデータ到着まで
-    リセットを確定しない (draft-ietf-quic-reliable-stream-reset-09 Section 5.3
+    リセットを確定しない (draft-ietf-quic-reliable-stream-reset-10 Section 5.3
     の Size Known → Data Recvd 遷移)。後から届いた WT ヘッダーでストリームが
     セッションに関連付けられてからリセットが確定し、on_stream_reset に正しい
-    セッション ID が渡る (データ未送信のままリセットした場合は -1 になる。
-    test_stream_reset_before_data_received_minus_one 参照)
+    セッション ID が渡る (低レベル API でデータも WT ヘッダーも送らないまま
+    リセットした場合は -1 になる。test_stream_reset_before_data_received_minus_one
+    参照)
     """
     server, server_task, info = await _start_reset_test_server(
         test_certificates, expected_sessions=1
@@ -675,12 +676,14 @@ async def test_stream_reset_at_recovers_session_id(test_certificates):
 async def test_stream_reset_before_data_received_minus_one(test_certificates):
     """WT ヘッダー未受信のままリセットされたストリームには -1 が渡ることを確認
 
-    open_stream と reset_stream の間に送信処理を挟まない (WT ヘッダーが先に
-    届くと stream_info_ に登録され、-1 が決定的にならない)。セッションとの
-    関連付けはストリーム先頭のヘッダー経由のみであり (draft-ietf-webtrans-http3-16
-    Section 4.4)、データ未書き込みのリセットは従来どおり RESET_STREAM が送出
-    される (Reliable Size 0 の RESET_STREAM_AT は RESET_STREAM と等価。
-    draft-ietf-quic-reliable-stream-reset-09 Section 5)。ヘッダー未受信のまま
+    open_stream と reset_stream の間に送信処理を挟まない低レベル API の構成で
+    検証する (高レベル API の reset_stream はリセット前に WT ヘッダーを QUIC 層
+    へ書き出すため、この構成にはならない)。WT ヘッダーが先に届くと stream_info_
+    に登録され、-1 が決定的にならない。セッションとの関連付けはストリーム先頭の
+    ヘッダー経由のみであり (draft-ietf-webtrans-http3-16 Section 4.4)、データ
+    未書き込みのリセットは従来どおり RESET_STREAM が送出される (データ配信の
+    目的では Reliable Size 0 の RESET_STREAM_AT は RESET_STREAM と等価。
+    draft-ietf-quic-reliable-stream-reset-10 Section 5)。ヘッダー未受信のまま
     リセットされたストリームは復元できない。旧実装では無関係なセッション ID が
     渡っていたケース
     """
