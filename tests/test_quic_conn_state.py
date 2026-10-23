@@ -497,8 +497,10 @@ def test_close_before_handshake():
     server = Connection.accept(server_config, initial_packet.data, SERVER_ADDR, CLIENT_ADDR)
     server.close(0x100, "server close before initial")
     assert server.is_closed() is True
-    # accept 直後は ngtcp2 が Initial 鍵を持っていないためパケット無し
-    assert server.in_closing_period is False
+    # accept 直後は ngtcp2 が Initial 鍵を持っておらず、anti-amplification
+    # 制限でパケットも生成できない。ngtcp2 はそれでも CLOSING 状態へ遷移
+    # するため in_closing_period は true になる (送信できるパケットは無い)
+    assert server.in_closing_period is True
     assert server.send() is None
 
     # サーバー側も保持パケットが無いため、close() 後の受信は終了を返す

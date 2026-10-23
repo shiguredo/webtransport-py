@@ -1,10 +1,10 @@
 {
   "ngtcp2": {
-    "ref": "eb9e154d18e0a88e4d7f202592bfa484d26efcbc",
+    "ref": "1aeec1f4abed326f5cc3d550794fc4de0c3babef",
     "url": "https://github.com/ngtcp2/ngtcp2"
   },
   "nghttp3": {
-    "ref": "044ad5ff641cd1aaab6b7f62be833c7d831b60e4",
+    "ref": "d75f4f813498e98c322d2ca2c59fee1a2584727f",
     "url": "https://github.com/ngtcp2/nghttp3"
   },
   "nghttp2": {

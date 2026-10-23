@@ -1920,9 +1920,10 @@ void QuicConnection::close(uint64_t error_code, const std::string& reason) {
 
   // CONNECTION_CLOSE が生成できた場合はパケットを保持し、send() が返せる
   // ように armed にする。生成できない場合 (クライアント Initial 未送信の
-  // NGTCP2_ERR_INVALID_STATE やサーバー Initial 未受信の送出量上限) は
-  // パケット無しで終了する (state 未確立のエンドポイントは closing 状態に
-  // 入らない (RFC 9000 Section 10.2.3))。
+  // NGTCP2_ERR_INVALID_STATE や、サーバー Initial 未受信で anti-amplification
+  // 制限により 0 バイトしか送れない場合) はパケット無しで終了する。
+  // サーバーの後者の場合も ngtcp2 は CLOSING 状態へ遷移するため、
+  // in_closing_period は true になる (送信できるパケットは無い)。
   //
   // ハンドシェイク途中 (Initial 交換済み) で呼んだ場合は Initial または
   // Handshake パケットで CONNECTION_CLOSE を書けるが、ngtcp2 が error_code
