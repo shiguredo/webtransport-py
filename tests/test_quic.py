@@ -94,6 +94,49 @@ def test_quic_config_enable_reset_stream_at():
     assert config.enable_reset_stream_at is False
 
 
+def test_has_pending_stream_data():
+    """QUIC 層へ書き込み済みで未送信のストリームデータ有無を確認
+
+    send_stream_data で QUIC 層へ書き込んだデータは、send() がパケットに
+    書き出すまで送信待ちとして残る。RESET_STREAM_AT の Reliable Size を
+    確保するため、リセット前に WT ヘッダーがパケットへ書き出されたことを
+    確認する用途で使う。
+    """
+    from conftest import create_client_server_pair, perform_handshake, wait_pacing_timeout
+
+    client, server, initial_packet = create_client_server_pair()
+    assert perform_handshake(client, server, initial_packet) is True
+
+    # ハンドシェイク完了直後の制御パケット (ACK 等) を掃く。これらは 1-RTT
+    # パケットではないためストリームデータを運べず、残っていると次の send()
+    # がストリームデータを書き出さないことがある
+    for _ in range(20):
+        if client.send() is None:
+            break
+        if not wait_pacing_timeout(client):
+            break
+
+    stream_id = client.open_stream(True)
+    assert stream_id >= 0
+
+    # データを書き込む前は送信待ちがない
+    assert client.has_pending_stream_data(stream_id) is False
+
+    # QUIC 層へ書き込むだけでは送信待ちとして残る
+    client.send_stream_data(stream_id, b"pending")
+    assert client.has_pending_stream_data(stream_id) is True
+
+    # pacing の期限待ちを挟みながら、パケットに書き出されるまで送信する
+    for _ in range(200):
+        if not client.has_pending_stream_data(stream_id):
+            break
+        if client.send() is None and not wait_pacing_timeout(client):
+            break
+
+    # send() がパケットに書き出したため送信待ちは解消する
+    assert client.has_pending_stream_data(stream_id) is False
+
+
 def test_remote_transport_params_after_handshake():
     """ハンドシェイク後の remote transport parameter getter が正しい値を返すことを確認
 

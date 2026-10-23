@@ -21,6 +21,10 @@ from webtransport.http3.exceptions import Http3ErrorCode
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+# リセット前の送信待ち掃き出しで pacing の期限を待つ上限 (ナノ秒)。
+# これを超える期限 (PTO など) は送信待ちではないため待たない
+_PACING_WAIT_LIMIT_NS = 10_000_000
+
 logger = logging.getLogger(__name__)
 
 
@@ -435,6 +439,35 @@ class Server:
 
             await loop.sock_sendto(self._socket, packet.data, dest)
 
+    async def _send_to_before_reset(
+        self,
+        addr: tuple[str, int],
+        client: ClientConnection,
+        stream_id: int,
+    ) -> None:
+        """リセット前に送信待ちの WT ヘッダーを QUIC 層へ書き出す
+
+        ngtcp2 の send() は pacing の期限が来るまでパケットを返さないため、
+        期限待ちを挟まずに空振りすると WT ヘッダーが QUIC 層へ書き出されない
+        ままリセットで破棄され、RESET_STREAM_AT の Reliable Size が 0 になる。
+        QUIC 層の送信待ちから当該ストリームのデータが消えるまで、pacing の
+        期限が近い場合だけ待って再試行する (PTO などの遠い期限は待たない)。
+        """
+        if client.quic_connection is None:
+            return
+        for _ in range(8):
+            await self._send_to(addr, client)
+            if not client.quic_connection.has_pending_stream_data(stream_id):
+                return
+            timeout_ns = client.quic_connection.get_timeout()
+            # 期限なし、または pacing と考えられない遠い期限は待たない
+            if timeout_ns is None or timeout_ns > _PACING_WAIT_LIMIT_NS:
+                return
+            if timeout_ns > 0:
+                await asyncio.sleep(timeout_ns / 1e9)
+            else:
+                client.quic_connection.handle_timeout()
+
     def _setup_streams(self, client: ClientConnection) -> None:
         """HTTP/3 制御ストリームを設定する"""
         if client.quic_connection is None or client.webtransport_session is None:
@@ -750,6 +783,20 @@ class Server:
             stream_id,
             error_code,
         )
+        # ピアが reset_stream_at を広告している場合、リセット送出前に送信待ちを
+        # 掃いて WT ヘッダーを QUIC 層へ書き出す。ngtcp2 は FLUSH 指定時に
+        # リセット時点の書き込み済みオフセットを Reliable Size に設定した
+        # RESET_STREAM_AT を送出するため、ヘッダーが未書き込み (ストリームを
+        # 開いた直後でデータ未送信) のままリセットすると Reliable Size が 0 に
+        # なり、ピアがセッション ID を復元できない
+        # (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)。ピアが広告しない
+        # 場合は RESET_STREAM_AT を送出できず MUST を満たせないため、従来の
+        # 挙動 (ヘッダー未書き込みのまま通常の RESET_STREAM) を保つ
+        if (
+            client.quic_connection is not None
+            and client.quic_connection.remote_reset_stream_at is True
+        ):
+            await self._send_to_before_reset(addr, client, stream_id)
         if client.quic_connection is not None:
             client.quic_connection.reset_stream(stream_id, wire_error_code)
         client.webtransport_session.reset_stream(stream_id, error_code)

@@ -430,6 +430,17 @@ class QuicConnection {
                         bool fin = false);
 
   /**
+   * 送信待ちのストリームデータがあるか
+   *
+   * QUIC 層へ書き込み済み (send_stream_data) だが、まだパケットに書き出されて
+   * いないデータの有無を返す。RESET_STREAM_AT の Reliable Size を確保するため、
+   * リセット前に WT ヘッダーがパケットへ書き出されたことを確認する用途で使う。
+   * @param stream_id ストリーム ID
+   * @return 送信待ちデータがあれば true
+   */
+  bool has_pending_stream_data(int64_t stream_id) const;
+
+  /**
    * ストリームを閉じる (RESET_STREAM + STOP_SENDING)
    * @param stream_id ストリーム ID
    * @param error_code エラーコード (0 なら正常終了)

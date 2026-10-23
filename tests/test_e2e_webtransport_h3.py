@@ -1114,6 +1114,113 @@ async def test_client_resets_server_stream(test_certificates):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reset_stream_at_advertised, session_id_restored",
+    [(True, True), (False, False)],
+    ids=["reset_stream_at_advertised", "reset_stream_at_missing"],
+)
+async def test_client_resets_stream_immediately_after_open(
+    test_certificates,
+    reset_stream_at_advertised,
+    session_id_restored,
+):
+    """Client がストリームを開いた直後 (データ送信なし) にリセットした場合のセッション ID 復元を確認
+
+    draft-ietf-webtrans-http3-16 Section 4.4 は WebTransport のデータストリームを
+    リセットするとき、WT ヘッダー (ストリームタイプ + セッション ID) 以上の
+    Reliable Size を持つ RESET_STREAM_AT を送出することを MUST としている。
+    ピアが reset_stream_at を広告している場合、リセット送出前に WT ヘッダーを
+    QUIC 層へ書き出すことで、ngtcp2 が書き込み済みオフセットを Reliable Size に
+    設定した RESET_STREAM_AT を送出する。これにより Server の on_stream_reset に
+    セッション ID が渡る (修正前はヘッダー未書き込みのため -1 だった)。
+    広告していないピアには RESET_STREAM_AT を送出できないため、従来どおり
+    セッション ID は -1 になる (MUST を満たせないことは既知の制約)。
+    """
+    from webtransport._h3_client import Client
+
+    session_ready_event = asyncio.Event()
+    server_reset_received = asyncio.Event()
+    expected_session_id: dict[str, int] = {}
+    reset_info: dict[str, int] = {}
+
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=test_certificates["certfile"],
+        keyfile=test_certificates["keyfile"],
+        quic_config=(
+            None
+            if reset_stream_at_advertised
+            else _make_config_missing_transport_params("reset_stream_at")
+        ),
+    )
+
+    async def on_session_ready(session_id: int, addr: tuple[str, int]) -> None:
+        expected_session_id["session_id"] = session_id
+        session_ready_event.set()
+
+    async def on_stream_reset(
+        session_id: int,
+        stream_id: int,
+        error_code: int | None,
+        addr: tuple[str, int],
+    ) -> None:
+        reset_info["session_id"] = session_id
+        reset_info["stream_id"] = stream_id
+        # 受信側のアプリコードは常に int になる (None はワイヤコードが
+        # WT_APPLICATION_ERROR レンジ外の場合のみ)
+        reset_info["error_code"] = -1 if error_code is None else error_code
+        server_reset_received.set()
+
+    server.on_session_ready(on_session_ready)
+    server.on_stream_reset(on_stream_reset)
+    await server.start()
+
+    async def run_server() -> None:
+        try:
+            await server.run()
+        except asyncio.CancelledError:
+            pass
+
+    server_task = asyncio.create_task(run_server())
+
+    client = Client(
+        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+        verify_peer=False,
+        # close() 時のピア終了待ちを省き、run() を起動しないテストを短くする
+        close_wait_timeout=0,
+    )
+    try:
+        await asyncio.wait_for(client.connect(), timeout=5.0)
+        # サーバーが CONNECT を受理するまで待つ。受理前に開いたデータストリームの
+        # WT ヘッダーが先着すると、セッション未確立の扱いになり検証が不安定になる
+        await asyncio.wait_for(session_ready_event.wait(), timeout=5.0)
+
+        stream_id = await client.open_stream()
+        assert stream_id >= 0
+
+        # データを一切送らずに、開いた直後のストリームをリセットする
+        await client.reset_stream(stream_id, error_code=0x02)
+
+        await asyncio.wait_for(server_reset_received.wait(), timeout=5.0)
+        assert reset_info["stream_id"] == stream_id
+        assert reset_info["error_code"] == 0x02
+        if session_id_restored:
+            # RESET_STREAM_AT の Reliable Size により WT ヘッダーが配信され、
+            # ストリームがセッションに関連付けられてからリセットが確定する
+            assert reset_info["session_id"] == expected_session_id["session_id"]
+        else:
+            # ピアが reset_stream_at を広告しない場合は通常の RESET_STREAM が
+            # 送出され、WT ヘッダーは未書き込みのまま破棄されるため復元できない
+            assert reset_info["session_id"] == -1
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await client.close()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_chunked_stream_data(test_certificates):
     """同一ストリームへ複数回送信したデータが結合されて届くことを確認
 

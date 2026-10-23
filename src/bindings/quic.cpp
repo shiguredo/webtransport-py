@@ -1784,6 +1784,11 @@ void QuicConnection::send_stream_data(int64_t stream_id,
   stream_buffers_[stream_id].push_back({data, fin});
 }
 
+bool QuicConnection::has_pending_stream_data(int64_t stream_id) const {
+  auto it = stream_buffers_.find(stream_id);
+  return it != stream_buffers_.end() && !it->second.empty();
+}
+
 void QuicConnection::close_stream(int64_t stream_id, uint64_t error_code) {
   if (!conn_ || closed_) {
     return;
@@ -3335,6 +3340,12 @@ void bind_quic(nb::module_& m) {
           "内部専用: 上位層が組み立てた送信データを入力サイズの検査なしで"
           "送る (アプリ入力の上限は上位層で検査済み。nghttp3 が付けるフレーム"
           "ヘッダの分だけアプリ入力より大きくなるため、この検査を通せない)")
+      .def("has_pending_stream_data", &QuicConnection::has_pending_stream_data,
+           nb::lock_self(), nb::arg("stream_id"),
+           nb::sig("def has_pending_stream_data(self, stream_id: int) -> "
+                   "bool"),
+           "QUIC 層へ書き込み済みでまだパケットに書き出されていないストリーム"
+           "データがあるか")
       .def("close_stream", &QuicConnection::close_stream, nb::lock_self(),
            nb::arg("stream_id"), nb::arg("error_code") = 0,
            nb::sig("def close_stream(self, stream_id: int, error_code: int = "

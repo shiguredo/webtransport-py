@@ -319,6 +319,9 @@ class Connection:
         内部専用: 上位層が組み立てた送信データを入力サイズの検査なしで送る (アプリ入力の上限は上位層で検査済み。nghttp3 が付けるフレームヘッダの分だけアプリ入力より大きくなるため、この検査を通せない)
         """
 
+    def has_pending_stream_data(self, stream_id: int) -> bool:
+        """QUIC 層へ書き込み済みでまだパケットに書き出されていないストリームデータがあるか"""
+
     def close_stream(self, stream_id: int, error_code: int = 0) -> None:
         """ストリームを閉じる (RESET_STREAM + STOP_SENDING)"""
 

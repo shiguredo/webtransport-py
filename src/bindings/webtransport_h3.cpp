@@ -1595,14 +1595,32 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   if (it != stream_info_.end()) {
     session_id = it->second.session_id;
   }
+  // WT ヘッダーのみ受信してアプリデータがまだ届いていないストリームは
+  // stream_info_ に未登録である (登録は recv_wt_data_cb で行う)。nghttp3 は
+  // WT ヘッダー解析時点でストリームとセッションの対応を保持しているため、
+  // そこからセッション ID を復元する。これにより、ストリームを開いた直後に
+  // データを送らずリセットされた場合も、RESET_STREAM_AT の Reliable Size で
+  // WT ヘッダーが配信された後はセッション ID を解決できる。nghttp3 も対応を
+  // 持たない (WT ヘッダー未受信) 場合は -1 のまま
+  bool session_id_from_nghttp3 = false;
+  if (session_id < 0) {
+    int64_t wt_session_id =
+        nghttp3_conn_get_stream_wt_session_id(conn_, stream_id);
+    if (wt_session_id >= 0 && session_ids_.count(wt_session_id) > 0) {
+      session_id = wt_session_id;
+      session_id_from_nghttp3 = true;
+    }
+  }
   // CONNECT ストリームは stream_info_ に登録されないため session_ids_ で判定する。
   // セッション ID は CONNECT ストリーム ID そのもの (draft-ietf-webtrans-http3-16
   // Section 2.2)。CONNECT ストリームのリセットはセッション終了の正当な経路
   // (Section 6 のセッション終了条件の 1 つ目)。QUIC のストリーム ID は接続内で
   // 一意なため、session_ids_ に含まれる ID を持つ未登録ストリームは CONNECT
-  // ストリームしかあり得ない
+  // ストリームしかあり得ない。nghttp3 がセッション ID を解決できた場合は
+  // WT データストリームであるため CONNECT ストリームではない
   bool is_connect_stream =
-      (it == stream_info_.end() && session_ids_.count(stream_id) > 0);
+      (!session_id_from_nghttp3 && it == stream_info_.end() &&
+       session_ids_.count(stream_id) > 0);
   if (is_connect_stream) {
     session_id = stream_id;
     // セッションに属するデータストリームの送信バッファを stream_info_ の
