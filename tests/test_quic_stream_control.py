@@ -204,7 +204,8 @@ def test_initiate_key_update_before_handshake():
     client, server, _ = create_client_server_pair()
 
     # ハンドシェイク前はクライアント・サーバーとも False
-    # (ngtcp2 内部の assert 回避のためのガードが False を返す)
+    # (ngtcp2 はハンドシェイク完了前の呼び出しに NGTCP2_ERR_INVALID_STATE を
+    # 返し、バインディングのガードが False にする)
     assert client.initiate_key_update() is False
     assert server.initiate_key_update() is False
 

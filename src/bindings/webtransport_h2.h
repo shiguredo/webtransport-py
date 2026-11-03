@@ -126,7 +126,9 @@ struct H2SessionConfig {
   // 最大フレームサイズ (HTTP/2)
   uint32_t max_frame_size = 16384;
 
-  // 最大ヘッダーリストサイズ (HTTP/2)
+  // 最大ヘッダーリストサイズ (SETTINGS_MAX_HEADER_LIST_SIZE)
+  //
+  // 広告する値であり、受信するヘッダーリストの上限としても強制される
   uint32_t max_header_list_size = 65536;
 
   // サーバーモードかどうか

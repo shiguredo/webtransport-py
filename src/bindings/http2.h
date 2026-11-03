@@ -49,11 +49,11 @@ struct Http2Config {
   // 最大フレームサイズ (nghttp2-v2 では 16384 固定。設定しても使われない)
   uint32_t max_frame_size = 16384;
 
-  // 最大ヘッダーリストサイズ
+  // 最大ヘッダーリストサイズ (SETTINGS_MAX_HEADER_LIST_SIZE)
   //
-  // nghttp2-v2 はローカル側の最大ヘッダーリストサイズを強制しないため、
-  // SETTINGS_MAX_HEADER_LIST_SIZE として広告もしない (local_settings は
-  // 上限なしの 4294967295 を返す)
+  // 広告する値であり、受信するヘッダーリストの上限としても強制される。
+  // 上限を超えるヘッダーリストを受信したストリームは PROTOCOL_ERROR で
+  // リセットされる
   uint32_t max_header_list_size = 65536;
 
   // サーバーモードかどうか
@@ -360,9 +360,9 @@ class Http2Connection {
   /**
    * ローカルの SETTINGS の値を取得
    *
-   * ピアが ACK した値。 ACK を受信する前は nghttp2-v2 の既定値。
-   * max_frame_size は 16384 固定、max_header_list_size は上限なしの
-   * 4294967295 (nghttp2-v2 がローカルの上限を管理しないため)
+   * nghttp2-v2 は ACK の適用状態を公開しないため、ACK の前後で同じ値を返す。
+   * max_frame_size は 16384 固定、max_header_list_size は広告した
+   * SETTINGS_MAX_HEADER_LIST_SIZE の値
    * @return SETTINGS の辞書 (コネクションが閉じている場合は nullopt)
    */
   std::optional<std::map<std::string, uint32_t>> local_settings() const;

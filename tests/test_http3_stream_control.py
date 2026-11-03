@@ -68,8 +68,8 @@ def test_http3_block_unblock_stream() -> None:
 def test_http3_max_concurrent_streams() -> None:
     """同時ストリーム数のヒントを設定しても通常の送受信が継続できることを確認
 
-    効果は外部から観測できない (現在値との max マージのため) ため、
-    呼び出し後も通常の動作が続くことのみ確認する
+    効果は外部から観測できない (QPACK デコーダーの内部リソース消費の
+    ヒントに過ぎない) ため、呼び出し後も通常の動作が続くことのみ確認する
     """
     client, server = _create_http3_connection_pair()
 

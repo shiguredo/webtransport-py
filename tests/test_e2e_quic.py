@@ -973,7 +973,9 @@ async def test_high_level_initiate_key_update(test_certificates):
     # 未登録アドレスは False
     assert server.initiate_key_update(("127.0.0.1", 1)) is False
 
-    # 鍵更新後もストリーム送受信が継続する
+    # 鍵更新後もストリーム送受信が継続する。この送信で現在の鍵を使った
+    # パケットが ACK されるため、次の鍵更新を開始できる条件 (RFC 9001
+    # Section 6.1) も満たされる
     await client.send_stream_data(stream_id, b"after-key-update", fin=True)
     await asyncio.wait_for(server_received_event.wait(), timeout=10.0)
     assert bytes(server_received) == b"helloafter-key-update"

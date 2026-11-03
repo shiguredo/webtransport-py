@@ -1036,15 +1036,15 @@ QuicPacket QuicConnection::make_packet(const uint8_t* data,
                                        size_t len,
                                        const ngtcp2_path& path) {
   // ハンドシェイク完了後の 1RTT パケット (short header) の書き出しを記録する。
-  // クライアントの initiate_key_update は ngtcp2 内部の assert
-  // (NGTCP2_CS_POST_HANDSHAKE) を回避するため、post-handshake の state 遷移が
-  // 完了している必要がある。クライアントの state 遷移は write パスで行われ、
-  // 遷移後の 1RTT パケット書き出しはその後にしか起こらない (0-RTT 早期データ
-  // は long header で書き出されるため対象外)。書き出せなかった場合は立てず、
-  // assert 回避のため安全側に倒す。1RTT パケットの判定はデータグラム全体を
-  // パースして short header の有無で行う (RFC 9000 Section 12.2 のコアレッ
-  // シングにより、1 データグラムに複数の QUIC パケットが連結されることがあり、
-  // 先頭バイトだけでは 1RTT パケットの書き出しを検出できない)
+  // クライアントの initiate_key_update は post-handshake の state 遷移が完了
+  // している必要がある (遷移前は ngtcp2 が NGTCP2_ERR_INVALID_STATE を返す)。
+  // クライアントの state 遷移は write パスで行われ、遷移後の 1RTT パケット
+  // 書き出しはその後にしか起こらない (0-RTT 早期データは long header で
+  // 書き出されるため対象外)。書き出せなかった場合は立てず、遷移完了と誤認
+  // しないよう安全側に倒す。1RTT パケットの判定はデータグラム全体をパース
+  // して short header の有無で行う (RFC 9000 Section 12.2 のコアレッシングに
+  // より、1 データグラムに複数の QUIC パケットが連結されることがあり、先頭
+  // バイトだけでは 1RTT パケットの書き出しを検出できない)
   if (handshake_completed_ && len > 0 &&
       contains_short_header_packet(data, len)) {
     post_handshake_write_done_ = true;
@@ -1717,9 +1717,9 @@ bool QuicConnection::initiate_key_update() {
     return false;
   }
 
-  // ngtcp2 内部に assert (state == NGTCP2_CS_POST_HANDSHAKE) があり、Debug
-  // ビルドではハンドシェイク完了前の呼び出しで abort するため、両側ガードを
-  // 設けて不成立時は False を返す。
+  // ngtcp2 はハンドシェイク完了前や post-handshake の state 遷移前の呼び出し
+  // に対して NGTCP2_ERR_INVALID_STATE を返す。Python API は例外ではなく
+  // False を返す契約のため、状態を先にガードする。
   // サーバーは read パスで state 遷移が完了するため、ハンドシェイク完了のみで
   // 足りる。クライアントはハンドシェイク完了直後はまだ post-handshake の
   // write を行っていない (state 遷移は write パスで行われる) ため、

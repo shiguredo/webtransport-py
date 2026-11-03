@@ -45,7 +45,7 @@ _CALLBACK_FIELD_ASSIGNMENT = re.compile(
     r"^\s*(?:callbacks\.\w+|dr\.read_data|data_prd\.read_callback|"
     r"conn_ref_\.get_conn|\.read_data|\.write_stream_data_offset|"
     r"\.begin_headers|\.recv_header|\.end_headers|\.recv_data|"
-    r"\.remote_end_stream|\.local_end_stream|\.recv_ping_ack|\.shutdown|"
+    r"\.end_stream_remote|\.end_stream_local|\.recv_ping_ack|\.shutdown|"
     r"\.begin_trailers|\.recv_trailer|\.end_trailers)"
     r"\s*=\s*&?(?:\w+::)*([A-Za-z_]\w*)\s*[,;}]"
 )

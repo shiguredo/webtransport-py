@@ -2251,6 +2251,8 @@ async def test_high_level_initiate_key_update(test_certificates):
     from webtransport.http3 import Client, Server
 
     server_got_request = asyncio.Event()
+    second_request_received = asyncio.Event()
+    request_count = 0
     client_addr: list[tuple[str, int]] = []
 
     server = Server(
@@ -2261,8 +2263,13 @@ async def test_high_level_initiate_key_update(test_certificates):
     )
 
     async def on_request(stream_id, headers, addr):
+        nonlocal request_count
         client_addr.append(addr)
-        server_got_request.set()
+        request_count += 1
+        if request_count == 1:
+            server_got_request.set()
+        else:
+            second_request_received.set()
         await server.submit_response(addr, stream_id, [(":status", "200")])
         await server.send_data(addr, stream_id, b"ok", fin=True)
 
@@ -2311,7 +2318,15 @@ async def test_high_level_initiate_key_update(test_certificates):
     # 未登録アドレスは False
     assert server.initiate_key_update(("127.0.0.1", 1)) is False
 
-    # クライアント側からも開始できる (サーバー側の確認が済むまで待つ)
+    # RFC 9001 Section 6.1: 前回の鍵更新の確認後、現在の鍵で送信した
+    # パケットが ACK されるまで次の鍵更新は開始できない。クライアント側から
+    # 開始できるよう、ack-eliciting なリクエストを 1 往復させる
+    assert await client.request("GET", "/") >= 0
+    await asyncio.wait_for(second_request_received.wait(), timeout=10.0)
+
+    # クライアント側からも開始できる (サーバー側の確認と、現在の鍵で送信
+    # したパケットの ACK が済むまで待つ)。ACK の到着は下のリトライループで
+    # 待つ
     client_can_update = False
     for _ in range(200):
         if client.initiate_key_update():

@@ -3,11 +3,11 @@
 ## 位置付け
 
 - nghttp2 v1 から nghttp2-v2 への切り替えの記録である
-- 対象は HTTP/2 層 (`src/bindings/http2.*`) と WebTransport over HTTP/2 層 (`src/bindings/webtransport_h2.*`) で利用する nghttp2 を v1 (v1.70.0) から nghttp2-v2 (0.1.0) へ切り替える作業である
+- 対象は HTTP/2 層 (`src/bindings/http2.*`) と WebTransport over HTTP/2 層 (`src/bindings/webtransport_h2.*`) で利用する nghttp2 を v1 (v1.70.0) から nghttp2-v2 へ切り替える作業である (切り替え当時は 0.1.0、現在は 0.2.0 の特定コミットを ref 固定している)
 
 ## 依存とビルドの変更
 
-- `deps.json` の `nghttp2` を `https://github.com/nghttp2/nghttp2-v2` のタグ `v0.1.0` (`tag`) に固定した
+- `deps.json` の `nghttp2` を `https://github.com/nghttp2/nghttp2-v2` の特定コミット (`ref`) に固定した。切り替え当初はタグ `v0.1.0` (`tag`) に固定していたが、上流の最新ヘッダーへ追従するため ref 指定に変更した
 - `CMakeLists.txt` の `ExternalProject_Add(nghttp2_build ...)` に `GIT_SUBMODULES lib/sfparse` を追加した。nghttp2-v2 は Structured Field パーサ `lib/sfparse` をサブモジュールで取得し、`ENABLE_LIB_ONLY=ON` でも必須である
 - インストール成果物は v1 と同じ `lib/libnghttp2.a` で、ヘッダーだけ `include/nghttp2v2/` に変わる
 - nghttp2-v2 はバージョン取得関数 `nghttp2_version` と ALPN 選択関数 `nghttp2_select_alpn` を公開しない。`http2.get_version()` は `NGHTTP2_VERSION` マクロを返し、`http2.select_alpn()` はバインディング内で h2 > http/1.1 の優先順を実装した
@@ -40,16 +40,18 @@
 - 受信は `nghttp2_conn_read` を呼び、成功時は入力長を、エラー時は 0 を返す
 - nghttp2-v2 では受信ウィンドウをアプリが管理するため、v1 相当の自動 WINDOW_UPDATE (受信ウィンドウの半分で返す) を `extend_recv_connection_window` / `extend_recv_stream_window` に実装した。`local_window_size` / `effective_recv_data_length` / `stream_local_window_size` / `stream_effective_recv_data_length` はこの追跡値から返す
 - `set_local_window_size` は増加を extend、減少をローカルな受信絞り込みとして v1 と同じセマンティクスで実装した
-- ストリームの half-closed 状態は `stream_open` / `local_end_stream` / `remote_end_stream` / `stream_close` コールバックで追跡する。nghttp2-v2 には v1 の `nghttp2_session_get_stream_local_close` に相当する API が無い
+- ストリームの half-closed 状態は `stream_open` / `end_stream_local` / `end_stream_remote` / `stream_close` コールバックで追跡する。nghttp2-v2 には v1 の `nghttp2_session_get_stream_local_close` に相当する API が無い
 - 1xx は `:status` が 1xx のときに `nghttp2_conn_submit_info` へ振り分ける (Python API は v1 と同じ `submit_response` のまま)
 - トレーラは `nghttp2_conn_submit_trailers` を呼び、データ供給側は送信データが尽きた時点で `NGHTTP2_READ_DATA_FLAG_EOF` を返す
+- `Config.max_header_list_size` は `nghttp2_settings.max_field_section_size` にマップし、SETTINGS_MAX_HEADER_LIST_SIZE として広告するとともに受信するヘッダーリストの上限として強制する。上限を超えるヘッダーリストを受信したストリームは PROTOCOL_ERROR でリセットされる
 
 ### WebTransport over HTTP/2 層 (`src/bindings/webtransport_h2.cpp`)
 
 - `nghttp2_conn_write` の吸い上げを `flush_output()` に集約した。旧実装の `nghttp2_session_send` 呼び出し箇所を置き換えている
 - カプセルの送信バッファを `H2StreamData` (`data` + `offset`) に変更し、`read_data` がバッファを直接指して `write_stream_data_offset` で送出確認する nghttp2-v2 の契約に対応した。END_STREAM を保留している場合は最後のチャンクと同じ呼び出しで EOF を返す (空 DATA フレームで END_STREAM を送らない)
 - 受信ウィンドウはアプリ管理のため、`consume_recv_bytes` は `nghttp2_conn_extend_max_stream_offset` + `nghttp2_conn_extend_max_offset` を呼ぶ。`test_effective_recv_data_length` は v1 相当の未返却量を自前で追跡して返す
-- SETTINGS は `nghttp2_settings` のフィールド (MAX_CONCURRENT_STREAMS / INITIAL_WINDOW_SIZE / ENABLE_CONNECT_PROTOCOL) と `extra_settings` (WebTransport 固有 SETTINGS、クライアントの SETTINGS_ENABLE_CONNECT_PROTOCOL) で送る。リクエスト / レスポンス処理は `begin_headers` / `recv_header` / `end_headers` (トレーラは `begin_trailers` / `recv_trailer` / `end_trailers`) と `remote_end_stream` で行う
+- SETTINGS は `nghttp2_settings` のフィールド (MAX_CONCURRENT_STREAMS / INITIAL_WINDOW_SIZE / MAX_HEADER_LIST_SIZE / ENABLE_CONNECT_PROTOCOL) と `extra_settings` (WebTransport 固有 SETTINGS、クライアントの SETTINGS_ENABLE_CONNECT_PROTOCOL) で送る。リクエスト / レスポンス処理は `begin_headers` / `recv_header` / `end_headers` (トレーラは `begin_trailers` / `recv_trailer` / `end_trailers`) と `end_stream_remote` で行う
+- 上流は構造体のレイアウトをバージョン (`NGHTTP2_SETTINGS_VERSION` / `NGHTTP2_CALLBACKS_VERSION` / `NGHTTP2_PRI_VERSION`) で管理しており、`nghttp2_settings_default` / `nghttp2_conn_server_new` / `nghttp2_conn_client_new` などの互換マクロが版を渡す。バインディングはこのマクロ経由で呼ぶため、構造体レイアウトの変更は呼び出し側に波及しない (追加されたフィールドは必要に応じて明示的に設定する)
 
 ## nghttp2-v2 で公開されない機能・観測性
 
@@ -67,7 +69,7 @@
 - GOAWAY は接続に 1 つだけ予約される。`goaway()` の直後に `terminate_session()` を呼んでも 2 枚にはならない
 - `terminate_session(error_code, last_stream_id)` の `last_stream_id` は反映されない (ライブラリが処理済みの値を使う)。パリティ検証だけ v1 互換で残している
 - `goaway(error_code)` で 0 以外のエラーコードは graceful shutdown で送れないため即時終了にフォールバックする
-- `SETTINGS_MAX_FRAME_SIZE` は 16384 固定、`SETTINGS_MAX_HEADER_LIST_SIZE` は送信されない (ローカルでは無制限)。`Config.max_frame_size` / `Config.max_header_list_size` は動作に影響しない
+- `SETTINGS_MAX_FRAME_SIZE` は 16384 固定 (`Config.max_frame_size` は動作に影響しない)。`SETTINGS_MAX_HEADER_LIST_SIZE` は `Config.max_header_list_size` の値を送信し、受信するヘッダーリストの上限としても強制される
 - `Config.no_rfc7540_priorities` は無効である (nghttp2-v2 は常に `SETTINGS_NO_RFC7540_PRIORITIES=1` を送る)
 - ローカルの SETTINGS は ACK の適用状態を公開しないため、ACK 前後で同じ値を返す
 - CONNECT リクエストへの trailer と不正なヘッダー名 (大文字など) は接続エラーになる (v1 はストリーム単位で閉じていた)
@@ -76,7 +78,7 @@
 
 ## テストの適応
 
-- 全テスト (1464 件) が通る
+- 切り替え当時、全テスト (1464 件) が通ることを確認した
 - v1 の内部状態に依存していたテストは v2 で観測可能な範囲に書き換えた。主な変更は次のファイルである
   - `tests/test_http2.py`: WINDOW_UPDATE イベントと受信 PING の検証を削除し、フロー制御の再開放をデータ到達で検証
   - `tests/test_http2_session_state.py` / `tests/test_http2_session_control.py`: 設定値・ウィンドウ・GOAWAY の期待値を v2 に合わせた
@@ -89,5 +91,5 @@
 
 ## フォローアップ
 
-- nghttp2-v2 は開発中 (0.1.0) であり、送信側ウィンドウや受信 WINDOW_UPDATE などの観測 API、Server Push 相当の機能が追加されたらバインディングを再検討する
-- `Config.max_frame_size` / `Config.max_header_list_size` / `Config.no_rfc7540_priorities` を削除するか、上流の対応を待って意味を持たせるかを判断する
+- nghttp2-v2 は開発中 (0.2.0) であり、送信側ウィンドウや受信 WINDOW_UPDATE などの観測 API、Server Push 相当の機能が追加されたらバインディングを再検討する
+- `Config.max_frame_size` / `Config.no_rfc7540_priorities` を削除するか、上流の対応を待って意味を持たせるかを判断する

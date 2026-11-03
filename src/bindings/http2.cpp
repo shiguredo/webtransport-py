@@ -160,8 +160,8 @@ bool Http2Connection::initialize() {
   callbacks.recv_trailer = &Http2Connection::on_recv_trailer_callback;
   callbacks.end_trailers = &Http2Connection::on_end_trailers_callback;
   callbacks.recv_data = &Http2Connection::on_recv_data_callback;
-  callbacks.remote_end_stream = &Http2Connection::on_remote_end_stream_callback;
-  callbacks.local_end_stream = &Http2Connection::on_local_end_stream_callback;
+  callbacks.end_stream_remote = &Http2Connection::on_remote_end_stream_callback;
+  callbacks.end_stream_local = &Http2Connection::on_local_end_stream_callback;
   callbacks.recv_ping_ack = &Http2Connection::on_recv_ping_ack_callback;
   callbacks.shutdown = &Http2Connection::on_shutdown_callback;
   callbacks.write_stream_data_offset =
@@ -176,9 +176,12 @@ bool Http2Connection::initialize() {
   // の管理をアプリに委ねるため、この値がストリームの受信ウィンドウの初期値に
   // なる (本クラスは v1 相当の自動 WINDOW_UPDATE を実装する)
   settings.initial_max_stream_data = config_.initial_window_size;
-  // SETTINGS_MAX_FRAME_SIZE / SETTINGS_MAX_HEADER_LIST_SIZE は nghttp2-v2 が
-  // 扱わないため送信しない (フレームサイズは 16384 固定、ヘッダーリスト
-  // サイズはローカルでは無制限)
+  // SETTINGS_MAX_HEADER_LIST_SIZE (RFC 9113 Section 6.5.2) として広告し、
+  // 受信するヘッダーリストの上限としても強制される。既定値は nghttp2-v2 の
+  // 既定値 (65536) と同じ
+  settings.max_field_section_size = config_.max_header_list_size;
+  // SETTINGS_MAX_FRAME_SIZE は nghttp2-v2 が扱わないため送信しない
+  // (フレームサイズは 16384 固定)
 
   int rv;
   if (is_server_) {
@@ -663,15 +666,16 @@ std::optional<std::map<std::string, uint32_t>> Http2Connection::local_settings()
     return std::nullopt;
   }
 
-  // max_frame_size は 16384 固定。max_header_list_size は nghttp2-v2 が
-  // ローカルの上限を管理しないため上限なしを返す
+  // max_frame_size は 16384 固定。max_header_list_size は広告した
+  // SETTINGS_MAX_HEADER_LIST_SIZE の値 (受信するヘッダーリストの上限)
   return std::map<std::string, uint32_t>{
       {"initial_window_size",
        static_cast<uint32_t>(settings->initial_max_stream_data)},
       {"max_concurrent_streams",
        static_cast<uint32_t>(settings->max_concurrent_streams_remote)},
       {"max_frame_size", 16384},
-      {"max_header_list_size", 4294967295u},
+      {"max_header_list_size",
+       static_cast<uint32_t>(settings->max_field_section_size)},
   };
 }
 

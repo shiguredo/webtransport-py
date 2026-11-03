@@ -55,7 +55,7 @@ webtransport-py は Sans I/O アーキテクチャを採用した WebTransport �
   - [dwnx](https://github.com/ngtcp2/dwnx) を採用
   - DATAGRAM は未対応
 - 依存ライブラリは [deps.json](deps.json) で特定のタグ / コミットに固定する
-  - ngtcp2 / nghttp3 / dwnx は上流ブランチの特定コミット (`ref`)、nghttp2-v2 / AWS-LC はタグ (`tag`) で固定する
+  - ngtcp2 / nghttp3 / nghttp2-v2 / dwnx は上流ブランチの特定コミット (`ref`)、AWS-LC はタグ (`tag`) で固定する
   - 更新時は `deps.json` を書き換える (ビルドキャッシュのキーも `deps.json` の内容に連動する)
 - Python [Free-Threading](https://docs.python.org/3/howto/free-threading-python.html) 対応
   - [PEP 703 – Making the Global Interpreter Lock Optional in CPython \| peps\.python\.org](https://peps.python.org/pep-0703/)

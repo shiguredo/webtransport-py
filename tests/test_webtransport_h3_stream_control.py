@@ -134,8 +134,8 @@ def test_shutdown_stream_write_unknown_stream_is_noop() -> None:
 def test_max_concurrent_streams() -> None:
     """同時ストリーム数のヒントを設定してもセッション確立と送受信が継続できることを確認
 
-    効果は外部から観測できない (現在値との max マージのため) ため、
-    呼び出し後も通常の動作が続くことのみ確認する
+    効果は外部から観測できない (QPACK デコーダーの内部リソース消費の
+    ヒントに過ぎない) ため、呼び出し後も通常の動作が続くことのみ確認する
     """
     client, server, session_id = _establish_session()
 

@@ -986,9 +986,9 @@ class QuicConnection {
   bool verify_failed_ = false;
 
   // ハンドシェイク完了後の 1RTT パケット (short header) の書き出し記録。
-  // クライアントの initiate_key_update ガードに使う (ngtcp2 内部の assert
-  // (NGTCP2_CS_POST_HANDSHAKE) 回避のため、post-handshake の state 遷移の
-  // 完了が必要。遷移後の 1RTT パケット書き出しはその後にしか起こらない)
+  // クライアントの initiate_key_update ガードに使う (post-handshake の state
+  // 遷移の完了が必要で、遷移前の呼び出しは NGTCP2_ERR_INVALID_STATE になる。
+  // 遷移後の 1RTT パケット書き出しはその後にしか起こらない)
   bool post_handshake_write_done_ = false;
 
   // close() が生成した CONNECTION_CLOSE パケット (初回配送後も保持する)

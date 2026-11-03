@@ -30,6 +30,8 @@ def test_http2_remote_settings_defaults() -> None:
     assert remote["max_concurrent_streams"] == 100
     assert remote["initial_window_size"] == 65535
     assert remote["max_frame_size"] == 16384
+    # SETTINGS_MAX_HEADER_LIST_SIZE を受信するまでは上限なし
+    # (nghttp2-v2 は UINT32_MAX で表現する)
     assert remote["max_header_list_size"] == 4294967295
 
 
@@ -47,9 +49,9 @@ def test_http2_local_settings_defaults() -> None:
     assert local["max_concurrent_streams"] == 0
     assert local["initial_window_size"] == 65535
     assert local["max_frame_size"] == 16384
-    # nghttp2-v2 はローカルの最大ヘッダーリストサイズを管理しないため
-    # 上限なしを返す
-    assert local["max_header_list_size"] == 4294967295
+    # SETTINGS_MAX_HEADER_LIST_SIZE として Http2Config の既定値 (65536) を
+    # 広告する
+    assert local["max_header_list_size"] == 65536
 
 
 def test_http2_settings_after_exchange() -> None:
@@ -64,14 +66,13 @@ def test_http2_settings_after_exchange() -> None:
     _exchange_http2_settings(client, server)
 
     # ピア (サーバー) の SETTINGS はサーバーの Http2Config の値になる。
-    # nghttp2-v2 は SETTINGS_MAX_HEADER_LIST_SIZE を送信しないため、
-    # ピア側では上限なしのままになる
+    # SETTINGS_MAX_HEADER_LIST_SIZE もサーバーが広告した値になる
     remote = client.remote_settings
     assert remote is not None
     assert remote["max_concurrent_streams"] == 100
     assert remote["initial_window_size"] == 131072
     assert remote["max_frame_size"] == 16384
-    assert remote["max_header_list_size"] == 4294967295
+    assert remote["max_header_list_size"] == 262144
 
     # ローカルの SETTINGS は自身が広告する値になる
     local = client.local_settings
@@ -79,7 +80,7 @@ def test_http2_settings_after_exchange() -> None:
     assert local["max_concurrent_streams"] == 0
     assert local["initial_window_size"] == 65535
     assert local["max_frame_size"] == 16384
-    assert local["max_header_list_size"] == 4294967295
+    assert local["max_header_list_size"] == 65536
 
     # サーバー側から見たピア (クライアント) の設定値は、クライアントが
     # 広告した SETTINGS_MAX_CONCURRENT_STREAMS = 0 と初期ウィンドウになる
@@ -87,14 +88,14 @@ def test_http2_settings_after_exchange() -> None:
     assert remote_server is not None
     assert remote_server["max_concurrent_streams"] == 0
     assert remote_server["initial_window_size"] == 65535
-    assert remote_server["max_header_list_size"] == 4294967295
+    assert remote_server["max_header_list_size"] == 65536
 
     # サーバーのローカル SETTINGS はサーバーが広告する値になる
     local_server = server.local_settings
     assert local_server is not None
     assert local_server["max_concurrent_streams"] == 100
     assert local_server["initial_window_size"] == 131072
-    assert local_server["max_header_list_size"] == 4294967295
+    assert local_server["max_header_list_size"] == 262144
 
 
 def test_http2_want_write_after_submit() -> None:

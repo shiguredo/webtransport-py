@@ -1,14 +1,14 @@
 {
   "ngtcp2": {
-    "ref": "1aeec1f4abed326f5cc3d550794fc4de0c3babef",
+    "ref": "9979c9cee96b582b525c6b703d49f3712a67273b",
     "url": "https://github.com/ngtcp2/ngtcp2"
   },
   "nghttp3": {
-    "ref": "d75f4f813498e98c322d2ca2c59fee1a2584727f",
+    "ref": "80c3de453b023ecfd2a4e6745744ddd6851f4f16",
     "url": "https://github.com/ngtcp2/nghttp3"
   },
   "nghttp2": {
-    "tag": "v0.1.0",
+    "ref": "f7a101bc43f7454cf6325ce55f9b849549010842",
     "url": "https://github.com/nghttp2/nghttp2-v2"
   },
   "aws-lc": {

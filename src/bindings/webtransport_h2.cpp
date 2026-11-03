@@ -2112,7 +2112,7 @@ bool H2Session::initialize() {
   callbacks.recv_trailer = &H2Session::on_recv_header_callback;
   callbacks.end_trailers = &H2Session::on_end_trailers_callback;
   callbacks.recv_data = &H2Session::on_recv_data_callback;
-  callbacks.remote_end_stream = &H2Session::on_remote_end_stream_callback;
+  callbacks.end_stream_remote = &H2Session::on_remote_end_stream_callback;
   callbacks.shutdown = &H2Session::on_shutdown_callback;
   callbacks.write_stream_data_offset =
       &H2Session::on_write_stream_data_offset_callback;
@@ -2123,14 +2123,17 @@ bool H2Session::initialize() {
   //
   // SETTINGS は draft-16 Section 3.1 / 4.3.1 / 11.2 に従う。nghttp2-v2 が
   // 自ら送る SETTINGS (MAX_CONCURRENT_STREAMS / NO_RFC7540_PRIORITIES /
-  // INITIAL_WINDOW_SIZE / ENABLE_CONNECT_PROTOCOL) は nghttp2_settings の
-  // フィールドで指定し、WebTransport 固有の SETTINGS は extra_settings で
-  // 送る (extra_settings の上限は NGHTTP2_MAX_EXTRA_SETTINGS = 16)。
+  // INITIAL_WINDOW_SIZE / MAX_HEADER_LIST_SIZE / ENABLE_CONNECT_PROTOCOL) は
+  // nghttp2_settings のフィールドで指定し、WebTransport 固有の SETTINGS は
+  // extra_settings で送る (extra_settings の上限は NGHTTP2_MAX_EXTRA_SETTINGS = 16)。
   nghttp2_settings settings;
   nghttp2_settings_default(&settings);
   settings.initial_ts = now_ts();
   settings.max_concurrent_streams_remote = config_.max_concurrent_streams;
   settings.initial_max_stream_data = config_.initial_window_size;
+  // SETTINGS_MAX_HEADER_LIST_SIZE (RFC 9113 Section 6.5.2) として広告し、
+  // 受信するヘッダーリストの上限としても強制される
+  settings.max_field_section_size = config_.max_header_list_size;
   // SETTINGS_ENABLE_CONNECT_PROTOCOL はサーバーが送る (draft-16 Section 3.1
   // の MUST)。クライアントはライブラリがこのフィールドを無視するため
   // extra_settings で送る (サーバーはフィールドで送るので重複しない)
