@@ -244,7 +244,7 @@ def _encode_varint(value: int) -> bytes:
 
 
 # WebTransport over HTTP/2 のカプセル種別の数値の出典。テストからはこれを
-# import して使う (draft-ietf-webtrans-http2-15 Section 6 / RFC 9297 Section 3.5)
+# import して使う (draft-ietf-webtrans-http2-16 Section 6 / RFC 9297 Section 3.5)
 _WT_DATAGRAM = 0x00
 _WT_PADDING = 0x190B4D38
 _WT_RESET_STREAM = 0x190B4D39
@@ -430,7 +430,7 @@ def _encode_wt_stream_data(session_id: int, payload: bytes) -> bytes:
 def _encode_wt_max_stream_data_capsule(stream_id: int, max_stream_data: int) -> bytes:
     """WebTransport over HTTP/2 の WT_MAX_STREAM_DATA カプセルを組み立てる
 
-    形式は Type 0x190B4D3E (draft-ietf-webtrans-http2-15 Section 6.6) +
+    形式は Type 0x190B4D3E (draft-ietf-webtrans-http2-16 Section 6.6) +
     Length + Stream ID (可変長整数) + Maximum Stream Data (可変長整数)。
     """
     return _encode_capsule(
@@ -441,7 +441,7 @@ def _encode_wt_max_stream_data_capsule(stream_id: int, max_stream_data: int) -> 
 def _encode_wt_stream_data_blocked_capsule(stream_id: int, max_stream_data: int) -> bytes:
     """WebTransport over HTTP/2 の WT_STREAM_DATA_BLOCKED カプセルを組み立てる
 
-    形式は Type 0x190B4D42 (draft-ietf-webtrans-http2-15 Section 6.9) +
+    形式は Type 0x190B4D42 (draft-ietf-webtrans-http2-16 Section 6.9) +
     Length + Stream ID (可変長整数) + Maximum Stream Data (可変長整数)。
     """
     return _encode_capsule(
@@ -832,7 +832,7 @@ def _create_h2_session_pair() -> tuple[h2.Session, h2.Session]:
     """h2.Session のクライアント・サーバーペアを作成して初期化する
 
     HTTP/2 preface + 双方の SETTINGS 交換まで完了させる
-    (draft-15 Section 3.1 の is_webtransport_ready 成立まで)。
+    (draft-16 Section 3.1 の is_webtransport_ready 成立まで)。
 
     @return (クライアント Session, サーバー Session)
     """
@@ -916,7 +916,7 @@ def _assert_session_closed_by_protocol_error(
     カプセルのペイロードが不正な場合、またはクリーンな終了時にカプセルが
     切り詰められていた場合は、RFC 9297 Section 3.3 と RFC 9113 Section 8.1.1
     により PROTOCOL_ERROR のストリームエラーになる。アプリケーションシグナル
-    (WT_CLOSE_SESSION) は送出しない (draft-15 Section 3.4)。
+    (WT_CLOSE_SESSION) は送出しない (draft-16 Section 3.4)。
     unexpected_event を渡すと、その種別のイベントが push されていないこと
     (無言で受理されていないこと) を表明する。
     """

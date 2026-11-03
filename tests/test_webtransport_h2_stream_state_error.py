@@ -6,12 +6,12 @@
 状態のストリームへ届いた WT_STREAM_DATA_BLOCKED の受信 (Section 6.9)、
 および解放済みストリームへ届いた WT_STREAM / WT_RESET_STREAM /
 WT_STREAM_DATA_BLOCKED の受信 (Section 6.4 / 6.2 / 6.9) を検知して
-WT_STREAM_STATE_ERROR を送出することを検証する。draft-15 の
+WT_STREAM_STATE_ERROR を送出することを検証する。draft-16 の
 MUST 違反の修正テストで、ピアからの不正カプセルはワイヤ注入で再現する
 (公開 API では非コンプライアントなカプセルを送出する手段が存在しないため)。
 エラー送出は close_session 経由の WT_CLOSE_SESSION (error code 0x51) で
 実現され、ワイヤ部分列チェックで検証する。WT_STREAM_STATE_ERROR (0x51) は 0xTBD の
-プレースホルダ (draft-15 Section 3.4)。
+プレースホルダ (draft-16 Section 3.4)。
 """
 
 from conftest import (
@@ -34,7 +34,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -107,7 +107,7 @@ def _assert_state_error_sent(server: h2.Session, error_message: str) -> None:
     """WT_STREAM_STATE_ERROR (0x51) の WT_CLOSE_SESSION が送出されることを確認
 
     エラー検知は close_session (WT_CLOSE_SESSION 送出 + END_STREAM) で実現
-    される (draft-15 Section 3.4 の「Prior to terminating a stream with an
+    される (draft-16 Section 3.4 の「Prior to terminating a stream with an
     error, a WT_CLOSE_SESSION capsule with an application-specified error
     code MAY be sent」)。ワイヤ部分列チェックで送出を検証する。
     """
@@ -132,7 +132,7 @@ def test_wt_stream_after_reset_stream_sends_state_error() -> None:
 
     ピアの WT_RESET_STREAM 受信後はエントリが残存したまま recv_state が
     ResetRecvd になる。修正前は状態検証がなく、以後の WT_STREAM がそのまま
-    処理されていた (draft-15 Section 6.4 の MUST 違反)。
+    処理されていた (draft-16 Section 6.4 の MUST 違反)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -145,7 +145,7 @@ def test_wt_stream_after_reset_stream_sends_state_error() -> None:
     ]
     assert len(reset_events) == 1
 
-    # リセット済みストリームへの WT_STREAM は stream error になる
+    # リセット済みストリームへの WT_STREAM は session error になる
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"x")))
     assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_STREAM_TERMINAL)
@@ -154,8 +154,8 @@ def test_wt_stream_after_reset_stream_sends_state_error() -> None:
 def test_wt_stream_after_fin_sends_state_error() -> None:
     """FIN 受信済み (DataRecvd) ストリームへの WT_STREAM 受信で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    WT_STREAM_FIN 受信で recv_state が DataRecvd に遷移する (draft-15
-    Section 5.2 の QUIC 状態ミラー)。以後の WT_STREAM は stream error に
+    WT_STREAM_FIN 受信で recv_state が DataRecvd に遷移する (draft-16
+    Section 5.2 の QUIC 状態ミラー)。以後の WT_STREAM は session error に
     なる (Section 6.4 の MUST)。
     """
     client, server = _create_h2_session_pair()
@@ -172,7 +172,7 @@ def test_wt_stream_after_fin_sends_state_error() -> None:
     assert len(stream_events) == 1
     assert stream_events[0].fin is True
 
-    # FIN 済みストリームへの WT_STREAM は stream error になる
+    # FIN 済みストリームへの WT_STREAM は session error になる
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"x")))
     assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_STREAM_TERMINAL)
@@ -186,7 +186,7 @@ def test_empty_wt_stream_fin_after_fin_ignored() -> None:
     """FIN 受信済み (DataRecvd) のストリームへの空の WT_STREAM_FIN が無視されることを確認
 
     空の WT_STREAM capsule は「ストリームを閉じる」操作として許容される
-    (draft-15 Section 6.4 の「Empty WT_STREAM capsules MUST NOT be used
+    (draft-16 Section 6.4 の「Empty WT_STREAM capsules MUST NOT be used
     unless they open or close a stream」)。実ブラウザ (WebKit) は FIN 送信後
     に空の WT_STREAM_FIN を送ることがあるため、終端状態への受信でもエラーに
     しない (データ付きの WT_STREAM は終端状態へのデータ送信を意味するため
@@ -212,9 +212,9 @@ def test_empty_wt_stream_fin_after_fin_ignored() -> None:
 def test_wt_reset_stream_after_fin_sends_state_error() -> None:
     """FIN 受信済み (DataRecvd) ストリームへの WT_RESET_STREAM 受信で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    WT_RESET_STREAM は終了済みストリームには送ってはならない (draft-15
+    WT_RESET_STREAM は終了済みストリームには送ってはならない (draft-16
     Section 6.2 の MUST)。受信側終端状態のストリームへの WT_RESET_STREAM は
-    stream error になる。Reliable Size の一致・不一致は問わない (終端状態が
+    session error になる。Reliable Size の一致・不一致は問わない (終端状態が
     先行して不正)。
     """
     client, server = _create_h2_session_pair()
@@ -226,7 +226,7 @@ def test_wt_reset_stream_after_fin_sends_state_error() -> None:
     )
     assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
 
-    # 終端状態への WT_RESET_STREAM は stream error になる
+    # 終端状態への WT_RESET_STREAM は session error になる
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_reset_stream_capsule(0, 42, 3)))
     assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_RESET_TERMINAL)
@@ -239,8 +239,8 @@ def test_wt_reset_stream_after_reset_stream_sends_state_error() -> None:
     """リセット済み (ResetRecvd) ストリームへの WT_RESET_STREAM 受信で WT_STREAM_STATE_ERROR が送出されることを確認
 
     WT_RESET_STREAM はリセット済みストリームには送ってはならない
-    (draft-15 Section 6.2 の MUST)。受信側終端状態のストリームへの
-    WT_RESET_STREAM は stream error になる。
+    (draft-16 Section 6.2 の MUST)。受信側終端状態のストリームへの
+    WT_RESET_STREAM は session error になる。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -253,7 +253,7 @@ def test_wt_reset_stream_after_reset_stream_sends_state_error() -> None:
     ]
     assert len(reset_events) == 1
 
-    # 終端状態への WT_RESET_STREAM は stream error になる
+    # 終端状態への WT_RESET_STREAM は session error になる
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_reset_stream_capsule(0, 42, 0)))
     assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_RESET_TERMINAL)
@@ -265,7 +265,7 @@ def test_wt_reset_stream_after_reset_stream_sends_state_error() -> None:
 def test_wt_reset_stream_reliable_size_mismatch_sends_state_error() -> None:
     """Reliable Size 不一致の WT_RESET_STREAM 受信で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    Reliable Size は受信済みバイト数と一致しなければならない (draft-15
+    Reliable Size は受信済みバイト数と一致しなければならない (draft-16
     Section 6.2 の MUST)。不一致時は session error でセッションを閉じ、
     StreamReset イベントは push しない。
     """
@@ -288,10 +288,10 @@ def test_wt_reset_stream_reliable_size_mismatch_sends_state_error() -> None:
 def test_wt_reset_stream_unknown_stream_zero_accepted() -> None:
     """ストリーム不在の WT_RESET_STREAM (Reliable Size 0) が受け入れられることを確認
 
-    真に未知のストリームは受信済みバイト数 0 として比較する (draft-15
+    真に未知のストリームは受信済みバイト数 0 として比較する (draft-16
     Section 6.2 の MUST)。Reliable Size = 0 なら受け入れ、エントリを作成して
     受信側を ResetRecvd へ遷移させる。以後の WT_STREAM は ResetRecvd として
-    stream error になることで遷移を観測する。
+    session error になることで遷移を観測する。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -308,7 +308,7 @@ def test_wt_reset_stream_unknown_stream_zero_accepted() -> None:
     assert len(reset_events) == 1
     assert reset_events[0].error_code == 42
 
-    # 以後の WT_STREAM は ResetRecvd として stream error になる
+    # 以後の WT_STREAM は ResetRecvd として session error になる
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"x")))
     assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_STREAM_TERMINAL)
@@ -318,7 +318,7 @@ def test_wt_reset_stream_unknown_stream_nonzero_sends_state_error() -> None:
     """ストリーム不在の WT_RESET_STREAM (Reliable Size > 0) で WT_STREAM_STATE_ERROR が送出されることを確認
 
     未知のストリームで Reliable Size > 0 は、届かないはずのデータを約束する
-    ため session error でセッションを閉じる (draft-15 Section 6.2 の MUST)。
+    ため session error でセッションを閉じる (draft-16 Section 6.2 の MUST)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -360,7 +360,7 @@ def test_wt_reset_stream_reliable_size_match_delivered() -> None:
 def test_wt_stream_implicit_creation_delivered() -> None:
     """ストリーム不在の WT_STREAM が従来どおり暗黙作成されて StreamData イベントになることを確認
 
-    WT_STREAM capsule はストリームを暗黙的に作成する (draft-15 Section 6.4)。
+    WT_STREAM capsule はストリームを暗黙的に作成する (draft-16 Section 6.4)。
     最初の受信ではエラーにならない (回帰ピン)。
     """
     client, server = _create_h2_session_pair()
@@ -381,7 +381,7 @@ def test_wt_stream_implicit_creation_delivered() -> None:
 def test_wt_stream_after_local_reset_received() -> None:
     """自側 reset_stream 後のピアからの WT_STREAM が従来どおり受信されることを確認
 
-    送信リセットは送信側の終了のみであり受信側は継続する (draft-15 Section
+    送信リセットは送信側の終了のみであり受信側は継続する (draft-16 Section
     5.2 の QUIC 状態ミラー)。自側 reset 後もエントリが保持されるため、ピア
     からの WT_STREAM はエラーにならず正常に StreamData イベントになる
     (回帰ピン。エントリを erase していた修正前は新規作成として再生成されて
@@ -413,7 +413,7 @@ def test_send_stream_data_after_local_reset_not_sent() -> None:
     """リセット済みストリームへの send_stream_data が塞がれることを確認
 
     リセット後もエントリは保持されるため、send_state の確認で塞ぐ
-    (draft-15 Section 6.4 の「A WT_STREAM capsule MUST NOT be sent after a
+    (draft-16 Section 6.4 の「A WT_STREAM capsule MUST NOT be sent after a
     stream is closed or reset」)。塞がないと WT_STREAM capsule が
     WT_RESET_STREAM の後ろに積まれてワイヤへ送出され得る。
     """
@@ -470,7 +470,7 @@ def test_peer_receives_session_closed_with_state_error() -> None:
     """エラー通知の WT_CLOSE_SESSION がピアに届いて SessionClosed (WT_STREAM_STATE_ERROR) になることを確認
 
     エラー検知は close_session (WT_CLOSE_SESSION 送出 + END_STREAM) で実現
-    される (draft-15 Section 3.4)。ピアは受信して SessionClosed イベント
+    される (draft-16 Section 3.4)。ピアは受信して SessionClosed イベント
     (error code 0x51) を得る。
     """
     client, server = _create_h2_session_pair()
@@ -499,7 +499,7 @@ def test_wt_stream_after_matching_reset_sends_state_error() -> None:
     """Reliable Size 一致で ResetRecvd に遷移したストリームへの WT_STREAM で WT_STREAM_STATE_ERROR が送出されることを確認
 
     既存ストリームへの Reliable Size 一致の WT_RESET_STREAM は正常処理されて
-    ResetRecvd に遷移し、以後の WT_STREAM は stream error になる
+    ResetRecvd に遷移し、以後の WT_STREAM は session error になる
     (正常経路の遷移 → 終端検知の組を直接ピンする)。
     """
     client, server = _create_h2_session_pair()
@@ -513,7 +513,7 @@ def test_wt_stream_after_matching_reset_sends_state_error() -> None:
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_reset_stream_capsule(0, 42, 3)))
     assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
 
-    # 以後の WT_STREAM は stream error になる
+    # 以後の WT_STREAM は session error になる
     ret = server.receive(_encode_data_frame(session_id, _encode_wt_stream_capsule(0, b"x")))
     assert ret > 0, "WT_STREAM カプセルの注入に失敗しました"
     _assert_state_error_sent(server, _WT_STREAM_TERMINAL)
@@ -522,7 +522,7 @@ def test_wt_stream_after_matching_reset_sends_state_error() -> None:
 def test_get_stream_ids_includes_reset_stream() -> None:
     """get_stream_ids にリセット済みストリームも含まれることを確認
 
-    自側 reset_stream はエントリを保持する (draft-15 Section 5.2 の QUIC
+    自側 reset_stream はエントリを保持する (draft-16 Section 5.2 の QUIC
     状態ミラー。送信リセットは受信側に影響しない) ため、get_stream_ids には
     リセット済みストリームも含まれる (修正前は erase されていたため
     含まれなかった)。
@@ -714,12 +714,12 @@ def test_wt_stop_sending_different_streams_each_deliver_once() -> None:
 def test_wt_max_stream_data_after_stop_sending_sends_state_error() -> None:
     """WT_STOP_SENDING 受信後の WT_MAX_STREAM_DATA 受信で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    draft-15 Section 6.6 の MUST「A stream error (Section 3.4) of type
+    draft-16 Section 6.6 の MUST「A session error (Section 3.4) of type
     WT_STREAM_STATE_ERROR MUST be sent if a WT_MAX_STREAM_DATA capsule is
     received after a WT_STOP_SENDING capsule for the same stream」を検証する。
     修正前は停止状態を参照していなかったため、停止後のクレジットがそのまま
     受理されていた。注入する値 1024 は初期広告値 (既定 256 KiB) より小さい
-    ため減少値検査にも掛かるが、停止状態の判定を先に置くため
+    ため非増加検査にも掛かるが、停止状態の判定を先に置くため
     WT_STREAM_STATE_ERROR が優先されることも同時に確認する (draft は 2 つの
     MUST が同時に成立する場合の優先を定めておらず、これは実装の選択である)。
     """
@@ -738,7 +738,7 @@ def test_wt_max_stream_data_after_stop_sending_sends_state_error() -> None:
     ]
     assert len(stop_events) == 1
 
-    # 停止済みストリームへの WT_MAX_STREAM_DATA は stream error になる
+    # 停止済みストリームへの WT_MAX_STREAM_DATA は session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 1024))
     )
@@ -771,8 +771,8 @@ def test_wt_max_stream_data_after_stop_sending_unknown_stream_sends_state_error(
     ]
     assert len(stop_events) == 1
 
-    # 停止済み (未作成) ストリームへの WT_MAX_STREAM_DATA も stream error になる
-    # (初期広告値より大きい増加値を使い、減少値検査とは独立に検出する)
+    # 停止済み (未作成) ストリームへの WT_MAX_STREAM_DATA も session error になる
+    # (初期広告値より大きい増加値を使い、非増加検査とは独立に検出する)
     ret = server.receive(
         _encode_data_frame(
             session_id, _encode_wt_max_stream_data_capsule(unknown_stream_id, 524288)
@@ -812,7 +812,7 @@ def test_wt_max_stream_data_after_stop_sending_released_stream_sends_state_error
     assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
     assert server.get_stream_ids(session_id) == [], "ストリームエントリが解放されていません"
 
-    # 解放後の Stream ID への WT_MAX_STREAM_DATA も stream error になる
+    # 解放後の Stream ID への WT_MAX_STREAM_DATA も session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_max_stream_data_capsule(0, 524288))
     )
@@ -900,7 +900,7 @@ def test_wt_max_stream_data_without_stop_sending_accepted() -> None:
 def test_wt_stream_data_blocked_for_terminal_stream_sends_state_error() -> None:
     """受信側が終端したストリームへの WT_STREAM_DATA_BLOCKED で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    draft-15 Section 6.9 の MUST「A stream error (Section 3.4) of type
+    draft-16 Section 6.9 の MUST「A session error (Section 3.4) of type
     WT_STREAM_STATE_ERROR MUST be sent if a WT_STREAM_DATA_BLOCKED capsule is
     received for a stream that is not in a valid state」を検証する。修正前は
     カプセルを読み捨てていたため検知できなかった。ピアの FIN で受信側が
@@ -920,7 +920,7 @@ def test_wt_stream_data_blocked_for_terminal_stream_sends_state_error() -> None:
     assert ret > 0, "WT_STREAM_FIN カプセルの注入に失敗しました"
     _drain_events(server)
 
-    # 終端済みストリームへの WT_STREAM_DATA_BLOCKED は stream error になる
+    # 終端済みストリームへの WT_STREAM_DATA_BLOCKED は session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_stream_data_blocked_capsule(0, 1024))
     )
@@ -950,7 +950,7 @@ def test_wt_stream_data_blocked_after_reset_sends_state_error() -> None:
     assert ret > 0, "WT_RESET_STREAM カプセルの注入に失敗しました"
     _drain_events(server)
 
-    # リセット済みストリームへの WT_STREAM_DATA_BLOCKED は stream error になる
+    # リセット済みストリームへの WT_STREAM_DATA_BLOCKED は session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_stream_data_blocked_capsule(0, 1024))
     )
@@ -994,7 +994,7 @@ def _assert_state_error_event(events: list[h2.Event], stream_id: int) -> None:
 def test_wt_stream_after_release_sends_state_error() -> None:
     """解放済みストリームへのデータ付き WT_STREAM で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    draft-15 Section 6.4 の MUST NOT / MUST を検証する。ピア起点単方向の
+    draft-16 Section 6.4 の MUST NOT / MUST を検証する。ピア起点単方向の
     ストリームは FIN 受信だけで解放されるため、同じ Stream ID への WT_STREAM
     は終端済みストリームへの送信になる。修正前は暗黙作成されてデータが
     再配送されていた。
@@ -1006,7 +1006,7 @@ def test_wt_stream_after_release_sends_state_error() -> None:
 
     _release_peer_uni_stream(server, session_id, stream_id)
 
-    # 解放済み Stream ID へのデータ付き WT_STREAM は stream error になる
+    # 解放済み Stream ID へのデータ付き WT_STREAM は session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_stream_capsule(stream_id, b"cd"))
     )
@@ -1019,7 +1019,7 @@ def test_wt_stream_after_release_sends_state_error() -> None:
 def test_wt_reset_stream_after_release_sends_state_error() -> None:
     """解放済みストリームへの Reliable Size 0 の WT_RESET_STREAM で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    draft-15 Section 6.2 の MUST NOT / MUST を検証する。Reliable Size 0 は
+    draft-16 Section 6.2 の MUST NOT / MUST を検証する。Reliable Size 0 は
     修正前なら未知ストリームとして受理され、エントリが再作成されて
     StreamReset イベントが再通知されていた。
     """
@@ -1040,7 +1040,7 @@ def test_wt_reset_stream_after_release_sends_state_error() -> None:
     _drain_events(server)
 
     # 解放済み Stream ID への Reliable Size 0 の WT_RESET_STREAM は
-    # stream error になる
+    # session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_reset_stream_capsule(stream_id, 0, 0))
     )
@@ -1076,7 +1076,7 @@ def test_wt_stream_fin_after_release_ignored() -> None:
 def test_wt_stream_data_blocked_after_release_sends_state_error() -> None:
     """解放済みストリームへの WT_STREAM_DATA_BLOCKED で WT_STREAM_STATE_ERROR が送出されることを確認
 
-    draft-15 Section 6.9 の MUST を検証する。エントリが無いため終端状態の
+    draft-16 Section 6.9 の MUST を検証する。エントリが無いため終端状態の
     判定では捉えられず、解放済み ID の記録を参照して検出する。
     """
     client, server = _create_h2_session_pair()
@@ -1085,7 +1085,7 @@ def test_wt_stream_data_blocked_after_release_sends_state_error() -> None:
 
     _release_peer_uni_stream(server, session_id, stream_id)
 
-    # 解放済み Stream ID への WT_STREAM_DATA_BLOCKED は stream error になる
+    # 解放済み Stream ID への WT_STREAM_DATA_BLOCKED は session error になる
     ret = server.receive(
         _encode_data_frame(session_id, _encode_wt_stream_data_blocked_capsule(stream_id, 1024))
     )

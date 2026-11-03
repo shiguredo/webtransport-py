@@ -1,6 +1,6 @@
 """WebTransport over HTTP/2 の例外とエラーコード
 
-draft-ietf-webtrans-http2-15 が定義するセッションの拒否と終了、カプセル
+draft-ietf-webtrans-http2-16 が定義するセッションの拒否と終了、カプセル
 プロトコルの違反を例外として扱えるようにする。
 
 セッションの終了は 2 通りある。Extended CONNECT の応答が非 2xx だった場合は
@@ -10,7 +10,7 @@ draft-ietf-webtrans-http2-15 が定義するセッションの拒否と終了、
 
 HTTP/2 層のエラー (`webtransport.http2.exceptions`) とは独立に扱う。
 WebTransport のセッションエラーは HTTP/2 の接続状態を変えない
-(draft-ietf-webtrans-http2-15 Section 3.4)。
+(draft-ietf-webtrans-http2-16 Section 3.4)。
 """
 
 import enum
@@ -29,7 +29,7 @@ __all__ = [
 class WebTransportErrorCode(enum.IntEnum):
     """WebTransport over HTTP/2 が使う HTTP/2 のエラーコード
 
-    draft-ietf-webtrans-http2-15 Section 3.4 が予約する値である。draft-15 では
+    draft-ietf-webtrans-http2-16 Section 3.4 が予約する値である。draft-16 では
     0xTBD のプレースホルダであり、本ライブラリは 0x50 / 0x51 / 0x52 を使う
     (低レベルの `h2.WtErrorCode` と同じ値)。
     """
@@ -88,7 +88,7 @@ class WebTransportSessionClosedError(WebTransportH2Error):
 class WebTransportProtocolError(WebTransportH2Error):
     """WebTransport over HTTP/2 層のプロトコルエラーを検知した場合の例外
 
-    低レベルの `h2.Session` が `on_error` で通知するエラーに対応する。draft-15
+    低レベルの `h2.Session` が `on_error` で通知するエラーに対応する。draft-16
     Section 3.4 のとおり、本ライブラリが通知するのは WT_FLOW_CONTROL_ERROR である。
 
     Attributes:

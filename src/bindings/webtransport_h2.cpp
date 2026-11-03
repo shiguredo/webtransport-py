@@ -1,5 +1,5 @@
 /**
- * WebTransport over HTTP/2 バインディング実装 (draft-ietf-webtrans-http2-15)
+ * WebTransport over HTTP/2 バインディング実装 (draft-ietf-webtrans-http2-16)
  *
  * Capsule Protocol (RFC 9297) を使用した実装
  */
@@ -59,7 +59,7 @@ void record_received_limit(std::optional<uint64_t>& received, uint64_t value) {
   }
 }
 
-// draft-15 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
+// draft-16 Section 6.7 / 6.10: Maximum Streams は 2^60 を超えてはならない
 constexpr uint64_t kMaxStreamsLimit = 1ULL << 60;
 
 // HTTP/2 SETTINGS の値は uint32 (RFC 9113 Section 6.5.1)。WebTransport の
@@ -70,10 +70,10 @@ constexpr uint64_t kMaxSettingsValue = (1ULL << 32) - 1;
 static_assert(bindings::kMaxPythonInputBytes ==
               H2SessionConfig{}.wt_max_capsule_payload_size);
 
-// draft-15 Section 6.12 の Application Error Message 上限 (バイト)
+// draft-16 Section 6.12 の Application Error Message 上限 (バイト)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 
-// QUIC 互換ストリーム ID の方向検証 (draft-15 Section 5.2)。
+// QUIC 互換ストリーム ID の方向検証 (draft-16 Section 5.2)。
 // Bit 0 が initiator (0 = client, 1 = server)、Bit 1 が方向
 // (0 = bidi, 1 = uni)。双方向 (%4==0/1) は両方向とも可
 // 送信者→受信者方向 (WT_STREAM / WT_RESET_STREAM) は自側送信専用
@@ -112,7 +112,7 @@ uint64_t build_stream_id(bool is_server,
   return (counter << 2) | dir_bit | initiator_bit;
 }
 
-// draft-15 Section 6.2 / 6.3 の Application Protocol Error Code 上限。
+// draft-16 Section 6.2 / 6.3 の Application Protocol Error Code 上限。
 // [WEBTRANSPORT-H3] Section 4.4 の unsigned 32-bit 範囲
 constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
 
@@ -133,7 +133,7 @@ constexpr uint64_t kMaxApplicationErrorCode = 0xFFFFFFFFULL;
 // どちらも失われる
 constexpr size_t kMaxReceivedMapEntries = 4096;
 
-// draft-15 Section 6.7: 同一タイプ・方向のより低い ID も暗黙オープン。
+// draft-16 Section 6.7: 同一タイプ・方向のより低い ID も暗黙オープン。
 // 閉じたストリームを含む累積数は (stream_id >> 2) + 1
 bool incoming_stream_exceeds_limit(const WtSessionInfo& wt_session,
                                    uint64_t stream_id) {
@@ -144,7 +144,7 @@ bool incoming_stream_exceeds_limit(const WtSessionInfo& wt_session,
   return (stream_id >> 2) + 1 > max_streams;
 }
 
-// WT_STOP_SENDING を受信済みか (draft-15 Section 6.3 / 6.6)。セッション単位の
+// WT_STOP_SENDING を受信済みか (draft-16 Section 6.3 / 6.6)。セッション単位の
 // 集合が未作成・解放後のストリームを担い、実在ストリームのフラグが集合の
 // 安全弁上限に達した場合のストリームを担う (上限超過の未作成 ID は集合に
 // 残らないため対象外)。二重受信検出と停止状態の判定で同じ条件を使うため
@@ -179,7 +179,7 @@ std::optional<std::pair<uint64_t, size_t>> H2Session::read_capsule_varint(
     // RFC 9297 Section 3.3: カプセルのペイロードが識別フィールドの終端に
     // 達していない場合は malformed / incomplete な HTTP メッセージとして
     // 扱う。HTTP/2 では RFC 9113 Section 8.1.1 により PROTOCOL_ERROR の
-    // ストリームエラー (RST_STREAM) を送出する。draft-15 Section 3.4 の
+    // ストリームエラー (RST_STREAM) を送出する。draft-16 Section 3.4 の
     // とおり、ストリームのリセットはセッションを終了させる
     reset_stream_for_malformed_capsule(session_id);
     return std::nullopt;
@@ -191,7 +191,7 @@ void H2Session::reset_stream_for_malformed_capsule(int32_t session_id) {
   // 無言で読み捨てると、後段の検証 (方向・ストリーム状態・二重受信) に
   // 到達しないままセッションが継続するため、プロトコル違反として扱う。
   // close_session は使わない: WT_CLOSE_SESSION はアプリケーションシグナルで
-  // あり、draft-15 Section 3.4 が定めるリセットによる終了 (アプリケーション
+  // あり、draft-16 Section 3.4 が定めるリセットによる終了 (アプリケーション
   // シグナル無し) と意味が異なる
   auto* wt_session = get_wt_session(session_id);
   if (wt_session) {
@@ -305,7 +305,7 @@ void H2Session::process_capsules(int32_t session_id,
     auto [payload_len, length_len] = *length_result;
 
     // 単一カプセルのペイロード上限を Length 解釈直後に検査する
-    // (draft-15 全種別対象。ペイロード待ちの無制限蓄積によるメモリ DoS を
+    // (draft-16 全種別対象。ペイロード待ちの無制限蓄積によるメモリ DoS を
     // 防ぐ。 DATAGRAM も対象に含める)。超過時は WT_ERROR でセッションを
     // 閉じる。受理前の蓄積時は総量上限のみを適用し、本検査は確立後
     // (受理後の排出を含む) に適用するため、重複検査にならない
@@ -353,7 +353,7 @@ void H2Session::process_capsule(int32_t session_id,
   switch (type) {
     case CapsuleType::WtStream:
     case CapsuleType::WtStreamFin: {
-      // draft-15 Section 6.4: Type の最下位ビットが FIN
+      // draft-16 Section 6.4: Type の最下位ビットが FIN
       bool fin = (static_cast<uint64_t>(type) & 0x01ULL) != 0;
       handle_wt_stream(session_id, h2_stream_id, fin, payload, length);
       break;
@@ -396,10 +396,10 @@ void H2Session::process_capsule(int32_t session_id,
       handle_wt_data_blocked(session_id, payload, length);
       break;
     case CapsuleType::Padding:
-      // PADDING は意味を持つフィールドが無く (draft-15 Section 6.1 の
+      // PADDING は意味を持つフィールドが無く (draft-16 Section 6.1 の
       // "has no semantic value")、同節は受信側に検証を義務付けていない
       // ("A receiver is not obligated to verify padding but MAY treat non-zero
-      // padding as a stream error") ため、状態更新もアプリへの通知も不要
+      // padding as a session error") ため、状態更新もアプリへの通知も不要
       break;
   }
 }
@@ -413,7 +413,7 @@ void H2Session::handle_wt_stream(int32_t session_id,
                                  size_t length) {
   // ペイロードが空 (Length 0) の場合は Stream ID すら含まれず、RFC 9297
   // Section 3.3 の「識別フィールドの終端に達していないペイロード」に該当する。
-  // draft-15 Section 6.4 が無視を MAY とする empty WT_STREAM (Stream Data が
+  // draft-16 Section 6.4 が無視を MAY とする empty WT_STREAM (Stream Data が
   // 空 = Stream ID のみ) とは異なる入力であり、read_capsule_varint の失敗経路
   // (プロトコル違反) に委ねる
 
@@ -442,7 +442,7 @@ void H2Session::handle_wt_stream(int32_t session_id,
   // エントリが無い場合の処理 (解放済みの判定と Section 6.4 の暗黙作成)
   auto stream_it = wt_session->streams.find(stream_id);
   if (stream_it == wt_session->streams.end()) {
-    // draft-15 Section 6.4: 解放済みストリームへの WT_STREAM は
+    // draft-16 Section 6.4: 解放済みストリームへの WT_STREAM は
     // WT_STREAM_STATE_ERROR。データを含まない WT_STREAM は「ストリームを
     // 開くか閉じる」操作として許容されるため、終端状態への受信と同じく
     // 無視する (Section 6.4 の「an endpoint MAY treat an empty WT_STREAM
@@ -456,7 +456,7 @@ void H2Session::handle_wt_stream(int32_t session_id,
                                 "WT_STREAM received for released stream");
       return;
     }
-    // draft-15 Section 6.7: 広告した Maximum Streams を超える受信は
+    // draft-16 Section 6.7: 広告した Maximum Streams を超える受信は
     // WT_FLOW_CONTROL_ERROR。同一タイプ・方向の低い ID も累積カウントする
     if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
       report_recv_flow_control_error(session_id, stream_id,
@@ -480,8 +480,8 @@ void H2Session::handle_wt_stream(int32_t session_id,
   const uint8_t* stream_data = payload + stream_id_len;
 
   // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへのデータ付き
-  // WT_STREAM 受信は stream error (draft-15 Section 6.4 の「A WT_STREAM
-  // capsule MUST NOT be sent after a stream is closed or reset... A stream
+  // WT_STREAM 受信は session error (draft-16 Section 6.4 の「A WT_STREAM
+  // capsule MUST NOT be sent after a stream is closed or reset... A session
   // error (Section 3.4) of type WT_STREAM_STATE_ERROR MUST be sent」)。
   // データを含まない WT_STREAM (FIN のみ) は「ストリームを閉じる」操作として
   // 許容される (Section 6.4 の「Empty WT_STREAM capsules MUST NOT be used
@@ -499,7 +499,7 @@ void H2Session::handle_wt_stream(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.5 / 6.6: 受信超過は WT_FLOW_CONTROL_ERROR で
+  // draft-16 Section 6.5 / 6.6: 受信超過は WT_FLOW_CONTROL_ERROR で
   // セッションを閉じる。Error イベントの push と close_session は
   // report_recv_flow_control_error に集約する
   if (wt_session->bytes_received + data_len > wt_session->max_data_remote ||
@@ -526,14 +526,14 @@ void H2Session::handle_wt_stream(int32_t session_id,
   stream_info.bytes_received += data_len;
   wt_session->bytes_received += data_len;
 
-  // 受信消費に応じたクレジット補充 (draft-15 Section 4.4 の SHOULD)。
+  // 受信消費に応じたクレジット補充 (draft-16 Section 4.4 の SHOULD)。
   // 広告値の 1/2 を超えたら初期値分を上乗せする
   maybe_send_max_data(session_id);
   maybe_send_max_stream_data(session_id, stream_id);
 
-  // FIN 受信で受信側を DataRecvd に遷移させる (draft-15 Section 5.2 の
+  // FIN 受信で受信側を DataRecvd に遷移させる (draft-16 Section 5.2 の
   // QUIC 状態ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は冒頭の状態
-  // 検証で stream error になる)
+  // 検証で session error になる)
   if (fin) {
     stream_info.recv_state = StreamState::DataRecvd;
     // 両ハーフ終端ならエントリを解放する
@@ -564,7 +564,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   auto [error_code, error_code_len] = *error_code_result;
   offset += error_code_len;
 
-  // draft-15 Section 6.2: Application Protocol Error Code は 0xffffffff
+  // draft-16 Section 6.2: Application Protocol Error Code は 0xffffffff
   // 以下。超過は WT_ERROR セッションエラー。終端状態・ reliable_size より
   // 先に検証する
   if (error_code > kMaxApplicationErrorCode) {
@@ -606,7 +606,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
 
   auto stream_it = wt_session->streams.find(stream_id);
   if (stream_it == wt_session->streams.end()) {
-    // draft-15 Section 6.2: 解放済みストリームへの WT_RESET_STREAM は
+    // draft-16 Section 6.2: 解放済みストリームへの WT_RESET_STREAM は
     // WT_STREAM_STATE_ERROR。Reliable Size の検証より前に置き、解放済みで
     // あることを優先して報告する
     if (wt_session->released_stream_ids.contains(stream_id)) {
@@ -615,18 +615,18 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
       return;
     }
     // 真に未知のストリームへの WT_RESET_STREAM。受信済みバイト数は 0 として
-    // Reliable Size と比較する (draft-15 Section 6.2 の MUST)。> 0 は
+    // Reliable Size と比較する (draft-16 Section 6.2 の MUST)。> 0 は
     // 届かないはずのデータを約束するため session error でセッションを閉じる。
     // = 0 は受け入れ、暗黙作成と同様の初期化でエントリを作成して受信側を
-    // ResetRecvd へ遷移させる (以後の WT_STREAM は冒頭の状態検証で stream
-    // error になる)。エラー検知時は StreamReset イベントを push しない
+    // ResetRecvd へ遷移させる (以後の WT_STREAM は冒頭の状態検証で
+    // session error になる)。エラー検知時は StreamReset イベントを push しない
     if (reliable_size > 0) {
       report_stream_state_error(
           session_id, stream_id,
           "WT_RESET_STREAM non-zero reliable size, unknown stream");
       return;
     }
-    // draft-15 Section 6.7: 未知ストリームの暗黙作成も Maximum Streams
+    // draft-16 Section 6.7: 未知ストリームの暗黙作成も Maximum Streams
     // 制限の対象。 error_code 範囲 (WT_ERROR) と Reliable Size の
     // WT_STREAM_STATE_ERROR のあと、エントリ作成前に検証する
     if (incoming_stream_exceeds_limit(*wt_session, stream_id)) {
@@ -660,8 +660,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
   auto& stream_info = stream_it->second;
 
   // 受信側終端状態 (DataRecvd / ResetRecvd) のストリームへの WT_RESET_STREAM
-  // 受信は stream error (draft-15 Section 6.2 の「A WT_RESET_STREAM capsule
-  // MUST NOT be sent after a stream is closed or reset... A stream error
+  // 受信は session error (draft-16 Section 6.2 の「A WT_RESET_STREAM capsule
+  // MUST NOT be sent after a stream is closed or reset... A session error
   // (Section 3.4) of type WT_STREAM_STATE_ERROR MUST be sent」)
   if (stream_info.recv_state == StreamState::DataRecvd ||
       stream_info.recv_state == StreamState::ResetRecvd) {
@@ -671,7 +671,7 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     return;
   }
 
-  // Reliable Size と受信済みバイト数の一致を検証する (draft-15 Section 6.2
+  // Reliable Size と受信済みバイト数の一致を検証する (draft-16 Section 6.2
   // の「A receiver MUST close the WebTransport session with a
   // WT_STREAM_STATE_ERROR session error if the Reliable Size in a
   // WT_RESET_STREAM capsule does not equal the number of bytes received on
@@ -684,8 +684,8 @@ void H2Session::handle_wt_reset_stream(int32_t session_id,
     return;
   }
 
-  // 受信側を ResetRecvd に遷移させる (draft-15 Section 5.2 の QUIC 状態
-  // ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は stream error になる)
+  // 受信側を ResetRecvd に遷移させる (draft-16 Section 5.2 の QUIC 状態
+  // ミラー。以後の WT_STREAM / WT_RESET_STREAM 受信は session error になる)
   stream_info.recv_state = StreamState::ResetRecvd;
   // 両ハーフ終端ならエントリを解放する
   maybe_release_stream(session_id, stream_id);
@@ -744,7 +744,7 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.3: Application Protocol Error Code は 0xffffffff
+  // draft-16 Section 6.3: Application Protocol Error Code は 0xffffffff
   // 以下。超過は WT_ERROR セッションエラー。二重受信検出より先に検証する
   if (error_code > kMaxApplicationErrorCode) {
     report_wt_error(session_id,
@@ -765,7 +765,7 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING は
+  // draft-16 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING は
   // WT_STREAM_STATE_ERROR (判定条件の内訳は has_received_stop_sending 参照)
   auto stream_it = wt_session->streams.find(stream_id);
   const bool known_stream = stream_it != wt_session->streams.end();
@@ -793,9 +793,9 @@ void H2Session::handle_wt_stop_sending(int32_t session_id,
   event.error_code = static_cast<uint32_t>(error_code);
   push_event(std::move(event));
 
-  // draft-15 Section 6.3 / RFC 9000 Section 3.5: 送信側が Ready / Send 状態
+  // draft-16 Section 6.3 / RFC 9000 Section 3.5: 送信側が Ready / Send 状態
   // のストリームへの WT_STOP_SENDING 受信には WT_RESET_STREAM で応答する。
-  // エラーコードは受信した WT_STOP_SENDING のものを複製する (draft-15
+  // エラーコードは受信した WT_STOP_SENDING のものを複製する (draft-16
   // Section 6.3 の「The error code from the WT_STOP_SENDING capsule can be
   // copied into the WT_RESET_STREAM capsule if the endpoint does not have a
   // more appropriate code to use」)。送信側が既に終端 (DataSent /
@@ -819,7 +819,7 @@ void H2Session::handle_wt_max_data(int32_t session_id,
   offset += max_data_len;
 
   // ペイロードが Maximum Data の終端で終わっていることを検証する
-  // (RFC 9297 Section 3.3)。フィールドの意味論 (減少値) より先に検証する
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (非増加) より先に検証する
   if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
     return;
   }
@@ -829,11 +829,12 @@ void H2Session::handle_wt_max_data(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.5: 前回受信値より小さい WT_MAX_DATA は
-  // WT_FLOW_CONTROL_ERROR。比較対象は受信値のみ (フォールバックしない)
+  // draft-16 Section 6.5: 前回受信値 (カプセル未受信なら初期値) を増加
+  // させない WT_MAX_DATA は WT_FLOW_CONTROL_ERROR。等値も「増加しない」
+  // ためエラーになる
   if (wt_session->received_max_data.has_value() &&
-      max_data < *wt_session->received_max_data) {
-    report_flow_control_error(session_id, "WT_MAX_DATA decreased");
+      max_data <= *wt_session->received_max_data) {
+    report_flow_control_error(session_id, "WT_MAX_DATA did not increase");
     return;
   }
   wt_session->received_max_data = max_data;
@@ -869,7 +870,7 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   offset += max_data_len;
 
   // ペイロードが Maximum Stream Data の終端で終わっていることを検証する
-  // (RFC 9297 Section 3.3)。フィールドの意味論 (方向・減少値) より先に
+  // (RFC 9297 Section 3.3)。フィールドの意味論 (方向・非増加) より先に
   // 検証する
   if (!verify_capsule_payload_fully_read(session_id, offset, length)) {
     return;
@@ -893,11 +894,11 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
   auto stream_it = wt_session->streams.find(stream_id);
   const bool known_stream = stream_it != wt_session->streams.end();
 
-  // draft-15 Section 6.6: WT_STOP_SENDING の後に同じストリームへ届いた
+  // draft-16 Section 6.6: WT_STOP_SENDING の後に同じストリームへ届いた
   // WT_MAX_STREAM_DATA は WT_STREAM_STATE_ERROR。判定条件は
   // handle_wt_stop_sending の二重受信検出と同じ (has_received_stop_sending)。
-  // 未作成・解放後のストリームもセッション単位の集合で検出する。減少値
-  // 検査より前に置いて WT_STREAM_STATE_ERROR を報告する: draft は減少値の
+  // 未作成・解放後のストリームもセッション単位の集合で検出する。非増加
+  // 検査より前に置いて WT_STREAM_STATE_ERROR を報告する: draft は非増加の
   // MUST (同 Section の WT_FLOW_CONTROL_ERROR) と本 MUST が同時に成立する
   // 場合の優先を定めておらず、本判定を先に置くのは実装の選択である
   if (has_received_stop_sending(*wt_session, stream_id)) {
@@ -913,11 +914,11 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
     previous = capsule_it->second;
   } else if (known_stream) {
     // 実在ストリームは直前のクレジットを前回値とし、コンテナの安全弁
-    // 上限で保持しなかった場合も減少検出 (draft-15 Section 6.6) を維持する
+    // 上限で保持しなかった場合も非増加検出 (draft-16 Section 6.6) を維持する
     previous = stream_it->second.max_stream_data_local;
   } else {
     // カプセル未受信なら SETTINGS / WebTransport-Init の初期値が
-    // 「前回受信値」 (draft-15 Section 6.6)
+    // 「前回受信値」 (draft-16 Section 6.6)
     // ビット 0: 開始側 (0 = クライアント, 1 = サーバー)
     // ビット 1: 方向性 (0 = 双方向, 1 = 単方向)
     bool is_unidirectional = (stream_id & 0x02) != 0;
@@ -926,13 +927,14 @@ void H2Session::handle_wt_max_stream_data(int32_t session_id,
         advertised_stream_send_credit(*wt_session, is_unidirectional, is_local);
   }
 
-  if (previous.has_value() && max_data < *previous) {
-    report_flow_control_error(session_id, "WT_MAX_STREAM_DATA decreased");
+  if (previous.has_value() && max_data <= *previous) {
+    report_flow_control_error(session_id,
+                              "WT_MAX_STREAM_DATA did not increase");
     return;
   }
 
   // 受信コンテナは安全弁の上限で有界にする。上限超過の新規 ID は保持
-  // しない。実在ストリームへのクレジット反映と減少検出は
+  // しない。実在ストリームへのクレジット反映と非増加検出は
   // max_stream_data_local のフォールバックで維持する
   if (capsule_it != wt_session->received_max_stream_data_by_id.end() ||
       wt_session->received_max_stream_data_by_id.size() <
@@ -974,7 +976,7 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.7: Maximum Streams は 2^60 を超えてはならない
+  // draft-16 Section 6.7: Maximum Streams は 2^60 を超えてはならない
   if (max_streams > kMaxStreamsLimit) {
     report_flow_control_error(session_id, "WT_MAX_STREAMS exceeds 2^60");
     return;
@@ -985,9 +987,10 @@ void H2Session::handle_wt_max_streams(int32_t session_id,
   auto& credit = is_bidi ? wt_session->max_streams_bidi_local
                          : wt_session->max_streams_uni_local;
 
-  // 前回受信値より小さい WT_MAX_STREAMS は WT_FLOW_CONTROL_ERROR
-  if (received.has_value() && max_streams < *received) {
-    report_flow_control_error(session_id, "WT_MAX_STREAMS decreased");
+  // 前回受信値 (カプセル未受信なら初期値) を増加させない WT_MAX_STREAMS は
+  // WT_FLOW_CONTROL_ERROR。等値も「増加しない」ためエラーになる
+  if (received.has_value() && max_streams <= *received) {
+    report_flow_control_error(session_id, "WT_MAX_STREAMS did not increase");
     return;
   }
   received = max_streams;
@@ -1017,7 +1020,7 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
   offset += stream_id_len;
 
   // Maximum Stream Data。受信側の状態を変える値ではないため読み捨てる
-  // (draft-15 Section 6.9 の "the offset of the stream at which the blocking
+  // (draft-16 Section 6.9 の "the offset of the stream at which the blocking
   // occurred" であり、自側のフロー制御上限ではない)。完全デコードは他の
   // ハンドラと同じく行う
   auto max_stream_data_result =
@@ -1053,7 +1056,7 @@ void H2Session::handle_wt_stream_data_blocked(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.9: 閉じた・リセット済みのストリームへの
+  // draft-16 Section 6.9: 閉じた・リセット済みのストリームへの
   // WT_STREAM_DATA_BLOCKED 受信は WT_STREAM_STATE_ERROR。判定は受信側の
   // 終端 (recv_state) で行う: 本カプセルはピアの送信方向 (自側の受信方向)
   // の申告であり、自側の FIN は自側の送信方向だけを閉じるため send_state は
@@ -1111,8 +1114,8 @@ void H2Session::handle_wt_streams_blocked(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.10: Maximum Streams が 2^60 を超える値は
-  // WT_FLOW_CONTROL_ERROR。減少値の受信側 MUST は無く、 advisory な通知
+  // draft-16 Section 6.10: Maximum Streams が 2^60 を超える値は
+  // WT_FLOW_CONTROL_ERROR。非増加値の受信側 MUST は無く、 advisory な通知
   // のため状態は更新しない
   if (max_streams > kMaxStreamsLimit) {
     report_flow_control_error(session_id, "WT_STREAMS_BLOCKED exceeds 2^60");
@@ -1126,7 +1129,7 @@ void H2Session::handle_wt_data_blocked(int32_t session_id,
   size_t offset = 0;
 
   // Maximum Data。受信側の状態を変える値ではないため読み捨てる
-  // (draft-15 Section 6.8 の "the session-level limit at which blocking
+  // (draft-16 Section 6.8 の "the session-level limit at which blocking
   // occurred" であり、自側の送信上限 (max_data_local) を更新する値ではなく
   // 自側が広告済みの受信上限の再申告である)。読み出しはペイロードの形を
   // 検証するために行う
@@ -1145,7 +1148,7 @@ void H2Session::handle_wt_data_blocked(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.8 は WT_DATA_BLOCKED を "input to tuning of flow
+  // draft-16 Section 6.8 は WT_DATA_BLOCKED を "input to tuning of flow
   // control algorithms and for debugging purposes" と位置付けるだけであり、
   // エンドポイント (受信側) に MUST を課していない。同節の MUST は中間装置
   // 向け (consume して自身の制限に対する flow control signals を生成する)
@@ -1173,7 +1176,7 @@ void H2Session::handle_datagram(int32_t session_id,
 void H2Session::handle_wt_close_session(int32_t session_id,
                                         const uint8_t* payload,
                                         size_t length) {
-  // draft-15 Section 6.12: Application Error Code は 32 ビット固定であり、
+  // draft-16 Section 6.12: Application Error Code は 32 ビット固定であり、
   // 4 バイト未満のペイロードは RFC 9297 Section 3.3 の「定義が挙げる
   // フィールドの終端より前に終わるペイロード」に該当する。不完全な可変長
   // 整数のデコード失敗とは異なり固定長フィールドのため read_capsule_varint を
@@ -1191,7 +1194,7 @@ void H2Session::handle_wt_close_session(int32_t session_id,
                               (static_cast<uint32_t>(payload[2]) << 8) |
                               static_cast<uint32_t>(payload[3]);
   // Application Error Message は 4 バイト以降の残り全部であり、空も合法
-  // (draft-15 Section 3.4 が "an error code and an optional explanatory
+  // (draft-16 Section 3.4 が "an error code and an optional explanatory
   // message" と定め、Section 6.12 の "The message takes up the remainder of the
   // capsule" に下限が無い)。length == 4 では payload + 4 は
   // 終端を指すだけで参照しない (message_len が 0 のため下の検証と組み立ては
@@ -1199,7 +1202,7 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   const uint8_t* message_bytes = payload + 4;
   const size_t message_len = length - 4;
 
-  // draft-15 Section 6.12: Application Error Message は 1024 バイト以下の
+  // draft-16 Section 6.12: Application Error Message は 1024 バイト以下の
   // 正しい UTF-8 である。超過または不正な UTF-8 は WT_ERROR セッションエラー。
   // 受信した不正メッセージは close_session へ渡さない (再送出と、送信側の
   // 1024 切り詰めが文字境界を無視して新たな不正 UTF-8 を作るのを防ぐ)
@@ -1232,7 +1235,7 @@ void H2Session::handle_wt_close_session(int32_t session_id,
   // 終了を学習した後にキュー済みの送出を行わないため (handle_end_stream と
   // 対称)。破棄で失われるのは終了前にキュー済みの未 flush のカプセル (データ
   // グラム等) であり、応答の END_STREAM は以下で直接送出するため応答カプセル
-  // は発生しない。draft-15 Section 6.12 の受信者 MUST (WT_CLOSE_SESSION
+  // は発生しない。draft-16 Section 6.12 の受信者 MUST (WT_CLOSE_SESSION
   // 受信時に END_STREAM フレームで応答してストリームを閉じる) に従い、
   // 応答の END_STREAM を送出する (end_stream_pending_ による half-close)。
   // エントリは削除済みのため、両ハーフクローズ時の on_stream_close_callback
@@ -1256,7 +1259,7 @@ void H2Session::handle_wt_drain_session(int32_t session_id,
                                         size_t length) {
   (void)payload;
 
-  // draft-15 Section 6.13: WT_DRAIN_SESSION の Length は 0 であり、ペイロードを
+  // draft-16 Section 6.13: WT_DRAIN_SESSION の Length は 0 であり、ペイロードを
   // 持つカプセルは RFC 9297 Section 3.3 の余分なバイトとして扱う
   if (!verify_capsule_payload_fully_read(session_id, 0, length)) {
     return;
@@ -1270,7 +1273,7 @@ void H2Session::handle_wt_drain_session(int32_t session_id,
 
 void H2Session::handle_end_stream(int32_t session_id) {
   // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
-  // を閉じた場合のセッション終了処理 (draft-15 Section 3.4 の正規の終了経路)。
+  // を閉じた場合のセッション終了処理 (draft-16 Section 3.4 の正規の終了経路)。
   // 終了処理の対象は確立済み (is_established) のセッションに限定する: 非 2xx
   // 拒否とサーバー側の受理前 END_STREAM は確立されておらず、終了処理は行わない
   // (非 2xx 拒否は応答受信時にエントリ削除済み)。正常な WT_CLOSE_SESSION を
@@ -1283,7 +1286,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // handle_wt_close_session と並置する (共通ヘルパー化はしない): 並置時に
   // エントリ削除・バッファ破棄を欠落させると「エントリ不在で塞がる」前提が
   // 崩れる。確立前・終了済み (is_terminated) のセッションはここで返るため
-  // 下の切り詰め検証の対象外になる: 受理前は draft-15 Section 3.2 のとおり
+  // 下の切り詰め検証の対象外になる: 受理前は draft-16 Section 3.2 のとおり
   // カプセルを処理せず (RFC 9297 Section 3.2 の Capsule Protocol も 2xx まで
   // not in use)、終了済みは on_data_chunk_recv_callback が受信カプセル自体を
   // 破棄する。受理前 END_STREAM は保留集合に記録し、終了処理と切り詰めの検証は
@@ -1293,7 +1296,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
     // サーバーが 2xx を送出する前にピアが WT_CLOSE_SESSION 無しの END_STREAM で
     // CONNECT ストリームを閉じた場合 (受理前 END_STREAM) は、ここでは終了処理を
     // 行わず保留集合に記録するだけに留める。accept_session が 2xx を送出し、
-    // 受理前に蓄積したカプセルを遅延処理した後に終了処理を行う (draft-15
+    // 受理前に蓄積したカプセルを遅延処理した後に終了処理を行う (draft-16
     // Section 3.4 のセッション終了条件のうち、確立前の CONNECT ストリームの
     // クローズ)
     if (is_server_ && wt_session != nullptr && !wt_session->is_established &&
@@ -1304,7 +1307,7 @@ void H2Session::handle_end_stream(int32_t session_id) {
   }
 
   // RFC 9297 Section 3.3: カプセルを運ぶストリームの受信側がクリーンに終了し
-  // (HTTP/2 では END_STREAM。draft-15 Section 3.4)、そのとき最後のカプセルが
+  // (HTTP/2 では END_STREAM。draft-16 Section 3.4)、そのとき最後のカプセルが
   // まだ途中だった場合は malformed / incomplete なメッセージとして扱う MUST が
   // ある。扱いは RFC 9113 Section 8.1.1 の PROTOCOL_ERROR のストリームエラー。
   // カプセル境界で終わった場合 (バッファが空) だけが正規の終了になる。後始末は
@@ -1331,9 +1334,9 @@ void H2Session::handle_end_stream(int32_t session_id) {
   // receive() 末尾 / send() であり、その時点で両ハーフが閉じて発火するが、
   // エントリは削除済みのため SessionClosed も後始末も行わない) ため、破棄と
   // 記録の解放をここで直接行う。キュー済みのカプセル (http2_stream_buffers_) も
-  // 破棄する: 2xx + END_STREAM (受理と同時クローズ) では同一 receive() 内で
-  // 確立処理が初期フロー制御カプセルをキューしており、セッション終了を学習した
-  // 後に送出しないため (on_stream_close_callback のバッファ破棄と対称)。
+  // 破棄する (on_stream_close_callback のバッファ破棄と対称)。2xx + END_STREAM
+  // (受理と同時クローズ) では同一 receive() 内で確立処理後の送出待ちが残り得る
+  // ため、セッション終了を学習した後にワイヤへ出さない。
   // ピアの END_STREAM に対する自側の応答 END_STREAM も送出する:
   // WT_CLOSE_SESSION 無しのクリーンな終了は error code 0 の WT_CLOSE_SESSION に
   // よる終了と等価 (Section 6.12) であり、同節の受信者 MUST (END_STREAM 付きの
@@ -1377,7 +1380,7 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   }
 
   // WT_CLOSE_SESSION 無しのクリーンクローズは error code 0 かつ空のエラー
-  // 文字列の WT_CLOSE_SESSION と等価 (draft-15 Section 6.12)
+  // 文字列の WT_CLOSE_SESSION と等価 (draft-16 Section 6.12)
   H2Event event;
   event.type = H2EventType::SessionClosed;
   event.session_id = session_id;
@@ -1387,7 +1390,7 @@ void H2Session::terminate_pre_accept_end_stream_session(int32_t session_id) {
   // エントリと送信バッファを破棄し、以後の送信をエントリ不在で塞ぐ。応答の
   // END_STREAM は受理後 END_STREAM の handle_end_stream と同じ扱いで送出する:
   // WT_CLOSE_SESSION 無しのクリーンな終了は error code 0 の WT_CLOSE_SESSION に
-  // よる終了と等価 (draft-15 Section 6.12) であり、同節の受信者 MUST
+  // よる終了と等価 (draft-16 Section 6.12) であり、同節の受信者 MUST
   // (END_STREAM 付きのフレームで応答してストリームを閉じる) は文面上はカプセルの
   // 受信を条件とするが、等価規定の下で END_STREAM のみの受信にも適用する
   // (仕様が強制するものではなく、h3 の応答 FIN と揃えて同時ストリーム枠を解放
@@ -1452,7 +1455,7 @@ bool H2Session::verify_origin(
   }
 
   // Origin ヘッダーが無いリクエストは受理する
-  // (draft-ietf-webtrans-http2-15 Section 3.2: 非ブラウザクライアントでは
+  // (draft-ietf-webtrans-http2-16 Section 3.2: 非ブラウザクライアントでは
   // OPTIONAL)
   std::string origin;
   bool has_origin = false;
@@ -1594,55 +1597,49 @@ WtSessionInfo* H2Session::get_wt_session(int32_t session_id) {
 void H2Session::apply_peer_initial_flow_control(
     WtSessionInfo& wt_session) const {
   // 対向 SETTINGS が我々の送信上限 (local)、自側 config が受信上限 (remote)
-  // draft-15 Section 4.3.1
-  // 対向 SETTINGS が 0 (draft-15 Section 11.2 の既定値) の場合、送信
+  // (draft-16 Section 4.3.1)
+  // 対向 SETTINGS が 0 (draft-16 Section 11.2 の既定値) の場合、送信
   // クレジットは 0 であり「WT_MAX_DATA / WT_MAX_STREAM_DATA /
   // WT_MAX_STREAMS カプセル到着まで送信不可」を意味する (Section 6.5 /
   // 6.6 / 6.7 は非 0 値での MAY 伝達を定める)。自側 config 値を下限にする
   // フォールバックは広告制限を超えるため行わない (過去の実装は相互運用の
   // ためフォールバックしていたが、仕様の MUST 違反である)。
-  // クライアントは SETTINGS 受信後に Extended CONNECT を送る (draft-15
+  // クライアントは SETTINGS 受信後に Extended CONNECT を送る (draft-16
   // Section 3.1。高レベル層の _wait_webtransport_ready もこの順序) ため、
   // SETTINGS 未受信は通常経路では起きないが、既定値 0 として仕様どおり扱う
   wt_session.max_data_local = peer_wt_initial_max_data_;
   wt_session.max_data_remote = config_.wt_initial_max_data;
-  if (peer_wt_initial_max_data_ > 0) {
-    wt_session.received_max_data = peer_wt_initial_max_data_;
-  }
+  // 初期値は 0 を含めて記録する。draft-16 Section 6.5 はカプセル未受信時の
+  // 非増加判定の基準に初期値を使うため、初期値 0 のときに 0 のカプセルを
+  // 受信しても「増加しない」として検出できなければならない
+  wt_session.received_max_data = peer_wt_initial_max_data_;
   wt_session.max_streams_bidi_local = peer_wt_initial_max_streams_bidi_;
   wt_session.max_streams_uni_local = peer_wt_initial_max_streams_uni_;
-  if (peer_wt_initial_max_streams_bidi_ > 0) {
-    wt_session.received_max_streams_bidi = peer_wt_initial_max_streams_bidi_;
-  }
-  if (peer_wt_initial_max_streams_uni_ > 0) {
-    wt_session.received_max_streams_uni = peer_wt_initial_max_streams_uni_;
-  }
+  // 0 を含む初期値を記録する (draft-16 Section 6.7)
+  wt_session.received_max_streams_bidi = peer_wt_initial_max_streams_bidi_;
+  wt_session.received_max_streams_uni = peer_wt_initial_max_streams_uni_;
   wt_session.max_streams_bidi_remote = config_.wt_initial_max_streams_bidi;
   wt_session.max_streams_uni_remote = config_.wt_initial_max_streams_uni;
 
+  // 初期ストリームデータ上限。0 を含む SETTINGS 値を記録し、後に
+  // WebTransport-Init の値との大きい方を採る (draft-16 Section 4.3)
   wt_session.peer_max_stream_data_uni = peer_wt_initial_max_stream_data_uni_;
-  if (peer_wt_initial_max_stream_data_uni_ > 0) {
-    wt_session.received_initial_max_stream_data_uni =
-        peer_wt_initial_max_stream_data_uni_;
-  }
+  wt_session.received_initial_max_stream_data_uni =
+      peer_wt_initial_max_stream_data_uni_;
   // 自側開始 bidi: 対向の BIDI_REMOTE
   wt_session.peer_max_stream_data_bidi_local =
       peer_wt_initial_max_stream_data_bidi_remote_;
-  if (peer_wt_initial_max_stream_data_bidi_remote_ > 0) {
-    wt_session.received_initial_max_stream_data_bidi_local =
-        peer_wt_initial_max_stream_data_bidi_remote_;
-  }
+  wt_session.received_initial_max_stream_data_bidi_local =
+      peer_wt_initial_max_stream_data_bidi_remote_;
   // 対向開始 bidi: 対向の BIDI_LOCAL
   wt_session.peer_max_stream_data_bidi_remote =
       peer_wt_initial_max_stream_data_bidi_local_;
-  if (peer_wt_initial_max_stream_data_bidi_local_ > 0) {
-    wt_session.received_initial_max_stream_data_bidi_remote =
-        peer_wt_initial_max_stream_data_bidi_local_;
-  }
+  wt_session.received_initial_max_stream_data_bidi_remote =
+      peer_wt_initial_max_stream_data_bidi_local_;
 }
 
 std::string H2Session::encode_webtransport_init() const {
-  // draft-15 Section 4.3.2: Dictionary Structured Field (RFC 8941)
+  // draft-16 Section 4.3.2: Structured Fields の Dictionary (RFC 9651)
   // 将来キーやセマンティクスが変わる可能性がある
   return "u=" + std::to_string(config_.wt_initial_max_stream_data) +
          ", bl=" + std::to_string(config_.wt_initial_max_stream_data) +
@@ -1736,7 +1733,7 @@ bool H2Session::parse_webtransport_init(const std::string& value,
       has_br = true;
       out_br = parsed;
     }
-    // 未知キーは MUST ignore (draft-15 Section 4.3.2)
+    // 未知キーは MUST ignore (draft-16 Section 4.3.2)
   }
 
   return true;
@@ -1781,7 +1778,7 @@ void H2Session::initialize_stream_send_credit(const WtSessionInfo& wt_session,
 
 void H2Session::report_flow_control_error(int32_t session_id,
                                           const std::string& error_message) {
-  // 0x50 は WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) の
+  // 0x50 は WT_FLOW_CONTROL_ERROR (draft-16 Section 3.4 の 0xTBD) の
   // プレースホルダ。draft で値が確定したら更新する
   close_session(session_id, kWtFlowControlError, error_message);
 }
@@ -1793,7 +1790,7 @@ void H2Session::report_recv_flow_control_error(
   // 受信超過は高レベル層への通知のため Error イベントを push してから
   // セッションを閉じる (カプセル値減少の検知は Error を push せず
   // close_session のみ)。error_code の 0x50 は WT_FLOW_CONTROL_ERROR
-  // (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。draft で値が確定
+  // (draft-16 Section 3.4 の 0xTBD) のプレースホルダ。draft で値が確定
   // したら更新する
   H2Event event;
   event.type = H2EventType::Error;
@@ -1826,7 +1823,7 @@ void H2Session::maybe_send_max_data(int32_t session_id) {
     return;
   }
   // 広告値の 1/2 を超えたら初期値分を上乗せする (ヒステリシスで送出頻度を
-  // 抑える。draft-15 Section 4.4 の SHOULD「consume に応じて送る」)。
+  // 抑える。draft-16 Section 4.4 の SHOULD「consume に応じて送る」)。
   // 初期値 0 (未設定) では補充しない
   if (config_.wt_initial_max_data == 0) {
     return;
@@ -1853,7 +1850,7 @@ void H2Session::maybe_send_max_stream_data(int32_t session_id,
   if (!wt_session || wt_session->is_terminated) {
     return;
   }
-  // draft-15 Section 6.6: WT_STOP_SENDING を送出したストリームへは
+  // draft-16 Section 6.6: WT_STOP_SENDING を送出したストリームへは
   // WT_MAX_STREAM_DATA を送出しない (MUST NOT)。記録の寿命は
   // WtSessionInfo::sent_stop_sending_stream_ids の宣言コメントを参照
   if (wt_session->sent_stop_sending_stream_ids.contains(stream_id)) {
@@ -2067,9 +2064,9 @@ std::unique_ptr<H2Session> H2Session::create_server(
 
 bool H2Session::initialize() {
   // WebTransport の初期フロー制御値を生成時に検査する。SETTINGS の値は
-  // uint32 のため、2^32 以上は SETTINGS で切り詰められて WebTransport-Init や
-  // 初期カプセルと食い違う (RFC 9113 Section 6.5.1)。Python 境界であるここで
-  // ValueError にする。draft-15 Section 6.7 / 6.10 の Maximum Streams 2^60
+  // uint32 のため、2^32 以上は SETTINGS で切り詰められて WebTransport-Init
+  // ヘッダーと食い違う (RFC 9113 Section 6.5.1)。Python 境界であるここで
+  // ValueError にする。draft-16 Section 6.7 / 6.10 の Maximum Streams 2^60
   // 制限もストリーム数 2 フィールドでは本検査 (2^32 - 1) により同時に満たす
   if (config_.wt_initial_max_data > kMaxSettingsValue) {
     throw std::invalid_argument("wt_initial_max_data must be less than 2^32: " +
@@ -2124,7 +2121,7 @@ bool H2Session::initialize() {
   // 存在せず、アプリが消費した分だけ extend するため、アプリの消費速度が
   // 受信レートの上限になる (背圧)。
   //
-  // SETTINGS は draft-15 Section 3.1 / 4.3.1 / 11.2 に従う。nghttp2-v2 が
+  // SETTINGS は draft-16 Section 3.1 / 4.3.1 / 11.2 に従う。nghttp2-v2 が
   // 自ら送る SETTINGS (MAX_CONCURRENT_STREAMS / NO_RFC7540_PRIORITIES /
   // INITIAL_WINDOW_SIZE / ENABLE_CONNECT_PROTOCOL) は nghttp2_settings の
   // フィールドで指定し、WebTransport 固有の SETTINGS は extra_settings で
@@ -2134,20 +2131,23 @@ bool H2Session::initialize() {
   settings.initial_ts = now_ts();
   settings.max_concurrent_streams_remote = config_.max_concurrent_streams;
   settings.initial_max_stream_data = config_.initial_window_size;
-  // SETTINGS_ENABLE_CONNECT_PROTOCOL はサーバーが送る (draft-15 Section 3.1
+  // SETTINGS_ENABLE_CONNECT_PROTOCOL はサーバーが送る (draft-16 Section 3.1
   // の MUST)。クライアントはライブラリがこのフィールドを無視するため
   // extra_settings で送る (サーバーはフィールドで送るので重複しない)
   if (is_server_) {
     settings.enable_connect_protocol = 1;
   }
 
-  nghttp2_settings_entry extra_settings[8];
+  nghttp2_settings_entry extra_settings[9];
   size_t extra_settings_count = 0;
   if (!is_server_) {
     extra_settings[extra_settings_count++] = {SETTINGS_ENABLE_CONNECT_PROTOCOL,
                                               1};
   }
   extra_settings[extra_settings_count++] = {SETTINGS_WT_ENABLED, 1};
+  // 旧 draft-15 の codepoint も併送する。未知の設定 ID はピアが無視する
+  // ため (RFC 9113 Section 6.5)、旧実装との相互運用を壊さない
+  extra_settings[extra_settings_count++] = {SETTINGS_WT_ENABLED_DRAFT15, 1};
   extra_settings[extra_settings_count++] = {
       SETTINGS_WT_INITIAL_MAX_DATA,
       static_cast<uint32_t>(config_.wt_initial_max_data)};
@@ -2254,12 +2254,12 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
     return -1;
   }
 
-  // draft-15 Section 3.1: SETTINGS 受信前に CONNECT してはならない
+  // draft-16 Section 3.1: SETTINGS 受信前に CONNECT してはならない
   if (!is_webtransport_ready()) {
     return -1;
   }
 
-  // draft-15 Section 6.13: GOAWAY 受信後は新規 CONNECT 要求を抑止する。
+  // draft-16 Section 6.13: GOAWAY 受信後は新規 CONNECT 要求を抑止する。
   // 既存セッションの送受信と WT ストリーム open は継続する
   if (goaway_received_) {
     return -1;
@@ -2273,7 +2273,7 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
   }
 
   // Extended CONNECT リクエストヘッダー
-  // draft-15 Section 3.2
+  // draft-16 Section 3.2
   std::string method = "CONNECT";
   std::string scheme = "https";
   std::string protocol = "webtransport";
@@ -2283,11 +2283,11 @@ int32_t H2Session::connect(const std::string& url, const std::string& origin) {
       {":method", method}, {":scheme", scheme},     {":authority", authority},
       {":path", path},     {":protocol", protocol},
   };
-  // draft-15 Section 3.2: Web 文脈では Origin 必須
+  // draft-16 Section 3.2: Web 文脈では Origin 必須
   if (!origin.empty()) {
     headers.emplace_back("origin", origin);
   }
-  // draft-15 Section 4.3.2: 初期フロー制御をヘッダーでも伝える
+  // draft-16 Section 4.3.2: 初期フロー制御をヘッダーでも伝える
   headers.emplace_back("webtransport-init", wt_init);
 
   std::vector<nghttp2_nv> nva = bindings::to_nghttp2_nv(headers);
@@ -2318,7 +2318,7 @@ bool H2Session::accept_session(int32_t session_id) {
   }
 
   // 200 OK レスポンス
-  // draft-15 Section 4.3.2: 応答でも WebTransport-Init を送れる
+  // draft-16 Section 4.3.2: 応答でも WebTransport-Init を送れる
   std::string status = "200";
   std::string wt_init = encode_webtransport_init();
 
@@ -2351,7 +2351,7 @@ bool H2Session::accept_session(int32_t session_id) {
 
   flush_output();
 
-  // 受理前の楽観的カプセルを遅延処理する (draft-15 Section 3.2) 。
+  // 受理前の楽観的カプセルを遅延処理する (draft-16 Section 3.2) 。
   // SessionReady push 後に Datagram / StreamData が発火するよう、
   // 2xx 送出後に処理する。全種別を遅延処理し、振り分けは行わない。
   // 追記なしの排出専用呼び出しのため空入力で呼ぶ
@@ -2369,26 +2369,17 @@ bool H2Session::accept_session(int32_t session_id) {
   }
 
   // 受理前 END_STREAM を検知したセッションは、2xx 送出と受理前蓄積の遅延処理
-  // まで完了したここで終了処理を行う。初期フロー制御カプセルは送出しない
+  // まで完了したここで終了処理を行う
   if (established_session->pre_accept_end_stream) {
     terminate_pre_accept_end_stream_session(session_id);
     return true;
   }
 
-  // 初期フロー制御 Capsule を送信
-  std::vector<uint8_t> max_data_payload =
-      bindings::encode_quic_varint(config_.wt_initial_max_data);
-  send_capsule(session_id, CapsuleType::WtMaxData, max_data_payload);
-
-  std::vector<uint8_t> max_streams_bidi_payload =
-      bindings::encode_quic_varint(config_.wt_initial_max_streams_bidi);
-  send_capsule(session_id, CapsuleType::WtMaxStreamsBidi,
-               max_streams_bidi_payload);
-
-  std::vector<uint8_t> max_streams_uni_payload =
-      bindings::encode_quic_varint(config_.wt_initial_max_streams_uni);
-  send_capsule(session_id, CapsuleType::WtMaxStreamsUni,
-               max_streams_uni_payload);
+  // 初期フロー制御値は SETTINGS (SETTINGS_WT_INITIAL_*) と WebTransport-Init
+  // ヘッダーで伝達済みである。draft-16 Section 6.5 / 6.7 は、初期値を
+  // 増加させないカプセルの受信を MUST 違反とするため、SETTINGS と同じ値の
+  // 初期カプセルは送出しない (旧 draft-15 では等値を許容していたが、
+  // draft-16 のピアは接続を閉じる)
 
   return true;
 }
@@ -2418,7 +2409,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   // status_code を検証する: HTTP status code (RFC 9110 Section 15) として
   // 意味を持つ 200-599 のみを許容する。1xx と 3 桁未満・4 桁以上・600 以上
   // は誤用であり、クライアント側の挙動を壊す: 2 桁以下は nghttp2 が
-  // ストリームエラーにし「SessionClosed 非発火」の設計ピン (draft-15
+  // ストリームエラーにし「SessionClosed 非発火」の設計ピン (draft-16
   // Section 3.2) を破る。reject_session 経由の 1xx は END_STREAM 付きで
   // 送出されるため、クライアントの nghttp2 は HTTP メッセージングエラー
   // として同じくストリームエラーにする (「1xx が中間応答として無視され
@@ -2463,7 +2454,7 @@ void H2Session::reject_session(int32_t session_id, int status_code) {
   }
 
   // 非 2xx 応答で拒否されたセッションは一度も確立されていない
-  // (draft-15 Section 3.2 の「A WebTransport session is established when
+  // (draft-16 Section 3.2 の「A WebTransport session is established when
   // the server sends a 2xx response」) ため、SessionClosed は発火しない
   // (黙って削除)。削除により、以後の on_stream_close_callback /
   // close_session / send_datagram / send_stream_data / open_stream /
@@ -2512,7 +2503,7 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   }
 
   // ストリーム数制限チェック。超過時は -1 を返し、初回のみ
-  // WT_STREAMS_BLOCKED を送出する (draft-15 Section 6.10 の SHOULD)
+  // WT_STREAMS_BLOCKED を送出する (draft-16 Section 6.10 の SHOULD)
   if (is_unidirectional) {
     if (wt_session->streams_uni_opened >= wt_session->max_streams_uni_local) {
       if (!wt_session->streams_blocked_uni_sent) {
@@ -2560,7 +2551,7 @@ int64_t H2Session::open_stream(int32_t session_id, bool is_unidirectional) {
   wt_session->streams[stream_id] = info;
 
   // 空の WT_STREAM capsule は送信しない。WT_STREAM capsule は最初のデータ送信
-  // (send_stream_data) でストリームを暗黙的に作成する (draft-15 Section 6.4)。
+  // (send_stream_data) でストリームを暗黙的に作成する (draft-16 Section 6.4)。
   // 空の WT_STREAM capsule でストリームを開始してから後続の WT_STREAM_FIN
   // capsule でデータを送ると、WebKit の WebTransport over HTTP/2 実装がデータを
   // 破棄するため、実ブラウザとの相互運用性のために空 capsule を送らない。
@@ -2602,7 +2593,7 @@ void H2Session::send_stream_data(int32_t session_id,
     return;
   }
 
-  // リセット済み・FIN 送出済みストリームへの送信は塞ぐ (draft-15
+  // リセット済み・FIN 送出済みストリームへの送信は塞ぐ (draft-16
   // Section 6.4 の「A WT_STREAM capsule MUST NOT be sent after a stream is
   // closed or reset」。FIN 送出後は送信側状態を DataSent へ遷移させる
   // (下記の FIN 送出後処理) ため、以後の送信はここで塞がれる。
@@ -2617,7 +2608,7 @@ void H2Session::send_stream_data(int32_t session_id,
 
   // 保留があるストリームへの新規送信は順序維持のため末尾へ積む
   // (クレジットがあっても追い越さない)。末尾が FIN 付きなら FIN 後の
-  // 送信として無視する (draft-15 Section 6.4)
+  // 送信として無視する (draft-16 Section 6.4)
   if (!stream_info.pending_sends.empty()) {
     if (stream_info.pending_sends.back().fin) {
       return;
@@ -2629,9 +2620,9 @@ void H2Session::send_stream_data(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.5 / 6.6: フロー制御超過分はセッション閉鎖せず
+  // draft-16 Section 6.5 / 6.6: フロー制御超過分はセッション閉鎖せず
   // 保留する。残量の範囲で部分送出し、残りは保留キューへ積む。超過時は
-  // BLOCKED を送出して対向の MAX 到着を待つ (送出自体は draft-15 Section
+  // BLOCKED を送出して対向の MAX 到着を待つ (送出自体は draft-16 Section
   // 6.8 / 6.9 の SHOULD であり任意。実装は同一制限値での重複を抑止する
   // ため初回のみ送る)
   // オーバーフロー安全な残量計算 (bytes_sent > max なら残量 0)
@@ -2698,7 +2689,7 @@ void H2Session::send_stream_data(int32_t session_id,
   wt_session->bytes_sent += data.size();
 
   // FIN 送出後は送信側状態を DataSent へ遷移させる (QUIC の送信状態図の
-  // 「STREAM 送信 + FIN → Data Sent」に対応。draft-15 Section 5.2 は
+  // 「STREAM 送信 + FIN → Data Sent」に対応。draft-16 Section 5.2 は
   // ACK を待たず即時遷移とする)。以後の send_stream_data は冒頭のガードで
   // 塞がれる。空の起動 WT_STREAM_FIN (data 空 + fin=True) を含む
   if (fin) {
@@ -2738,20 +2729,20 @@ void H2Session::reset_stream(int32_t session_id,
   }
 
   // 終了済み (リセット送出済み・FIN 送出済み) のストリームへの WT_RESET_STREAM
-  // 送出は塞ぐ (draft-15 Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT
+  // 送出は塞ぐ (draft-16 Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT
   // be sent after a stream is closed or reset」。再リセットと FIN 後の
   // リセットの両方をここで弾く。リセット送出後は送信側のみ終了であり
   // 受信側は継続するため、送信側の状態だけを判定に使う)。なお RFC 9000
   // では Data Sent からの RESET_STREAM 送出が許容されるが (送信状態図の
   // Data Sent → Reset Sent)、本実装は HTTP/2 の順序保証によりピアが必ず
-  // 終端状態 (DataRecvd) で受信するため、draft-15 Section 6.2 の MUST NOT
+  // 終端状態 (DataRecvd) で受信するため、draft-16 Section 6.2 の MUST NOT
   // に従い意図的に塞ぐ
   if (stream_it->second.send_state == StreamState::ResetSent ||
       stream_it->second.send_state == StreamState::DataSent) {
     return;
   }
 
-  // draft-15 Section 6.2: Reliable Size は送信済みバイト数と一致させる
+  // draft-16 Section 6.2: Reliable Size は送信済みバイト数と一致させる
   // (送信者は自カウンタで正値を知り得るため引数では受け取らない)
   uint64_t reliable_size = stream_it->second.bytes_sent;
 
@@ -2770,13 +2761,13 @@ void H2Session::reset_stream(int32_t session_id,
   send_capsule(session_id, CapsuleType::WtResetStream, payload);
 
   // 送信リセットは送信側の終了のみであり、受信側は継続する
-  // (draft-15 Section 5.2 の QUIC 状態ミラー)。エントリを erase せず
+  // (draft-16 Section 5.2 の QUIC 状態ミラー)。エントリを erase せず
   // send_state を ResetSent に更新して、受信側の追跡 (bytes_received /
   // recv_state) を維持する (erase すると以後のピアからの WT_STREAM が
   // 新規作成として扱われ、受信追跡が失われる)。両ハーフ終端後は
   // maybe_release_stream で解放し、対向開始分は WT_MAX_STREAMS を補充する。
   // 以後の send_stream_data は send_state の確認で塞がれる
-  // (draft-15 Section 6.4)。保留キューも破棄する (リセットは送信放棄の
+  // (draft-16 Section 6.4)。保留キューも破棄する (リセットは送信放棄の
   // 意思表示であり、残すと flush で終了後の送出になる)
   stream_it->second.send_state = StreamState::ResetSent;
   stream_it->second.pending_sends.clear();
@@ -2819,7 +2810,7 @@ void H2Session::stop_sending(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING 送出は
+  // draft-16 Section 6.3: 同一ストリームへの 2 回目の WT_STOP_SENDING 送出は
   // 禁止されている。2 回目以降は送出済みの記録で判定して黙って無視する
   // (存在しないストリーム ID への送出と同じ扱いで、セッションは閉じない)。
   // 判定は記録の挿入より前に置く: 挿入後に判定すると常に真になり、1 回目の
@@ -2828,7 +2819,7 @@ void H2Session::stop_sending(int32_t session_id,
     return;
   }
 
-  // draft-15 Section 6.6: WT_STOP_SENDING を送出したストリームへは以後
+  // draft-16 Section 6.6: WT_STOP_SENDING を送出したストリームへは以後
   // WT_MAX_STREAM_DATA を送出しない (MUST NOT)。送出済みを記録して
   // maybe_send_max_stream_data で抑止する (Section 6.3 の判定にも使う)
   wt_session->sent_stop_sending_stream_ids.insert(stream_id);
@@ -2848,7 +2839,7 @@ void H2Session::stop_sending(int32_t session_id,
 void H2Session::send_datagram(int32_t session_id,
                               const std::vector<uint8_t>& data) {
   // 終了したセッション ID と、一度も connect されていないセッション ID への
-  // 送信を黙って無視する。セッション終了は draft-15 Section 3.4 の「CONNECT
+  // 送信を黙って無視する。セッション終了は draft-16 Section 3.4 の「CONNECT
   // ストリームのクローズ」で定義され、WT_CLOSE_SESSION (Section 6.12) はその
   // 前の終了通知である。受信後は終了を学習した状態とみなし、新たなデータ
   // グラムを送出しない (h3 の Section 6 相当の MUST は h2 には存在しないが、
@@ -2867,7 +2858,7 @@ void H2Session::send_datagram(int32_t session_id,
   // (send_stream_data / reset_stream / stop_sending / close_session はエントリと
   // 終了フラグのガードを自前で持つ。受理前 END_STREAM の保留ガードは
   // send_datagram と drain_session のみが持つ)。
-  // 楽観的送信 (draft-15 Section 3.2 の MAY
+  // 楽観的送信 (draft-16 Section 3.2 の MAY
   // 「クライアントは応答を待たずに WebTransport カプセルを送信してよい」)
   // は妨げない: クライアントは connect 直後 (2xx 応答前)・サーバーは
   // CONNECT リクエスト受信時に wt_sessions_ へエントリが挿入され、終了
@@ -2889,7 +2880,7 @@ void H2Session::send_datagram(int32_t session_id,
   // クライアントが非 2xx 応答 (拒否) を受けたセッション ID 宛の送信は、
   // 応答受信時に wt_sessions_ から削除されるためエントリ確認で塞がれる
   // (1xx を挟んだ拒否は削除が機能せずエントリが残る既知の制約)。
-  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-15
+  // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了経路 (draft-16
   // Section 3.4 の正規の終了経路) も受理後 END_STREAM の検知でエントリが
   // 削除されるため塞がれる (受理前 END_STREAM は上の保留ガードで塞ぐ)
   send_capsule(session_id, CapsuleType::Datagram, data);
@@ -2923,7 +2914,7 @@ void H2Session::close_session(int32_t session_id,
   discard_stream_recv_bytes(session_id);
 
   // WT_CLOSE_SESSION カプセル: エラーコード (32bit) + メッセージ
-  // draft-15 Section 6.12: Application Error Message は最大 1024 バイト
+  // draft-16 Section 6.12: Application Error Message は最大 1024 バイト
   std::vector<uint8_t> payload;
   payload.push_back(static_cast<uint8_t>((error_code >> 24) & 0xFF));
   payload.push_back(static_cast<uint8_t>((error_code >> 16) & 0xFF));
@@ -2932,7 +2923,7 @@ void H2Session::close_session(int32_t session_id,
 
   if (!error_message.empty()) {
     // バイト単位で 1024 に切り詰めた後、末尾が不完全な UTF-8 シーケンスに
-    // なる場合は文字境界まで後退させる (draft-15 Section 6.12 の
+    // なる場合は文字境界まで後退させる (draft-16 Section 6.12 の
     // 「Senders that truncate an application-supplied message MUST do so at
     // a UTF-8 character boundary」)。切り詰めで生じる不完全な終端は
     // is_valid_utf8 (RFC 3629 の well-formed) で検出し、先頭部分が有効な
@@ -2970,7 +2961,7 @@ void H2Session::close_session(int32_t session_id,
   // フラグも落とす
   wt_session->pre_accept_end_stream = false;
 
-  // draft-15 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
+  // draft-16 Section 6.12: Capsule 送信後に END_STREAM で half-close する MUST
   // RST_STREAM ではアプリケーション終了を正しく伝えられない
   //
   // nghttp2_conn_read のコールバック中に flush_output を呼んではならない。
@@ -2980,7 +2971,7 @@ void H2Session::close_session(int32_t session_id,
 }
 
 bool H2Session::is_webtransport_ready() const {
-  // draft-15 Section 3.1
+  // draft-16 Section 3.1
   return peer_enable_connect_protocol_ && peer_wt_enabled_;
 }
 
@@ -3145,13 +3136,15 @@ int H2Session::on_recv_settings_entry_callback(
 
   auto* h2_session = static_cast<H2Session*>(user_data);
 
-  // draft-15 Section 3.1 / 4.3.1
+  // draft-16 Section 3.1 / 4.3.1
   switch (ent->id) {
     case SETTINGS_ENABLE_CONNECT_PROTOCOL:
       h2_session->peer_enable_connect_protocol_ = (ent->value == 1);
       break;
     case SETTINGS_WT_ENABLED:
-      // draft-15 Section 3.1: 1 超は PROTOCOL_ERROR
+    case SETTINGS_WT_ENABLED_DRAFT15:
+      // draft-16 Section 3.1: 1 超は PROTOCOL_ERROR。旧 codepoint も同じ
+      // 値域の設定として扱う (併送された場合は最後の値で上書きする)
       if (ent->value > 1) {
         H2Event event;
         event.type = H2EventType::Error;
@@ -3263,7 +3256,7 @@ int H2Session::on_end_headers_callback(nghttp2_conn* conn,
     }
 
     if (is_connect && is_webtransport) {
-      // draft-15 Section 3.2: Origin ヘッダーがある場合は検証 MUST。
+      // draft-16 Section 3.2: Origin ヘッダーがある場合は検証 MUST。
       // 検証失敗は 403 で拒否する (同 Section の SHOULD)
       if (!h2_session->verify_origin(it->second)) {
         h2_session->pending_headers_.erase(it);
@@ -3276,7 +3269,7 @@ int H2Session::on_end_headers_callback(nghttp2_conn* conn,
       wt_session.http2_stream_id = session_id;
       h2_session->apply_peer_initial_flow_control(wt_session);
 
-      // draft-15 Section 4.3: SETTINGS とヘッダーの大きい方を採用
+      // draft-16 Section 4.3: SETTINGS とヘッダーの大きい方を採用
       if (has_wt_init) {
         uint64_t init_u = 0;
         uint64_t init_bl = 0;
@@ -3325,7 +3318,7 @@ int H2Session::on_end_headers_callback(nghttp2_conn* conn,
     } else {
       // 非 WebTransport リクエスト (CONNECT +
       // :protocol=webtransport 以外) は 405 で拒否してストリームを
-      // 終端する。draft-15 Section 3.2 の 405 SHOULD は extended
+      // 終端する。draft-16 Section 3.2 の 405 SHOULD は extended
       // CONNECT + :protocol=webtransport の対象リソースが
       // WebTransport 非対応の場合を指し、本分岐はその対象外だが、
       // WebTransport 専用エンドポイントとしての実装ポリシーで送出する
@@ -3343,7 +3336,7 @@ int H2Session::on_end_headers_callback(nghttp2_conn* conn,
   for (const auto& [name, value] : it->second) {
     if (name == ":status") {
       status_value = value;
-      // draft-15 Section 3.2 の「A WebTransport session is established
+      // draft-16 Section 3.2 の「A WebTransport session is established
       // when the server sends a 2xx response」。200 のみでなく先頭
       // 文字が '2' の 2xx 全般を確立として扱う
       if (!value.empty() && value[0] == '2') {
@@ -3357,7 +3350,7 @@ int H2Session::on_end_headers_callback(nghttp2_conn* conn,
   }
   auto* wt_session = h2_session->get_wt_session(session_id);
   if (is_success && wt_session) {
-    // draft-15 Section 4.3: 応答の WebTransport-Init も反映
+    // draft-16 Section 4.3: 応答の WebTransport-Init も反映
     // (2xx 全般の確立であり、200 のみに限らない)
     if (has_wt_init) {
       uint64_t init_u = 0;
@@ -3400,26 +3393,14 @@ int H2Session::on_end_headers_callback(nghttp2_conn* conn,
     event.headers = it->second;
     h2_session->push_event(std::move(event));
 
-    // 初期フロー制御 Capsule を送信
-    std::vector<uint8_t> max_data_payload =
-        bindings::encode_quic_varint(h2_session->config_.wt_initial_max_data);
-    h2_session->send_capsule(session_id, CapsuleType::WtMaxData,
-                             max_data_payload);
-
-    std::vector<uint8_t> max_streams_bidi_payload =
-        bindings::encode_quic_varint(
-            h2_session->config_.wt_initial_max_streams_bidi);
-    h2_session->send_capsule(session_id, CapsuleType::WtMaxStreamsBidi,
-                             max_streams_bidi_payload);
-
-    std::vector<uint8_t> max_streams_uni_payload = bindings::encode_quic_varint(
-        h2_session->config_.wt_initial_max_streams_uni);
-    h2_session->send_capsule(session_id, CapsuleType::WtMaxStreamsUni,
-                             max_streams_uni_payload);
+    // 初期フロー制御値は SETTINGS (SETTINGS_WT_INITIAL_*) と
+    // WebTransport-Init ヘッダーで伝達済みである。draft-16 Section 6.5 /
+    // 6.7 は初期値を増加させないカプセルの受信を MUST 違反とするため、
+    // SETTINGS と同じ値の初期カプセルは送出しない
   } else if (wt_session && !status_value.empty() && status_value[0] != '1' &&
              status_value[0] != '2') {
     // 非 2xx 応答 (拒否) を受信したセッションは一度も確立されていない
-    // (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
+    // (draft-ietf-webtrans-http2-16 Section 3.2 の「A WebTransport
     // session is established when the server sends a 2xx
     // response」)。SessionClosed は発火しない: 一度も確立されて
     // いないセッションの終了通知という意味論が合わないため、
@@ -3490,7 +3471,7 @@ int H2Session::on_recv_data_callback(nghttp2_conn* conn,
 
   // WebTransport セッションのデータとして Capsule を処理する。確立済みは
   // 即時処理し、サーバー側の受理前は上限付きで蓄積して accept_session で
-  // 遅延処理する (draft-15 Section 3.2 の楽観送信) 。クライアント側の
+  // 遅延処理する (draft-16 Section 3.2 の楽観送信) 。クライアント側の
   // 受理前 (2xx 応答前) は排出契機がないため従来どおり破棄する
   auto* wt_session = h2_session->get_wt_session(session_id);
   if (!wt_session || wt_session->is_terminated) {
@@ -3552,7 +3533,7 @@ int H2Session::on_remote_end_stream_callback(nghttp2_conn* conn,
   auto* h2_session = static_cast<H2Session*>(user_data);
 
   // ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送って CONNECT ストリーム
-  // を閉じた場合のセッション終了検知 (draft-15 Section 3.4 の正規の終了経路)。
+  // を閉じた場合のセッション終了検知 (draft-16 Section 3.4 の正規の終了経路)。
   // nghttp2-v2 は end_headers / end_trailers の後にこのコールバックを呼ぶ
   // ため、2xx + END_STREAM (受理と同時クローズ) でも is_established が
   // 設定された後に検知できる
@@ -3568,7 +3549,7 @@ int H2Session::on_shutdown_callback(nghttp2_conn* conn,
 
   auto* h2_session = static_cast<H2Session*>(user_data);
 
-  // draft-15 Section 6.13 の graceful shutdown: GOAWAY 受信後も既存
+  // draft-16 Section 6.13 の graceful shutdown: GOAWAY 受信後も既存
   // セッションの送受信を継続する。closed_ にはせず、新規 CONNECT の
   // 抑止のみを goaway_received_ で行う
   H2Event event;
@@ -3626,7 +3607,7 @@ nghttp2_ssize H2Session::on_read_data_callback(
     }
 
     // 送信するカプセルが尽きた。END_STREAM の送出を保留していれば
-    // half-close する (draft-15 Section 6.12)
+    // half-close する (draft-16 Section 6.12)
     auto pending_it = h2_session->end_stream_pending_.find(session_id);
     if (pending_it != h2_session->end_stream_pending_.end()) {
       *pflags |= NGHTTP2_READ_DATA_FLAG_EOF;
@@ -3685,7 +3666,7 @@ int H2Session::on_write_stream_data_offset_callback(
 void bind_webtransport_h2(nb::module_& m) {
   auto h2_mod = m.def_submodule("h2", "WebTransport over HTTP/2");
 
-  // WtErrorCode のバインディング (draft-15 Section 3.4)
+  // WtErrorCode のバインディング (draft-16 Section 3.4)
   nb::enum_<WtErrorCode>(h2_mod, "WtErrorCode",
                          "WebTransport over HTTP/2 のエラーコード")
       .value("WT_FLOW_CONTROL_ERROR", WtErrorCode::kWtFlowControlError)

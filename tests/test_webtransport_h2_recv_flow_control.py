@@ -1,11 +1,11 @@
 """WebTransport over HTTP/2 の受信フロー制御違反と受信ウィンドウ返却のテスト
 
-draft-15 Section 6.5 / 6.6 の MUST 「受信データが広告した WT_MAX_DATA /
+draft-16 Section 6.5 / 6.6 の MUST 「受信データが広告した WT_MAX_DATA /
 WT_MAX_STREAM_DATA を超えたら WT_FLOW_CONTROL_ERROR でセッションを閉じる」
 を検証する。不正な超過データはワイヤ注入で再現する (公開 API の
 send_stream_data は送信側クレジットで塞がれ、超過分を送れないため)。
 セッション閉鎖は close_session 経由の WT_CLOSE_SESSION (error code 0x50)
-で実現され、あわせて Error イベント (WT_FLOW_CONTROL_ERROR) を push する。WT_FLOW_CONTROL_ERROR (0x50) は 0xTBD のプレースホルダ (draft-15 Section 3.4)。
+で実現され、あわせて Error イベント (WT_FLOW_CONTROL_ERROR) を push する。WT_FLOW_CONTROL_ERROR (0x50) は 0xTBD のプレースホルダ (draft-16 Section 3.4)。
 
 あわせて、アプリへ配送せず破棄した受信バイトの後始末 (ストリーム終了経路での
 未消費受信バイト記録の解放と、コネクションレベル受信ウィンドウの返却) を
@@ -31,7 +31,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -65,7 +65,7 @@ def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> byt
 def _assert_flow_control_error_sent(server: h2.Session) -> None:
     """WT_FLOW_CONTROL_ERROR (0x50) の WT_CLOSE_SESSION が送出されることを確認
 
-    WT_FLOW_CONTROL_ERROR は draft-15 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
+    WT_FLOW_CONTROL_ERROR は draft-16 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
     確定したら更新する。
     """
     wire = server.send()
@@ -436,7 +436,7 @@ def test_peer_end_stream_releases_unconsumed_recv_bytes() -> None:
     session_id = _connect_h2_session(client, server)
 
     _inject_incomplete_capsule(server, session_id)
-    # 空の DATA + END_STREAM でピアがストリームを閉じる (draft-15 Section 3.4)
+    # 空の DATA + END_STREAM でピアがストリームを閉じる (draft-16 Section 3.4)
     ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
     assert ret > 0, "END_STREAM の注入に失敗しました"
 

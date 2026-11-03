@@ -4,7 +4,7 @@ RFC 9297 Section 3.3 は「各カプセルのペイロードはその定義が�
 正確に含まなければならない。識別フィールドの後に余分なバイトを含むペイロード
 は malformed な HTTP メッセージとして扱わなければならない」ことを MUST として
 おり、HTTP/2 では RFC 9113 Section 8.1.1 により PROTOCOL_ERROR のストリーム
-エラー (RST_STREAM) を送出する。draft-ietf-webtrans-http2-15 Section 3.4 の
+エラー (RST_STREAM) を送出する。draft-ietf-webtrans-http2-16 Section 3.4 の
 とおり、ストリームのリセットはセッションを終了させる。
 
 対象は固定フィールドのみからなる 8 ハンドラ (WT_RESET_STREAM / WT_STOP_SENDING /
@@ -16,7 +16,7 @@ WT_CLOSE_SESSION / PADDING) には適用しない。
 検証の順序も固定する。WT_RESET_STREAM の Error Code の範囲検証は既存の順序
 (Reliable Size より前) を維持するため、余分なバイトと範囲外の Error Code を
 同時に持つ入力では範囲検証が先に走り WT_ERROR セッションエラーになる。他の
-カプセルは形の検証が意味論検証 (減少値・方向・ストリーム状態) より先に走る。
+カプセルは形の検証が意味論検証 (非増加・方向・ストリーム状態) より先に走る。
 """
 
 import pytest
@@ -50,26 +50,27 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# セッションエラー (draft-ietf-webtrans-http2-15 Section 3.4)
+# セッションエラー (draft-ietf-webtrans-http2-16 Section 3.4)
 _WT_ERROR = WtErrorCode.WT_ERROR.value
 
-# カプセル種別 (draft-ietf-webtrans-http2-15 Section 6。WT_DRAIN_SESSION の
+# カプセル種別 (draft-ietf-webtrans-http2-16 Section 6。WT_DRAIN_SESSION の
 # 0x78ae は draft-ietf-webtrans-http3-16 Section 4.6 の登録値である)
 
 # 余分なバイト (1 バイトと複数バイト)
 _TRAILING_BYTE = b"\x00"
 _TRAILING_BYTES = b"\x00\x00"
 
-# Application Protocol Error Code の上限 (draft-15 Section 6.2 / 6.3)。
+# Application Protocol Error Code の上限 (draft-16 Section 6.2 / 6.3)。
 # 超過は WT_ERROR セッションエラーになる
 _OVER_MAX_ERROR_CODE = 0x100000000
 
 # 本実装の Config の既定値。セッション確立時にピアの SETTINGS から引き継いだ
-# 受信済み値を下回る WT_MAX_DATA / WT_MAX_STREAM_DATA は既存の減少値検証
+# 受信済み値を下回る WT_MAX_DATA / WT_MAX_STREAM_DATA は既存の非増加検証
 # (WT_FLOW_CONTROL_ERROR) で閉じるため、対照テストには既定値より大きい値を使う。
 # 余分なバイトを持つ側は形の検証が意味論検証より先に走るため値に依存しない
 _ACCEPTED_MAX_DATA = h2.Config().wt_initial_max_data + 1
 _ACCEPTED_MAX_STREAM_DATA = h2.Config().wt_initial_max_stream_data + 1
+_ACCEPTED_MAX_STREAMS = h2.Config().wt_initial_max_streams_bidi + 1
 
 
 @pytest.mark.parametrize(
@@ -91,7 +92,7 @@ _ACCEPTED_MAX_STREAM_DATA = h2.Config().wt_initial_max_stream_data + 1
         (_WT_MAX_DATA, _encode_varint(_ACCEPTED_MAX_DATA) + _TRAILING_BYTE, None),
         (_WT_MAX_DATA, _encode_varint(_ACCEPTED_MAX_DATA) + _TRAILING_BYTES, None),
         # WT_MAX_STREAM_DATA: Stream ID / Maximum Stream Data。既定値未満の値
-        # (減少値検証に掛かる値) を使い、形の検証が先に走ることも固定する
+        # (非増加検証に掛かる値) を使い、形の検証が先に走ることも固定する
         (
             _WT_MAX_STREAM_DATA,
             _encode_varint(0) + _encode_varint(100) + _TRAILING_BYTE,
@@ -101,7 +102,7 @@ _ACCEPTED_MAX_STREAM_DATA = h2.Config().wt_initial_max_stream_data + 1
         (_WT_MAX_STREAMS_BIDI, _encode_varint(100) + _TRAILING_BYTE, None),
         (_WT_MAX_STREAMS_UNI, _encode_varint(100) + _TRAILING_BYTE, None),
         # WT_DATA_BLOCKED: Maximum Data。形の検証が意味論検証より先に走ることを
-        # 固定する (WT_MAX_DATA の減少値検証へ誤って流れた場合の検出は、
+        # 固定する (WT_MAX_DATA の非増加検証へ誤って流れた場合の検出は、
         # 既定値未満の値を受理させる対照表の行が担う)
         (_WT_DATA_BLOCKED, _encode_varint(100) + _TRAILING_BYTE, None),
         # WT_STREAM_DATA_BLOCKED: Stream ID / Maximum Stream Data
@@ -166,9 +167,9 @@ def test_trailing_byte_capsule_resets_stream(
             _encode_varint(0) + _encode_varint(_ACCEPTED_MAX_STREAM_DATA),
             None,
         ),
-        (_WT_MAX_STREAMS_BIDI, _encode_varint(100), None),
-        (_WT_MAX_STREAMS_UNI, _encode_varint(100), None),
-        # 既定値未満の 100。値の意味論 (減少値検証) へ誤って流れていないことを
+        (_WT_MAX_STREAMS_BIDI, _encode_varint(_ACCEPTED_MAX_STREAMS), None),
+        (_WT_MAX_STREAMS_UNI, _encode_varint(_ACCEPTED_MAX_STREAMS), None),
+        # 既定値未満の 100。値の意味論 (非増加検証) へ誤って流れていないことを
         # セッション存続の表明で検出できる
         (_WT_DATA_BLOCKED, _encode_varint(100), None),
         (_WT_STREAM_DATA_BLOCKED, _encode_varint(0) + _encode_varint(100), None),
@@ -277,7 +278,7 @@ def test_trailing_byte_in_pre_accept_buffer_resets_on_accept() -> None:
     """受理前に蓄積した余分なバイト付きカプセルが accept_session の排出でリセットされる
 
     サーバーは受理前のカプセルを蓄積し、accept_session で遅延処理する
-    (draft-15 Section 3.2 の楽観的送信)。この経路でも余分なバイトを持つ
+    (draft-16 Section 3.2 の楽観的送信)。この経路でも余分なバイトを持つ
     カプセルは PROTOCOL_ERROR の RST_STREAM になり、初期クレジット
     (WT_MAX_DATA / WT_MAX_STREAMS) は送出されない。
     """

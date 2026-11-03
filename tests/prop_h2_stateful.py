@@ -17,7 +17,7 @@ from webtransport import h2
 
 # WT データストリームに使うクライアント起動双方向ストリーム
 DATA_STREAM_IDS = (0, 4, 8)
-# データグラムのペイロード上限 (draft-15 Section 3.4 の 1200 バイト目安)
+# データグラムのペイロード上限 (draft-16 Section 3.4 の 1200 バイト目安)
 MAX_DATAGRAM_SIZE = 1200
 
 

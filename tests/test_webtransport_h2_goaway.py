@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 の GOAWAY 受信テスト
 
 GOAWAY 受信後も既存セッションが継続し、新規 CONNECT のみ抑止されること
-(draft-15 Section 6.13 の graceful shutdown) を検証する。GOAWAY フレーム
+(draft-16 Section 6.13 の graceful shutdown) を検証する。GOAWAY フレーム
 は送出手段が存在しないためワイヤ注入で再現する。
 """
 

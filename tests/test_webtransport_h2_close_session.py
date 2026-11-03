@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 の close_session の送出抑止とエラーメッセージ切り詰めテスト
 
 close_session の二重呼び出し送出抑止と、エラーメッセージの 1024 バイト
-切り詰め (draft-15 Section 6.12 の UTF-8 文字境界後退) を検証する。
+切り詰め (draft-16 Section 6.12 の UTF-8 文字境界後退) を検証する。
 ローカル close_session の二重呼び出しで WT_CLOSE_SESSION capsule が 2 個
 ワイヤへ送出されないことを検証する。close_session はエントリを残したまま
 is_terminated を立てるため、修正前は 2 回目以降の呼び出しでも get_wt_session
@@ -36,7 +36,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -80,10 +80,10 @@ def _create_h2_session_pair_with_server_stream_limit(
     """サーバー側の wt_initial_max_stream_data を縮小したペアを作成する
 
     クライアントのストリーム送信クレジットは対向 (サーバー) の SETTINGS 由来
-    (draft-15 Section 4.3.1) のため、サーバー config の
+    (draft-16 Section 4.3.1) のため、サーバー config の
     wt_initial_max_stream_data を小さな正の値にするとクライアントの送信
     クレジットが縮小する。0 にすると送信クレジットは 0 (カプセル到着待ち)
-    になる (apply_peer_initial_flow_control と draft-15 Section 11.2)。
+    になる (apply_peer_initial_flow_control と draft-16 Section 11.2)。
     クレジットは SETTINGS と 200 応答の WebTransport-Init ヘッダー (br) を
     max で合成するが (webtransport_h2.cpp の SETTINGS 受信・200 応答受信処理)、
     ヘルパーは config の値が両方に反映されるため 4 で一致し、合成経路で
@@ -127,7 +127,7 @@ def test_close_session_double_call_single_capsule() -> None:
     assert _encode_wt_close_session_capsule(42, "second") not in wire
 
     # 1 回目の呼び出し由来の END_STREAM (half-close) はガードで失われない
-    # (draft-15 Section 6.12 の送出側 MUST)
+    # (draft-16 Section 6.12 の送出側 MUST)
     assert (
         _encode_data_frame(session_id, _encode_wt_close_session_capsule(0), end_stream=True) in wire
     )
@@ -186,7 +186,7 @@ def test_close_session_alive_session_delivered() -> None:
 def test_close_session_flow_control_violation_internal_call_delivered() -> None:
     """send_stream_data のフロー制御超過時は閉じずに保留することを確認
 
-    send_stream_data はフロー制御超過 (draft-15 Section 6.5 / 6.6) を検知
+    send_stream_data はフロー制御超過 (draft-16 Section 6.5 / 6.6) を検知
     するとセッションを閉じず、超過試行の初回に WT_STREAM_DATA_BLOCKED を
     送出してデータを保留キューへ積む。対向の WT_MAX_STREAM_DATA 受信で
     送出が再開される。旧仕様の FLOW_CONTROL_ERROR (0x50) による自己
@@ -234,7 +234,7 @@ def test_close_session_flow_control_violation_internal_call_delivered() -> None:
 def test_close_session_truncates_at_utf8_boundary() -> None:
     """1024 バイトを跨ぐマルチバイト文字が UTF-8 文字境界で切り詰められることを確認
 
-    draft-15 Section 6.12 の MUST「Senders that truncate an application-supplied
+    draft-16 Section 6.12 の MUST「Senders that truncate an application-supplied
     message MUST do so at a UTF-8 character boundary」に従い、1024 バイトで
     切り詰めると不完全な UTF-8 シーケンスが生じる場合は文字境界まで後退する。
     「あ」は 3 バイト (e3 81 82)。342 文字 (1026 バイト) のメッセージを
@@ -278,7 +278,7 @@ def test_close_session_ascii_truncates_at_1024_bytes() -> None:
     """ASCII のみのメッセージは従来どおり 1024 バイトで切り詰められることを確認
 
     1 バイト文字のメッセージでは文字境界の調整が発生しないため、バイト単位の
-    1024 バイト切り詰めがそのまま適用される (既存挙動のピン)。draft-15
+    1024 バイト切り詰めがそのまま適用される (既存挙動のピン)。draft-16
     Section 6.12 の 1024 バイト制限はちょうど 1024 バイトまで合法。
     """
     client, server = _create_h2_session_pair()
@@ -338,7 +338,7 @@ def test_close_session_exact_1024_bytes_no_truncation() -> None:
 
     3 バイト文字 341 個 (1023 バイト) + ASCII 1 バイト (「b」) = ちょうど
     1024 バイト。バイト単位の切り詰めでは後退が必要ないため、完全な 1024
-    バイトがそのまま送出される (draft-15 Section 6.12 では 1024 バイトちょうど
+    バイトがそのまま送出される (draft-16 Section 6.12 では 1024 バイトちょうど
     は合法)。「有効な UTF-8 でも余計に後退してしまう」未来の回帰を検出する。
     """
     client, server = _create_h2_session_pair()

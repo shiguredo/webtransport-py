@@ -1,8 +1,8 @@
 """WebTransport over HTTP/2 の WT_CLOSE_SESSION メッセージ検証テスト
 
-draft-15 Section 6.12 の MUST 「Application Error Message が 1024 バイト超
+draft-16 Section 6.12 の MUST 「Application Error Message が 1024 バイト超
 または不正な UTF-8 なら WT_ERROR セッションエラー」を検証する。WT_ERROR の
-値 (0x52) は draft-15 Section 3.4 の 0xTBD のプレースホルダであり、draft で
+値 (0x52) は draft-16 Section 3.4 の 0xTBD のプレースホルダであり、draft で
 値が確定したら更新する。不正メッセージは close_session へ渡さず、固定の英語
 メッセージを Error イベントと WT_CLOSE_SESSION の両方に使う。
 
@@ -13,7 +13,7 @@ draft-15 Section 6.12 の MUST 「Application Error Message が 1024 バイト�
 になることも検証する。
 
 Application Error Message が空 (ペイロード 4 バイト) でも正しいカプセルである。
-draft-15 Section 3.4 がメッセージを "an optional explanatory message" と定め、
+draft-16 Section 3.4 がメッセージを "an optional explanatory message" と定め、
 Section 6.12 の "The message takes up the remainder of the capsule" に下限が
 無いためである。4 バイト (メッセージ無し) と 5 バイト以上 (メッセージ付き) は
 従来どおり受理される (対照)。
@@ -36,7 +36,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x52 は 0xTBD のプレースホルダ)
 WT_ERROR = WtErrorCode.WT_ERROR.value
 
@@ -72,7 +72,7 @@ def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
     """WT_ERROR (0x52) の WT_CLOSE_SESSION が送出されることを確認
 
     エラー検知は close_session (WT_CLOSE_SESSION 送出 + END_STREAM) で実現
-    される (draft-15 Section 3.4)。ワイヤ部分列チェックで送出を検証する。
+    される (draft-16 Section 3.4)。ワイヤ部分列チェックで送出を検証する。
     """
     wire = server.send()
     assert wire is not None
@@ -85,7 +85,7 @@ def _assert_accepted_without_error_signals(server: h2.Session, session_id: int) 
 
     _WT_CLOSE_SESSION_TYPE_BYTES は WT_CLOSE_SESSION (Type WT_CLOSE_SESSION) の Type バイト
     列であり、エラー検知 (close_session 呼び出し) があれば必ずワイヤに現れる。
-    応答カプセルを送らないのは draft-15 Section 6.12 が許容する省略 (MUST NOT
+    応答カプセルを送らないのは draft-16 Section 6.12 が許容する省略 (MUST NOT
     ではない) であり、本実装のポリシーである。一方、同節は受信者に
     "replying with an HTTP/2 frame with the END_STREAM flag set" を MUST で
     課すため、その応答の存在は表明する。PROTOCOL_ERROR の RST_STREAM は 4 バイト

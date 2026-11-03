@@ -178,7 +178,7 @@ def test_send_stream_data_after_fin_not_sent() -> None:
     """FIN 送出後の send_stream_data が塞がれることを確認
 
     FIN (WT_STREAM_FIN) 送出後は送信側状態を DataSent へ遷移させ、以後の
-    send_stream_data を無視する (draft-15 Section 6.4 の「A WT_STREAM
+    send_stream_data を無視する (draft-16 Section 6.4 の「A WT_STREAM
     capsule MUST NOT be sent after a stream is closed or reset」)。修正前は
     FIN 後に再度 send_stream_data を呼ぶと閉じたストリームへの WT_STREAM が
     ワイヤへ送出され、ピアから WT_STREAM_STATE_ERROR を受けた。
@@ -204,7 +204,7 @@ def test_reset_stream_after_fin_not_sent() -> None:
     """FIN 送出後の reset_stream が塞がれることを確認
 
     FIN 送出後 (DataSent 相当) のストリームは送信側から見て閉じているため、
-    WT_RESET_STREAM の送出も塞ぐ (draft-15 Section 6.2 の「A
+    WT_RESET_STREAM の送出も塞ぐ (draft-16 Section 6.2 の「A
     WT_RESET_STREAM capsule MUST NOT be sent after a stream is closed or
     reset」)。修正前は FIN 後に reset_stream を呼ぶと WT_RESET_STREAM が
     ワイヤへ送出され、ピア (サーバー側の DataRecvd 検知) がセッション
@@ -233,7 +233,7 @@ def test_reset_stream_after_reset_not_sent() -> None:
     """リセット送出後の再 reset_stream が塞がれることを確認
 
     リセット送出後 (ResetSent) のストリームへの再 reset_stream は無視する
-    (draft-15 Section 6.2 の MUST NOT。修正前は WT_RESET_STREAM が二重に
+    (draft-16 Section 6.2 の MUST NOT。修正前は WT_RESET_STREAM が二重に
     ワイヤへ送出された)。
     """
     client, server = _create_h2_session_pair()
@@ -257,7 +257,7 @@ def test_empty_fin_then_send_not_sent() -> None:
     """空の起動 WT_STREAM_FIN 送出後の send_stream_data が塞がれることを確認
 
     data 空 + fin=True の起動 WT_STREAM_FIN (ストリームを開いて同時に閉じる
-    カプセル。draft-15 Section 6.4 の「Empty WT_STREAM capsules MUST NOT be
+    カプセル。draft-16 Section 6.4 の「Empty WT_STREAM capsules MUST NOT be
     used unless they open or close a stream」) でも DataSent へ遷移し、
     以後の send_stream_data は塞がれる。
     """

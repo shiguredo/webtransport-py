@@ -3,7 +3,7 @@
 Sans-IO 構成 (conftest.py の h2 用 Sans-IO ヘルパー) を使い、セッション終了
 後の send_datagram が無視されることを検証する。セッション終了の経路
 (WT_CLOSE_SESSION 受信 / ローカル close_session) の両方で検証する。
-h2 仕様 (draft-ietf-webtrans-http2-15) には h3 の Section 6 相当の「新しい
+h2 仕様 (draft-ietf-webtrans-http2-16) には h3 の Section 6 相当の「新しい
 データグラムを送信してはならない MUST」は存在しないが、Section 6.12 の
 「WT_CLOSE_SESSION を受信したら END_STREAM で応答してストリームを閉じる
 MUST」と Section 3.4 の「セッション終了 = CONNECT ストリームのクローズ」に
@@ -200,7 +200,7 @@ def test_send_datagram_alive_after_other_session_closed_delivered() -> None:
 def test_send_datagram_client_optimistic_delivered() -> None:
     """サーバー応答前の楽観的データグラム送信が妨げられないことを確認
 
-    draft-15 Section 3.2 の MAY「クライアントは応答を待たずに WebTransport
+    draft-16 Section 3.2 の MAY「クライアントは応答を待たずに WebTransport
     カプセル (データグラムはその例) を送信してよい」。connect 直後
     (200 応答前) は is_established が false だが、終了状態の判定に
     is_established を使わないため、DATAGRAM capsule がワイヤに送出される。
@@ -223,7 +223,7 @@ def test_send_datagram_client_optimistic_delivered() -> None:
 def test_send_datagram_server_optimistic_delivered() -> None:
     """サーバー側の accept 前データグラム送信が妨げられないことを確認
 
-    draft-15 Section 3.2 の楽観的送信 MAY はクライアントのみに定められており、
+    draft-16 Section 3.2 の楽観的送信 MAY はクライアントのみに定められており、
     サーバー側は仕様に禁止がない。サーバーは CONNECT リクエスト受信時に
     wt_sessions_ へエントリが挿入され、accept 前でも終了フラグが立っていない
     ため send_datagram は無視されない。HTTP/2 では応答 (200) を送信するまで
@@ -259,7 +259,7 @@ def test_pre_accept_datagram_same_receive_delivered_after_accept() -> None:
 
     CONNECT (HEADERS) と DATAGRAM カプセル (DATA) が同一 receive で届くと、
     受理前は蓄積され、accept_session 後に SessionReady に続いて Datagram が
-    発火する (draft-15 Section 3.2 の楽観送信) 。
+    発火する (draft-16 Section 3.2 の楽観送信) 。
     """
     client, server = _create_h2_session_pair()
 

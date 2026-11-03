@@ -122,7 +122,7 @@ def prop_session_create_config_over_limit_raises(value: int):
     """Config の初期フロー制御値が 2^32 以上ならセッション生成が ValueError になる
 
     HTTP/2 の SETTINGS は uint32 (RFC 9113 Section 6.5.1) のため、2^32 以上は
-    切り詰められて WebTransport-Init や初期カプセルと値が食い違う。4 フィールド
+    切り詰められて WebTransport-Init ヘッダーと値が食い違う。4 フィールド
     すべてが生成時に拒否されることを固定する。
     """
     for field in (
@@ -316,7 +316,7 @@ def prop_send_datagram_to_closed_session_ignored(error_code: int, data: bytes):
     """自分で閉じたセッション ID へのデータグラム送信が送出されないことを確認
 
     セッションは CONNECT ストリームのクローズで終了し (refs/webtrans/
-    draft-ietf-webtrans-http2-15.txt Section 3.4)、実装は終了したセッション
+    draft-ietf-webtrans-http2-16.txt Section 3.4)、実装は終了したセッション
     ID への送信を無視する (仕様強制ではなく実装ポリシー)。任意 ID への送信を
     検証する prop_send_datagram_arbitrary とは異なり、close_session で
     明示的に終了させたセッション ID を使う (session_ids_ からの削除経路を
@@ -379,7 +379,7 @@ def prop_next_event_returns_none():
     assert event is None
 
 
-# ========== close_session のエラーメッセージ切り詰め (draft-15 Section 6.12) ==========
+# ========== close_session のエラーメッセージ切り詰め (draft-16 Section 6.12) ==========
 
 
 @given(st.text(min_size=1025, max_size=2000))
@@ -387,7 +387,7 @@ def prop_next_event_returns_none():
 def prop_close_session_error_message_utf8_safe(message: str):
     """任意のエラーメッセージの close_session が UTF-8 境界で切り詰められて届く
 
-    draft-15 Section 6.12 の MUST「Senders that truncate an application-supplied
+    draft-16 Section 6.12 の MUST「Senders that truncate an application-supplied
     message MUST do so at a UTF-8 character boundary」「its length MUST NOT
     exceed 1024 bytes」に従い、message の内容によらずピアへ届く Application
     Error Message が well-formed UTF-8 で 1024 バイト以下になることを検証する。

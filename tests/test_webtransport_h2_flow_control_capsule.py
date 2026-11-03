@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 のフロー制御カプセル受信値検証テスト
 
-draft-15 Section 6.5 / 6.6 / 6.7 の MUST 「前回受信値より小さい
-WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS は
+draft-16 Section 6.5 / 6.6 / 6.7 の MUST 「前回受信値 (カプセル未受信なら
+初期値) を増加させない WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS は
 WT_FLOW_CONTROL_ERROR」と、 Section 6.7 / 6.10 の MUST 「Maximum Streams が
 2^60 を超える値は WT_FLOW_CONTROL_ERROR」を検証する。あわせて Section 6.9 の
 WT_STREAM_DATA_BLOCKED が、有効な状態のストリームと未使用の Stream ID では
@@ -10,7 +10,7 @@ WT_STREAM_DATA_BLOCKED が、有効な状態のストリームと未使用の St
 手段が存在しないため)。セッション閉鎖は close_session 経由の
 WT_CLOSE_SESSION (error code 0x50) で実現され、ワイヤ部分列チェックで
 検証する。WT_FLOW_CONTROL_ERROR (0xTBD) のプレースホルダ
-(draft-15 Section 3.4)。
+(draft-16 Section 3.4)。
 
 Section 6.8 の WT_DATA_BLOCKED も対象に含む。Maximum Data (可変長整数) を
 受理し、advisory な通知として扱って自側のフロー制御状態とクレジットを
@@ -44,14 +44,14 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
 WT_ERROR = WtErrorCode.WT_ERROR.value
 
 
-# Capsule Type (draft-15 Section 6)
+# Capsule Type (draft-16 Section 6)
 
 # Maximum Streams の上限は 2^60
 _MAX_STREAMS_LIMIT = 1 << 60
@@ -83,7 +83,7 @@ def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> byt
 def _assert_flow_control_error_sent(server: h2.Session, error_message: str) -> None:
     """WT_FLOW_CONTROL_ERROR (0x50) の WT_CLOSE_SESSION が送出されることを確認
 
-    WT_FLOW_CONTROL_ERROR は draft-15 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
+    WT_FLOW_CONTROL_ERROR は draft-16 Section 3.4 の 0xTBD のプレースホルダ。draft で値が
     確定したら更新する。
     """
     wire = server.send()
@@ -109,7 +109,7 @@ def _inject_capsule(server: h2.Session, session_id: int, capsule_type: int, payl
 
 
 def test_wt_max_data_decrease_closes_session() -> None:
-    """前回受信値より小さい WT_MAX_DATA で WT_FLOW_CONTROL_ERROR になることを確認
+    """前回受信値を増加させない WT_MAX_DATA で WT_FLOW_CONTROL_ERROR になることを確認
 
     対向 SETTINGS の SETTINGS_WT_INITIAL_MAX_DATA (既定 1048576) は受信値
     なので、それより小さいカプセルは Section 6.5 の MUST 違反になる。
@@ -119,11 +119,11 @@ def test_wt_max_data_decrease_closes_session() -> None:
     session_id = _connect_h2_session(client, server)
 
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(1))
-    _assert_flow_control_error_sent(server, "WT_MAX_DATA decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_DATA did not increase")
 
 
 def test_wt_max_stream_data_decrease_closes_session() -> None:
-    """前回受信値より小さい WT_MAX_STREAM_DATA で WT_FLOW_CONTROL_ERROR になることを確認
+    """前回受信値を増加させない WT_MAX_STREAM_DATA で WT_FLOW_CONTROL_ERROR になることを確認
 
     ストリーム未作成でも SETTINGS_WT_INITIAL_MAX_STREAM_DATA_* (既定 262144)
     は受信値なので、それより小さいカプセルは Section 6.6 の MUST 違反になる。
@@ -133,7 +133,7 @@ def test_wt_max_stream_data_decrease_closes_session() -> None:
 
     payload = _encode_varint(0) + _encode_varint(1)
     _inject_capsule(server, session_id, _WT_MAX_STREAM_DATA, payload)
-    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA did not increase")
 
 
 def test_wt_max_stream_data_increase_then_decrease_closes_session() -> None:
@@ -154,7 +154,7 @@ def test_wt_max_stream_data_increase_then_decrease_closes_session() -> None:
     _inject_capsule(
         server, session_id, _WT_MAX_STREAM_DATA, _encode_varint(0) + _encode_varint(400000)
     )
-    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA did not increase")
 
 
 def test_wt_max_stream_data_increase_raises_send_credit() -> None:
@@ -237,11 +237,11 @@ def test_wt_max_stream_data_decrease_on_existing_stream() -> None:
     _inject_capsule(
         server, session_id, _WT_MAX_STREAM_DATA, _encode_varint(stream_id) + _encode_varint(1)
     )
-    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA did not increase")
 
 
 def test_wt_max_streams_bidi_decrease_closes_session() -> None:
-    """前回受信値より小さい WT_MAX_STREAMS (bidi) で WT_FLOW_CONTROL_ERROR になることを確認
+    """前回受信値を増加させない WT_MAX_STREAMS (bidi) で WT_FLOW_CONTROL_ERROR になることを確認
 
     対向 SETTINGS の SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI (既定 100) は受信値
     なので、それより小さいカプセルは Section 6.7 の MUST 違反になる。
@@ -250,11 +250,11 @@ def test_wt_max_streams_bidi_decrease_closes_session() -> None:
     session_id = _connect_h2_session(client, server)
 
     _inject_capsule(server, session_id, _WT_MAX_STREAMS_BIDI, _encode_varint(1))
-    _assert_flow_control_error_sent(server, "WT_MAX_STREAMS decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAMS did not increase")
 
 
 def test_wt_max_streams_uni_decrease_closes_session() -> None:
-    """前回受信値より小さい WT_MAX_STREAMS (uni) で WT_FLOW_CONTROL_ERROR になることを確認
+    """前回受信値を増加させない WT_MAX_STREAMS (uni) で WT_FLOW_CONTROL_ERROR になることを確認
 
     対向 SETTINGS の SETTINGS_WT_INITIAL_MAX_STREAMS_UNI (既定 100) は受信値
     なので、それより小さいカプセルは Section 6.7 の MUST 違反になる。
@@ -263,7 +263,7 @@ def test_wt_max_streams_uni_decrease_closes_session() -> None:
     session_id = _connect_h2_session(client, server)
 
     _inject_capsule(server, session_id, _WT_MAX_STREAMS_UNI, _encode_varint(1))
-    _assert_flow_control_error_sent(server, "WT_MAX_STREAMS decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAMS did not increase")
 
 
 def test_wt_max_streams_exceeds_2_60_closes_session() -> None:
@@ -310,9 +310,9 @@ def test_wt_streams_blocked_uni_exceeds_2_60_closes_session() -> None:
 
 
 def test_wt_streams_blocked_decrease_does_not_close() -> None:
-    """WT_STREAMS_BLOCKED の減少値はエラーにしないことを確認
+    """WT_STREAMS_BLOCKED の非増加値はエラーにしないことを確認
 
-    Section 6.10 に減少値の受信側 MUST は無く、 advisory な通知のため検証
+    Section 6.10 に非増加値の受信側 MUST は無く、 advisory な通知のため検証
     対象外。SETTINGS の 100 より小さい 50 を送ってもセッションは閉じない。
     """
     client, server = _create_h2_session_pair()
@@ -330,7 +330,7 @@ def test_wt_streams_blocked_decrease_does_not_close() -> None:
 def test_wt_data_blocked_accepted_for_valid_varint_lengths(value: int, wire_length: int) -> None:
     """Maximum Data が正しい WT_DATA_BLOCKED が受理されセッションが存続することを確認
 
-    draft-15 Section 6.8 は Maximum Data を可変長整数と定めるため、1 / 2 / 4 /
+    draft-16 Section 6.8 は Maximum Data を可変長整数と定めるため、1 / 2 / 4 /
     8 バイトのいずれの符号化も受け入れる。値域の MUST は無いため上限
     (2^62 - 1) も受理する。フィールドの読み出しを実装していないと、この
     対照テストは (修正前でも) 通ってしまうため RED の観測対象ではない。
@@ -380,7 +380,7 @@ def test_wt_data_blocked_accepted_for_non_minimal_varint() -> None:
 def test_wt_data_blocked_does_not_update_flow_control_state() -> None:
     """受理した WT_DATA_BLOCKED が自側のフロー制御状態を更新しないことを確認
 
-    draft-15 Section 6.8 の Maximum Data は「ブロックが発生したセッション
+    draft-16 Section 6.8 の Maximum Data は「ブロックが発生したセッション
     レベルの上限」の申告であり、WT_MAX_DATA と違って自側の送信上限
     (max_data_local) を書き換えない。送信クレジットを観測点にして、既定値より
     大きい値を送っても残量が変わらないこと (状態更新が起きていないこと) を
@@ -416,10 +416,23 @@ def test_wt_data_blocked_does_not_update_flow_control_state() -> None:
     _assert_no_flow_control_error_sent(server)
 
 
-def test_wt_max_data_increase_and_equal_do_not_close() -> None:
-    """WT_MAX_DATA の増加・同一値はエラーにしないことを確認
+def test_wt_max_data_increase_does_not_close() -> None:
+    """WT_MAX_DATA の増加はエラーにしないことを確認
 
-    受信値より大きい値はクレジット更新、同一値は冗長な通知として受け入れる。
+    前回受信値より大きい値はクレジット更新とともに受理される。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(2_000_000))
+    _assert_no_flow_control_error_sent(server)
+
+
+def test_wt_max_data_equal_closes_session() -> None:
+    """WT_MAX_DATA の等値は「増加しない」ため WT_FLOW_CONTROL_ERROR になることを確認
+
+    draft-16 Section 6.5 は前回受信値 (カプセル未受信なら初期値) を増加
+    させない値の受信を MUST 違反とする。等値は冗長な通知として受理しない。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -428,11 +441,82 @@ def test_wt_max_data_increase_and_equal_do_not_close() -> None:
     _assert_no_flow_control_error_sent(server)
 
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(2_000_000))
-    _assert_no_flow_control_error_sent(server)
+    _assert_flow_control_error_sent(server, "WT_MAX_DATA did not increase")
+
+
+def test_wt_max_data_equal_to_initial_value_closes_session() -> None:
+    """初期値と等しい最初の WT_MAX_DATA は WT_FLOW_CONTROL_ERROR になることを確認
+
+    カプセル未受信時の比較基準は SETTINGS の初期値 (既定 1_048_576) で、
+    同値のカプセルは「増加しない」ためエラーになる (draft-16 Section 6.5)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_capsule(
+        server,
+        session_id,
+        _WT_MAX_DATA,
+        _encode_varint(h2.Config().wt_initial_max_data),
+    )
+    _assert_flow_control_error_sent(server, "WT_MAX_DATA did not increase")
+
+
+def test_wt_max_stream_data_equal_to_initial_value_closes_session() -> None:
+    """初期値と等しい最初の WT_MAX_STREAM_DATA は WT_FLOW_CONTROL_ERROR になることを確認
+
+    カプセル未受信時の比較基準は SETTINGS の初期値 (既定 262144) で、
+    同値のカプセルは「増加しない」ためエラーになる (draft-16 Section 6.6)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    payload = _encode_varint(0) + _encode_varint(h2.Config().wt_initial_max_stream_data)
+    _inject_capsule(server, session_id, _WT_MAX_STREAM_DATA, payload)
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAM_DATA did not increase")
+
+
+def test_wt_max_streams_equal_to_initial_value_closes_session() -> None:
+    """初期値と等しい最初の WT_MAX_STREAMS は WT_FLOW_CONTROL_ERROR になることを確認
+
+    カプセル未受信時の比較基準は SETTINGS の初期値 (既定 100) で、同値の
+    カプセルは「増加しない」ためエラーになる (draft-16 Section 6.7)。
+    """
+    client, server = _create_h2_session_pair()
+    session_id = _connect_h2_session(client, server)
+
+    _inject_capsule(
+        server,
+        session_id,
+        _WT_MAX_STREAMS_BIDI,
+        _encode_varint(h2.Config().wt_initial_max_streams_bidi),
+    )
+    _assert_flow_control_error_sent(server, "WT_MAX_STREAMS did not increase")
+
+
+def test_wt_max_data_zero_initial_equal_capsule_closes_session() -> None:
+    """初期値 0 のセッションで値 0 の WT_MAX_DATA を受信するとエラーになることを確認
+
+    初期値 0 も比較基準として記録されるため、値 0 のカプセルは「増加しない」
+    として WT_FLOW_CONTROL_ERROR になる (draft-16 Section 6.5)。0 を基準に
+    記録しない実装では見逃す。
+    """
+    client_config = h2.Config()
+    client_config.wt_initial_max_data = 0
+    client = h2.Session.create_client(client_config)
+    server_config = h2.Config()
+    server_config.is_server = True
+    server = h2.Session.create_server(server_config)
+    _h2_pump(client, server)
+    _h2_pump(server, client)
+    session_id = _connect_h2_session(client, server)
+
+    _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(0))
+    _assert_flow_control_error_sent(server, "WT_MAX_DATA did not increase")
 
 
 def test_wt_max_data_decrease_does_not_push_error_event() -> None:
-    """減少値検知は Error イベントを push せず close_session のみで閉じることを確認
+    """非増加検知は Error イベントを push せず close_session のみで閉じることを確認
 
     受信フロー制御違反 (Error イベント push) とは経路を分け、本検知は
     close_session 直接呼び出しだけにする。
@@ -443,16 +527,16 @@ def test_wt_max_data_decrease_does_not_push_error_event() -> None:
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(1))
     error_events = [event for event in _drain_events(server) if event.type == h2.EventType.ERROR]
     assert error_events == []
-    _assert_flow_control_error_sent(server, "WT_MAX_DATA decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_DATA did not increase")
 
 
 def test_wt_max_data_first_capsule_no_decrease_does_not_close() -> None:
-    """受信値 0 より大きい最初の WT_MAX_DATA を減少扱いしないことを確認
+    """初期値 0 より大きい最初の WT_MAX_DATA を非増加扱いしないことを確認
 
     クライアントが 0 の初期フロー制御 (wt_initial_max_data = 0) を広告した
-    セッションでは、サーバーの「前回受信値」は未設定のまま (0 は記録されない)
-    ため、最初のカプセルで 100 を受け取っても Section 6.5 の減少にはならない。
-    受信後に 50 を受け取ると 100 からの減少になる。
+    セッションでは、サーバーの「前回受信値」は初期値 0 になる。最初の
+    カプセルで 100 を受け取ると増加として受理される。受信後に 50 を
+    受け取ると 100 からの非増加になる (draft-16 Section 6.5)。
     """
     client_config = h2.Config()
     client_config.wt_initial_max_data = 0
@@ -473,15 +557,13 @@ def test_wt_max_data_first_capsule_no_decrease_does_not_close() -> None:
     assert len(ready_events) == 1
     assert server.accept_session(session_id) is True, "セッションの受理に失敗しました"
     _h2_pump(server, client)
-    # クライアントの初期 WT_MAX_DATA カプセル (値 0) はまだサーバーへ
-    # 届いていない (SETTINGS の 0 は既に受信済みだが、クライアントの
-    # セッション確立後の初期カプセルは _h2_pump(server, client) まで送られない)
+    # SETTINGS の初期値 0 が受信済みで、比較基準は 0 になっている
 
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(100))
     _assert_no_flow_control_error_sent(server)
 
     _inject_capsule(server, session_id, _WT_MAX_DATA, _encode_varint(50))
-    _assert_flow_control_error_sent(server, "WT_MAX_DATA decreased")
+    _assert_flow_control_error_sent(server, "WT_MAX_DATA did not increase")
 
 
 def test_get_send_credit_observes_remaining_credit() -> None:
@@ -543,7 +625,7 @@ def test_get_send_credit_reaches_zero_when_exhausted() -> None:
 def test_wt_stream_data_blocked_accepted_for_open_stream() -> None:
     """recv_state が終端でないストリームへの WT_STREAM_DATA_BLOCKED が受理されることを確認
 
-    draft-15 Section 6.9 の MUST は「not in a valid state」への受信だけを
+    draft-16 Section 6.9 の MUST は「not in a valid state」への受信だけを
     対象とする。開いたままのストリームへの申告は受理し、セッションを閉じない
     (ピアの申告であり自側のフロー制御状態も変えない)。
     """

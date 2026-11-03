@@ -37,7 +37,7 @@ def test_send_stream_data_rejects_input_over_one_mib() -> None:
     session_id = _connect_h2_session(client, server)
     stream_id = client.open_stream(session_id, False)
     assert stream_id >= 0
-    # 確立時に client がキューした初期フロー制御カプセルを先に送出しておく
+    # 確立直後の送信待ちを先に処理しておく
     _h2_pump(client, server)
 
     with pytest.raises(
@@ -53,7 +53,7 @@ def test_send_datagram_rejects_input_over_one_mib() -> None:
     """send_datagram が 1 MiB 超の入力で ValueError になり、ワイヤへ積まないことを確認"""
     client, _server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, _server)
-    # 確立時に client がキューした初期フロー制御カプセルを先に送出しておく
+    # 確立直後の送信待ちを先に処理しておく
     _h2_pump(client, _server)
 
     with pytest.raises(
@@ -104,7 +104,7 @@ def test_send_datagram_accepts_one_mib() -> None:
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
-    # 確立時に client がキューした初期フロー制御カプセルを先に送出しておく
+    # 確立直後の送信待ちを先に処理しておく
     _h2_pump(client, server)
     assert client.want_write() is False
 
@@ -123,7 +123,7 @@ def test_send_stream_data_accepts_one_mib() -> None:
     session_id = _connect_h2_session(client, server)
     stream_id = client.open_stream(session_id, False)
     assert stream_id >= 0
-    # 確立時に client がキューした初期フロー制御カプセルを先に送出しておく
+    # 確立直後の送信待ちを先に処理しておく
     _h2_pump(client, server)
     assert client.want_write() is False
 

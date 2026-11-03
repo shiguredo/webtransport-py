@@ -53,15 +53,16 @@ def _encode_wt_drain_session_capsule() -> bytes:
 def test_stop_sending_after_peer_end_stream_not_sent() -> None:
     """ピアの END_STREAM 受信後に stop_sending がワイヤへ送出されないことを確認
 
-    ピアが END_STREAM のみで CONNECT ストリームを閉じた場合 (draft-15
+    ピアが END_STREAM のみで CONNECT ストリームを閉じた場合 (draft-16
     Section 3.4 の正規の終了経路)、handle_end_stream がエントリを削除する。
     エントリ削除後は stop_sending がエントリ不在で塞がれ、WT_STOP_SENDING
     カプセルは送出されない。ワイヤには応答 END_STREAM (空 DATA + END_STREAM)
     が送出される (WT_CLOSE_SESSION 無しのクリーンな終了は error code 0 の
     WT_CLOSE_SESSION による終了と等価 (Section 6.12) であり、同節の受信者 MUST は
     文面上はカプセルの受信を条件とするが、等価規定の下で END_STREAM のみの受信にも
-    適用する実装ポリシー。確立時にキュー済みの初期フロー制御カプセルが同じ
-    ワイヤに残り得る)。修正前はエントリ不在でもカプセルをキューしてワイヤへ
+    適用する実装ポリシー。初期フロー制御値は SETTINGS で伝達済みのため、
+    同じワイヤに初期カプセルは現れない)。修正前はエントリ不在でもカプセルを
+    キューしてワイヤへ
     送出されていた (終了済みセッション宛の誤送出)。
     """
     client, server = _create_h2_session_pair()
@@ -82,7 +83,7 @@ def test_stop_sending_after_peer_end_stream_not_sent() -> None:
 def test_drain_session_after_peer_end_stream_not_sent() -> None:
     """ピアの END_STREAM 受信後に drain_session がワイヤへ送出されないことを確認
 
-    stop_sending と同じく、END_STREAM 検知 (draft-15 Section 3.4) 後の
+    stop_sending と同じく、END_STREAM 検知 (draft-16 Section 3.4) 後の
     drain_session はエントリ不在で塞がれる。修正前はカプセルをキューして
     ワイヤへ送出されていた。
     """
@@ -143,7 +144,7 @@ def test_stop_sending_after_client_non_2xx_reject_not_sent() -> None:
     """非 2xx 拒否受信後に stop_sending がワイヤへ送出されないことを確認
 
     サーバーが reject_session (非 2xx) で拒否すると、クライアントのエントリが
-    応答受信時に削除される (draft-15 Section 3.2 では非 2xx はセッション非
+    応答受信時に削除される (draft-16 Section 3.2 では非 2xx はセッション非
     確立)。HTTP/2 ストリーム自体はサーバー側のみが閉じた半開きで生存する
     ため、修正前はエントリ不在でもカプセルをキューしてワイヤへ送出されて
     いた。拒否前はセッション未確立で open_stream できないため stream_id は
@@ -169,7 +170,7 @@ def test_stop_sending_after_client_non_2xx_reject_not_sent() -> None:
 def test_drain_session_after_client_non_2xx_reject_not_sent() -> None:
     """非 2xx 拒否受信後に drain_session がワイヤへ送出されないことを確認
 
-    stop_sending と同じく、非 2xx 拒否 (draft-15 Section 3.2) でエントリが
+    stop_sending と同じく、非 2xx 拒否 (draft-16 Section 3.2) でエントリが
     削除された後の drain_session は送出されない。修正前はカプセルをキュー
     してワイヤへ送出されていた。
     """
@@ -328,7 +329,7 @@ def _encode_wt_reset_stream_capsule(stream_id: int, error_code: int, reliable_si
 def test_stop_sending_on_ready_stream_auto_resets() -> None:
     """Ready 状態のストリームへの WT_STOP_SENDING に WT_RESET_STREAM で自動応答することを確認
 
-    draft-15 Section 6.3 は「the recipient of a WT_STOP_SENDING capsule sends
+    draft-16 Section 6.3 は「the recipient of a WT_STOP_SENDING capsule sends
     a WT_RESET_STREAM capsule in response if the stream is in the "Ready" or
     "Send" state」(RFC 9000 Section 3.5 由来の MUST) を求める。エラーコードは
     受信した WT_STOP_SENDING から複製する (同 Section の can)。ストリーム
@@ -358,7 +359,7 @@ def test_stop_sending_on_ready_stream_auto_resets() -> None:
     assert stop_events[0].error_code == error_code
 
     # 自動応答の WT_RESET_STREAM がワイヤに載る (エラーコードは複製され、
-    # Reliable Size は送信済みバイト数 5 になる。draft-15 Section 6.2)
+    # Reliable Size は送信済みバイト数 5 になる。draft-16 Section 6.2)
     wire = server.send()
     assert wire is not None, "WT_RESET_STREAM が送出されていません"
     assert _encode_wt_reset_stream_capsule(stream_id, error_code, len(b"hello")) in wire
@@ -367,7 +368,7 @@ def test_stop_sending_on_ready_stream_auto_resets() -> None:
 def test_stop_sending_on_terminal_stream_does_not_auto_reset() -> None:
     """送信側が終端済みのストリームには自動応答しないことを確認
 
-    draft-15 Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT be sent after
+    draft-16 Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT be sent after
     a stream is closed or reset」により、送信側が FIN 送出済み (DataSent) の
     ストリームには WT_RESET_STREAM を送出しない。STOP_SENDING イベント自体は
     届く。

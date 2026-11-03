@@ -2,7 +2,7 @@
 
 Length 解釈直後に単一カプセルのペイロード上限 (既定 1 MiB) を検査し、
 超過時は WT_ERROR (0x52) でセッションを閉じることを検証する
-(draft-ietf-webtrans-http2-15)。ペイロード待ちの無制限蓄積による
+(draft-ietf-webtrans-http2-16)。ペイロード待ちの無制限蓄積による
 メモリ DoS 経路を塞ぐ。ワイヤ注入で再現する (公開 API では非準拠な
 Length を送出する手段が存在しないため)。
 """
@@ -23,7 +23,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value

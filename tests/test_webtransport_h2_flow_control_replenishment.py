@@ -1,6 +1,6 @@
 """WebTransport over HTTP/2 のフロー制御クレジット補充テスト
 
-draft-15 Section 4.4 の SHOULD「受信消費に応じたクレジット送出」に従い、
+draft-16 Section 4.4 の SHOULD「受信消費に応じたクレジット送出」に従い、
 WT_MAX_DATA / WT_MAX_STREAM_DATA を受信量の 1/2 到達で補充し、
 WT_MAX_STREAMS をストリーム終了時に補充することを検証する。送信側は
 超過時にセッションを閉じず BLOCKED 送出と保留キューで待ち、対向の
@@ -65,7 +65,7 @@ def _received_stream_bytes(session: h2.Session) -> int:
 def _create_wide_window_h2_session_pair() -> tuple[h2.Session, h2.Session]:
     """HTTP/2 の受信ウィンドウを広げた h2.Session ペアを作成する
 
-    本テストは WebTransport (draft-15 Section 4.4) のクレジット補充を対象と
+    本テストは WebTransport (draft-16 Section 4.4) のクレジット補充を対象と
     する。HTTP/2 レベルの受信ウィンドウはアプリ消費に連動して開く実装に
     なったため、既定の 65535 では 64 KiB のカプセルが 1 フレームに収まらず
     先頭で止まる。WT 層の検証に集中するため HTTP/2 側は広げておく。
@@ -468,7 +468,7 @@ def test_max_stream_data_on_wire_without_stop_sending() -> None:
 def test_max_stream_data_not_sent_after_stop_sending() -> None:
     """WT_STOP_SENDING 送出後の WT_MAX_STREAM_DATA 送出が抑止されることを確認
 
-    draft-15 Section 6.6 の MUST NOT「A WT_MAX_STREAM_DATA capsule MUST NOT
+    draft-16 Section 6.6 の MUST NOT「A WT_MAX_STREAM_DATA capsule MUST NOT
     be sent after a sender requests that a stream be closed with
     WT_STOP_SENDING」を検証する。修正前は送出済みを記録していなかったため、
     停止後も受信量に応じた補充の WT_MAX_STREAM_DATA が送出されていた。
@@ -505,7 +505,7 @@ def test_max_stream_data_not_sent_after_stop_sending() -> None:
 def test_max_stream_data_accepted_after_local_stop_sending() -> None:
     """自側が WT_STOP_SENDING を送出したストリームの WT_MAX_STREAM_DATA が受理されることを確認
 
-    draft-15 Section 6.6 の 1 文目は WT_STOP_SENDING の送出側に WT_MAX_STREAM_DATA
+    draft-16 Section 6.6 の 1 文目は WT_STOP_SENDING の送出側に WT_MAX_STREAM_DATA
     の送出を禁じ、2 文目は WT_STOP_SENDING を受信した側にストリームエラーの送出を
     課す。自側は受信側ではないため、停止を要求した後にピアが送る
     WT_MAX_STREAM_DATA は合法であり、拒否してはならない (受信側の判定に自側の
@@ -552,7 +552,7 @@ def test_max_stream_data_accepted_after_local_stop_sending() -> None:
 def test_stop_sending_sent_once_per_stream() -> None:
     """同じストリームへ stop_sending を複数回呼んでも WT_STOP_SENDING が 1 個だけであることを確認
 
-    draft-15 Section 6.3 の MUST NOT「A WT_STOP_SENDING capsule MUST NOT be
+    draft-16 Section 6.3 の MUST NOT「A WT_STOP_SENDING capsule MUST NOT be
     sent multiple times for the same stream」を検証する。2 回目以降は存在
     しないストリーム ID への送出と同じく黙って無視され、ワイヤへの送出・
     イベント・セッション終了のいずれも引き起こさない。あわせて Section 6.6 の

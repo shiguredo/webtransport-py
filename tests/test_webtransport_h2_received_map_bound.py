@@ -3,7 +3,7 @@
 受信系コンテナ (received_max_stream_data_by_id /
 received_stop_sending_stream_ids) がピアの入力で無制限に増えるメモリ
 DoS への防御 (固定上限の安全弁) を検証する。上限超過の新規 ID は
-保持せず、上限内の二重受信検出・減少検出と、実在ストリームへの
+保持せず、上限内の二重受信検出・非増加検出と、実在ストリームへの
 イベント通知・クレジット反映は維持される。
 """
 
@@ -23,7 +23,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -111,7 +111,7 @@ def test_bulk_unknown_max_stream_data_keeps_session_alive() -> None:
     _drain_events(server)
 
     # 未知 ID へ大量注入する。初期クレジット (262144) より大きい値に
-    # しないと減少検出でセッションエラーになる
+    # しないと非増加検出でセッションエラーになる
     for batch_start in range(0, _BULK_IDS, _BATCH_SIZE):
         count = min(_BATCH_SIZE, _BULK_IDS - batch_start)
         capsules = [
@@ -134,8 +134,8 @@ def test_bulk_unknown_max_stream_data_keeps_session_alive() -> None:
 def test_max_stream_data_over_limit_new_id_not_retained() -> None:
     """上限超過の新規 ID への WT_MAX_STREAM_DATA は保持されない
 
-    保持されないため、その ID への減少値は検出されずセッションが生存
-    する (上限超過分は減少検出 (draft-15 Section 6.6) の対象外になる
+    保持されないため、その ID への非増加値は検出されずセッションが生存
+    する (上限超過分は非増加検出 (draft-16 Section 6.6) の対象外になる
     既知の制約)。
     """
     client, server = _create_h2_session_pair()
@@ -146,7 +146,7 @@ def test_max_stream_data_over_limit_new_id_not_retained() -> None:
     assert not _error_events(server)
     assert server.get_session_ids() == [session_id]
 
-    # 上限超過の新規 ID は保持されず、減少値を送っても
+    # 上限超過の新規 ID は保持されず、非増加値を送っても
     # WT_FLOW_CONTROL_ERROR の WT_CLOSE_SESSION (Type 0x2843) は送出されない
     over_id = (_MAP_LIMIT + 100) * 4
     _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(over_id, 1 << 20)])
@@ -158,11 +158,11 @@ def test_max_stream_data_over_limit_new_id_not_retained() -> None:
 
 
 def test_max_stream_data_existing_stream_decrease_detected_after_limit() -> None:
-    """上限到達後も実在ストリームの減少検出は維持される
+    """上限到達後も実在ストリームの非増加検出は維持される
 
     実在ストリームは max_stream_data_local を前回値に使うため、上限
-    超過でも減少値が WT_FLOW_CONTROL_ERROR になる (クレジット反映と
-    減少検出を落とさない)。
+    超過でも非増加値が WT_FLOW_CONTROL_ERROR になる (クレジット反映と
+    非増加検出を落とさない)。
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
@@ -178,7 +178,7 @@ def test_max_stream_data_existing_stream_decrease_detected_after_limit() -> None
     _fill_unknown_max_stream_data(server, session_id, _MAP_LIMIT, first_index=1)
     assert not _error_events(server)
 
-    # 実在ストリームへ増加値を送り、その後減少値を送ると
+    # 実在ストリームへ増加値を送り、その後非増加値を送ると
     # WT_FLOW_CONTROL_ERROR の WT_CLOSE_SESSION (Type 0x2843) が送出される
     _inject_batch(server, session_id, [_encode_wt_max_stream_data_capsule(stream_id, 1 << 20)])
     assert not _error_events(server)
@@ -268,7 +268,7 @@ def test_stop_sending_for_existing_stream_survives_map_limit() -> None:
 def test_stop_sending_after_release_still_detected_as_duplicate() -> None:
     """解放後の 2 回目 WT_STOP_SENDING もストリーム状態エラーになる
 
-    受信記録はセッション中保持されるため、二重受信検出 (draft-15
+    受信記録はセッション中保持されるため、二重受信検出 (draft-16
     Section 6.3 の MUST) が解放後も維持される。
     """
     client, server = _create_h2_session_pair()

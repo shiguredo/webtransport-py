@@ -1,5 +1,5 @@
 /**
- * WebTransport over HTTP/2 バインディング (draft-ietf-webtrans-http2-15)
+ * WebTransport over HTTP/2 バインディング (draft-ietf-webtrans-http2-16)
  *
  * Sans-IO スタイルの WebTransport over HTTP/2 実装
  * Capsule Protocol (RFC 9297) を使用
@@ -33,10 +33,10 @@ namespace webtransport {
 namespace h2 {
 
 /**
- * WebTransport over HTTP/2 のエラーコード (draft-ietf-webtrans-http2-15
+ * WebTransport over HTTP/2 のエラーコード (draft-ietf-webtrans-http2-16
  * Section 3.4)
  *
- * draft-15 では 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダである。draft で
+ * draft-16 では 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダである。draft で
  * 値が確定したらここだけを更新する (C++ / Python 高レベル / tests はすべて
  * この定数と、バインディングで公開する同名の Python 定数を参照する)
  */
@@ -50,7 +50,7 @@ enum WtErrorCode : uint32_t {
 };
 
 /**
- * Capsule Type (draft-ietf-webtrans-http2-15 Section 6)
+ * Capsule Type (draft-ietf-webtrans-http2-16 Section 6)
  *
  * WT_STREAM の Type は 0x190B4D3B..0x190B4D3C で、最下位ビットが FIN
  * (Section 6.4)。非終端は 0x190B4D3C、終端は 0x190B4D3B。
@@ -59,7 +59,7 @@ enum class CapsuleType : uint64_t {
   // DATAGRAM (RFC 9297 Section 3.5 / draft Section 6.11)
   Datagram = 0x00,
 
-  // WebTransport カプセル (draft-ietf-webtrans-http2-15)
+  // WebTransport カプセル (draft-ietf-webtrans-http2-16)
   Padding = 0x190B4D38,
   WtResetStream = 0x190B4D39,
   WtStopSending = 0x190B4D3A,
@@ -82,10 +82,12 @@ enum class CapsuleType : uint64_t {
 };
 
 /**
- * WebTransport over HTTP/2 用 SETTINGS (draft-15 Section 11.2)
+ * WebTransport over HTTP/2 用 SETTINGS (draft-16 Section 11.2)
  * 将来コードポイントが変わる可能性がある。
  */
-constexpr uint16_t SETTINGS_WT_ENABLED = 0x2b60;
+constexpr uint16_t SETTINGS_WT_ENABLED = 0x2b67;
+// draft-15 の codepoint。旧実装との相互運用のため併送・受理する
+constexpr uint16_t SETTINGS_WT_ENABLED_DRAFT15 = 0x2b60;
 constexpr uint16_t SETTINGS_WT_INITIAL_MAX_DATA = 0x2b61;
 constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_UNI = 0x2b62;
 constexpr uint16_t SETTINGS_WT_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL = 0x2b63;
@@ -281,14 +283,14 @@ struct WtSessionInfo {
   // 時点でカプセルが切り詰められていた場合の RST_STREAM)。
   // 正常な WT_CLOSE_SESSION 受信はエントリ削除で表現する。
   // is_established は connect 直後 (2xx 応答前) も false のため、楽観的送信
-  // (draft-15 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
+  // (draft-16 Section 3.2) を塞がないよう終了状態は専用フラグで管理する
   bool is_terminated = false;
 
   // サーバーが 2xx を送出する前にピアが WT_CLOSE_SESSION 無しの END_STREAM で
   // CONNECT ストリームを閉じたことを検知したか (受理前 END_STREAM)。検知時点
   // では終了処理を行わず、accept_session が 2xx を送出し受理前の蓄積カプセルを
   // 遅延処理した後に terminate_pre_accept_end_stream_session で後始末する
-  // (draft-15 Section 3.4 のセッション終了条件のうち、確立前の CONNECT
+  // (draft-16 Section 3.4 のセッション終了条件のうち、確立前の CONNECT
   // ストリームクローズ)。終了状態 (is_terminated) とは意味が異なり、
   // process_capsules の蓄積破棄を起こさない。エントリを残したまま
   // is_terminated を立てる経路では is_terminated と同一箇所で false に戻す
@@ -297,9 +299,10 @@ struct WtSessionInfo {
   // フロー制御 (送信側)
   uint64_t bytes_sent = 0;
   uint64_t max_data_local = 0;
-  // 対向から受信した直近の Maximum Data (SETTINGS 非 0 または
-  // WT_MAX_DATA)。未受信は nullopt で、減少値判定の基準にならない
-  // (draft-15 Section 6.5。自側 config へのフォールバックは廃止済み)
+  // 対向から受信した直近の Maximum Data (SETTINGS の初期値または
+  // WT_MAX_DATA)。セッション生成時に初期値 (0 を含む) で初期化され、
+  // 非増加判定の基準になる (draft-16 Section 6.5。自側 config への
+  // フォールバックは廃止済み)
   std::optional<uint64_t> received_max_data;
 
   // フロー制御 (受信側)
@@ -311,12 +314,13 @@ struct WtSessionInfo {
   uint64_t next_uni_stream_id = 0;
   uint64_t max_streams_bidi_local = 0;
   uint64_t max_streams_uni_local = 0;
-  // 対向から受信した直近の Maximum Streams (SETTINGS 非 0 または
-  // WT_MAX_STREAMS)。未受信は nullopt (draft-15 Section 6.7)
+  // 対向から受信した直近の Maximum Streams (SETTINGS の初期値または
+  // WT_MAX_STREAMS)。セッション生成時に初期値 (0 を含む) で初期化され、
+  // 非増加判定の基準になる (draft-16 Section 6.7)
   std::optional<uint64_t> received_max_streams_bidi;
   std::optional<uint64_t> received_max_streams_uni;
   // 自側が SETTINGS / WT_MAX_STREAMS で広告した受信上限
-  // (draft-15 Section 6.7。対向が開いてよい累積本数)
+  // (draft-16 Section 6.7。対向が開いてよい累積本数)
   uint64_t max_streams_bidi_remote = 0;
   uint64_t max_streams_uni_remote = 0;
   uint64_t streams_bidi_opened = 0;
@@ -329,29 +333,29 @@ struct WtSessionInfo {
   std::vector<uint8_t> capsule_buffer;
 
   // 対向の初期ストリームデータ上限 (送信側クレジット)
-  // draft-15 Section 4.3.1 / 4.3.2
+  // draft-16 Section 4.3.1 / 4.3.2
   uint64_t peer_max_stream_data_uni = 0;
   // 自側が開いた双方向ストリーム向け (対向の BIDI_REMOTE)
   uint64_t peer_max_stream_data_bidi_local = 0;
   // 対向が開いた双方向ストリーム向け (対向の BIDI_LOCAL)
   uint64_t peer_max_stream_data_bidi_remote = 0;
   // ストリーム種別ごとの初期 Maximum Stream Data 受信値
-  // (SETTINGS 非 0 / WebTransport-Init)
+  // (SETTINGS と WebTransport-Init の大きい方。0 を含む)
   std::optional<uint64_t> received_initial_max_stream_data_uni;
   std::optional<uint64_t> received_initial_max_stream_data_bidi_local;
   std::optional<uint64_t> received_initial_max_stream_data_bidi_remote;
   // ストリーム未作成時も含め、 WT_MAX_STREAM_DATA で受信した直近値
-  // (draft-15 Section 6.6 の「previously received value」)。
+  // (draft-16 Section 6.6 の「previously received value」)。
   // セッション破棄まで残し、ストリーム単位では消さない。メモリ DoS
   // 防止のため kMaxReceivedMapEntries を超える新規 ID は保持しない
   std::map<uint64_t, uint64_t> received_max_stream_data_by_id;
-  // 受信済み WT_STOP_SENDING の Stream ID (draft-15 Section 6.3)。
+  // 受信済み WT_STOP_SENDING の Stream ID (draft-16 Section 6.3)。
   // 未知ストリームでも検出するため WtStreamInfo ではなくセッション単位の
   // 集合で持つ。セッション破棄まで残し、ストリーム単位では消さない。
   // メモリ DoS 防止のため kMaxReceivedMapEntries を超える新規 ID は
   // 保持しない
   std::set<uint64_t> received_stop_sending_stream_ids;
-  // 送出済み WT_STOP_SENDING の Stream ID。draft-15 Section 6.3 の
+  // 送出済み WT_STOP_SENDING の Stream ID。draft-16 Section 6.3 の
   // 「同じストリームへ 2 回送出しない」の判定と、Section 6.6 の「送出後に
   // 同じストリームへ WT_MAX_STREAM_DATA を送らない」の抑止に使う。
   // ストリームエントリの解放後も抑止する必要があるため WtStreamInfo では
@@ -366,7 +370,7 @@ struct WtSessionInfo {
   std::set<uint64_t> sent_stop_sending_stream_ids;
   // 解放済み (H2Session::maybe_release_stream が streams から消した)
   // Stream ID。解放後にピアが同じ ID へ WT_STREAM / WT_RESET_STREAM /
-  // WT_STREAM_DATA_BLOCKED を送ったときの draft-15 Section 6.4 / 6.2 / 6.9 の
+  // WT_STREAM_DATA_BLOCKED を送ったときの draft-16 Section 6.4 / 6.2 / 6.9 の
   // 検出に使う。解放のたびに増えるため、受信系コンテナと同じ固定上限
   // kMaxReceivedMapEntries で有界にし、超過した ID は保持しない (上限超過後は
   // 再作成が起こり得るという既知の制約になる)。自側送信専用 (自側 initiator
@@ -374,7 +378,7 @@ struct WtSessionInfo {
   std::set<uint64_t> released_stream_ids;
 
   // 同一制限値での BLOCKED 系カプセルの重複送出を抑止する印。対向の
-  // MAX 受信で制限が増えたら戻す。送出自体は draft-15 Section 6.8 / 6.9 /
+  // MAX 受信で制限が増えたら戻す。送出自体は draft-16 Section 6.8 / 6.9 /
   // 6.10 の SHOULD (任意) に従うもので、初回のみに絞るのは実装の選択である
   bool data_blocked_sent = false;
   bool streams_blocked_bidi_sent = false;
@@ -431,7 +435,7 @@ class H2Session {
    * @param origin Origin ヘッダー値 (空なら付与しない)
    * @return セッション ID (失敗時は -1)
    *
-   * draft-15 Section 3.1: SETTINGS_WT_ENABLED と
+   * draft-16 Section 3.1: SETTINGS_WT_ENABLED と
    * SETTINGS_ENABLE_CONNECT_PROTOCOL を受信するまで呼んではならない。
    */
   int32_t connect(const std::string& url, const std::string& origin = "");
@@ -440,7 +444,7 @@ class H2Session {
    * 対向の SETTINGS で WebTransport over HTTP/2 が有効か
    * (ENABLE_CONNECT_PROTOCOL=1 かつ WT_ENABLED=1)
    *
-   * draft-15 Section 3.1
+   * draft-16 Section 3.1
    */
   bool is_webtransport_ready() const;
 
@@ -452,7 +456,8 @@ class H2Session {
    * カプセルを遅延処理した後にセッション終了として処理する (SessionClosed の
    * error_code は 0。受理前に届いた WT_CLOSE_SESSION が遅延処理で確定した場合は
    * その error code。遅延処理後もカプセルが切り詰められていれば PROTOCOL_ERROR
-   * のストリームエラーになり、初期フロー制御カプセルは送出しない)
+   * のストリームエラーになる。初期フロー制御値は SETTINGS で伝達済みのため、
+   * 受理時の初期フロー制御カプセル送出は行わない)
    * @param session_id セッション ID
    * @return 成功したかどうか
    */
@@ -462,7 +467,7 @@ class H2Session {
    * WebTransport セッションを拒否 (サーバー用)
    *
    * 非 2xx 応答で拒否されたセッションは一度も確立されていない
-   * (draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport session
+   * (draft-ietf-webtrans-http2-16 Section 3.2 の「A WebTransport session
    * is established when the server sends a 2xx response」) ため、
    * wt_sessions_ からセッション ID を削除する (SessionClosed イベントは
    * 発火しない。黙って削除)。2xx を渡した場合は削除しない (2xx 送出は
@@ -512,7 +517,7 @@ class H2Session {
    * 受理前 END_STREAM の保留ガードは持たない)。リセット済み (send_state が
    * ResetSent)・FIN 送出済み
    * (send_state が DataSent) のストリームへの送信も無視する
-   * (draft-15 Section 6.4)。
+   * (draft-16 Section 6.4)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
    * @param data 送信データ
@@ -532,13 +537,13 @@ class H2Session {
    * 受理前はストリームエントリが作られない)。存在しないストリーム ID への送信も
    * 黙って無視する
    * (セッションは閉じない)。リセット送出済み (ResetSent)・FIN 送出済み
-   * (DataSent) のストリームへの WT_RESET_STREAM 送出も無視する (draft-15
+   * (DataSent) のストリームへの WT_RESET_STREAM 送出も無視する (draft-16
    * Section 6.2 の「A WT_RESET_STREAM capsule MUST NOT be sent after a
    * stream is closed or reset」。再リセットと FIN 後のリセットの両方)。
-   * Reliable Size は常に送信済みバイト数 (bytes_sent) を載せる (draft-15
+   * Reliable Size は常に送信済みバイト数 (bytes_sent) を載せる (draft-16
    * Section 6.2)。
    * 送信リセットは送信側の終了のみであり受信側は継続するため
-   * (draft-15 Section 5.2 の QUIC 状態ミラー)、エントリは保持され、以後の
+   * (draft-16 Section 5.2 の QUIC 状態ミラー)、エントリは保持され、以後の
    * send_stream_data は塞がれる (受信側の追跡は維持される)。
    * 入力検証はセッション・未知ストリームの検査より先に行う。stream_id が
    * 2^62 以上の場合は std::invalid_argument を投げる (nanobind の既定翻訳で
@@ -563,7 +568,7 @@ class H2Session {
    * セッション・未知ストリームの検査より先に行い、stream_id が 2^62 以上の
    * 場合は std::invalid_argument を投げる (nanobind の既定翻訳で ValueError。
    * 終了済みセッションでも例外になる)。
-   * 送出したストリームへは以後 WT_MAX_STREAM_DATA を送出しない (draft-15
+   * 送出したストリームへは以後 WT_MAX_STREAM_DATA を送出しない (draft-16
    * Section 6.6 の MUST NOT)。
    * @param session_id セッション ID
    * @param stream_id ストリーム ID
@@ -580,12 +585,12 @@ class H2Session {
    * 終了したセッション ID と、一度も connect されていないセッション ID への
    * 送信は黙って無視する。セッション終了の検知は wt_sessions_ のエントリと
    * is_terminated フラグで行う: 正常な WT_CLOSE_SESSION 受信後・受理後
-   * END_STREAM 受信後はエントリが削除されて塞がり (draft-15 Section 3.4 の
+   * END_STREAM 受信後はエントリが削除されて塞がり (draft-16 Section 3.4 の
    * セッション終了 = CONNECT ストリームのクローズ)、ペイロード不正のカプセル
    * (Application Error Code が欠けた WT_CLOSE_SESSION など) とローカル
    * close_session 後は終了フラグで塞ぐ (Section 6.12 の WT_CLOSE_SESSION に
    * よる終了通知。本対応は仕様強制ではなく実装ポリシーである)。楽観的送信
-   * (draft-15 Section 3.2 の MAY) は妨げない: クライアントは connect 直後
+   * (draft-16 Section 3.2 の MAY) は妨げない: クライアントは connect 直後
    * (2xx 応答前)、サーバーは CONNECT リクエスト受信時に wt_sessions_ へ
    * エントリが挿入され、終了
    * フラグが立っていないため従来どおり送出される (サーバー側で受理前
@@ -593,7 +598,7 @@ class H2Session {
    * (拒否) を受けたセッション ID 宛の送信は、応答受信時に wt_sessions_ から
    * 削除されるため塞がれる (1xx を挟んだ拒否は削除が機能せずエントリが残る
    * 既知の制約)。ピアが WT_CLOSE_SESSION なしで END_STREAM のみを送る終了
-   * 経路 (draft-15 Section 3.4 の正規の終了経路) は、カプセル境界で終わって
+   * 経路 (draft-16 Section 3.4 の正規の終了経路) は、カプセル境界で終わって
    * いれば END_STREAM 検知でエントリが削除されて塞がれ、カプセルが切り詰め
    * られていれば PROTOCOL_ERROR の RST_STREAM になり、
    * on_stream_close_callback がエントリを削除するため、いずれも塞がれる。
@@ -927,7 +932,7 @@ class H2Session {
   void consume_connection_recv_bytes(size_t size);
   WtSessionInfo* get_wt_session(int32_t session_id);
 
-  // draft-15 Section 4.3: 対向 SETTINGS / WebTransport-Init から初期 FC を設定
+  // draft-16 Section 4.3: 対向 SETTINGS / WebTransport-Init から初期 FC を設定
   void apply_peer_initial_flow_control(WtSessionInfo& wt_session) const;
 
   /**
@@ -946,7 +951,7 @@ class H2Session {
   bool verify_origin(
       const std::vector<std::pair<std::string, std::string>>& headers) const;
 
-  // draft-15 Section 4.3.2: WebTransport-Init Structured Field Dictionary
+  // draft-16 Section 4.3.2: WebTransport-Init Structured Field Dictionary
   std::string encode_webtransport_init() const;
   bool parse_webtransport_init(const std::string& value,
                                uint64_t& out_u,
@@ -985,7 +990,7 @@ class H2Session {
   // 検知した WT_ERROR をアプリへ通知してからセッションを閉じる
   void report_wt_error(int32_t session_id, const std::string& error_message);
 
-  // 受信消費に応じたクレジット補充 (draft-15 Section 4.4 の SHOULD)。
+  // 受信消費に応じたクレジット補充 (draft-16 Section 4.4 の SHOULD)。
   // 受信量が広告値の 1/2 を超えたら初期値分を上乗せして送出する
   void maybe_send_max_data(int32_t session_id);
   void maybe_send_max_stream_data(int32_t session_id, uint64_t stream_id);
@@ -1036,7 +1041,7 @@ class H2Session {
   // クリーンな終了への応答。Section 6.12)
   std::set<int32_t> end_stream_pending_;
 
-  // 対向 SETTINGS (draft-15 Section 3.1 / 4.3.1)
+  // 対向 SETTINGS (draft-16 Section 3.1 / 4.3.1)
   bool peer_enable_connect_protocol_ = false;
   bool peer_wt_enabled_ = false;
   uint64_t peer_wt_initial_max_data_ = 0;
@@ -1049,7 +1054,7 @@ class H2Session {
   // 接続状態
   bool closed_ = false;
   // GOAWAY 受信済み (graceful shutdown)。新規 CONNECT のみ抑止し、
-  // 既存セッションの送受信は継続する (draft-15 Section 6.13)
+  // 既存セッションの送受信は継続する (draft-16 Section 6.13)
   bool goaway_received_ = false;
 };
 

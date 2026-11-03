@@ -91,11 +91,11 @@ class SessionWriter:
         """データグラムを送信する
 
         Capsule Protocol の DATAGRAM capsule (RFC 9297) を使う。
-        draft-15 Section 6.11
+        draft-16 Section 6.11
 
         終了したセッション ID (正常な WT_CLOSE_SESSION 受信後 / close_session 後 /
         ピアの END_STREAM 受信後 / ペイロード不正のカプセル受信後) への送信は
-        無視される (draft-15 Section 3.4 のセッション終了。仕様強制ではなく
+        無視される (draft-16 Section 3.4 のセッション終了。仕様強制ではなく
         実装ポリシー)。
 
         Args:
@@ -131,7 +131,7 @@ class SessionWriter:
         """ピアに送信停止を要求する (WT_STOP_SENDING)
 
         受信側の停止を要求し、送信側が Ready / Send 状態ならピアが
-        WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-15 Section 6.3 /
+        WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-16 Section 6.3 /
         RFC 9000 Section 3.5)。本メソッドの送出後は同じストリームへ
         WT_MAX_STREAM_DATA を送出しない (Section 6.6 の MUST NOT)。同じ
         ストリームへ複数回呼んでも WT_STOP_SENDING は 1 回だけ送出される
@@ -156,7 +156,7 @@ class SessionWriter:
     async def close_session(self, error_code: int = 0, error_message: str = "") -> None:
         """セッションを閉じる
 
-        draft-15 Section 6.12
+        draft-16 Section 6.12
 
         Args:
             error_code: アプリケーションエラーコード
@@ -173,7 +173,7 @@ class Server:
     """WebTransport over HTTP/2 サーバー
 
     asyncio を使用した非同期 WebTransport サーバー。TLS 1.3 以上を必須とし
-    (draft-15 Section 7)、TLS 1.2 以下の接続は拒否する。仕様上許容される
+    (draft-16 Section 7)、TLS 1.2 以下の接続は拒否する。仕様上許容される
     TLS 1.2 + extended master secret (EMS) も、Python の ssl が EMS 交渉の
     有無を公開しないため拒否する。
 
@@ -202,7 +202,7 @@ class Server:
             config: HTTP/2 / WebTransport セッション設定。省略時は既定値。
                 呼び出し元のオブジェクトは書き換えない
             allowed_origins: 許可オリジンリスト (None と空リストは
-                どちらも全オリジンを受理する)。draft-15 Section 3.2 の
+                どちらも全オリジンを受理する)。draft-16 Section 3.2 の
                 Origin 検証 MUST に対応する (h3.Server と対称)
         """
         self._host = host
@@ -339,7 +339,7 @@ class Server:
         """ピアからの WT_STOP_SENDING 受信時のコールバックを設定する
 
         ピアが送信側の停止を要求したときに、そのアプリケーションエラーコードと
-        ともに呼ばれる (draft-ietf-webtrans-http2-15 Section 6.3)。受信側の
+        ともに呼ばれる (draft-ietf-webtrans-http2-16 Section 6.3)。受信側の
         低レベル層は送信側が Ready / Send 状態なら WT_RESET_STREAM を自動で
         返すため、このコールバックは通知のみを担う。
 
@@ -358,11 +358,11 @@ class Server:
     ) -> None:
         """受信フロー制御違反のコールバックを設定する
 
-        `WtErrorCode.WT_FLOW_CONTROL_ERROR` のみを渡す。draft-15 Section 3.4
+        `WtErrorCode.WT_FLOW_CONTROL_ERROR` のみを渡す。draft-16 Section 3.4
         では 0x50 / 0x51 / 0x52 が 0xTBD のプレースホルダであり、値が確定
         したら `WtErrorCode` を更新する。WT_STREAM_STATE_ERROR や nghttp2 /
         SETTINGS 違反の Error イベントは対象外。セッションエラーは HTTP/2
-        接続を終了しない (draft-15 Section 3.4)。
+        接続を終了しない (draft-16 Section 3.4)。
 
         Args:
             callback: async def callback(error_code: int, error_message: str, session_writer: SessionWriter) -> None
@@ -376,7 +376,7 @@ class Server:
         """GOAWAY 受信時のコールバックを設定する
 
         graceful shutdown の通知であり、既存セッションの送受信は継続する
-        (draft-15 Section 6.13)。接続ごとに初回受信のみ発火する。
+        (draft-16 Section 6.13)。接続ごとに初回受信のみ発火する。
 
         Args:
             callback: async def callback(last_stream_id: int, error_code: int, addr: tuple[object, ...]) -> None
@@ -398,7 +398,7 @@ class Server:
             h2_low.Session.create_server(self._user_config)
 
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        # draft-15 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
+        # draft-16 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
         # (EMS) のいずれも満たさない接続で受信した WebTransport over HTTP/2
         # リクエストは malformed として扱わなければならない (MUST)。Python の
         # ssl は EMS 交渉の有無を公開しないため、TLS 1.3 以上を許可し TLS 1.2

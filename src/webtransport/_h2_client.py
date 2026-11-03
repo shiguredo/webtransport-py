@@ -27,7 +27,7 @@ class Client:
     """WebTransport over HTTP/2 クライアント
 
     asyncio を使用した非同期 WebTransport クライアント。TLS 1.3 以上を必須とし
-    (draft-15 Section 7)、TLS 1.2 以下の対向へは接続できない。
+    (draft-16 Section 7)、TLS 1.2 以下の対向へは接続できない。
 
     Usage:
         client = Client(url="https://localhost:8443/webtransport")
@@ -197,7 +197,7 @@ class Client:
         """ピアからの WT_STOP_SENDING 受信時のコールバックを設定する
 
         ピアが送信側の停止を要求したときに、そのアプリケーションエラーコードと
-        ともに呼ばれる (draft-ietf-webtrans-http2-15 Section 6.3)。受信側の
+        ともに呼ばれる (draft-ietf-webtrans-http2-16 Section 6.3)。受信側の
         低レベル層は送信側が Ready / Send 状態なら WT_RESET_STREAM を自動で
         返すため、このコールバックは通知のみを担う。
 
@@ -212,11 +212,11 @@ class Client:
     ) -> None:
         """受信フロー制御違反のコールバックを設定する
 
-        `WtErrorCode.WT_FLOW_CONTROL_ERROR` のみを渡す。draft-15 Section 3.4
+        `WtErrorCode.WT_FLOW_CONTROL_ERROR` のみを渡す。draft-16 Section 3.4
         では 0x50 / 0x51 / 0x52 が 0xTBD のプレースホルダであり、値が確定
         したら `WtErrorCode` を更新する。WT_STREAM_STATE_ERROR や nghttp2 /
         SETTINGS 違反の Error イベントは対象外。セッションエラーは HTTP/2
-        接続を終了しない (draft-15 Section 3.4)。
+        接続を終了しない (draft-16 Section 3.4)。
 
         Args:
             callback: async def callback(error_code: int, error_message: str) -> None
@@ -230,7 +230,7 @@ class Client:
         """GOAWAY 受信時のコールバックを設定する
 
         graceful shutdown の通知であり、既存セッションの送受信は継続する
-        (draft-15 Section 6.13)。初回受信のみ発火する。
+        (draft-16 Section 6.13)。初回受信のみ発火する。
 
         Args:
             callback: async def callback(last_stream_id: int, error_code: int) -> None
@@ -268,7 +268,7 @@ class Client:
     async def _wait_webtransport_ready(self, timeout_seconds: float = 5.0) -> bool:
         """対向の SETTINGS を待ち WebTransport が利用可能になるまで待機する
 
-        draft-15 Section 3.1: ENABLE_CONNECT_PROTOCOL と WT_ENABLED を
+        draft-16 Section 3.1: ENABLE_CONNECT_PROTOCOL と WT_ENABLED を
         受信するまで CONNECT してはならない。
         """
         if self._session is None:
@@ -288,7 +288,7 @@ class Client:
 
         deadline ベースで bounded に動作する。成功時は例外なしで復帰し、
         失敗時は具体例外で理由を通知する。TLS 1.3 以上を必須とし
-        (draft-15 Section 7)、TLS 1.2 以下の対向へは接続できない。仕様上
+        (draft-16 Section 7)、TLS 1.2 以下の対向へは接続できない。仕様上
         許容される TLS 1.2 + extended master secret (EMS) も、Python の ssl
         が EMS 交渉の有無を公開しないため拒否する。
 
@@ -341,7 +341,7 @@ class Client:
                 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_NONE
-            # draft-15 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
+            # draft-16 Section 7: TLS 1.3 以上と TLS 1.2 + extended master secret
             # (EMS) のいずれも満たさない接続では WebTransport over HTTP/2
             # リクエストを送信してはならない (MUST NOT)。Python の ssl は EMS
             # 交渉の有無を公開しないため、TLS 1.3 以上を許可し TLS 1.2 以下を
@@ -396,7 +396,7 @@ class Client:
 
                 self._running = True
 
-                # draft-15 Section 3.1: SETTINGS 受信後に Extended CONNECT を送る
+                # draft-16 Section 3.1: SETTINGS 受信後に Extended CONNECT を送る
                 remaining = deadline - loop.time()
                 if remaining <= 0 or not await self._wait_webtransport_ready(
                     timeout_seconds=remaining
@@ -449,7 +449,7 @@ class Client:
                                 0, "session closed before 2xx response"
                             )
 
-                        # 非 2xx 拒否 (draft-15 Section 3.2: 2xx 以外はセッション未確立)。
+                        # 非 2xx 拒否 (draft-16 Section 3.2: 2xx 以外はセッション未確立)。
                         # SESSION_READY / SESSION_CLOSED のどちらも発火しないため、
                         # 待たずに WebTransportSessionRejectedError を送出して
                         # 終了する。
@@ -556,11 +556,11 @@ class Client:
         """データグラムを送信する
 
         Capsule Protocol の DATAGRAM capsule (RFC 9297) を使う。
-        draft-15 Section 6.11
+        draft-16 Section 6.11
 
         終了したセッション ID (正常な WT_CLOSE_SESSION 受信後 / close_session 後 /
         ピアの END_STREAM 受信後 / ペイロード不正のカプセル受信後) への送信は
-        無視される (draft-15 Section 3.4 のセッション終了。仕様強制ではなく
+        無視される (draft-16 Section 3.4 のセッション終了。仕様強制ではなく
         実装ポリシー)。
 
         Args:
@@ -596,7 +596,7 @@ class Client:
         """ピアに送信停止を要求する (WT_STOP_SENDING)
 
         受信側の停止を要求し、送信側が Ready / Send 状態ならピアが
-        WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-15 Section 6.3 /
+        WT_RESET_STREAM を返す (draft-ietf-webtrans-http2-16 Section 6.3 /
         RFC 9000 Section 3.5)。本メソッドの送出後は同じストリームへ
         WT_MAX_STREAM_DATA を送出しない (Section 6.6 の MUST NOT)。同じ
         ストリームへ複数回呼んでも WT_STOP_SENDING は 1 回だけ送出される
@@ -748,7 +748,7 @@ class Client:
     async def close(self, error_code: int = 0, error_message: str = "") -> None:
         """接続を閉じる
 
-        draft-15 Section 6.12: WT_CLOSE_SESSION 後に CONNECT ストリームを
+        draft-16 Section 6.12: WT_CLOSE_SESSION 後に CONNECT ストリームを
         half-close し、ピアの CONNECT ストリームクローズ (END_STREAM /
         RST_STREAM) を close_wait_timeout の上限まで待ってから TCP/TLS を
         閉じる。上限で打ち切った場合も閉じる処理へ進む。
@@ -798,7 +798,7 @@ class Client:
     async def _wait_for_peer_close(self, session_id: int) -> bool:
         """ピアの CONNECT ストリームクローズを待つ。観測したら True を返す
 
-        draft-15 Section 6.12 の MUST (WT_CLOSE_SESSION の受信側は END_STREAM
+        draft-16 Section 6.12 の MUST (WT_CLOSE_SESSION の受信側は END_STREAM
         で応答してストリームを閉じる) への応答を best-effort で観測する
         (draft の改版で要件が変わる可能性がある)。終了条件はピアクローズの
         観測・接続断 (EOF / RST 等)・close_wait_timeout の満了で、いずれも

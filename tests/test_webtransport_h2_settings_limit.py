@@ -2,7 +2,7 @@
 
 HTTP/2 の SETTINGS 値は uint32 (RFC 9113 Section 6.5.1) のため、Config の
 初期フロー制御値が 2^32 以上だと SETTINGS で切り詰められ、WebTransport-Init
-や初期 WT_MAX_DATA / WT_MAX_STREAMS カプセルと値が食い違う。生成時に
+ヘッダーと値が食い違う。生成時に
 2^32 - 1 の上限検査を行い、超過は ValueError にする境界を検証する。
 """
 
@@ -55,8 +55,8 @@ def test_create_session_with_settings_value_over_max_raises_value_error(
 ) -> None:
     """2^32 以上の Config でセッション生成が ValueError になることを確認
 
-    SETTINGS は uint32 のため、2^32 以上は切り詰められて WebTransport-Init や
-    初期 WT_MAX_DATA / WT_MAX_STREAMS カプセルと食い違う。生成時に拒否し、
+    SETTINGS は uint32 のため、2^32 以上は切り詰められて WebTransport-Init
+    ヘッダーと食い違う。生成時に拒否し、
     SETTINGS と他経路の値が一致することを保証する。2^32 + 5 は切り詰めで 5 に
     なる元の再現値である。
     """

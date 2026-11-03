@@ -5,7 +5,7 @@
 ペイロードは識別フィールドを正確に含まなければならず、識別フィールドの終端に
 達していないペイロードは malformed / incomplete な HTTP メッセージとして扱う」
 ことを MUST としており、HTTP/2 では RFC 9113 Section 8.1.1 により PROTOCOL_ERROR
-のストリームエラー (RST_STREAM) を送出する。draft-ietf-webtrans-http2-15
+のストリームエラー (RST_STREAM) を送出する。draft-ietf-webtrans-http2-16
 Section 3.4 のとおり、ストリームのリセットはセッションを終了させる。
 
 対象はペイロードの可変長整数を読む 9 ハンドラ (WT_STREAM / WT_RESET_STREAM /
@@ -17,7 +17,7 @@ WT_STREAM_DATA_BLOCKED / WT_STREAMS_BLOCKED / WT_DATA_BLOCKED) すべてであ�
 Maximum Data の欠落が検証されない状態だった。
 
 Stream ID のみでデータを持たない WT_STREAM は、ストリームを開閉しない
-カプセルとして従来どおりイベントを発火しない (draft-15 Section 6.4 の MAY。
+カプセルとして従来どおりイベントを発火しない (draft-16 Section 6.4 の MAY。
 WebKit 相互運用のための既存の判断)。ペイロードが空 (Length 0) の WT_STREAM は
 Stream ID すら含まれず「識別フィールドの終端に達していない」ため、他の
 ハンドラと同じくリセットする。カプセルの Type / Length / ペイロード自体が
@@ -54,7 +54,7 @@ from conftest import (
 
 from webtransport import h2
 
-# カプセル種別 (draft-ietf-webtrans-http2-15 Section 6)
+# カプセル種別 (draft-ietf-webtrans-http2-16 Section 6)
 
 # 不完全な可変長整数。0x40 は 2 バイト、0x80 は 4 バイト、0xc0 は 8 バイト
 # varint のプレフィックスであり、いずれも 1 バイトしか無いためデコードに失敗する
@@ -200,7 +200,7 @@ def test_wt_stream_without_data_creates_stream_without_events() -> None:
     """Stream ID のみの WT_STREAM がイベントを発火せずストリームを作成することを確認
 
     Stream ID は完全にデコードできるため不完全なペイロードの扱いの対象外で
-    あり、データも FIN も持たないカプセルはストリームを開閉しない (draft-15
+    あり、データも FIN も持たないカプセルはストリームを開閉しない (draft-16
     Section 6.4 の MAY の対象)。実装はストリームを暗黙作成するが、イベントは
     発火せずセッションも維持される (WebKit 相互運用のための既存の判断)。
     """
@@ -224,7 +224,7 @@ def test_incomplete_payload_in_pre_accept_buffer_resets_on_accept() -> None:
     """受理前に蓄積した不完全なカプセルが accept_session の排出でリセットされることを確認
 
     サーバーは受理前のカプセルを蓄積し、accept_session で遅延処理する
-    (draft-15 Section 3.2 の楽観的送信)。この経路でも不完全なペイロードは
+    (draft-16 Section 3.2 の楽観的送信)。この経路でも不完全なペイロードは
     PROTOCOL_ERROR の RST_STREAM になり、初期クレジット (WT_MAX_DATA 等) は
     送出されない。
     """

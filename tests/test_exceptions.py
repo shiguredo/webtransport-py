@@ -99,7 +99,7 @@ def test_quic_connection_error_subclasses() -> None:
         (h3_exceptions.WebTransportErrorCode.WT_FLOW_CONTROL_ERROR, 0x045D4487),
         (h3_exceptions.WebTransportErrorCode.WT_SESSION_GONE, 0x170D7B68),
         (h3_exceptions.WebTransportErrorCode.WT_BUFFERED_STREAM_REJECTED, 0x3994BD84),
-        # draft-ietf-webtrans-http2-15 Section 3.4 (draft は 0xTBD のため
+        # draft-ietf-webtrans-http2-16 Section 3.4 (draft は 0xTBD のため
         # 本ライブラリ固定値。低レベルの h2.WtErrorCode と一致させる)
         (h2_exceptions.WebTransportErrorCode.WT_FLOW_CONTROL_ERROR, 0x50),
         (h2_exceptions.WebTransportErrorCode.WT_STREAM_STATE_ERROR, 0x51),

@@ -1,6 +1,6 @@
 """WebTransport over HTTP/2 の初期フロー制御 0 フォールバック除去のテスト
 
-draft-15 Section 11.2 の「対向 SETTINGS が 0 (既定値) の場合、
+draft-16 Section 11.2 の「対向 SETTINGS が 0 (既定値) の場合、
 WT_MAX_DATA / WT_MAX_STREAM_DATA / WT_MAX_STREAMS カプセル到着まで送信不可」
 (Section 6.5 / 6.6 / 6.7 は非 0 値での MAY 伝達) に従い、0 を広告するピアへの
 送信はフォールバック (自側 config 値での送信) を行わない。送信を試みた場合は
@@ -26,7 +26,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -37,7 +37,7 @@ def _encode_wt_close_session_capsule(error_code: int, error_message: str) -> byt
     """WT_CLOSE_SESSION capsule のワイヤバイト列を組み立てる
 
     Type WT_CLOSE_SESSION は 2 バイト varint [0x68, 0x43] + Length + Application Error
-    Code (32bit) + Message。WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15
+    Code (32bit) + Message。WT_FLOW_CONTROL_ERROR (0xTBD) は draft-16
     Section 3.4 の 0xTBD) のプレースホルダ。
     """
     payload = error_code.to_bytes(4, "big") + error_message.encode("utf-8")
@@ -55,7 +55,7 @@ def _create_h2_session_pair_with_limits(
 
     サーバーの config 値はクライアント宛の SETTINGS / WebTransport-Init に
     反映され、クライアントの送信クレジット・ストリーム上限となる
-    (draft-15 Section 4.3.1)。
+    (draft-16 Section 4.3.1)。
     """
     client = h2.Session.create_client(h2.Config())
     server_config = h2.Config()
@@ -86,7 +86,7 @@ def test_zero_peer_initial_limits_block_until_capsules() -> None:
     サーバーが 0 の初期フロー制御 (WT_MAX_DATA / WT_MAX_STREAM_DATA /
     WT_MAX_STREAMS) を広告したセッションでは、クライアントの送信クレジットと
     ストリーム上限は 0 になる。修正前は自側 config 値へフォールバックし、
-    広告制限を超える送信が可能だった (draft-15 Section 6.5 / 6.6 / 6.7 の
+    広告制限を超える送信が可能だった (draft-16 Section 6.5 / 6.6 / 6.7 の
     MUST 違反)。WT_MAX_STREAMS_BIDI / WT_MAX_STREAM_DATA (Stream ID + 値の
     形式) / WT_MAX_DATA カプセルの受信で前進することを検証する。
     """
@@ -122,7 +122,7 @@ def test_zero_peer_initial_uni_streams_limit_block_until_capsule() -> None:
 
     単方向ストリームの初期上限 (WT_MAX_STREAMS, UNI) を 0 で広告された
     セッションでは、open_stream(True) は -1 を返す。WT_MAX_STREAMS_UNI
-    カプセルの受信で上限が前進することを検証する (draft-15 Section 6.7)。
+    カプセルの受信で上限が前進することを検証する (draft-16 Section 6.7)。
     """
     client, server = _create_h2_session_pair_with_limits(1024, 1024, 100, 0)
     session_id = _connect_h2_session(client, server)

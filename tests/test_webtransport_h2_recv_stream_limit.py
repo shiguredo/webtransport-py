@@ -1,8 +1,8 @@
 """WebTransport over HTTP/2 の受信ストリーム数上限テスト
 
-draft-15 Section 6.7 の MUST 「広告した Maximum Streams を超えるストリーム
+draft-16 Section 6.7 の MUST 「広告した Maximum Streams を超えるストリーム
 受信は WT_FLOW_CONTROL_ERROR でセッションを閉じる」を検証する。 WT_FLOW_CONTROL_ERROR は
-WT_FLOW_CONTROL_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。
+WT_FLOW_CONTROL_ERROR (draft-16 Section 3.4 の 0xTBD) のプレースホルダ。
 同一タイプ・方向の低い ID も暗黙オープンとして累積カウントし、閉じた
 ストリームも含める。
 """
@@ -23,7 +23,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value

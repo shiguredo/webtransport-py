@@ -1,6 +1,6 @@
 """WebTransport over HTTP/2 の TLS バージョン要件テスト
 
-draft-ietf-webtrans-http2-15 Section 7 は、クライアントに TLS 1.3 以上、または
+draft-ietf-webtrans-http2-16 Section 7 は、クライアントに TLS 1.3 以上、または
 TLS 1.2 + extended master secret (EMS) の接続でのみ送信することを求め、サーバー
 にどちらも満たさない接続のリクエストを malformed として扱うことを求める。
 Python の ssl は EMS 交渉の有無を公開しないため、本実装は TLS 1.3 以上を必須

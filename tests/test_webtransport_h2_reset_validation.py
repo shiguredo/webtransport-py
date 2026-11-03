@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 の reset_stream / stop_sending 入力検証テスト
 
 reset_stream の Reliable Size は送信済みバイト数と一致しなければならない
-(draft-ietf-webtrans-http2-15 Section 6.2) ため、任意指定の引数を廃止して
+(draft-ietf-webtrans-http2-16 Section 6.2) ため、任意指定の引数を廃止して
 常に bytes_sent を載せる。あわせて varint 範囲 (2^62 - 1、RFC 9000 Section
 16) の検査と、存在しないストリーム ID への送出抑止を検証する。
 """
@@ -46,7 +46,7 @@ def test_reset_stream_uses_bytes_sent_as_reliable_size() -> None:
     """reset_stream の Reliable Size が送信済みバイト数になることを確認
 
     データ送信後の reset_stream は引数を持たず、常に bytes_sent (= 5) を
-    Reliable Size に載せる (draft-15 Section 6.2)。ピアも対称の値として受理
+    Reliable Size に載せる (draft-16 Section 6.2)。ピアも対称の値として受理
     し、STREAM_RESET イベントが発火する (セッションエラーにならない)。
     """
     client, server = _create_h2_session_pair()
@@ -80,7 +80,7 @@ def test_reset_stream_multiple_chunks_uses_total_bytes_sent() -> None:
     """複数チャンク送信後の Reliable Size が合計送信バイト数になることを確認
 
     3 バイト + 2 バイトの 2 チャンクを送信した後の reset_stream は、合計の
-    5 バイトを Reliable Size に載せる (draft-15 Section 6.2 の送信済み
+    5 バイトを Reliable Size に載せる (draft-16 Section 6.2 の送信済み
     バイト数)。ピアの bytes_received と一致し STREAM_RESET が発火する。
     """
     client, server = _create_h2_session_pair()
@@ -111,7 +111,7 @@ def test_reset_stream_with_pending_send_uses_sent_bytes_only() -> None:
     サーバーの初期クレジットを 3 バイトに絞ると、5 バイトの送信は 3 バイトだけが
     ワイヤに載り 2 バイトは保留になる。この状態の reset_stream は、アプリが
     渡した合計 5 ではなく実際に送信済みの 3 を Reliable Size に載せる
-    (draft-15 Section 6.2 の送信済みバイト数)。ピアの受信バイト数と一致し
+    (draft-16 Section 6.2 の送信済みバイト数)。ピアの受信バイト数と一致し
     STREAM_RESET が発火する。
     """
     client = h2.Session.create_client(h2.Config())
@@ -162,7 +162,7 @@ def test_reset_stream_and_stop_sending_over_varint_range_raises_value_error(
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
-    # 確立時に client がキューした初期フロー制御カプセルを先に送出しておく
+    # 確立直後の送信待ちを先に処理しておく
     _h2_pump(client, server)
 
     with pytest.raises(ValueError, match=r"reset_stream stream_id must be less than 2\^62"):
@@ -225,7 +225,7 @@ def test_reset_stream_and_stop_sending_unknown_stream_id_ignored(unknown_stream_
     """
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
-    # 確立時に client がキューした初期フロー制御カプセルを先に送出しておく
+    # 確立直後の送信待ちを先に処理しておく
     _h2_pump(client, server)
 
     client.reset_stream(session_id, unknown_stream_id, 42)

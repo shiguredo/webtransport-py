@@ -248,7 +248,7 @@ await client.close()
 - `quic.exceptions.QuicCryptoErrorCode` (RFC 9001 Section 4.8 の CRYPTO_ERROR 範囲。TLS アラートの値に 0x0100 を加えたもの)
 - `http2.exceptions.Http2ErrorCode` (RFC 9113 Section 7)
 - `http3.exceptions.Http3ErrorCode` (RFC 9114 Section 8.1 / RFC 9204 Section 8.3 / draft-ietf-webtrans-http3-16 Section 9.5)
-- `h2.exceptions.WebTransportErrorCode` (draft-ietf-webtrans-http2-15 Section 3.4。draft では 0xTBD のため 0x50 / 0x51 / 0x52 を使う)
+- `h2.exceptions.WebTransportErrorCode` (draft-ietf-webtrans-http2-16 Section 3.4。draft では 0xTBD のため 0x50 / 0x51 / 0x52 を使う)
 - `h3.exceptions.WebTransportErrorCode` (draft-ietf-webtrans-http3-16 Section 9.5)
 
 例外が持つ属性。
@@ -453,9 +453,9 @@ async def close(error_code: int = 0, error_message: str = "") -> None
 
 ### WebTransport over HTTP/2 (統一 API + `webtransport.h2` の Sans-IO)
 
-`Client` / `Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-15 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
+`Client` / `Server` は TLS 1.3 以上を必須とする (draft-ietf-webtrans-http2-16 Section 7 準拠。仕様上許容される TLS 1.2 + extended master secret (EMS) の接続も、Python の `ssl` が EMS 交渉の有無を公開しないため現時点では拒否する)。
 
-`Server.__init__(host, port, certfile, keyfile, config=None, allowed_origins=None)` (証明書は必須)。`config` は h2.Config で、省略時は既定値。`allowed_origins` は Server と対称で、None と空リストはどちらも全オリジンを受理する (draft-15 Section 3.2 の Origin 検証 MUST。Origin ヘッダー無しは受理する)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
+`Server.__init__(host, port, certfile, keyfile, config=None, allowed_origins=None)` (証明書は必須)。`config` は h2.Config で、省略時は既定値。`allowed_origins` は Server と対称で、None と空リストはどちらも全オリジンを受理する (draft-16 Section 3.2 の Origin 検証 MUST。Origin ヘッダー無しは受理する)。サーバーのコールバックは末尾に `SessionWriter` を受け取る点が h3 と異なる。
 
 ```python
 # on_session_request(session_id: int, headers: list[tuple[str, str]], addr: tuple[object, ...]) -> int | None
@@ -957,9 +957,9 @@ def get_stream_ids(session_id: int) -> list[int]  # セッションに属する�
 def get_send_credit(session_id: int) -> int  # セッションレベルの送信可能残量 (観測専用。未知 ID は 0)
 ```
 
-`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。`stop_sending` の送出後は同じストリームへ WT_MAX_STREAM_DATA を送出しない (draft-ietf-webtrans-http2-15 Section 6.6 の MUST NOT。HTTP/2 の順序保証により冗長な WT_MAX_STREAM_DATA が不要なためである)。同じストリームへ複数回呼んでも WT_STOP_SENDING は 1 回だけ送出される (Section 6.3 の MUST NOT。2 回目以降は存在しないストリーム ID への送出と同じく黙って無視する。2^62 以上の stream_id は 2 回目以降も `ValueError` になる)。停止要求後もピアからのデータは `STREAM_DATA` イベントとして届き続け (ピアが WT_RESET_STREAM を返すまで)、クレジットの補充だけが止まるため、ピアは残クレジットを使い切ると WT_STREAM_DATA_BLOCKED (Section 6.9 の SHOULD で、送出は必須ではない) を送って待つ。`receive` / `send_stream_data` / `send_datagram` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。`reject_session` は `session_id` が 0 以下なら `ValueError` を送出する (クライアントセッションでは no-op)。応答の submit / 送出に失敗した場合は ERROR イベントを発火する (送出失敗は次に `send()` / `receive()` を呼んだ時に観測される。低レベル `next_event()` のみ。高レベル `Server` / `Client` は `WtErrorCode.WT_FLOW_CONTROL_ERROR` 以外の ERROR を `on_error` に渡さない)。
+`reset_stream` / `stop_sending` は `stream_id` が 2^62 以上なら `ValueError` を送出する。範囲内でも存在しないストリーム ID へは送出せず、セッションも閉じない。`reset_stream` の Reliable Size は常に送信済みバイト数になる。`stop_sending` の送出後は同じストリームへ WT_MAX_STREAM_DATA を送出しない (draft-ietf-webtrans-http2-16 Section 6.6 の MUST NOT。HTTP/2 の順序保証により冗長な WT_MAX_STREAM_DATA が不要なためである)。同じストリームへ複数回呼んでも WT_STOP_SENDING は 1 回だけ送出される (Section 6.3 の MUST NOT。2 回目以降は存在しないストリーム ID への送出と同じく黙って無視する。2^62 以上の stream_id は 2 回目以降も `ValueError` になる)。停止要求後もピアからのデータは `STREAM_DATA` イベントとして届き続け (ピアが WT_RESET_STREAM を返すまで)、クレジットの補充だけが止まるため、ピアは残クレジットを使い切ると WT_STREAM_DATA_BLOCKED (Section 6.9 の SHOULD で、送出は必須ではない) を送って待つ。`receive` / `send_stream_data` / `send_datagram` は生の入力が 1 MiB 超なら `ValueError` を送出する (C++ 側へのコピー前のローカル検査)。`reject_session` は `session_id` が 0 以下なら `ValueError` を送出する (クライアントセッションでは no-op)。応答の submit / 送出に失敗した場合は ERROR イベントを発火する (送出失敗は次に `send()` / `receive()` を呼んだ時に観測される。低レベル `next_event()` のみ。高レベル `Server` / `Client` は `WtErrorCode.WT_FLOW_CONTROL_ERROR` 以外の ERROR を `on_error` に渡さない)。
 
-`h2.WtErrorCode` は WebTransport over HTTP/2 のエラーコード (draft-ietf-webtrans-http2-15 Section 3.4) を公開する。`WT_FLOW_CONTROL_ERROR = 0x50` / `WT_STREAM_STATE_ERROR = 0x51` / `WT_ERROR = 0x52` で、draft-15 ではいずれも 0xTBD のプレースホルダである (値が確定したら定数を更新する)。`h2.Event.error_code` は plain int で届くため、比較は `h2.WtErrorCode.WT_ERROR.value` のように `.value` を取る。`Server.on_error` / `Client.on_error` に渡るのは `WT_FLOW_CONTROL_ERROR` のみで、`WT_STREAM_STATE_ERROR` はセッション終了 (`on_session_closed`) として観測する。
+`h2.WtErrorCode` は WebTransport over HTTP/2 のエラーコード (draft-ietf-webtrans-http2-16 Section 3.4) を公開する。`WT_FLOW_CONTROL_ERROR = 0x50` / `WT_STREAM_STATE_ERROR = 0x51` / `WT_ERROR = 0x52` で、draft-16 ではいずれも 0xTBD のプレースホルダである (値が確定したら定数を更新する)。`h2.Event.error_code` は plain int で届くため、比較は `h2.WtErrorCode.WT_ERROR.value` のように `.value` を取る。`Server.on_error` / `Client.on_error` に渡るのは `WT_FLOW_CONTROL_ERROR` のみで、`WT_STREAM_STATE_ERROR` はセッション終了 (`on_session_closed`) として観測する。
 
 ## Config の主要デフォルト値
 

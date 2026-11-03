@@ -3,7 +3,7 @@
 サーバーが reject_session (非 2xx 応答) で CONNECT リクエストを拒否しても、
 クライアントの wt_sessions_ にエントリが残り続け、拒否されたセッション ID
 宛の send_datagram が DATAGRAM capsule をワイヤへ送出し続ける問題の修正を
-検証する。draft-ietf-webtrans-http2-15 Section 3.2 の「A WebTransport
+検証する。draft-ietf-webtrans-http2-16 Section 3.2 の「A WebTransport
 session is established when the server sends a 2xx response」により、非 2xx
 で拒否されたセッションは一度も確立されておらず、終了通知 (SessionClosed)
 の意味論が合わない。そのため SESSION_REJECTED を push してからセッション
@@ -58,7 +58,7 @@ def _encode_status_headers(session_id: int, status_code: int) -> bytes:
 def test_client_non_2xx_reject_removes_session(status_code: int) -> None:
     """非 2xx 拒否でクライアントの wt_sessions_ からエントリが削除されることを確認
 
-    拒否されたセッションは一度も確立されていない (draft-15 Section 3.2)。
+    拒否されたセッションは一度も確立されていない (draft-16 Section 3.2)。
     エントリ削除により send_datagram のガードが成立し、DATAGRAM capsule が
     ワイヤへ送出されない (エントリの削除は公開 API から直接観測できない
     ため、送出抑止で間接検証する)。
@@ -81,7 +81,7 @@ def test_client_non_2xx_reject_removes_session(status_code: int) -> None:
 def test_client_non_2xx_reject_no_session_closed_event() -> None:
     """拒否されたセッションに対して SessionClosed イベントが発火しないことを確認
 
-    非 2xx で拒否されたセッションは一度も確立されていない (draft-15
+    非 2xx で拒否されたセッションは一度も確立されていない (draft-16
     Section 3.2) ため、SessionClosed (セッション終了の通知) の意味論が
     合わない。SessionRejected を発火してからエントリを削除する。本テストは
     修正前実装でも通る設計ピンであり、SessionClosed 不発火の意味論を守る。
@@ -133,7 +133,7 @@ def test_client_non_2xx_reject_close_session_noop() -> None:
 def test_client_response_201_session_established() -> None:
     """2xx 非 200 応答 (201) でセッションが確立として扱われることを確認
 
-    draft-15 Section 3.2 では 2xx 全般がセッション確立であり、確立条件を
+    draft-16 Section 3.2 では 2xx 全般がセッション確立であり、確立条件を
     「200 のみ」から先頭文字が '2' の 2xx 全般へ広げた。201 は確立
     (is_established / SESSION_READY) として扱われることを検証する。
     201 応答は END_STREAM 付きで届くため、確立直後のセッション終了
@@ -173,7 +173,7 @@ def test_client_receive_1xx_keeps_session() -> None:
     stream state が OPENING のストリームへの最初の HEADERS が RESPONSE に
     分類され、1xx 受信で state が OPENED に遷移するため、続く最終応答は
     NGHTTP2_HCAT_HEADERS で通知される)。1xx は中間応答であり拒否ではない
-    (draft-15 Section 3.2 では 2xx のみが確立) ため、削除対象に含めない。
+    (draft-16 Section 3.2 では 2xx のみが確立) ため、削除対象に含めない。
     1xx 後の最終応答がレスポンス処理分岐で捕捉されずエントリが残るのは
     既存の制約であり、1xx を挟んだ拒否は本対応の削除が機能しない。本テスト
     は修正前実装でも通る設計ピンであり、1xx が削除対象に含まれないことを
@@ -298,7 +298,7 @@ def test_client_reject_other_session_unaffected() -> None:
 def test_server_reject_status_code_entry_retention(status_code: int, expected_closed: bool) -> None:
     """reject_session の 2xx 応答時はサーバーのエントリが残り、両ハーフクローズで SessionClosed が発火することを確認
 
-    draft-15 Section 3.2 の「A WebTransport session is established when
+    draft-16 Section 3.2 の「A WebTransport session is established when
     the server sends a 2xx response」により、2xx 送出はセッション確立であり、
     reject_session に 2xx を渡しても wt_sessions_ から削除しない (h3 側の
     reject_session と対称の意味論)。エントリ残留は公開 API から直接観測
@@ -507,7 +507,7 @@ def test_client_response_201_without_end_stream_keeps_session() -> None:
 
     reject_session(201) は END_STREAM 付きで応答するため (確立直後に終了する
     シナリオ)、確立後にセッションとして機能する挙動はワイヤ注入 (END_STREAM
-    なしの 2xx HEADERS) で検証する。draft-15 Section 3.2 の 2xx 全般確立に
+    なしの 2xx HEADERS) で検証する。draft-16 Section 3.2 の 2xx 全般確立に
     より SESSION_READY が発火し、open_stream / send_datagram が機能する
     (修正前は 201 を非確立として扱い、高レベル Client.connect がハング
     していた)。

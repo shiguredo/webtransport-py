@@ -16,7 +16,7 @@ from webtransport.http2.exceptions import Http2ConnectionError
 from webtransport.webtransport_ext import h2 as h2_low
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -713,7 +713,7 @@ async def test_recv_flow_control_violation_notifies_on_error(test_certificates):
     公開 API の send_stream_data は送信側クレジットで塞がれるため、クライアント
     の TLS ソケットへ WT_STREAM カプセルを直接書き込んで超過を再現する。
     サーバーのストリーム受信上限を 4 バイトにし、5 バイトを注入する。
-    WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15 Section 3.4 の 0xTBD) の
+    WT_FLOW_CONTROL_ERROR (0xTBD) は draft-16 Section 3.4 の 0xTBD) の
     プレースホルダ。draft で値が確定したら更新する。
     """
     from webtransport._h2_client import Client
@@ -783,7 +783,7 @@ async def test_client_recv_flow_control_violation_notifies_on_error(test_certifi
     公開 API の send_stream_data は送信側クレジットで塞がれるため、サーバー
     の TLS ソケットへ WT_STREAM カプセルを直接書き込んで超過を再現する。
     クライアントのストリーム受信上限を 4 バイトにし、5 バイトを注入する。
-    WT_FLOW_CONTROL_ERROR (0xTBD) は draft-15 Section 3.4 の 0xTBD) の
+    WT_FLOW_CONTROL_ERROR (0xTBD) は draft-16 Section 3.4 の 0xTBD) の
     プレースホルダ。draft で値が確定したら更新する。
     """
     from webtransport._h2_client import Client
@@ -1133,7 +1133,7 @@ async def _h2_server_with_origin_allowed(
 async def test_h2_server_rejects_session_with_non_2xx(test_certificates):
     """on_session_request が 403 を返すとクライアントに SESSION_REJECTED が届くことを確認
 
-    draft-15 Section 3.2 の Origin 検証失敗時の 403 SHOULD を高レベル
+    draft-16 Section 3.2 の Origin 検証失敗時の 403 SHOULD を高レベル
     Server から発行できることの検証。クライアントは高レベル Client では
     なく Sans-IO h2_low.Session を使い、非 2xx 受信時の SESSION_REJECTED
     イベントを直接観測する。
@@ -1269,7 +1269,7 @@ async def test_h2_server_on_session_closed_after_pre_accept_end_stream(test_cert
 async def test_h2_client_connect_raises_on_non_2xx_reject(test_certificates):
     """on_session_request が 403 を返すと Client.connect() が WebTransportSessionRejectedError を送出することを確認
 
-    draft-15 Section 3.2 により、非 2xx 応答はセッション未確立を意味する。
+    draft-16 Section 3.2 により、非 2xx 応答はセッション未確立を意味する。
     bindings は拒否時に SESSION_REJECTED のみを発火し、SESSION_READY /
     SESSION_CLOSED は発火しない。connect() の待機ループが
     SESSION_REJECTED を検知しないと永久ブロックするため、実 Server と実
@@ -1601,7 +1601,7 @@ async def test_goaway_notifies_server_and_keeps_session(test_certificates):
 
     高レベル Server と Sans-IO クライアントで検証する。GOAWAY を 2 回
     送っても on_goaway は 1 回のみ発火し、データグラムの送受信は継続する
-    (draft-15 Section 6.13 の graceful shutdown)。
+    (draft-16 Section 6.13 の graceful shutdown)。
     """
     from conftest import _encode_goaway_frame
 
@@ -2351,7 +2351,7 @@ async def _pump_http2_connection(
 async def test_h2_server_rejects_session_with_405_and_allow(test_certificates):
     """on_session_request の 405 拒否で :status 405 と allow: CONNECT が届くことを確認
 
-    draft-ietf-webtrans-http2-15 Section 3.2 の 405 SHOULD を高レベル
+    draft-ietf-webtrans-http2-16 Section 3.2 の 405 SHOULD を高レベル
     Server のアプリコールバック (on_session_request) から発行できることを、
     TLS / asyncio を挟んだ実経路で検証する。RFC 9110 Section 15.5.6 の MUST
     に従い Allow: CONNECT が応答ヘッダーに載る。応答ヘッダーの観測には
@@ -2402,7 +2402,7 @@ async def test_server_on_stop_sending_fires(test_certificates):
     サーバーが双方向ストリームを開いてデータを送り、クライアントが
     stop_sending で送信停止を要求する。サーバー側で stream_id と
     アプリケーションエラーコードが観測でき、送信側が Ready 状態のため
-    低レベル層が WT_RESET_STREAM を自動で返す (draft-15 Section 6.3)。
+    低レベル層が WT_RESET_STREAM を自動で返す (draft-16 Section 6.3)。
     """
     from webtransport._h2_client import Client
     from webtransport._h2_server import Server
@@ -2544,7 +2544,7 @@ async def test_client_on_stop_sending_fires(test_certificates):
 async def test_h2_server_rejects_disallowed_origin(test_certificates):
     """allowed_origins に無い Origin の CONNECT が 403 で拒否されることを確認
 
-    draft-ietf-webtrans-http2-15 Section 3.2 の「When the request contains the
+    draft-ietf-webtrans-http2-16 Section 3.2 の「When the request contains the
     Origin header, the WebTransport server MUST verify the Origin header」と
     「If the verification fails, the WebTransport server SHOULD reply with
     status code 403」を、高レベル h2.Server の allowed_origins で満たす。

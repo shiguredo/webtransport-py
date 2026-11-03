@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 のストリーム ID 方向検証テスト
 
 QUIC 互換ストリーム ID (Bit 0 = initiator、Bit 1 = 方向) の検証を
-カプセル種別の向きごとに行うことを検証する (draft-15 Section 5.2)。
+カプセル種別の向きごとに行うことを検証する (draft-16 Section 5.2)。
 双方向 (%4==0/1) は両方向とも可。単方向は送信者→受信者方向が
 ピア initiator のみ可、受信者→送信者方向が自側 initiator のみ可。
 ワイヤ注入で再現する (公開 API では非準拠な ID を送出する手段が
@@ -26,7 +26,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -268,7 +268,7 @@ def test_stream_data_blocked_to_send_only_stream_rejected() -> None:
     サーバー視点の ID 3 (サーバー起点単方向) は自側送信専用である。
     WT_STREAM_DATA_BLOCKED はデータ送信者→受信者の方向であり、WT_STREAM /
     WT_RESET_STREAM と同じ群のため、受信すると WT_STREAM_STATE_ERROR になる
-    (draft-15 Section 6.9)。逆方向の is_receivable_flow_capsule を使うと
+    (draft-16 Section 6.9)。逆方向の is_receivable_flow_capsule を使うと
     この拒否が起きないため、その回帰ピンになる。
     """
     client, server = _create_h2_session_pair()

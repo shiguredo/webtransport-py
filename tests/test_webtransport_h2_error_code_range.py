@@ -1,8 +1,8 @@
 """WebTransport over HTTP/2 の error_code 範囲検証テスト
 
-draft-15 Section 6.2 / 6.3 の MUST 「Application Protocol Error Code が
+draft-16 Section 6.2 / 6.3 の MUST 「Application Protocol Error Code が
 0xffffffff を超えたら WT_ERROR セッションエラー」を検証する。 WT_ERROR は
-WT_ERROR (draft-15 Section 3.4 の 0xTBD) のプレースホルダ。 draft で値が
+WT_ERROR (draft-16 Section 3.4 の 0xTBD) のプレースホルダ。 draft で値が
 確定したら更新する。 0xffffffff ちょうどは合法で、従来どおり
 StreamReset / StopSending が届く。終端状態や二重受信と同時に立っても
 範囲検証が先で、 WT_STREAM_STATE_ERROR ではなく WT_ERROR になる。
@@ -24,7 +24,7 @@ from conftest import (
 from webtransport import h2
 from webtransport.webtransport_ext.h2 import WtErrorCode
 
-# エラーコードは WtErrorCode を単一の出典とする (draft-15 Section 3.4 の
+# エラーコードは WtErrorCode を単一の出典とする (draft-16 Section 3.4 の
 # 0x50 / 0x51 / 0x52 は 0xTBD のプレースホルダ)
 WT_FLOW_CONTROL_ERROR = WtErrorCode.WT_FLOW_CONTROL_ERROR.value
 WT_STREAM_STATE_ERROR = WtErrorCode.WT_STREAM_STATE_ERROR.value
@@ -74,7 +74,7 @@ def _assert_wt_error_sent(server: h2.Session, error_message: str) -> None:
     """WT_ERROR (0x52) の WT_CLOSE_SESSION が送出されることを確認
 
     エラー検知は close_session (WT_CLOSE_SESSION 送出 + END_STREAM) で実現
-    される (draft-15 Section 3.4)。ワイヤ部分列チェックで送出を検証する。
+    される (draft-16 Section 3.4)。ワイヤ部分列チェックで送出を検証する。
     """
     wire = server.send()
     assert wire is not None

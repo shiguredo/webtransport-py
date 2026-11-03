@@ -1,7 +1,7 @@
 """WebTransport over HTTP/2 の END_STREAM によるセッション終了検知テスト
 
 ピアが WT_CLOSE_SESSION カプセルを送らず END_STREAM フレームのみで CONNECT
-ストリームを閉じた場合 (draft-ietf-webtrans-http2-15 Section 3.4 の正規の
+ストリームを閉じた場合 (draft-ietf-webtrans-http2-16 Section 3.4 の正規の
 終了経路) にセッション終了を検知する修正を検証する。WT_CLOSE_SESSION なし
 のクリーンクローズは error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION
 と等価 (Section 6.12)。
@@ -71,7 +71,7 @@ def test_end_stream_only_closes_session() -> None:
     """END_STREAM のみの終了でセッション終了が検知され応答 END_STREAM が送出されることを確認
 
     ピアが WT_CLOSE_SESSION を送らず END_STREAM のみで CONNECT ストリームを
-    閉じた場合 (draft-15 Section 3.4 の正規の終了経路) にセッション終了が
+    閉じた場合 (draft-16 Section 3.4 の正規の終了経路) にセッション終了が
     検知され、SessionClosed (error_code 0、error_message 空) が発火する。
     WT_CLOSE_SESSION なしのクリーンクローズは error code 0 かつ空のエラー
     文字列の WT_CLOSE_SESSION と等価 (Section 6.12) である。同節の受信者 MUST
@@ -138,7 +138,7 @@ def test_end_stream_with_truncated_capsule_resets_stream(truncated: bytes) -> No
         "カプセルが途中の時点でセッションが終了しています"
     )
 
-    # 空の DATA + END_STREAM でピアがストリームを閉じる (draft-15 Section 3.4)
+    # 空の DATA + END_STREAM でピアがストリームを閉じる (draft-16 Section 3.4)
     ret = server.receive(_encode_data_frame(session_id, b"", end_stream=True))
     assert ret > 0, "END_STREAM の注入に失敗しました"
 
@@ -166,7 +166,7 @@ def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
     """完成したカプセルの直後の END_STREAM は従来どおり error code 0 で終了することを確認
 
     カプセル境界で終わった場合は RFC 9297 Section 3.3 の切り詰めに該当せず、
-    draft-15 Section 6.12 の「WT_CLOSE_SESSION 無しのクリーンな終了」になる
+    draft-16 Section 6.12 の「WT_CLOSE_SESSION 無しのクリーンな終了」になる
     (対照)。受信側のカプセルバッファが空のときに END_STREAM が届いても
     RST_STREAM を送出しないことも表明する (wire の表明は補助であり、主たる
     判別は SessionClosed の error_code 0)。あわせて同節の受信者 MUST は文面上は
@@ -176,7 +176,7 @@ def test_end_stream_after_complete_capsule_closes_cleanly() -> None:
     client, server = _create_h2_session_pair()
     session_id = _connect_h2_session(client, server)
 
-    # 完成したカプセル (PADDING。draft-15 Section 6.1) を届けてバッファを空にする
+    # 完成したカプセル (PADDING。draft-16 Section 6.1) を届けてバッファを空にする
     ret = server.receive(_encode_data_frame(session_id, _encode_capsule(_WT_PADDING, b"")))
     assert ret > 0, "カプセルの注入に失敗しました"
     assert server._test_unfinished_capsule_bytes(session_id) == 0, (
@@ -207,7 +207,7 @@ def test_end_stream_pre_accept_truncated_capsule_no_termination() -> None:
     """受理前のセッションでは END_STREAM 受信時に切り詰めの検証も終了通知も行わないことを確認
 
     サーバーは受理するまでカプセルを処理せず、受理前の DATA は上限付きで蓄積
-    される (draft-15 Section 3.2 の楽観送信。RFC 9297 Section 3.2 の Capsule
+    される (draft-16 Section 3.2 の楽観送信。RFC 9297 Section 3.2 の Capsule
     Protocol も 2xx まで not in use)。受理前 END_STREAM は保留記録のみを行い、
     切り詰めの検証と終了処理は accept_session の遅延カプセル処理後に行うため、
     受理を呼ばないこの時点では SessionClosed も RST_STREAM も発生せず、エントリ
@@ -290,7 +290,7 @@ def test_end_stream_after_recv_wt_close_session_no_double() -> None:
     """WT_CLOSE_SESSION + END_STREAM の両方を送るピアで SessionClosed が 1 回だけ発火することを確認
 
     コンプライアントなピアは WT_CLOSE_SESSION 送出後に必ず END_STREAM を送る
-    (draft-15 Section 6.12 の MUST)。close_session は WT_CLOSE_SESSION と
+    (draft-16 Section 6.12 の MUST)。close_session は WT_CLOSE_SESSION と
     END_STREAM を同時送出するため、_h2_pump の時点で両方がサーバーに届く。
     カプセル処理 (handle_wt_close_session) が SessionClosed を発火してエントリ
     を削除するため、続く END_STREAM 検知 (handle_end_stream) とストリーム
@@ -310,7 +310,7 @@ def test_end_stream_after_recv_wt_close_session_no_double() -> None:
 def test_end_stream_response_after_recv_wt_close_session() -> None:
     """WT_CLOSE_SESSION 受信後に受信者 MUST (END_STREAM で応答) に従い END_STREAM を送出することを確認
 
-    draft-15 Section 6.12 の「受信者は WT_CLOSE_SESSION 受信時に END_STREAM
+    draft-16 Section 6.12 の「受信者は WT_CLOSE_SESSION 受信時に END_STREAM
     フレームで応答してストリームを閉じる MUST」。エントリ削除とセットで行い、
     ストリームを両ハーフクローズで閉じて同時ストリーム枠を消費し続けない。
     """
@@ -505,7 +505,7 @@ def test_end_stream_close_session_noop() -> None:
 def test_end_stream_201_terminates_session() -> None:
     """201 応答のセッションは END_STREAM で終了処理が実行されることを確認
 
-    201 は 2xx 全般のセッション確立 (draft-15 Section 3.2) であり、
+    201 は 2xx 全般のセッション確立 (draft-16 Section 3.2) であり、
     is_established = true となる。確立済みセッションの END_STREAM は
     セッション終了として検知され、SessionClosed が発火する。
     """
@@ -703,8 +703,8 @@ def test_headers_200_end_stream_ready_and_closed() -> None:
     wire = client.send()
     assert wire is None or _encode_capsule(_WT_DATAGRAM, b"after-200-end") not in wire
 
-    # 確立処理でキューされた初期フロー制御カプセル (WT_MAX_DATA /
-    # WT_MAX_STREAMS) もセッション終了後に送出されない
+    # SETTINGS と同値の初期フロー制御カプセル (WT_MAX_DATA / WT_MAX_STREAMS)
+    # は送出しないため、セッション終了後のワイヤにも現れない
     # 0x99 0x0b 0x4d 0x3d は WT_MAX_DATA (Type 0x190b4d3d) の 4 バイト varint
     assert wire is None or _encode_varint(_WT_MAX_DATA) not in wire
 
@@ -717,7 +717,7 @@ def test_end_stream_server_pre_accept_end_stream_terminates_after_accept() -> No
     終了処理をしない)。accept_session が 2xx を送出した後にセッション終了
     (error code 0) として処理される。WT_CLOSE_SESSION 無しのクリーンクローズ
     は error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION と等価
-    (draft-15 Section 3.4 / 6.12)。
+    (draft-16 Section 3.4 / 6.12)。
     """
     _client, server = _create_h2_session_pair()
 
@@ -741,7 +741,7 @@ def test_end_stream_server_pre_accept_end_stream_terminates_after_accept() -> No
     wire = server.send()
     assert wire is not None, "受理の応答が送出されていません"
     assert b"\x88" in wire, "2xx (:status 200) の応答ヘッダーが送出されていません"
-    # 初期フロー制御カプセルは終了するセッションへ送出しない
+    # SETTINGS と同値の初期フロー制御カプセルは送出しない
     assert _encode_varint(_WT_MAX_DATA) not in wire, "WT_MAX_DATA が送出されました"
     assert _encode_varint(_WT_MAX_STREAMS_BIDI) not in wire, (
         "WT_MAX_STREAMS (BIDI) が送出されました"
@@ -858,7 +858,7 @@ def test_test_has_pre_accept_end_stream_cleared_on_close_session() -> None:
 def test_end_stream_server_pre_accept_truncated_capsule_resets_stream_after_accept() -> None:
     """受理前 END_STREAM の時点で切り詰めが残る場合、accept_session 後に PROTOCOL_ERROR で終了することを確認
 
-    受理前はカプセルを処理しない (draft-15 Section 3.2 の MUST) ため、切り詰め
+    受理前はカプセルを処理しない (draft-16 Section 3.2 の MUST) ため、切り詰め
     の検証は accept_session の遅延処理後に行う。END_STREAM がカプセル境界で
     終わっていないため、RFC 9297 Section 3.3 の malformed / incomplete として
     PROTOCOL_ERROR のストリームエラー (RFC 9113 Section 8.1.1) になり、clean な
@@ -958,7 +958,7 @@ def test_end_stream_pre_accept_wt_close_session_and_end_stream_single_fire(
     同じく受理前に届いた END_STREAM は保留記録され、遅延処理でセッションが
     閉じた場合は保留記録を除去するだけで終了処理を重ねない (二重発火しない)。
     SessionClosed の error code はカプセルの値 (0 と非 0 の両方) になる。
-    受信者 MUST の END_STREAM 応答 (draft-15 Section 6.12) も成立する。
+    受信者 MUST の END_STREAM 応答 (draft-16 Section 6.12) も成立する。
     """
     client, server = _create_h2_session_pair()
     session_id = client.connect("https://localhost/webtransport")
