@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 を draft-ietf-webtrans-http2-16 に追従する
 
 - Created: 2026-11-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-03
 - Branch: feature/update-h2-draft-16
 - Polished: {YYYY-MM-DD}
 
@@ -39,3 +39,13 @@ draft-16 は SETTINGS_WT_ENABLED の codepoint を 0x2b60 から 0x2b67 に変�
 - 既存テストを draft-16 の期待値に更新し、非増加判定と codepoint 互換のテストを追加する
 - WebKit を使った WebTransport over HTTP/2 のブラウザ E2E が通る
 - 全テストが通る
+
+## 解決方法
+
+- `src/bindings/webtransport_h2.h` の `SETTINGS_WT_ENABLED` を draft-16 の 0x2b67 に変更し、旧 draft-15 の 0x2b60 を `SETTINGS_WT_ENABLED_DRAFT15` として併送・受理するようにした (`H2Session::initialize` / `H2Session::on_recv_settings_entry_callback`)。両方の codepoint は同じ値域の設定として扱う
+- `H2Session::apply_peer_initial_flow_control` で、対向 SETTINGS の初期値 (0 を含む) を `received_max_data` / `received_max_streams_bidi` / `received_max_streams_uni` と `received_initial_max_stream_data_*` に記録するようにした。0 の初期値も非増加判定の基準になる
+- `H2Session::handle_wt_max_data` / `H2Session::handle_wt_max_stream_data` / `H2Session::handle_wt_max_streams` の受信値比較を「前回受信値 (カプセル未受信なら初期値) を増加させない場合」に変更し、WT_FLOW_CONTROL_ERROR でセッションを閉じるようにした。エラーメッセージも "did not increase" に変更した
+- `H2Session::accept_session` とクライアントの 2xx 応答処理から、SETTINGS と同値の初期フロー制御カプセル (WT_MAX_DATA / WT_MAX_STREAMS) の送出を削除した。初期値は SETTINGS と WebTransport-Init ヘッダーで伝達済みであり、draft-16 の非増加 MUST により等値のカプセルはピアが接続を閉じるためである
+- コードコメントの仕様引用を draft-16 の文言 (stream error → session error、RFC 8941 → RFC 9651 など) に更新し、src / tests / `skills/webtransport-py/SKILL.md` の h2 側 draft 参照を draft-16 に更新した
+- `tests/test_webtransport_h2_settings_codepoint.py` を新規作成し、両 codepoint の併送と、新旧どちらの codepoint でも WebTransport 対応として受理することを検証した (8 件)。`tests/test_webtransport_h2_flow_control_capsule.py` には、等値・初期値等値・初期値 0 の値 0 といった非増加判定のテストを追加し、既存の期待値を draft-16 に更新した
+- 検証: `make develop` 成功 (型スタブの diff なし)、全テスト 1567 件通過、WebKit 26.5 の WebTransport over HTTP/2 ブラウザ E2E 8 件通過、ruff と clang-format 通過
