@@ -1,7 +1,7 @@
 # CI で flaky に失敗する pacing テストの RTT 標本を決定的にする
 
 - Created: 2026-11-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-05
 - Branch: feature/test-fix-quic-pacing-rtt-inflation
 - Polished: {YYYY-MM-DD}
 
@@ -63,3 +63,20 @@
   通過する
 - 全テストが通過する
 - CI が緑に戻る
+
+## 解決方法
+
+- `tests/test_quic_pacing.py` から、送信と配送の間に `time.sleep` を挟んで RTT 標本を
+  膨らませる処理を削除した
+- `_deliver_ack_eliciting_packet` を追加した。送信後に `bytes_in_flight` が増える
+  パケットを 1 つだけサーバーへ配送し、ACK のみのパケットを除外する
+- `_inflate_rtt` を追加した。サーバーに ACK を生成させたあと `_ACK_HOLD_DELAY`
+  (0.1 秒) 保持してからクライアントへ配送する。他のパケットを配送しないため ACK の
+  largest acked は配送したパケットになり、標本は保持時間以上になる
+- 標本が膨らんだことを `latest_rtt` で検証し、膨らまなければ `AssertionError` に
+  する。平滑化 RTT が高速標本のまま進むことを防ぐ
+- 定数を `_ACK_HOLD_DELAY` / `_RTT_INFLATE_ROUNDS` / `_PREPARE_PUMP_PACKETS` に整理し、
+  不要になった `_TRICKLE_DELAY` / `_TRICKLE_ROUNDS` / `_TRICKLE_PACKETS` を削除した
+- 検証: 4 コア相当の CPU 負荷をかけた状態で `tests/test_quic_pacing.py` を 40 回
+  連続実行して失敗しないこと、準備後の平滑化 RTT が 23.6 ms 前後で安定することを
+  確認した。全テスト (1566 passed, 1 skipped) も通過した
