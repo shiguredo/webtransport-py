@@ -490,10 +490,10 @@ record = client.pending_record
 
 ## Python
 
-- 3.14
-- 3.14t
 - 3.15
 - 3.15t
+- 3.14
+- 3.14t
 
 ## プラットフォーム
 
