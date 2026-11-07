@@ -2,7 +2,7 @@
 
 ピアからの STOP_SENDING (RFC 9000 Section 19.5) が低レベル `quic.Event` の
 `STOP_SENDING` として伝播し、アプリケーションエラーコードを観測できることを
-検証する。draft-ietf-webtrans-http3-16 Section 4.4 は「WebTransport 実装は
+検証する。draft-ietf-webtrans-http3-17 Section 4.4 は「WebTransport 実装は
 これらのシグナルをアプリケーションへ伝播する」と定めており、RESET_STREAM
 だけを伝播して STOP_SENDING を落とすと仕様違反になる。
 

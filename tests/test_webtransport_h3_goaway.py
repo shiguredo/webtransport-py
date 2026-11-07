@@ -2,7 +2,7 @@
 
 Sans-IO 構成 (conftest.py の Sans-IO ヘルパー) を使い、GOAWAY 受信が接続の
 終了ではなく graceful shutdown の通知として扱われることを検証する。
-draft-ietf-webtrans-http3-16 Section 4.7 は「WT_DRAIN_SESSION カプセルまたは
+draft-ietf-webtrans-http3-17 Section 4.7 は「WT_DRAIN_SESSION カプセルまたは
 HTTP/3 GOAWAY フレームを送受信した後も、エンドポイントはセッションを継続して
 よい」と定め、RFC 9114 Section 5.2 は graceful shutdown の完了時に
 H3_NO_ERROR を使う SHOULD を定める。GOAWAY 受信で is_closed() が真になると、
@@ -57,7 +57,7 @@ def test_goaway_does_not_close_session() -> None:
     """GOAWAY 受信で is_closed() が真にならず GoAway イベントが 1 回発火することを確認
 
     GOAWAY は graceful shutdown の通知であり接続エラーではない
-    (draft-ietf-webtrans-http3-16 Section 4.7 / RFC 9114 Section 5.2)。
+    (draft-ietf-webtrans-http3-17 Section 4.7 / RFC 9114 Section 5.2)。
     shutdown コールバックで closed_ を立てると、高レベル層が
     H3_GENERAL_PROTOCOL_ERROR で接続を閉じてしまう。
     """
@@ -79,7 +79,7 @@ def test_server_session_goaway_does_not_close_session() -> None:
 
     サーバーが受信する GOAWAY の ID は push ID を表す (RFC 9114 Section 7.2.6)。
     どちらの方向でも graceful shutdown の通知であり、接続を閉じない
-    (draft-ietf-webtrans-http3-16 Section 4.7)。
+    (draft-ietf-webtrans-http3-17 Section 4.7)。
     """
     _client, server, _session_id = _establish_session()
 
@@ -98,7 +98,7 @@ def test_goaway_keeps_datagram_sendable() -> None:
     """GOAWAY 受信後もデータグラムを送信でき、ピアが受信できることを確認
 
     GOAWAY 受信後もエンドポイントはセッションを継続してよい
-    (draft-ietf-webtrans-http3-16 Section 4.7)。GOAWAY 受信で送信経路
+    (draft-ietf-webtrans-http3-17 Section 4.7)。GOAWAY 受信で送信経路
     (get_streams_to_send / send_datagram) が止まると、graceful shutdown 中の
     データグラムが失われる。
     """
@@ -132,7 +132,7 @@ def test_goaway_keeps_existing_stream_usable() -> None:
     """GOAWAY 受信後も既存の WT データストリームで送受信できることを確認
 
     GOAWAY 受信後もエンドポイントはセッションを継続してよい
-    (draft-ietf-webtrans-http3-16 Section 4.7)。nghttp3 が GOAWAY 受信で拒否するのは
+    (draft-ietf-webtrans-http3-17 Section 4.7)。nghttp3 が GOAWAY 受信で拒否するのは
     新規ストリームの開設 (nghttp3_conn_open_wt_data_stream) だけで、既存ストリームの
     送受信は継続できる。
     """

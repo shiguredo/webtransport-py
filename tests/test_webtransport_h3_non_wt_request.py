@@ -1,6 +1,6 @@
 """WebTransport over HTTP/3 の非 WebTransport リクエストへの 405 応答テスト
 
-draft-ietf-webtrans-http3-16 Section 3.2 の 405 SHOULD は extended CONNECT +
+draft-ietf-webtrans-http3-17 Section 3.2 の 405 SHOULD は extended CONNECT +
 :protocol=webtransport-h3 が対象だが、WebTransport 専用エンドポイントとして
 通常の HTTP リクエストにも 405 を返す (h2 のサーバーと同じ実装ポリシー)。
 RFC 9110 Section 15.5.6 の MUST に従い、405 には Allow: CONNECT を付ける。

@@ -756,6 +756,44 @@ class H3Session {
                                   size_t length,
                                   bool fin);
 
+  // 対向の単方向ストリームを分類し、制御ストリームの SETTINGS に含まれる
+  // draft-17 の SETTINGS_WT_ENABLED (0x20b8933b) を検出する。nghttp3 は
+  // 未知の SETTINGS ID を破棄するため、受信 SETTINGS の codepoint を
+  // draft-16 の 0x2c7cf000 に読み替えて nghttp3 へ渡す
+  // (draft-ietf-webtrans-http3-17 Section 3.1 / Section 7.1)。
+  //
+  // 戻り値が true の場合はこの関数が受信データを処理したことを表し、
+  // forwarded に nghttp3 へ渡すデータが入る。forwarded が空で fin が false
+  // の場合は、SETTINGS フレームの到着待ちとしてデータを保持している。
+  // 戻り値が false の場合は呼び出し側の通常経路で nghttp3 へ渡す
+  bool handle_peer_uni_stream_data(int64_t stream_id,
+                                   const std::vector<uint8_t>& data,
+                                   bool fin,
+                                   std::vector<uint8_t>* forwarded,
+                                   bool* forwarded_fin);
+
+  // 制御ストリームの SETTINGS フレームを増分で解釈する。フレームが
+  // 分割到着しても状態を保持し、フレーム全体が揃ったら true を返す
+  bool parse_peer_control_settings();
+
+  // 完全な SETTINGS フレームを含む制御ストリームのバッファについて、
+  // draft-17 の SETTINGS_WT_ENABLED を draft-16 の codepoint に置き換える。
+  // nghttp3 に WebTransport 対応を認識させるために必要である
+  void rewrite_peer_settings_codepoint();
+
+  // ピア起点の単方向ストリーム ID かを返す
+  // (クライアントは %4==3、サーバーは %4==2)
+  bool is_remote_uni_stream_id(int64_t stream_id) const;
+
+  // 双方向ストリームのフレーム境界を観測し、WT_STREAM (0x41) が最初の
+  // フレーム以外で現れたら true を返す。nghttp3 は WebTransport 有効時の
+  // 新規双方向ストリームに MAYBE_WT_DATA を立てるため、HEADERS の後に
+  // WT_STREAM が来ても受理してしまう。draft-17 Section 4.3 の MUST
+  // (WT_STREAM は双方向ストリームの最初のバイト列に限る) をバインディング
+  // 層で強制する
+  bool observe_bidi_stream_frame(int64_t stream_id,
+                                 const std::vector<uint8_t>& data);
+
   // nghttp3 からの復帰後の共通処理。受理前 FIN 検知・QPACK ブロック中 FIN
   // 検知と移行・保留 FIN の後始末・遅延 2xx 破棄を行う。fin には実際に
   // nghttp3 へ渡した fin を渡す。保持に託した fin では呼ばず、保持投入時に
@@ -964,12 +1002,49 @@ class H3Session {
   // 接続状態
   bool closed_ = false;
 
-  // 対向 SETTINGS の受信状態 (draft-16 Section 3.1)。recv_settings2_cb が
+  // 対向 SETTINGS の受信状態 (draft-17 Section 3.1)。recv_settings2_cb が
   // 設定し、is_webtransport_ready() が参照する
   bool settings_received_ = false;
   bool peer_wt_enabled_ = false;
   bool peer_enable_connect_protocol_ = false;
   bool peer_h3_datagram_ = false;
+
+  // 対向の単方向ストリームを制御ストリームとして分類済みの ID の集合。
+  // 最初の 1 バイトが制御ストリームタイプ (0x00) の場合だけ制御ストリーム
+  // として扱う。QPACK (0x01..0x03) や WT 単方向 (0x54) は対象外
+  std::set<int64_t> classified_peer_uni_stream_ids_;
+  int64_t peer_control_stream_id_ = -1;
+
+  // 制御ストリームの SETTINGS フレームを解釈するための受信バッファ。
+  // ストリームタイプ (0x00) を含む。SETTINGS フレームを nghttp3 へ
+  // 渡したら空にする
+  std::vector<uint8_t> peer_control_buffer_;
+  bool peer_settings_observed_ = false;
+  // SETTINGS フレームを nghttp3 へ渡し終えたか。以降の制御ストリームの
+  // データはそのまま nghttp3 へ渡す
+  bool peer_control_forwarded_ = false;
+
+  // 自側の制御ストリームに draft-17 の SETTINGS_WT_ENABLED を追加済みか。
+  // nghttp3 は SETTINGS フレームを 1 回の writev_stream で書き出すため、
+  // 通常は最初のチャンクで完了する
+  bool local_settings_rewritten_ = false;
+
+  // 双方向ストリームのフレーム境界の観測状態。WT_STREAM が最初のフレームか
+  // どうかを判定するために使う。ストリーム終了時に破棄する
+  struct BidiFrameObserver {
+    // 最初のフレームが WT_STREAM だった場合、または不正を検出した場合に
+    // 以後の観測を打ち切る
+    bool stopped = false;
+    // WT_STREAM を最初のフレーム以外で検出した
+    bool misplaced = false;
+    // 次にフレームヘッダーが始まる絶対オフセット
+    uint64_t next_frame_offset = 0;
+    // 次に処理するバイトの絶対オフセット
+    uint64_t position = 0;
+    // 分割到着したフレームヘッダーの蓄積 (最大 16 バイト)
+    std::vector<uint8_t> header;
+  };
+  std::map<int64_t, BidiFrameObserver> bidi_frame_observers_;
 };
 
 // Python バインディングを定義

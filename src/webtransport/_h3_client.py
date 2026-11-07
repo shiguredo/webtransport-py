@@ -193,7 +193,7 @@ class Client:
         """GOAWAY 受信時のコールバックを設定する
 
         GOAWAY は graceful shutdown の通知であり、接続もセッションも継続する
-        (draft-ietf-webtrans-http3-16 Section 4.7)。初回受信でのみ発火し、
+        (draft-ietf-webtrans-http3-17 Section 4.7)。初回受信でのみ発火し、
         2 回目以降は GOAWAY ID の異同を問わず発火しない。登録前に受信した
         GOAWAY は通知しない。
 
@@ -221,7 +221,7 @@ class Client:
 
         error_code はデータストリームでは WT_APPLICATION_ERROR レンジの
         ワイヤコードを unsigned 32-bit のアプリコードへ逆変換して渡す
-        (draft-ietf-webtrans-http3-16 Section 4.4 の unchanged はアプリコードの
+        (draft-ietf-webtrans-http3-17 Section 4.4 の unchanged はアプリコードの
         end-to-end 保存を指すと解釈する)。レンジ外、またはレンジ内の予約済み
         コードポイントの場合は None (アプリエラーコードなし)。CONNECT
         ストリームのリセットは HTTP/3 エラーコード空間のまま渡す。
@@ -248,7 +248,7 @@ class Client:
 
         error_code はデータストリームでは WT_APPLICATION_ERROR レンジの
         ワイヤコードを unsigned 32-bit のアプリコードへ逆変換して渡す
-        (draft-ietf-webtrans-http3-16 Section 4.4)。レンジ外、またはレンジ内の
+        (draft-ietf-webtrans-http3-17 Section 4.4)。レンジ外、またはレンジ内の
         予約済みコードポイントの場合は None (アプリエラーコードなし)。
 
         Args:
@@ -264,7 +264,7 @@ class Client:
 
         不正なセッション ID (QUIC ストリーム ID 範囲外) のデータグラムは
         `on_datagram` に渡らず、接続が H3_ID_ERROR で閉じられる
-        (draft-ietf-webtrans-http3-16 Section 4 の MUST)。終了した・一度も
+        (draft-ietf-webtrans-http3-17 Section 4 の MUST)。終了した・一度も
         確立されていないセッション ID 宛のデータグラムは破棄される
         (実装ポリシー)。
 
@@ -598,7 +598,7 @@ class Client:
                 )
 
             # サーバーの transport parameter を検証する
-            # (draft-ietf-webtrans-http3-16 Section 3.1)。要件未達なら
+            # (draft-ietf-webtrans-http3-17 Section 3.1)。要件未達なら
             # CONNECT を送らずにセッションを確立しない。reset_stream_at の
             # 扱い (実ブラウザ互換のため必須としない) は
             # meets_transport_param_requirements の docstring を参照する
@@ -854,7 +854,7 @@ class Client:
         """データグラムを送信する
 
         終了したセッション ID への送信は無視される
-        (draft-ietf-webtrans-http3-16 Section 6 の MUST)。
+        (draft-ietf-webtrans-http3-17 Section 6 の MUST)。
 
         Args:
             data: 送信データ
@@ -882,7 +882,7 @@ class Client:
 
         データストリームのアプリケーションエラーコードは
         WT_APPLICATION_ERROR レンジへリマップしてワイヤに載せる
-        (draft-ietf-webtrans-http3-16 Section 4.4)。CONNECT ストリームは
+        (draft-ietf-webtrans-http3-17 Section 4.4)。CONNECT ストリームは
         リマップしない。error_code が 0xffffffff を超える場合は
         ValueError を上げる。
 
@@ -908,7 +908,7 @@ class Client:
         # RESET_STREAM_AT を送出するため、ヘッダーが未書き込み (ストリームを
         # 開いた直後でデータ未送信) のままリセットすると Reliable Size が 0 に
         # なり、ピアがセッション ID を復元できない
-        # (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)。ピアが広告しない
+        # (draft-ietf-webtrans-http3-17 Section 4.4 の MUST)。ピアが広告しない
         # 場合は RESET_STREAM_AT を送出できず MUST を満たせないため、従来の
         # 挙動 (ヘッダー未書き込みのまま通常の RESET_STREAM) を保つ
         if (
@@ -926,7 +926,7 @@ class Client:
 
         データストリームのアプリケーションエラーコードは
         WT_APPLICATION_ERROR レンジへリマップしてワイヤに載せる
-        (draft-ietf-webtrans-http3-16 Section 4.4 の MUST)。CONNECT
+        (draft-ietf-webtrans-http3-17 Section 4.4 の MUST)。CONNECT
         ストリームはリマップしない。STOP_SENDING を受けたピアは
         RFC 9000 Section 3.5 の MUST により RESET_STREAM を返す。
         `reset_stream` がストリーム破棄を nghttp3 へ通知するのに対し、
@@ -1056,7 +1056,7 @@ class Client:
 
             elif webtransport_event.type == h3_low.EventType.GOAWAY:
                 # graceful shutdown の通知であり、接続もセッションも継続する
-                # (draft-ietf-webtrans-http3-16 Section 4.7)。初回受信でのみ
+                # (draft-ietf-webtrans-http3-17 Section 4.7)。初回受信でのみ
                 # 通知し、2 回目以降は GOAWAY ID の異同を問わず通知しない
                 if not self._goaway_notified:
                     self._goaway_notified = True
@@ -1074,7 +1074,7 @@ class Client:
                 if self._on_datagram is not None:
                     # receive_datagram が Quarter Stream ID から session_id を
                     # 復元し、セッション ID を検証する
-                    # (draft-ietf-webtrans-http3-16 Section 4.5 / Section 4)。
+                    # (draft-ietf-webtrans-http3-17 Section 4.5 / Section 4)。
                     # 範囲外のセッション ID は接続クローズとなり、終了した・
                     # 一度も確立されていないセッション ID 宛のデータグラムは
                     # 破棄されるため、ここに到達するのは生存セッションの
@@ -1096,10 +1096,12 @@ class Client:
                 )
 
             elif webtransport_event.type == h3_low.EventType.ERROR:
-                # データグラムの不正なセッション ID 受信 (H3_ID_ERROR) のみ
-                # 接続クローズを扱う。receive_stream_data が生成する nghttp3
-                # エラー (error_code が 0x0108 でない) は対象外
-                if webtransport_event.error_code != 0x0108:
+                # 次の H3 接続エラーだけ接続クローズを扱う。それ以外の
+                # nghttp3 エラーは対象外
+                # - 0x0105 (H3_FRAME_UNEXPECTED): 双方向ストリームの最初の
+                #   フレーム以外に WT_STREAM が現れた
+                # - 0x0108 (H3_ID_ERROR): データグラムの不正なセッション ID
+                if webtransport_event.error_code not in (0x0105, 0x0108):
                     continue
                 # プロトコルエラーによる接続クローズ。run() の終端で送出する
                 # 例外として記録する
@@ -1210,7 +1212,7 @@ class Client:
     async def _wait_for_peer_close(self, session_id: int) -> bool:
         """CONNECT ストリームのピア側終了を待つ。観測したら True を返す
 
-        draft-ietf-webtrans-http3-16 Section 6 末尾の SHOULD (ピアの
+        draft-ietf-webtrans-http3-17 Section 6 末尾の SHOULD (ピアの
         CONNECT ストリームクローズを待ってから CONNECTION_CLOSE を送り、
         WT_CLOSE_SESSION を best-effort で届ける) に従う。将来改訂される
         可能性がある。終了条件はピア終了の観測・CONNECTION_CLOSE 受信・
@@ -1304,7 +1306,7 @@ class Client:
 
         WT_CLOSE_SESSION 送出後に CONNECT ストリームのピア側終了を
         close_wait_timeout の上限まで待ってから CONNECTION_CLOSE を送る
-        (draft-ietf-webtrans-http3-16 Section 6 の SHOULD による
+        (draft-ietf-webtrans-http3-17 Section 6 の SHOULD による
         best-effort 配信)。上限で打ち切った場合も閉じる処理へ進む。
         待機中のユーザーコールバック例外時は後始末を終えてから送出する
 
@@ -1312,7 +1314,7 @@ class Client:
             error_code: セッション終了の Application Error Code (32 bit)
             error_message: セッション終了の Application Error Message
                 (UTF-8)。1024 バイトを超える場合は UTF-8 文字境界で
-                切り詰められる (draft-ietf-webtrans-http3-16 Section 6)
+                切り詰められる (draft-ietf-webtrans-http3-17 Section 6)
         """
         # 未配信の SESSION_READY を破棄する (再 connect() の際に古い
         # セッション ID で発火させないため)

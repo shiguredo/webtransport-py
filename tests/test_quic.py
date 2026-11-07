@@ -140,7 +140,7 @@ def test_has_pending_stream_data():
 def test_remote_transport_params_after_handshake():
     """ハンドシェイク後の remote transport parameter getter が正しい値を返すことを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.1 の MUST (max_datagram_frame_size
+    draft-ietf-webtrans-http3-17 Section 3.1 の MUST (max_datagram_frame_size
     > 0 と reset_stream_at の送信) に対応する getter の検証。通常ピア同士
     では両側とも満たされ、transport parameter 未受信 (ハンドシェイク前) は
     None を返す。
@@ -168,7 +168,7 @@ def test_remote_transport_params_missing_peers():
     enable_datagram=False (max_datagram_frame_size 欠落) と
     enable_reset_stream_at=False (reset_stream_at 欠落) を設定したピアを
     用意し、対向の getter が要件未達を検出できることを検証する
-    (draft-ietf-webtrans-http3-16 Section 3.1 の MUST 検証の基盤)。
+    (draft-ietf-webtrans-http3-17 Section 3.1 の MUST 検証の基盤)。
     """
     from conftest import CERTFILE, KEYFILE, perform_handshake
 

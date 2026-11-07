@@ -116,7 +116,7 @@ def test_connect_stream_reset_releases_session_send_buffers() -> None:
 
     # 2 つ目のセッションの CONNECT ストリームをリセットする
     # (セッション ID は CONNECT ストリーム ID そのもの。
-    # draft-ietf-webtrans-http3-16 Section 2.2)
+    # draft-ietf-webtrans-http3-17 Section 2.2)
     assert client.close_stream(second_session_id, 0) == second_session_id
 
     # 対象セッションのバッファは削除され、他セッションのバッファは残る
@@ -218,7 +218,7 @@ def test_connect_stream_fin_cleans_session_streams() -> None:
 
     # FIN 経路の SessionClosed イベントは 1 回だけ発火し、error_code は 0
     # (クリーンクローズ。WT_CLOSE_SESSION 無しの FIN は error code 0 かつ
-    # 空のエラー文字列の WT_CLOSE_SESSION と等価。draft-ietf-webtrans-http3-16
+    # 空のエラー文字列の WT_CLOSE_SESSION と等価。draft-ietf-webtrans-http3-17
     # Section 6)
     session_closed = None
     session_closed_count = 0
@@ -239,7 +239,7 @@ def test_connect_stream_fin_cleans_session_streams() -> None:
 
     # close_stream の同期コールバックで、セッションに属するデータストリームが
     # WT_SESSION_GONE で破棄され、ResetStream / StopSending イベントが正しい
-    # セッション ID で発火することを確認する (draft-ietf-webtrans-http3-16
+    # セッション ID で発火することを確認する (draft-ietf-webtrans-http3-17
     # Section 6 の MUST。nghttp3_conn_close_stream が nghttp3 内部で破棄する)
     assert reset_events
     for _event_type, event_session_id, event_stream_id in reset_events:

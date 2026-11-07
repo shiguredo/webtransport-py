@@ -5,7 +5,7 @@
 受理前 FIN では nghttp3 が WT_SESSION_BLOCKED で空 FIN を処理せず
 end_stream コールバックが発火しないため、receive_stream_data の fin 引数
 で直接検知し、accept_session による受理と 2xx レスポンスの書き出し完了後に
-close_stream で後始末する (draft-ietf-webtrans-http3-16 Section 6 の
+close_stream で後始末する (draft-ietf-webtrans-http3-17 Section 6 の
 セッション終了条件 1 つ目)。
 """
 
@@ -340,7 +340,7 @@ def test_pre_accept_wt_close_session_fin_same_read() -> None:
     """受理前の WT_CLOSE_SESSION が FIN と同一読み取りで届き、accept_session 中に処理されても SessionClosed が 1 回だけ発火することを確認
 
     準拠クライアントは WT_CLOSE_SESSION 直後に FIN を送る
-    (draft-ietf-webtrans-http3-16 Section 6 の MUST)。FIN と同一読み取りで
+    (draft-ietf-webtrans-http3-17 Section 6 の MUST)。FIN と同一読み取りで
     届くため受理前 FIN 検知が成立し、移行処理 (pre_accept_fin_accepted_
     session_ids_ への移行) が confirm の前に実行された状態で、confirm の
     処理中にカプセルが処理される (破棄記録条件 1 の経路)。受理前のカプセル
@@ -417,7 +417,7 @@ def test_pre_accept_wt_close_session_no_fin() -> None:
     受理前 FIN なしの変種では移行処理 (pre_accept_fin_accepted_session_ids_
     への挿入) が機能せず、破棄記録は confirm 処理中の発火 (破棄記録条件 2)
     で成立する。再挿入抑止により session_ids_ に ID が残留せず、
-    draft-ietf-webtrans-http3-16 Section 6 の MUST (終了を学習したセッション
+    draft-ietf-webtrans-http3-17 Section 6 の MUST (終了を学習したセッション
     ID 宛の新しいデータグラム・ストリームの禁止) の窓が塞がる。fin_late
     変種との違いは FIN が届かないこと (fin_late は届いた空 FIN の処理後の
     挙動を確認する) と、窓の閉塞を直接検証することである。

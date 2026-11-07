@@ -1,6 +1,6 @@
 """WebTransport over HTTP/3 の :protocol トークン検証テスト
 
-draft-ietf-webtrans-http3-16 Section 3.2 は「:protocol は webtransport-h3
+draft-ietf-webtrans-http3-17 Section 3.2 は「:protocol は webtransport-h3
 であること」を定めるが、実ブラウザ (Chromium / WebKit) および Shiguredo
 WebTransport DevTools は現時点でも ":protocol: webtransport" で CONNECT する
 ため、本実装は両方のトークンをネイティブ HTTP/3 セッションとして受理する。
@@ -78,7 +78,7 @@ def _inject_protocol_connect(
 def test_connect_protocol_webtransport_accepted() -> None:
     """:protocol: webtransport の CONNECT が受理されることを確認
 
-    draft-ietf-webtrans-http3-16 Section 2.1.2 では "webtransport" はカプセル
+    draft-ietf-webtrans-http3-17 Section 2.1.2 では "webtransport" はカプセル
     ベースプロトコル用トークンであり、Section 3.2 の「:protocol は
     webtransport-h3 であること」に反する。しかし実ブラウザ (Chromium /
     WebKit) および Shiguredo WebTransport DevTools は現時点でも

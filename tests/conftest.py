@@ -518,7 +518,7 @@ def _send_pre_accept_wt_close_session(client: h3.Session) -> bytes:
     wt_close_stream_id, wt_close_data, wt_close_fin = streams[0]
     assert wt_close_stream_id == 0, "CONNECT ストリーム以外の送信データがあります"
     # nghttp3 は WT_CLOSE_SESSION 送出時に FIN も付ける
-    # (draft-ietf-webtrans-http3-16 Section 6 の MUST「WT_CLOSE_SESSION を
+    # (draft-ietf-webtrans-http3-17 Section 6 の MUST「WT_CLOSE_SESSION を
     # 送出するエンドポイントは直後に FIN を送る」を満たす)。サーバーへの
     # 注入時に fin を False にすれば「FIN が別パケットで届く」変種を構成できる
     assert wt_close_fin is True, "WT_CLOSE_SESSION カプセルには FIN が付きます"

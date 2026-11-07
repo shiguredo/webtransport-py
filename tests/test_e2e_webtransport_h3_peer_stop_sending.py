@@ -25,7 +25,7 @@ from webtransport.h3.exceptions import WebTransportSessionClosedError
 
 # ピアが送る STOP_SENDING のアプリケーションエラーコード。WT_APPLICATION_ERROR
 # レンジのワイヤコードへリマップして送り、通知時にアプリコードへ逆変換される
-# ことを確認する (draft-ietf-webtrans-http3-16 Section 4.4)
+# ことを確認する (draft-ietf-webtrans-http3-17 Section 4.4)
 _APP_ERROR_CODE = 7
 
 # WT_APPLICATION_ERROR レンジ外の HTTP/3 エラーコード。アプリコードへ逆変換

@@ -54,7 +54,7 @@ from webtransport.webtransport_ext.h2 import WtErrorCode
 _WT_ERROR = WtErrorCode.WT_ERROR.value
 
 # カプセル種別 (draft-ietf-webtrans-http2-16 Section 6。WT_DRAIN_SESSION の
-# 0x78ae は draft-ietf-webtrans-http3-16 Section 4.6 の登録値である)
+# 0x78ae は draft-ietf-webtrans-http3-17 Section 4.6 の登録値である)
 
 # 余分なバイト (1 バイトと複数バイト)
 _TRAILING_BYTE = b"\x00"

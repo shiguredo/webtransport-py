@@ -1126,7 +1126,7 @@ async def test_client_resets_stream_immediately_after_open(
 ):
     """Client がストリームを開いた直後 (データ送信なし) にリセットした場合のセッション ID 復元を確認
 
-    draft-ietf-webtrans-http3-16 Section 4.4 は WebTransport のデータストリームを
+    draft-ietf-webtrans-http3-17 Section 4.4 は WebTransport のデータストリームを
     リセットするとき、WT ヘッダー (ストリームタイプ + セッション ID) 以上の
     Reliable Size を持つ RESET_STREAM_AT を送出することを MUST としている。
     ピアが reset_stream_at を広告している場合、リセット送出前に WT ヘッダーを
@@ -2097,7 +2097,7 @@ async def test_datagram_invalid_session_id_closes_connection_client(
 
     サーバーが巨大な Quarter Stream ID を持つデータグラムを送った場合、
     クライアントは H3_ID_ERROR (0x0108) で接続を閉じる
-    (draft-ietf-webtrans-http3-16 Section 4 の MUST)。サーバー側の
+    (draft-ietf-webtrans-http3-17 Section 4 の MUST)。サーバー側の
     test_datagram_invalid_session_id_closes_connection
     (test_e2e_webtransport_h3_low_level.py) と対をなす検証で、
     C++ の receive_datagram が Error イベントを生成し、高レベル Client の
@@ -2285,7 +2285,7 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
     on_stream_reset で観測する (WT ヘッダー未受信のため session_id は -1)。
     内部解放リセットのワイヤコード 0 は WT_APPLICATION_ERROR レンジ外のため、
     アプリにはエラーコードなし (None) として配信される
-    (draft-ietf-webtrans-http3-16 Section 4.4)。
+    (draft-ietf-webtrans-http3-17 Section 4.4)。
     """
     from webtransport._h3_client import Client
 
@@ -2409,7 +2409,7 @@ def _make_config_missing_transport_params(
 ) -> quic.Config:
     """指定した transport parameter を欠落させる QUIC 設定を作る
 
-    draft-ietf-webtrans-http3-16 Section 3.1 の MUST (max_datagram_frame_size
+    draft-ietf-webtrans-http3-17 Section 3.1 の MUST (max_datagram_frame_size
     > 0 と reset_stream_at の送信) を満たさないピアを実スタックで作るための
     テスト用設定。
     """
@@ -2433,7 +2433,7 @@ async def test_client_connect_rejects_server_without_transport_params(
 ):
     """サーバーが transport parameter を欠落させていると Client.connect() が WebTransportProtocolError を送出することを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.1 の MUST (サーバーは
+    draft-ietf-webtrans-http3-17 Section 3.1 の MUST (サーバーは
     max_datagram_frame_size > 0 を送ること) を満たさないサーバーとは
     セッションを確立しない。検証はハンドシェイク完了直後 (CONNECT 送出前)
     に行われるため、クライアントは CONNECT を送らずに
@@ -2499,7 +2499,7 @@ async def test_server_rejects_client_without_transport_params(
 ):
     """クライアントが transport parameter を欠落させているとサーバーが接続を閉じることを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.1 の MUST を満たさないクライアント
+    draft-ietf-webtrans-http3-17 Section 3.1 の MUST を満たさないクライアント
     に対し、サーバーは確立済み・新規の全セッションを malformed として扱い、
     H3_MESSAGE_ERROR (RFC 9114 Section 8.1) で接続を閉じる。connect() は
     2xx 応答を待つため、拒否された場合は QUIC の接続例外を送出する。
@@ -2562,7 +2562,7 @@ async def test_client_connect_accepts_server_without_reset_stream_at(
 ):
     """reset_stream_at を送らないサーバーでも Client.connect() が成功することを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.1 はクライアント・サーバー双方に
+    draft-ietf-webtrans-http3-17 Section 3.1 はクライアント・サーバー双方に
     reset_stream_at の送信を要求するが、実ブラウザ (Chromium / WebKit) が
     現時点で送信しないため、相互運用性を優先して必須としない (緩和)。
     緩和前はブラウザ E2E テストが全滅した (サーバー側が require している
@@ -2635,7 +2635,7 @@ async def test_server_accepts_client_without_reset_stream_at(
 ):
     """reset_stream_at を送らないクライアントでもサーバーが接続を維持することを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.1 はクライアント・サーバー双方に
+    draft-ietf-webtrans-http3-17 Section 3.1 はクライアント・サーバー双方に
     reset_stream_at の送信を要求するが、実ブラウザ (Chromium / WebKit) が
     現時点で送信しないため、相互運用性を優先して必須としない (緩和)。
     緩和前は SESSION_READY 時にサーバーが H3_MESSAGE_ERROR (0x010E) で
@@ -3177,7 +3177,7 @@ async def test_on_session_request_accepts(test_certificates):
 async def test_on_session_request_rejects_with_non_2xx(test_certificates):
     """on_session_request の非 2xx でセッションが拒否されることを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.2 の 403 SHOULD をアプリの
+    draft-ietf-webtrans-http3-17 Section 3.2 の 403 SHOULD をアプリの
     コールバックから発行できる。on_session_ready は発火せず、クライアントの
     connect() は WebTransportSessionRejectedError を送出する。
     """
@@ -3500,7 +3500,7 @@ async def test_client_goaway_keeps_connection_and_notifies_once(test_certificate
     """GOAWAY 受信で接続を閉じず on_goaway が 1 回だけ発火することを確認
 
     GOAWAY は graceful shutdown の通知であり、接続もセッションも継続する
-    (draft-ietf-webtrans-http3-16 Section 4.7)。低レベルが GOAWAY 受信で
+    (draft-ietf-webtrans-http3-17 Section 4.7)。低レベルが GOAWAY 受信で
     is_closed() を真にすると、高レベル層が H3_GENERAL_PROTOCOL_ERROR
     (RFC 9114 Section 8.1) で CONNECTION_CLOSE を送出してしまう。
 
@@ -3587,7 +3587,7 @@ async def test_server_goaway_keeps_connection_and_notifies_once(test_certificate
     """サーバーが GOAWAY を受信しても on_goaway(goaway_id, addr) が 1 回だけ発火することを確認
 
     GOAWAY は graceful shutdown の通知であり、接続もセッションも継続する
-    (draft-ietf-webtrans-http3-16 Section 4.7)。サーバーが受信する GOAWAY の ID は
+    (draft-ietf-webtrans-http3-17 Section 4.7)。サーバーが受信する GOAWAY の ID は
     push ID を表す (RFC 9114 Section 7.2.6)。低レベルが GOAWAY 受信で is_closed() を
     真にすると、`Server._handle_datagram` の分岐が H3_GENERAL_PROTOCOL_ERROR で
     CONNECTION_CLOSE を送出してしまう。

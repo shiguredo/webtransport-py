@@ -232,7 +232,7 @@ def prop_send_stream_data_arbitrary(stream_id: int, data: bytes, fin: bool):
 def prop_send_datagram_arbitrary(session_id: int, data: bytes):
     """任意のセッション ID へのデータグラム送信がクラッシュしないことを確認
 
-    セッション終了の MUST (draft-ietf-webtrans-http3-16 Section 6) により、
+    セッション終了の MUST (draft-ietf-webtrans-http3-17 Section 6) により、
     確立済みセッション ID への送信は送出され、session_ids_ に含まれない
     セッション ID への送信は黙って無視される。いずれもクラッシュしない
     """
@@ -253,7 +253,7 @@ def prop_send_datagram_to_closed_session_ignored(error_code: int, data: bytes):
 
     WT_CLOSE_SESSION の送信でセッションは終了し、終了を学習したエンドポイント
     は新しいデータグラムを送ってはならない (refs/webtrans/
-    draft-ietf-webtrans-http3-16.txt Section 6)。任意 ID への送信を検証する
+    draft-ietf-webtrans-http3-17.txt Section 6)。任意 ID への送信を検証する
     prop_send_datagram_arbitrary とは異なり、close_session で明示的に
     終了させたセッション ID を使う (session_ids_ からの削除経路を通る)。
     """

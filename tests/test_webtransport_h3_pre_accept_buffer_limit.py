@@ -1,6 +1,6 @@
 """WebTransport over HTTP/3 の受理前ストリームのバッファ上限テスト
 
-draft-ietf-webtrans-http3-16 Section 4.6 の MUST (受理前バッファの上限) を
+draft-ietf-webtrans-http3-17 Section 4.6 の MUST (受理前バッファの上限) を
 満たすため、受理前 (セッション確定前) の WebTransport データストリームの
 累計受信バイトが `h3.Config` の `wt_pre_accept_buffer_limit` を超えたら、
 そのストリームを WT_BUFFERED_STREAM_REJECTED (0x3994BD84) で拒否すること
@@ -17,7 +17,7 @@ from conftest import (
 
 from webtransport import h3
 
-# WT_BUFFERED_STREAM_REJECTED (draft-ietf-webtrans-http3-16 Section 4.6)
+# WT_BUFFERED_STREAM_REJECTED (draft-ietf-webtrans-http3-17 Section 4.6)
 _WT_BUFFERED_STREAM_REJECTED = 0x3994BD84
 
 

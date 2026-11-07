@@ -4,7 +4,7 @@ close_session (WT_CLOSE_SESSION 送出) と recv_wt_close_session_cb
 (WT_CLOSE_SESSION 受信) は session_ids_ からセッション ID を削除するが、
 nghttp3 の CONNECT ストリームはストリームテーブルに残存し wt.session も
 解放されないため、終了したセッション ID 宛の open_stream が成功し得る。
-この open_stream を拒否すること (draft-ietf-webtrans-http3-16 Section 6
+この open_stream を拒否すること (draft-ietf-webtrans-http3-17 Section 6
 の MUST「セッション終了を学習したエンドポイントは、新しいストリームも
 開いてはならない」) を検証する。close_session 送出後の拒否は実効的な
 回帰テストであり、WT_CLOSE_SESSION 受信後の経路は現在の依存 nghttp3 でも
@@ -74,7 +74,7 @@ def test_open_stream_alive_session_succeeds() -> None:
 def test_open_stream_optimistic_succeeds() -> None:
     """セッション確立前の楽観的オープンが維持されることを確認
 
-    draft-ietf-webtrans-http3-16 Section 4 の楽観的オープン: クライアントは
+    draft-ietf-webtrans-http3-17 Section 4 の楽観的オープン: クライアントは
     CONNECT リクエスト送信後・サーバー応答前にストリームを開ける。connect
     直後に session_ids_ へ挿入されるため、メンバーシップ確認を通過する。
     """

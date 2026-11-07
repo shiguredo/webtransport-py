@@ -283,7 +283,7 @@ def prop_send_datagram_isolated(data1: bytes, data2: bytes):
 
     同一接続内の 2 セッションそれぞれへの送信が、互いのワイヤ形式を
     混ぜることなく独立にキューへ現れることを検証する。セッション終了の
-    無視は draft-ietf-webtrans-http3-16 Section 6 による
+    無視は draft-ietf-webtrans-http3-17 Section 6 による
     """
     client, _server, first_session_id, second_session_id = _establish_two_sessions()
 

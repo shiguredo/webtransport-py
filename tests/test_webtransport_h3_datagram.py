@@ -4,7 +4,7 @@ Sans-IO 構成 (conftest.py の Sans-IO ヘルパー) を使い、セッショ�
 send_datagram が無視されることと、終了したセッション ID 宛の受信
 データグラムが破棄されることを検証する。セッション終了の 3 経路
 (close_stream / close_session / recv_wt_close_session_cb) すべてで検証する
-(draft-ietf-webtrans-http3-16 Section 6 の MUST 「セッション終了を学習した
+(draft-ietf-webtrans-http3-17 Section 6 の MUST 「セッション終了を学習した
 エンドポイントは、新しいデータグラムを送信してはならない」。受信側の破棄は
 実装ポリシーであり、Section 4 の「closed session 宛のデータの扱いは
 Section 6 に従う」と、データグラムは再送されず配信保証がないこと
@@ -31,7 +31,7 @@ def test_send_datagram_after_close_stream_ignored() -> None:
     """CONNECT ストリームのクローズ後に send_datagram が無視されることを確認
 
     close_stream による CONNECT ストリームのクローズはセッション終了の
-    3 経路の 1 つ (draft-ietf-webtrans-http3-16 Section 6 のセッション終了
+    3 経路の 1 つ (draft-ietf-webtrans-http3-17 Section 6 のセッション終了
     条件の 1 つ目)。終了後に session_ids_ から削除されるため、終了後の
     send_datagram は送出されない。
     """
@@ -53,7 +53,7 @@ def test_send_datagram_after_close_session_ignored() -> None:
     """close_session (WT_CLOSE_SESSION 送出) 後に send_datagram が無視されることを確認
 
     close_session による WT_CLOSE_SESSION 送出はセッション終了の 3 経路の
-    1 つ (draft-ietf-webtrans-http3-16 Section 6)。終了後に session_ids_
+    1 つ (draft-ietf-webtrans-http3-17 Section 6)。終了後に session_ids_
     から削除されるため、終了後の send_datagram は送出されない。
     """
     client, _server, session_id = _establish_session()
@@ -74,7 +74,7 @@ def test_send_datagram_after_recv_wt_close_session_ignored() -> None:
     """WT_CLOSE_SESSION 受信後に send_datagram が無視されることを確認
 
     recv_wt_close_session_cb による WT_CLOSE_SESSION 受信はセッション終了
-    の 3 経路の 1 つ (draft-ietf-webtrans-http3-16 Section 6)。受信側
+    の 3 経路の 1 つ (draft-ietf-webtrans-http3-17 Section 6)。受信側
     (サーバー) の session_ids_ から削除されるため、終了後の send_datagram
     は送出されない。
     """
@@ -103,7 +103,7 @@ def test_send_datagram_after_recv_wt_close_session_ignored() -> None:
 def test_send_datagram_alive_session_delivered() -> None:
     """生存セッションの send_datagram は従来どおり送出されることを確認
 
-    セッション終了後の送信禁止 (draft-ietf-webtrans-http3-16 Section 6 の
+    セッション終了後の送信禁止 (draft-ietf-webtrans-http3-17 Section 6 の
     MUST) は終了したセッションにのみ適用され、生存セッションへの送信は
     影響を受けない。
     """
@@ -127,7 +127,7 @@ def test_send_datagram_alive_session_delivered() -> None:
 def test_send_datagram_alive_after_other_session_closed_delivered() -> None:
     """一方のセッション終了後も、生存セッションへの送信は継続されることを確認
 
-    セッション終了の MUST (draft-ietf-webtrans-http3-16 Section 6) は終了した
+    セッション終了の MUST (draft-ietf-webtrans-http3-17 Section 6) は終了した
     セッション ID 宛ての送信を禁止するものであり、同一接続の他の生存
     セッションへの送信は影響を受けない。
     """
@@ -205,7 +205,7 @@ def test_send_datagram_large_session_id_delivered(connect_stream_id: int) -> Non
 def test_send_datagram_optimistic_delivered() -> None:
     """サーバー応答前の楽観的データグラム送信が妨げられないことを確認
 
-    draft-ietf-webtrans-http3-16 Section 4 の楽観的送信: クライアントは
+    draft-ietf-webtrans-http3-17 Section 4 の楽観的送信: クライアントは
     CONNECT リクエスト送信後・サーバー応答前にデータグラムを送信できる。
     connect 直後に session_ids_ へ挿入されるため、メンバーシップ確認を
     通過して送出される。
@@ -223,7 +223,7 @@ def test_send_datagram_optimistic_delivered() -> None:
 def test_send_datagram_server_optimistic_delivered() -> None:
     """サーバー側の楽観的データグラム送信が妨げられないことを確認
 
-    draft-ietf-webtrans-http3-16 Section 4 の「On the server side, opening
+    draft-ietf-webtrans-http3-17 Section 4 の「On the server side, opening
     streams and sending datagrams is possible as soon as the CONNECT
     request has been received」。サーバーは CONNECT リクエスト受信時
     (end_headers_cb) に session_ids_ へ挿入されるため、受理前でも
@@ -253,7 +253,7 @@ def test_recv_datagram_after_close_session_discarded() -> None:
     """close_session (WT_CLOSE_SESSION 送出) 後に受信データグラムが破棄されることを確認
 
     終了したセッション ID 宛のデータグラムはアプリに配信されない
-    (draft-ietf-webtrans-http3-16 Section 4 の「closed session 宛のデータの
+    (draft-ietf-webtrans-http3-17 Section 4 の「closed session 宛のデータの
     扱いは Section 6 に従う」。実装ポリシー)。本テストは修正前実装では
     失敗する (Datagram イベントが発火する)。
     """
@@ -292,7 +292,7 @@ def test_recv_datagram_after_close_stream_discarded() -> None:
     """CONNECT ストリームのクローズ後に受信データグラムが破棄されることを確認
 
     close_stream による CONNECT ストリームのクローズはセッション終了の
-    3 経路の 1 つ (draft-ietf-webtrans-http3-16 Section 6 のセッション終了
+    3 経路の 1 つ (draft-ietf-webtrans-http3-17 Section 6 のセッション終了
     条件の 1 つ目)。クローズ後に session_ids_ から削除されるため、その後の
     受信データグラムは破棄される。
     """
@@ -377,7 +377,7 @@ def test_recv_datagram_alive_session_delivered() -> None:
 def test_recv_datagram_client_optimistic_delivered() -> None:
     """クライアントの connect 直後 (200 応答前) のデータグラム受信が妨げられないことを確認
 
-    draft-ietf-webtrans-http3-16 Section 4 の楽観的送信: クライアントは
+    draft-ietf-webtrans-http3-17 Section 4 の楽観的送信: クライアントは
     CONNECT 送信後・サーバー応答前にデータグラムを受信できる。connect 直後
     に session_ids_ へ挿入されるため、メンバーシップ確認を通過して配信
     される。

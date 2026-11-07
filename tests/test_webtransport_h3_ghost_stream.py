@@ -5,7 +5,7 @@ close_session (WT_CLOSE_SESSION 送出) と recv_wt_close_session_cb
 nghttp3 の CONNECT ストリームはストリームテーブルに残存するため、セッション
 終了後にピアが開いたデータストリーム (ghost ストリーム) は nghttp3 が受容
 して recv_wt_data_cb が呼ばれる。この ghost ストリームのデータがアプリに
-配信されないこと (draft-ietf-webtrans-http3-16 Section 6 の MUST「終了を
+配信されないこと (draft-ietf-webtrans-http3-17 Section 6 の MUST「終了を
 学習したエンドポイントは、属するストリームの受信側の読み取りを中止しなけれ
 ばならない」) を検証する。
 """
@@ -139,7 +139,7 @@ def test_ghost_stream_after_pre_accept_fin_ignored() -> None:
     後始末前) は session_ids_ に含まれたままのため、宛先のデータストリーム
     が nghttp3 に受容されて recv_wt_data_cb が呼ばれる。send_datagram /
     open_stream の送信拒否と同じく、終了を学習したセッションへの配信は
-    抑止される (draft-ietf-webtrans-http3-16 Section 6 の MUST)。
+    抑止される (draft-ietf-webtrans-http3-17 Section 6 の MUST)。
     """
     client, server = _create_session_pair()
     assert client.connect(0, "https://localhost/webtransport") is True

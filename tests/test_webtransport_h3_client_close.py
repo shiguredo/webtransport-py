@@ -8,7 +8,7 @@ Server は受信した WT_CLOSE_SESSION の終了コード・理由をアプリ�
 
 観測点は次の 2 つである。
 - WT_CLOSE_SESSION をピアが SESSION_CLOSED イベントの error_code /
-  error_message として復元できること (draft-ietf-webtrans-http3-16 Section 6)
+  error_message として復元できること (draft-ietf-webtrans-http3-17 Section 6)
 - STOP_SENDING のアプリケーションエラーコードが WT_APPLICATION_ERROR
   レンジへリマップされてワイヤに載ること (同 Section 4.4 の MUST)
 """
@@ -31,7 +31,7 @@ _WAIT_LIMIT = 5.0
 # アプリケーションエラーコード 3 をリマップした後のワイヤコード。
 # WT_APPLICATION_ERROR レンジの基準値 0x52e4a40fa8db にアプリコードを足し、
 # 予約済みコードポイント (0x1f * N + 0x21) をスキップした値である
-# (draft-ietf-webtrans-http3-16 Section 4.4 / Section 9.5 の Figure 4)。
+# (draft-ietf-webtrans-http3-17 Section 4.4 / Section 9.5 の Figure 4)。
 # 3 // 0x1e == 0 のためスキップは発生せず、基準値 + 3 になる
 _REMAPPED_ERROR_CODE_FOR_APPLICATION_CODE_3 = 0x52E4A40FA8DE
 
@@ -330,7 +330,7 @@ async def test_close_sends_wt_close_session_with_error_code_and_message(test_cer
     できる。クライアントの close(7, "protocol violation") が送出した
     WT_CLOSE_SESSION を、ピアが error_code 7 / error_message
     "protocol violation" として復元できることを確認する
-    (draft-ietf-webtrans-http3-16 Section 6)
+    (draft-ietf-webtrans-http3-17 Section 6)
     """
     server = _LowLevelServer(
         test_certificates["certfile"],
@@ -407,7 +407,7 @@ async def test_stop_sending_remaps_error_code_to_wt_application_error_range(
     """stop_sending() がリマップした STOP_SENDING を送出することを確認
 
     データストリームのアプリケーションエラーコードは WT_APPLICATION_ERROR
-    レンジへリマップしてワイヤに載せる (draft-ietf-webtrans-http3-16
+    レンジへリマップしてワイヤに載せる (draft-ietf-webtrans-http3-17
     Section 4.4 の MUST)。サーバーピアが QUIC の STOP_SENDING イベントとして
     観測する error code がアプリコード 3 ではなく、リマップ後の
     0x52e4a40fa8de になることを確認する

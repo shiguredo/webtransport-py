@@ -359,7 +359,7 @@ class _LowLevelClient:
 
         データストリームのアプリエラーコードは高レベル API と同様に
         WT_APPLICATION_ERROR へリマップしてから QUIC に渡す
-        (draft-ietf-webtrans-http3-16 Section 4.4)。
+        (draft-ietf-webtrans-http3-17 Section 4.4)。
         """
         wire_error_code = self._h3_session.map_send_error_code(stream_id, error_code)
         self._quic_connection.reset_stream(stream_id, wire_error_code)
@@ -626,7 +626,7 @@ async def test_stream_reset_at_recovers_session_id(test_certificates):
     """書き込み済みデータのあるストリームのリセットでセッション ID が復元される
 
     データパケットを保留してリセット送出パケットを先に届ける構成で、
-    RESET_STREAM_AT (draft-ietf-webtrans-http3-16 Section 4.4 の MUST) により
+    RESET_STREAM_AT (draft-ietf-webtrans-http3-17 Section 4.4 の MUST) により
     セッション ID が復元されることを確認する。RESET_STREAM_AT の Reliable Size
     は書き込み済みオフセット全体に設定されるため、ピアはデータ到着まで
     リセットを確定しない (draft-ietf-quic-reliable-stream-reset-10 Section 5.3
@@ -680,7 +680,7 @@ async def test_stream_reset_before_data_received_minus_one(test_certificates):
     検証する (高レベル API の reset_stream はリセット前に WT ヘッダーを QUIC 層
     へ書き出すため、この構成にはならない)。WT ヘッダーが先に届くと stream_info_
     に登録され、-1 が決定的にならない。セッションとの関連付けはストリーム先頭の
-    ヘッダー経由のみであり (draft-ietf-webtrans-http3-16 Section 4.4)、データ
+    ヘッダー経由のみであり (draft-ietf-webtrans-http3-17 Section 4.4)、データ
     未書き込みのリセットは従来どおり RESET_STREAM が送出される (データ配信の
     目的では Reliable Size 0 の RESET_STREAM_AT は RESET_STREAM と等価。
     draft-ietf-quic-reliable-stream-reset-10 Section 5)。ヘッダー未受信のまま
@@ -719,7 +719,7 @@ async def test_stream_reset_connect_stream_session_id(test_certificates):
 
     2 つ目のセッションの CONNECT ストリーム (最小 ID でない CONNECT) を
     クライアントがリセットすると、セッション ID (= CONNECT ストリーム ID。
-    draft-ietf-webtrans-http3-16 Section 2.2) が on_stream_reset に渡る
+    draft-ietf-webtrans-http3-17 Section 2.2) が on_stream_reset に渡る
     """
     server, server_task, info = await _start_reset_test_server(
         test_certificates, expected_sessions=2
@@ -751,7 +751,7 @@ async def test_connect_stream_reset_notifies_session_closed(test_certificates):
     同一 QUIC 接続上に 2 セッションを確立し、1 つ目のセッションの CONNECT
     ストリームをクライアントがリセットすると、on_session_closed が正しい
     セッション ID で 1 回だけ発火し、2 つ目のセッションのデータ送受信が
-    継続できることを確認する (draft-ietf-webtrans-http3-16 Section 6 の
+    継続できることを確認する (draft-ietf-webtrans-http3-17 Section 6 の
     セッション終了条件の 1 つ目)。旧実装では CONNECT ストリームのリセットで
     セッション ID が session_ids_ に残り続け、on_session_closed が発火
     しなかった
@@ -813,7 +813,7 @@ async def test_connect_stream_fin_notifies_session_closed(test_certificates):
     同一 QUIC 接続上に 2 セッションを確立し、1 つ目のセッションの CONNECT
     ストリームを空 FIN でクリーンクローズすると、on_session_closed が正しい
     セッション ID で 1 回だけ発火し、2 つ目のセッションのデータ送受信が
-    継続できることを確認する (draft-ietf-webtrans-http3-16 Section 6 の
+    継続できることを確認する (draft-ietf-webtrans-http3-17 Section 6 の
     セッション終了条件の 1 つ目)。旧実装では end_stream コールバックを
     登録しておらず、CONNECT ストリームの FIN でセッション ID が
     session_ids_ に残り続け、on_session_closed が発火しなかった
@@ -847,7 +847,7 @@ async def test_connect_stream_fin_notifies_session_closed(test_certificates):
         # SESSION_CLOSED ハンドラによる QUIC 直接注入の 1 経路で届く。
         # error_code は 0 (クリーンクローズ。WT_CLOSE_SESSION 無しの FIN は
         # error code 0 かつ空のエラー文字列の WT_CLOSE_SESSION と等価。
-        # draft-ietf-webtrans-http3-16 Section 6) で 1 回だけ発火すること
+        # draft-ietf-webtrans-http3-17 Section 6) で 1 回だけ発火すること
         # を確認する
         client_session_closed = None
         client_session_closed_count = 0
@@ -897,7 +897,7 @@ async def test_datagram_invalid_session_id_closes_connection(
     """巨大な Quarter Stream ID を持つデータグラムでサーバーが接続を閉じることを確認する
 
     仕様逸脱ピアが巨大な Quarter Stream ID を持つデータグラムを送った場合、
-    サーバーは H3_ID_ERROR (0x0108) で接続を閉じる (draft-ietf-webtrans-http3-16
+    サーバーは H3_ID_ERROR (0x0108) で接続を閉じる (draft-ietf-webtrans-http3-17
     Section 4 の MUST)。負のセッション ID になる 2^61 以上と、正のまま範囲超過に
     なる 2^60 以上 2^61 未満の両方を検証する。不正なセッション ID は on_datagram
     に渡らない。
@@ -983,7 +983,7 @@ async def test_datagram_closed_session_id_discarded(test_certificates):
     """閉じたセッションの ID 宛てのデータグラムが破棄されることを確認
 
     終了したセッション ID 宛のデータグラムはアプリに配信されない
-    (実装ポリシー。draft-ietf-webtrans-http3-16 Section 4 の「closed session
+    (実装ポリシー。draft-ietf-webtrans-http3-17 Section 4 の「closed session
     宛のデータの扱いは Section 6 に従う」と、データグラムは再送されず配信
     保証がないこと (Section 4.1 / RFC 9221) が根拠)。セッション ID の構造
     検証 (範囲外 ID の H3_ID_ERROR) は維持され、閉じたセッションの ID を
@@ -1119,7 +1119,7 @@ async def test_server_close_session_sends_error_code_and_message(test_certificat
     """close_session の終了コードと理由がピアの SESSION_CLOSED で観測される
 
     高レベル Server の close_session が WT_CLOSE_SESSION を送出し
-    (draft-ietf-webtrans-http3-16 Section 6)、ピア側の低レベル Session の
+    (draft-ietf-webtrans-http3-17 Section 6)、ピア側の低レベル Session の
     SESSION_CLOSED イベントに Application Error Code とメッセージが載ることを
     確認する。接続は閉じず、サーバー側の on_session_closed でも終了が通知される。
     """
@@ -1229,7 +1229,7 @@ async def test_server_stop_sending_remaps_error_code(test_certificates):
     """stop_sending が WT_APPLICATION_ERROR レンジのコードで送出される
 
     データストリームのアプリケーションエラーコードは WT_APPLICATION_ERROR
-    レンジへリマップしてワイヤに載せる (draft-ietf-webtrans-http3-16
+    レンジへリマップしてワイヤに載せる (draft-ietf-webtrans-http3-17
     Section 4.4 の MUST)。ピア側の QUIC STOP_SENDING イベントでリマップ後の
     コードを観測する。
     """

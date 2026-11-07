@@ -1,6 +1,6 @@
 """WebTransport over HTTP/3 のアプリケーションエラーコード変換テスト
 
-draft-ietf-webtrans-http3-16 Section 4.4 / Figure 4 の変換と配信整形を検証する。
+draft-ietf-webtrans-http3-17 Section 4.4 / Figure 4 の変換と配信整形を検証する。
 """
 
 import pytest
@@ -318,7 +318,7 @@ async def test_reset_stream_rejects_out_of_uint32(test_certificates) -> None:
 async def test_connect_stream_reset_is_not_remapped(test_certificates) -> None:
     """CONNECT ストリームのリセットは WT_APPLICATION_ERROR へリマップされない
 
-    draft-ietf-webtrans-http3-16 Section 4.4 の MUST はデータストリームのみ。
+    draft-ietf-webtrans-http3-17 Section 4.4 の MUST はデータストリームのみ。
     CONNECT のリセットは HTTP/3 エラーコード空間のままワイヤに載り、
     受信側 on_stream_reset にも同じ値が届くことを確認する。
     """

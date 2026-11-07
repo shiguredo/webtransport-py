@@ -5,7 +5,7 @@ Client.connect は SETTINGS 受信完了を「制御ストリーム (stream_id=3
 固定せず、サーバーが QPACK エンコーダーを先に開けば stream_id 3 は QPACK
 エンコーダーになる。H3Session.is_webtransport_ready() が SETTINGS の
 wt_enabled / enable_connect_protocol / h3_datagram を直接判定することを
-検証する (draft-ietf-webtrans-http3-16 Section 3.1)。
+検証する (draft-ietf-webtrans-http3-17 Section 3.1)。
 """
 
 from conftest import _bind_session_streams, _drain_events, _pump

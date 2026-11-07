@@ -33,18 +33,51 @@ uint64_t webtransport_code_to_http_code(uint64_t n) {
   return kWtApplicationErrorFirst + n + (n / 0x1eULL);
 }
 
-// WT_CLOSE_SESSION の Application Error Message の最大長 (draft-16 Section 6
+// WT_CLOSE_SESSION の Application Error Message の最大長 (draft-17 Section 6
 // の「its length MUST NOT exceed 1024 bytes」)
 constexpr size_t kMaxApplicationErrorMessageBytes = 1024;
 
 // 受信側の H3_MESSAGE_ERROR リセット (handle_wt_close_session_error) で使う
 // H3_MESSAGE_ERROR (nghttp3.h の公開定数)。WT_CLOSE_SESSION の Application
 // Error Message の不正 (1024 バイト超・4 バイト未満の不正な長さ・不正 UTF-8)
-// 受信時の CONNECT ストリームのリセットに使う (draft-16 Section 6 の MUST)
+// 受信時の CONNECT ストリームのリセットに使う (draft-17 Section 6 の MUST)
 constexpr uint64_t kH3MessageError = NGHTTP3_H3_MESSAGE_ERROR;
 
 // HTTP/3 フレーム種別 HEADERS (RFC 9114 Section 7.2.2)
 constexpr uint64_t kH3FrameTypeHeaders = 0x01;
+
+// HTTP/3 フレーム種別 SETTINGS (RFC 9114 Section 7.2.4)
+constexpr uint64_t kH3FrameTypeSettings = 0x04;
+
+// WebTransport の双方向ストリームシグナル値 (draft-ietf-webtrans-http3-17
+// Section 4.3)。双方向ストリームの最初のバイト列に限り、フレーム種別として
+// 現れてよい
+constexpr uint64_t kH3FrameTypeWtStreamBidi = 0x41;
+
+// WT_STREAM の誤配置を通知する H3_FRAME_UNEXPECTED (RFC 9114 Section 8.1)
+constexpr uint64_t kH3FrameUnexpected = 0x0105;
+
+// 制御ストリームタイプ (RFC 9114 Section 6.2.1)
+constexpr uint64_t kH3StreamTypeControl = 0x00;
+
+// SETTINGS_WT_ENABLED の codepoint。
+// draft-16 までは 0x2c7cf000、draft-17 からは 0x20b8933b を使う
+// (draft-ietf-webtrans-http3-17 Section 9.2)。両方を送出して
+// 旧 draft のピアとの相互運用を維持する (同 Section 7.1)
+constexpr uint64_t kWtEnabledDraft16 = 0x2c7cf000ULL;
+constexpr uint64_t kWtEnabledDraft17 = 0x20b8933bULL;
+
+// 送出時に draft-17 の SETTINGS_WT_ENABLED と置き換える、もっとも古い
+// 互換用 codepoint (draft-ietf-webtrans-http3-02 の
+// SETTINGS_ENABLE_WEBTRANSPORT)。draft-15 以降のピアが使う
+// 0x2c7cf000 と draft-13/14 の Safari が使う 0x14e9cd29 は残す
+constexpr uint64_t kWtEnabledAncientDraft2 = 0x2b603742ULL;
+
+// 受信した SETTINGS フレームのペイロード長の上限。制御ストリームはピアが
+// 送る任意のバイト列であり、巨大な length を保持し続けないようにする。
+// RFC 9114 は SETTINGS の具体的な上限を定めていないため、実装上限として
+// 1 MiB を置く。超過時は nghttp3 へそのまま渡す
+constexpr uint64_t kMaxObservedSettingsPayload = 1024ULL * 1024ULL;
 
 // HTTP/3 フレームヘッダー (種別 varint + 長さ varint) の解釈を試みる。
 // RFC 9000 Section 16 の可変長整数に基づき、先頭バイトの上位 2 ビットで
@@ -79,6 +112,98 @@ bool try_parse_h3_frame_header(const uint8_t* data,
   *payload_length = parsed_length;
   *header_length = type_length + length_length;
   return true;
+}
+
+// 制御ストリームの先頭に SETTINGS フレームがある場合、その SETTINGS
+// ペイロード内の SETTINGS_WT_ENABLED を from から to へ置き換える。
+// codepoint はどちらも 4 バイト varint であり、値も 1 バイトなので、
+// フレーム長を変えずに置き換えられる。
+//
+// 送出側では古い互換用 codepoint を draft-17 の codepoint に、受信側では
+// draft-17 の codepoint を nghttp3 が認識する draft-16 の codepoint に
+// 読み替えるために使う。
+//
+// nghttp3 は SETTINGS フレームを 1 回の writev_stream で書き出すため、
+// 通常は data にフレーム全体が含まれる。分割されている場合や、対象の
+// codepoint が見つからない場合は false を返す
+bool try_rewrite_settings_codepoint(std::vector<uint8_t>& data,
+                                    uint64_t from,
+                                    uint64_t to) {
+  if (data.empty()) {
+    return false;
+  }
+
+  uint64_t stream_type = 0;
+  nghttp3_get_uvarint(&stream_type, data.data());
+  size_t stream_type_length = nghttp3_get_uvarintlen(data.data());
+  if (stream_type != kH3StreamTypeControl ||
+      data.size() <= stream_type_length) {
+    return false;
+  }
+
+  uint64_t frame_type = 0;
+  uint64_t payload_length = 0;
+  size_t header_length = 0;
+  if (!try_parse_h3_frame_header(data.data() + stream_type_length,
+                                 data.size() - stream_type_length, &frame_type,
+                                 &payload_length, &header_length)) {
+    return false;
+  }
+  if (frame_type != kH3FrameTypeSettings) {
+    return false;
+  }
+
+  size_t payload_start = stream_type_length + header_length;
+  if (payload_length > data.size() - payload_start) {
+    // SETTINGS フレームが分割されている。nghttp3 は通常 1 チャンクで
+    // 書き出すため、ここに来るのは例外的な経路である
+    return false;
+  }
+  size_t payload_end = payload_start + static_cast<size_t>(payload_length);
+
+  // SETTINGS ペイロードは (ID, 値) の varint の並びである
+  // (RFC 9114 Section 7.2.4.1)
+  size_t offset = payload_start;
+  while (offset < payload_end) {
+    size_t id_length = nghttp3_get_uvarintlen(data.data() + offset);
+    if (id_length > payload_end - offset) {
+      return false;
+    }
+    uint64_t id = 0;
+    nghttp3_get_uvarint(&id, data.data() + offset);
+
+    size_t value_offset = offset + id_length;
+    if (value_offset >= payload_end) {
+      return false;
+    }
+    size_t value_length = nghttp3_get_uvarintlen(data.data() + value_offset);
+    if (value_length > payload_end - value_offset) {
+      return false;
+    }
+
+    if (id == from) {
+      // 値が 1 の WebTransport 有効化だけを置き換える。0 や 2 以上を
+      // 有効化に化けさせない
+      uint64_t value = 0;
+      nghttp3_get_uvarint(&value, data.data() + value_offset);
+      if (value != 1) {
+        return false;
+      }
+
+      uint8_t encoded[8] = {};
+      uint8_t* encoded_end = nghttp3_put_uvarint(encoded, to);
+      size_t encoded_length = static_cast<size_t>(encoded_end - encoded);
+      if (encoded_length != id_length) {
+        return false;
+      }
+      std::copy(encoded, encoded_end, data.data() + offset);
+      return true;
+    }
+
+    offset = value_offset + value_length;
+  }
+
+  return false;
 }
 
 }  // namespace
@@ -186,7 +311,7 @@ nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
     // WT_CLOSE_SESSION 関連のストリームエラー検知時の分離処理:
     // - NGHTTP3_ERR_H3_MESSAGE_ERROR かつ CONNECT ストリームは、WT_CLOSE_SESSION
     //   の Application Error Message が 1024 バイト超 (または 4 バイト未満の
-    //   不正な長さ) の経路 (draft-16 Section 6 の MUST: H3_MESSAGE_ERROR
+    //   不正な長さ) の経路 (draft-17 Section 6 の MUST: H3_MESSAGE_ERROR
     //   でのストリームリセット)。コールバックは発火していないため
     //   session_ids_ に残存しており、リセット処理はここで行う。ストリーム
     //   エラーであり接続エラーではないため Error イベントは積まない
@@ -223,7 +348,7 @@ nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
     // リセット処理。NGHTTP3_ERR_H3_MESSAGE_ERROR と不正 UTF-8 検知由来の
     // CALLBACK_FAILURE を含む) だけを除外し、それ以外は closed_ = true を
     // 立てる (http3.cpp の Http3Connection / http2.cpp の
-    // Http2Connection の負値時 closed_ と対称)。draft-16 Section 6 の
+    // Http2Connection の負値時 closed_ と対称)。draft-17 Section 6 の
     // MUST はストリームのリセットのみを要求し、接続を継続すべきため
     // ストリームエラーは除外する)
     if (!wt_close_session_error) {
@@ -234,6 +359,200 @@ nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
                                     static_cast<size_t>(consumed), fin);
   }
   return consumed;
+}
+
+bool H3Session::observe_bidi_stream_frame(int64_t stream_id,
+                                          const std::vector<uint8_t>& data) {
+  // 双方向ストリームだけを対象にする (クライアント %4==0 / サーバー %4==1)
+  if (stream_id % 4 != 0 && stream_id % 4 != 1) {
+    return false;
+  }
+
+  BidiFrameObserver& observer = bidi_frame_observers_[stream_id];
+  if (observer.stopped) {
+    return false;
+  }
+
+  size_t offset = 0;
+  while (offset < data.size()) {
+    if (observer.position < observer.next_frame_offset) {
+      // フレームペイロードの途中。次のフレーム境界まで読み飛ばす
+      uint64_t remaining = observer.next_frame_offset - observer.position;
+      uint64_t available = data.size() - offset;
+      uint64_t skip = std::min(remaining, available);
+      observer.position += skip;
+      offset += static_cast<size_t>(skip);
+      continue;
+    }
+
+    // フレーム境界。ヘッダーを 1 バイトずつ蓄積し、種別と長さが揃ったら
+    // 解釈する。最大 16 バイトで足りる (種別・長さとも最大 8 バイト varint)
+    observer.header.push_back(data[offset]);
+    ++offset;
+    ++observer.position;
+
+    uint64_t frame_type = 0;
+    uint64_t payload_length = 0;
+    size_t header_length = 0;
+    if (!try_parse_h3_frame_header(observer.header.data(),
+                                   observer.header.size(), &frame_type,
+                                   &payload_length, &header_length)) {
+      if (observer.header.size() >= 16) {
+        // 不正なフレームヘッダーは nghttp3 に判定させる
+        observer.stopped = true;
+        return false;
+      }
+      continue;
+    }
+
+    if (frame_type == kH3FrameTypeWtStreamBidi) {
+      if (observer.next_frame_offset == 0) {
+        // 最初のフレームが WT_STREAM なら正しい。以降のバイト列は
+        // アプリデータであり、フレームとして解釈してはならない
+        observer.stopped = true;
+        observer.header.clear();
+        return false;
+      }
+      observer.misplaced = true;
+      observer.stopped = true;
+      return true;
+    }
+
+    // 通常の HTTP/3 フレーム。次のフレーム境界までペイロードを読み飛ばす
+    observer.next_frame_offset = observer.position + payload_length;
+    observer.header.clear();
+  }
+
+  return false;
+}
+
+bool H3Session::is_remote_uni_stream_id(int64_t stream_id) const {
+  // QUIC のストリーム ID は下位 2 ビットで起点と方向が決まる
+  // (RFC 9000 Section 2.1)。サーバーから見たクライアント起点の単方向は
+  // %4==2、クライアントから見たサーバー起点の単方向は %4==3 である
+  if (is_server_) {
+    return stream_id % 4 == 2;
+  }
+  return stream_id % 4 == 3;
+}
+
+bool H3Session::handle_peer_uni_stream_data(int64_t stream_id,
+                                            const std::vector<uint8_t>& data,
+                                            bool fin,
+                                            std::vector<uint8_t>* forwarded,
+                                            bool* forwarded_fin) {
+  if (!is_remote_uni_stream_id(stream_id)) {
+    return false;
+  }
+
+  if (stream_id == peer_control_stream_id_) {
+    // SETTINGS フレームを nghttp3 へ渡した後の制御ストリームは
+    // そのまま通常経路で流す
+    if (peer_control_forwarded_) {
+      return false;
+    }
+    peer_control_buffer_.insert(peer_control_buffer_.end(), data.begin(),
+                                data.end());
+  } else {
+    // 分類済みの非制御ストリーム (QPACK / WT 単方向) は通常経路で流す
+    if (classified_peer_uni_stream_ids_.count(stream_id) > 0) {
+      return false;
+    }
+    classified_peer_uni_stream_ids_.insert(stream_id);
+
+    if (data.empty() || data[0] != static_cast<uint8_t>(kH3StreamTypeControl)) {
+      return false;
+    }
+    peer_control_stream_id_ = stream_id;
+    peer_control_buffer_ = data;
+  }
+
+  if (parse_peer_control_settings()) {
+    // nghttp3 に WebTransport 対応を認識させるため、draft-17 の
+    // codepoint を draft-16 の codepoint に読み替える
+    rewrite_peer_settings_codepoint();
+    *forwarded = std::move(peer_control_buffer_);
+    *forwarded_fin = fin;
+    peer_control_buffer_.clear();
+    peer_control_forwarded_ = true;
+    return true;
+  }
+
+  if (fin) {
+    // SETTINGS が揃う前に FIN した場合は、そのまま nghttp3 へ渡して
+    // 接続エラーとして処理させる
+    *forwarded = std::move(peer_control_buffer_);
+    *forwarded_fin = true;
+    peer_control_buffer_.clear();
+    peer_control_forwarded_ = true;
+    return true;
+  }
+
+  // SETTINGS フレームの到着待ち。データはバッファに保持する
+  return true;
+}
+
+bool H3Session::parse_peer_control_settings() {
+  if (peer_settings_observed_) {
+    return true;
+  }
+  if (peer_control_buffer_.empty()) {
+    return false;
+  }
+
+  // 制御ストリームタイプ (0x00) を読み飛ばす
+  uint64_t stream_type = 0;
+  nghttp3_get_uvarint(&stream_type, peer_control_buffer_.data());
+  size_t stream_type_length =
+      nghttp3_get_uvarintlen(peer_control_buffer_.data());
+  if (stream_type != kH3StreamTypeControl) {
+    peer_settings_observed_ = true;
+    return true;
+  }
+  if (peer_control_buffer_.size() <= stream_type_length) {
+    return false;
+  }
+
+  // SETTINGS フレームのヘッダー (種別 + 長さ)
+  uint64_t frame_type = 0;
+  uint64_t payload_length = 0;
+  size_t header_length = 0;
+  if (!try_parse_h3_frame_header(
+          peer_control_buffer_.data() + stream_type_length,
+          peer_control_buffer_.size() - stream_type_length, &frame_type,
+          &payload_length, &header_length)) {
+    return false;
+  }
+  if (frame_type != kH3FrameTypeSettings) {
+    // 制御ストリームの先頭が SETTINGS でない場合は nghttp3 が接続エラーに
+    // するため、これ以上の観測は不要である
+    peer_settings_observed_ = true;
+    return true;
+  }
+
+  size_t payload_start = stream_type_length + header_length;
+  if (payload_length > kMaxObservedSettingsPayload) {
+    // 巨大な SETTINGS は観測せずに nghttp3 へ渡す
+    peer_settings_observed_ = true;
+    return true;
+  }
+  if (payload_length > peer_control_buffer_.size() - payload_start) {
+    // フレーム全体の到着を待つ
+    return false;
+  }
+
+  // フレーム全体が揃った。ペイロードの解釈と codepoint の読み替えは
+  // rewrite_peer_settings_codepoint が行う
+  peer_settings_observed_ = true;
+  return true;
+}
+
+void H3Session::rewrite_peer_settings_codepoint() {
+  if (peer_control_buffer_.empty()) {
+    return;
+  }
+  (void)try_rewrite_settings_codepoint(peer_control_buffer_, kWtEnabledDraft17,
+                                       kWtEnabledDraft16);
 }
 
 void H3Session::enforce_pre_accept_buffer_limit(int64_t stream_id,
@@ -496,6 +815,44 @@ size_t H3Session::receive_stream_data(int64_t stream_id,
       rejected_pre_accept_stream_ids_.erase(stream_id);
     }
     return data.size();
+  }
+
+  // 双方向ストリームの最初のフレーム以外に WT_STREAM (0x41) が現れたら
+  // 接続エラー H3_FRAME_UNEXPECTED にする (draft-17 Section 4.3 の MUST)。
+  // nghttp3 は WebTransport 有効時の新規双方向ストリームに MAYBE_WT_DATA を
+  // 立てるため、HEADERS の後の WT_STREAM を受理してしまう。nghttp3 へ渡す
+  // 前にバインディング側で拒否する
+  if ((stream_id % 4 == 0 || stream_id % 4 == 1) &&
+      observe_bidi_stream_frame(stream_id, data)) {
+    H3Event event;
+    event.type = H3EventType::Error;
+    event.stream_id = stream_id;
+    event.error_code = kH3FrameUnexpected;
+    event.error_message = "WT_STREAM frame in invalid position";
+    push_event(std::move(event));
+    closed_ = true;
+    return 0;
+  }
+
+  // 対向の制御ストリームの SETTINGS を draft-17 の codepoint ごと
+  // nghttp3 へ渡せる形に読み替える。SETTINGS フレームが揃うまでは
+  // バッファに保持し、呼び出し側には消費済みとして返す
+  if (is_remote_uni_stream_id(stream_id)) {
+    std::vector<uint8_t> forwarded;
+    bool forwarded_fin = false;
+    if (handle_peer_uni_stream_data(stream_id, data, fin, &forwarded,
+                                    &forwarded_fin)) {
+      if (!forwarded.empty() || forwarded_fin) {
+        nghttp3_ssize consumed = read_from_nghttp3(
+            stream_id, forwarded.data(), forwarded.size(), forwarded_fin);
+        process_after_read(stream_id, forwarded_fin);
+        flush_unblocked_held_data();
+        if (consumed < 0) {
+          return 0;
+        }
+      }
+      return data.size();
+    }
   }
 
   // フレーム境界ガードの対象外判定。対象外は既存どおり一括で nghttp3 へ渡す
@@ -887,6 +1244,15 @@ H3Session::get_streams_to_send() {
       data.insert(data.end(), vec[i].base, vec[i].base + vec[i].len);
     }
 
+    // 自側の制御ストリームには draft-17 の SETTINGS_WT_ENABLED を
+    // 追加する。nghttp3 は draft-16 の codepoint (0x2c7cf000) しか
+    // 送出しないため、互換用の古い codepoint を置き換えて併送する
+    // (draft-ietf-webtrans-http3-17 Section 7.1)
+    if (stream_id == control_stream_id_ && !local_settings_rewritten_) {
+      local_settings_rewritten_ = try_rewrite_settings_codepoint(
+          data, kWtEnabledAncientDraft2, kWtEnabledDraft17);
+    }
+
     if (!data.empty() || fin) {
       result.emplace_back(stream_id, std::move(data), fin != 0);
     }
@@ -1167,7 +1533,7 @@ bool H3Session::accept_session(int64_t stream_id) {
     // - 1024 バイト超 (および 4 バイト未満の不正な長さ) のカプセルは
     //   コールバック非発火のため保留は未設定で、confirm 自体が
     //   NGHTTP3_ERR_H3_MESSAGE_ERROR で失敗する
-    // どちらも draft-16 Section 6 の MUST (H3_MESSAGE_ERROR でのリセット) を
+    // どちらも draft-17 Section 6 の MUST (H3_MESSAGE_ERROR でのリセット) を
     // 満たすため、当該セッション ID でリセット処理を実行する
     if (rv == NGHTTP3_ERR_H3_MESSAGE_ERROR ||
         pending_wt_close_session_error_session_id_.has_value()) {
@@ -1759,7 +2125,7 @@ void H3Session::discard_stale_2xx() {
 
 void H3Session::handle_wt_close_session_error(int64_t session_id) {
   // WT_CLOSE_SESSION の Application Error Message の不正 (1024 バイト超・
-  // 4 バイト未満の不正な長さ・不正 UTF-8。draft-16 Section 6 の MUST:
+  // 4 バイト未満の不正な長さ・不正 UTF-8。draft-17 Section 6 の MUST:
   // H3_MESSAGE_ERROR での CONNECT ストリームのリセット) のセッション終了処理。呼び出し元は
   // receive_stream_data の負値分岐 (read_stream2 からの復帰後) と
   // accept_session の確認失敗分岐 (アプリ呼び出し) の両方で、nghttp3 の
@@ -1801,7 +2167,7 @@ void H3Session::close_session(int64_t session_id,
   // nghttp3 の WebTransport セッション終了 API を使用
   // WT_CLOSE_SESSION カプセルを送信し、全ストリームを適切にシャットダウン
   // エラーメッセージはバイト単位で 1024 に切り詰めた後、末尾が不完全な
-  // UTF-8 シーケンスになる場合は文字境界まで後退させる (draft-16 Section 6
+  // UTF-8 シーケンスになる場合は文字境界まで後退させる (draft-17 Section 6
   // の「Senders that truncate an application-supplied message MUST do so at a
   // UTF-8 character boundary」。is_valid_utf8 は切り詰めで生じる不完全な終端
   // を検出する。ASCII のみのメッセージでは従来どおり 1024 バイトで切る。
@@ -1875,7 +2241,7 @@ bool H3Session::is_active_session(int64_t session_id) const {
 }
 
 bool H3Session::is_webtransport_ready() const {
-  // draft-16 Section 3.1: クライアントは SETTINGS を受信するまで CONNECT を
+  // draft-17 Section 3.1: クライアントは SETTINGS を受信するまで CONNECT を
   // 送ってはならない。3 設定 (wt_enabled / enable_connect_protocol /
   // h3_datagram) が draft の規定値 1 の場合のみ有効とする
   return settings_received_ && peer_wt_enabled_ &&
@@ -2044,6 +2410,9 @@ int H3Session::stream_close_cb(nghttp3_conn* conn,
   // 残す)
   session->forget_pre_accept_stream(stream_id);
 
+  // 双方向ストリームのフレーム境界観測状態を破棄する
+  session->bidi_frame_observers_.erase(stream_id);
+
   // ストリーム終了イベント
   H3Event event;
   event.type = H3EventType::StreamClosed;
@@ -2176,15 +2545,15 @@ int H3Session::end_headers_cb(nghttp3_conn* conn,
         // "webtransport-h3" はネイティブ HTTP/3 セッションのトークン
         // (draft-ietf-webtrans-http3-16 Section 3.2)。
         // "webtransport" は現行仕様ではカプセルベースプロトコル用トークン
-        // (draft-16 Section 2.1.2) であるが、実ブラウザ (Chromium /
+        // (draft-17 Section 2.1.2) であるが、実ブラウザ (Chromium /
         // WebKit) および Shiguredo WebTransport DevTools は現時点でも
         // ":protocol: webtransport" で CONNECT する (実測済み)。
-        // draft-16 は「unknown の :protocol を受信した場合は 501 を返す
+        // draft-17 は「unknown の :protocol を受信した場合は 501 を返す
         // SHOULD (RFC 9220 Section 3)」を定めるが、実ブラウザ互換を優先して
         // 本実装は "webtransport" もネイティブセッションとして受理する
         // (将来の仕様改訂でトークンが統一された場合に削除する)。
         // カプセルベースプロトコルのトークンとネイティブセッションの混同は
-        // ストリーム先頭シグナルの意味が異なり得る (draft-16 Section 2.1.2)
+        // ストリーム先頭シグナルの意味が異なり得る (draft-17 Section 2.1.2)
         // ため、カプセルベースプロトコルを実装するまで本実装の判定は
         // "webtransport" を含む。これは仕様との既知の逸脱である
         is_webtransport = true;
@@ -2396,7 +2765,7 @@ int H3Session::recv_settings2_cb(nghttp3_conn* conn,
     return 0;
   }
 
-  // draft-16 Section 3.1: 対向の SETTINGS を記録し、
+  // draft-17 Section 3.1: 対向の SETTINGS を記録し、
   // is_webtransport_ready() が WebTransport 対応を判定できるようにする
   session->settings_received_ = true;
   session->peer_wt_enabled_ = settings->wt_enabled == 1;
@@ -2480,7 +2849,7 @@ int H3Session::recv_wt_close_session_cb(nghttp3_conn* conn,
 
   auto* session = static_cast<H3Session*>(conn_user_data);
 
-  // Application Error Message の不正検知 (draft-16 Section 6 の MUST:
+  // Application Error Message の不正検知 (draft-17 Section 6 の MUST:
   // 「If the Application Error Message exceeds 1024 bytes or is not valid
   // UTF-8, the receiver MUST reset the stream with code H3_MESSAGE_ERROR」)。
   // 1024 バイト超過は nghttp3 が LENGTH 段階で NGHTTP3_ERR_H3_MESSAGE_ERROR

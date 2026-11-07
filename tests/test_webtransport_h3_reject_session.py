@@ -23,7 +23,7 @@ def test_client_non_2xx_response_removes_session_id(status_code: int) -> None:
 
     サーバーが CONNECT リクエストを非 2xx (403 / 302 / 500) で拒否した場合、
     クライアントの session_ids_ にセッション ID が残り続けるのが問題であり、
-    非 2xx 応答受信時に削除されることを検証する (draft-ietf-webtrans-http3-16
+    非 2xx 応答受信時に削除されることを検証する (draft-ietf-webtrans-http3-17
     Section 3.2)。
     """
     client, server = _create_session_pair()
@@ -48,7 +48,7 @@ def test_client_non_2xx_response_removes_session_id(status_code: int) -> None:
 def test_client_non_2xx_response_send_datagram_ignored(status_code: int) -> None:
     """拒否されたセッション ID 宛の send_datagram がデータグラムを送出しないことを確認
 
-    拒否されたセッションは確立されていない (draft-ietf-webtrans-http3-16
+    拒否されたセッションは確立されていない (draft-ietf-webtrans-http3-17
     Section 3.2) ため、楽観的送信 (Section 4) の枠を超えて送信が継続する
     経路を塞ぐ。削除後は session_ids_ のメンバーシップ確認が成立しないため、
     send_datagram は黙って無視される。
@@ -76,7 +76,7 @@ def test_client_non_2xx_response_open_stream_fails(status_code: int) -> None:
     """拒否されたセッション ID 宛の open_stream が失敗することを確認
 
     拒否後に session_ids_ から削除されるため、open_stream のメンバーシップ
-    確認が成立せず false を返す (draft-ietf-webtrans-http3-16 Section 6 の
+    確認が成立せず false を返す (draft-ietf-webtrans-http3-17 Section 6 の
     MUST)。
     """
     client, server = _create_session_pair()
@@ -84,7 +84,7 @@ def test_client_non_2xx_response_open_stream_fails(status_code: int) -> None:
     headers = _setup_connect(client, server, 0)
     server.receive_stream_data(0, headers, False)
 
-    # 拒否前の楽観的オープンは成功する (draft-ietf-webtrans-http3-16
+    # 拒否前の楽観的オープンは成功する (draft-ietf-webtrans-http3-17
     # Section 4 の楽観的オープン。nghttp3 は応答受信前でも wt.session の
     # 存在のみで open を許容する)。スケジューラに残らないよう書き出して
     # から次に進む
@@ -108,7 +108,7 @@ def test_client_non_2xx_response_no_session_closed_event(status_code: int) -> No
     """拒否されたセッションに対して SessionClosed イベントが発火しないことを確認
 
     非 2xx 応答ではセッションは一度も確立されていない
-    (draft-ietf-webtrans-http3-16 Section 3.2) ため、SessionClosed
+    (draft-ietf-webtrans-http3-17 Section 3.2) ため、SessionClosed
     (セッション終了の通知) の意味論が合わない。黙って削除する。
     本テストは修正前実装でも通る設計ピンであり、SessionClosed 不発火の
     意味論を守る (nghttp3 の abort_stream 由来の RESET_STREAM /
@@ -130,7 +130,7 @@ def test_client_non_2xx_response_no_session_closed_event(status_code: int) -> No
 def test_client_response_103_session_removed() -> None:
     """1xx 中間応答でもセッション ID が削除されることを確認
 
-    draft-ietf-webtrans-http3-16 Section 3.2 では 2xx のみがセッション確立
+    draft-ietf-webtrans-http3-17 Section 3.2 では 2xx のみがセッション確立
     であり、1xx は確立応答ではない。現在の依存 nghttp3 は 1xx 中間応答を
     受信すると status_code を -1 へ戻して非 2xx として CONNECT ストリーム
     を abort する (nghttp3 が 1xx を中間応答として扱う更新が入った場合は

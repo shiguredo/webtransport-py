@@ -1,6 +1,6 @@
 """WebTransport over HTTP/3 の WT_CLOSE_SESSION メッセージ送信トリミング・受信検証テスト
 
-draft-ietf-webtrans-http3-16 Section 6 の MUST「Application Error Message が
+draft-ietf-webtrans-http3-17 Section 6 の MUST「Application Error Message が
 1024 バイト超または不正な UTF-8 の場合、受信者は H3_MESSAGE_ERROR (0x010E)
 でストリームをリセットする」と「Senders that truncate an application-supplied
 message MUST do so at a UTF-8 character boundary」を検証する。送信側の

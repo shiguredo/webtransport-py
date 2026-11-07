@@ -92,7 +92,7 @@ def test_quic_connection_error_subclasses() -> None:
         (http3_exceptions.Http3ErrorCode.GENERAL_PROTOCOL_ERROR, 0x0101),
         (http3_exceptions.Http3ErrorCode.MISSING_SETTINGS, 0x010A),
         (http3_exceptions.Http3ErrorCode.QPACK_DECOMPRESSION_FAILED, 0x0200),
-        # draft-ietf-webtrans-http3-16 Section 9.5
+        # draft-ietf-webtrans-http3-17 Section 9.5
         (http3_exceptions.Http3ErrorCode.WT_FLOW_CONTROL_ERROR, 0x045D4487),
         (http3_exceptions.Http3ErrorCode.WT_SESSION_GONE, 0x170D7B68),
         (http3_exceptions.Http3ErrorCode.WT_BUFFERED_STREAM_REJECTED, 0x3994BD84),

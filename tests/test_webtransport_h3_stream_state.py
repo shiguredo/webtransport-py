@@ -50,5 +50,5 @@ def test_stream_wt_session_id() -> None:
 
     # WebTransport データストリームでないストリームもセッション ID を持たない
     # ため None。CONNECT ストリーム自身 (セッション ID は CONNECT ストリーム
-    # ID そのもの。draft-ietf-webtrans-http3-16 Section 2.2) で検証する
+    # ID そのもの。draft-ietf-webtrans-http3-17 Section 2.2) で検証する
     assert client.stream_wt_session_id(session_id) is None

@@ -3,7 +3,7 @@
 サーバーが reject_session (非 2xx 応答) で CONNECT リクエストを拒否しても、
 サーバーの session_ids_ にセッション ID が残り続け、拒否されたセッション
 ID 宛の send_datagram がデータグラムを送出し、receive_datagram が配信し
-続ける問題の修正を検証する。draft-ietf-webtrans-http3-16 Section 3.2 の
+続ける問題の修正を検証する。draft-ietf-webtrans-http3-17 Section 3.2 の
 「サーバーの視点では、2xx 応答を送信した時点でセッションが確立される」
 により、非 2xx で拒否されたセッションは一度も確立されておらず、終了通知
 (SessionClosed) の意味論が合わないため黙って削除する。
@@ -65,7 +65,7 @@ def test_server_reject_2xx_keeps_session_id() -> None:
 
     reject_session は任意の status_code を受け付けており、2xx 非 200 応答は
     reject_session で生成する (accept_session は 200 固定)。サーバー視点では
-    2xx 送出 = 確立 (draft-ietf-webtrans-http3-16 Section 3.2) のため、何も
+    2xx 送出 = 確立 (draft-ietf-webtrans-http3-17 Section 3.2) のため、何も
     削除しない。なお confirm_wt_session は accept_session のみが呼ぶため、
     2xx を渡してもサーバー側の wt.session は生成されず、ストリーム送受信は
     通らない (テスト合成経路としての制約)。
@@ -128,7 +128,7 @@ def test_server_reject_receive_datagram_not_delivered() -> None:
 
     拒否後は session_ids_ のメンバーシップ確認が成立しないため、届いた
     データグラムは破棄されて Datagram イベントは発火しない (データグラムは
-    再送されず配信保証がないため喪失は無害。draft-ietf-webtrans-http3-16
+    再送されず配信保証がないため喪失は無害。draft-ietf-webtrans-http3-17
     Section 4.1 / RFC 9221)。
     """
     client, server = _create_session_pair()
@@ -147,7 +147,7 @@ def test_server_reject_no_session_closed_event() -> None:
     """拒否されたセッションに対して SessionClosed イベントが発火しないことを確認
 
     非 2xx で拒否されたセッションは一度も確立されていない
-    (draft-ietf-webtrans-http3-16 Section 3.2) ため、SessionClosed (セッション
+    (draft-ietf-webtrans-http3-17 Section 3.2) ため、SessionClosed (セッション
     終了の通知) の意味論が合わない。黙って削除する。
     """
     client, server = _create_session_pair()
@@ -237,7 +237,7 @@ def test_server_reject_then_accept_returns_false() -> None:
     """非 2xx 拒否後に accept_session を呼ぶと false を返すことを確認
 
     reject_session で session_ids_ から削除済みのセッションは一度も確立
-    されていない (draft-ietf-webtrans-http3-16 Section 3.2) ため、誤って
+    されていない (draft-ietf-webtrans-http3-17 Section 3.2) ため、誤って
     accept_session を呼んでも受理不可能として false を返す (誤用の明示)。
     カプセル未到着構成 (受理前に WT_CLOSE_SESSION が届いていない) でも
     submit / confirm に進まないため、reject_session が submit した 403 は
@@ -283,7 +283,7 @@ def test_server_reject_then_accept_pre_accept_wt_close_session(
 
     受理前に届いた WT_CLOSE_SESSION カプセルは nghttp3 の inq にバッファ
     され、accept_session の confirm 処理中に同期処理される
-    (draft-ietf-webtrans-http3-16 Section 3.2 の「A server MUST NOT process
+    (draft-ietf-webtrans-http3-17 Section 3.2 の「A server MUST NOT process
     these bytes as capsules until it sends a 2xx response accepting the
     session」。受理前に届いたカプセルは受理されれば処理され、拒否されれば
     破棄される)。accept_session が false を返して confirm に進まないため、
