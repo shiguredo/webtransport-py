@@ -2,40 +2,47 @@
 
 import enum
 
+
 class Config:
     """HTTP/3 設定"""
 
     def __init__(self) -> None: ...
+
     @property
     def max_field_section_size(self) -> int:
         """最大フィールドセクションサイズ"""
 
     @max_field_section_size.setter
     def max_field_section_size(self, arg: int, /) -> None: ...
+
     @property
     def qpack_max_dtable_capacity(self) -> int:
         """QPACK 動的テーブル最大容量"""
 
     @qpack_max_dtable_capacity.setter
     def qpack_max_dtable_capacity(self, arg: int, /) -> None: ...
+
     @property
     def qpack_blocked_streams(self) -> int:
         """QPACK ブロックされたストリーム数"""
 
     @qpack_blocked_streams.setter
     def qpack_blocked_streams(self, arg: int, /) -> None: ...
+
     @property
     def enable_webtransport(self) -> bool:
         """WebTransport 有効化"""
 
     @enable_webtransport.setter
     def enable_webtransport(self, arg: bool, /) -> None: ...
+
     @property
     def enable_h3_datagram(self) -> bool:
         """HTTP/3 Datagram 有効化"""
 
     @enable_h3_datagram.setter
     def enable_h3_datagram(self, arg: bool, /) -> None: ...
+
     @property
     def is_server(self) -> bool:
         """サーバーモード"""
@@ -68,6 +75,7 @@ class Event:
     """HTTP/3 イベント"""
 
     def __init__(self) -> None: ...
+
     @property
     def type(self) -> EventType:
         """イベント種別"""

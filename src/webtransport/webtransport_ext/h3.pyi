@@ -1,24 +1,32 @@
 """WebTransport over HTTP/3"""
 
-import enum
 from collections.abc import Sequence
+import enum
+
 
 class Config:
     """WebTransport over HTTP/3 設定"""
 
     def __init__(self) -> None: ...
+
     @property
     def max_field_section_size(self) -> int: ...
+
     @max_field_section_size.setter
     def max_field_section_size(self, arg: int, /) -> None: ...
+
     @property
     def qpack_max_dtable_capacity(self) -> int: ...
+
     @qpack_max_dtable_capacity.setter
     def qpack_max_dtable_capacity(self, arg: int, /) -> None: ...
+
     @property
     def qpack_blocked_streams(self) -> int: ...
+
     @qpack_blocked_streams.setter
     def qpack_blocked_streams(self, arg: int, /) -> None: ...
+
     @property
     def wt_pre_accept_buffer_limit(self) -> int:
         """
@@ -27,10 +35,13 @@ class Config:
 
     @wt_pre_accept_buffer_limit.setter
     def wt_pre_accept_buffer_limit(self, arg: int, /) -> None: ...
+
     @property
     def is_server(self) -> bool: ...
+
     @is_server.setter
     def is_server(self, arg: bool, /) -> None: ...
+
     @property
     def allowed_origins(self) -> list[str]:
         """許可オリジンリスト (空なら全オリジンを受理)"""
@@ -65,20 +76,26 @@ class Event:
     """WebTransport イベント"""
 
     def __init__(self) -> None: ...
+
     @property
     def type(self) -> EventType: ...
+
     @property
     def session_id(self) -> int: ...
+
     @property
     def stream_id(self) -> int: ...
+
     @property
     def data(self) -> bytes:
         """イベントデータ"""
 
     @property
     def error_code(self) -> int: ...
+
     @property
     def error_message(self) -> str: ...
+
     @property
     def status_code(self) -> int:
         """SessionRejected 発火時の HTTP status code。他イベントでは 0 (パース失敗・範囲外は 0 に丸められる)"""
@@ -97,14 +114,19 @@ class StreamInfo:
     """WebTransport ストリーム情報"""
 
     def __init__(self) -> None: ...
+
     @property
     def stream_id(self) -> int: ...
+
     @property
     def session_id(self) -> int: ...
+
     @property
     def is_unidirectional(self) -> bool: ...
+
     @property
     def is_incoming(self) -> bool: ...
+
     @property
     def is_write_registered(self) -> bool: ...
 
@@ -140,7 +162,7 @@ class Session:
     def bind_qpack_decoder_stream(self, stream_id: int) -> None:
         """QPACK デコーダーストリーム ID を設定"""
 
-    def connect(self, stream_id: int, url: str, origin: str = "") -> bool:
+    def connect(self, stream_id: int, url: str, origin: str = '') -> bool:
         """WebTransport セッションを開始 (クライアント用)"""
 
     def accept_session(self, stream_id: int) -> bool:
@@ -176,7 +198,7 @@ class Session:
     def shutdown_stream_write(self, stream_id: int) -> None:
         """ストリームの書き込み側をシャットダウンする (以後の send_stream_data は no-op。受信方向は生存したまま)"""
 
-    def close_session(self, session_id: int, error_code: int = 0, error_message: str = "") -> None:
+    def close_session(self, session_id: int, error_code: int = 0, error_message: str = '') -> None:
         """WebTransport セッションを閉じる"""
 
     def next_event(self) -> Event | None:

@@ -2,52 +2,61 @@
 
 import enum
 
+
 class Config:
     """QMux 接続の設定"""
 
     def __init__(self) -> None: ...
+
     @property
     def initial_max_streams_bidi(self) -> int:
         """受け入れる同時双方向ストリーム数。2^60 以下でなければならない"""
 
     @initial_max_streams_bidi.setter
     def initial_max_streams_bidi(self, arg: int, /) -> None: ...
+
     @property
     def initial_max_streams_uni(self) -> int:
         """受け入れる同時単方向ストリーム数。2^60 以下でなければならない"""
 
     @initial_max_streams_uni.setter
     def initial_max_streams_uni(self, arg: int, /) -> None: ...
+
     @property
     def initial_max_data(self) -> int:
         """コネクション全体のフロー制御上限 (バイト)"""
 
     @initial_max_data.setter
     def initial_max_data(self, arg: int, /) -> None: ...
+
     @property
     def initial_max_stream_data_bidi_local(self) -> int:
         """双方向ストリーム (ローカル開始) のフロー制御上限 (バイト)"""
 
     @initial_max_stream_data_bidi_local.setter
     def initial_max_stream_data_bidi_local(self, arg: int, /) -> None: ...
+
     @property
     def initial_max_stream_data_bidi_remote(self) -> int:
         """双方向ストリーム (リモート開始) のフロー制御上限 (バイト)"""
 
     @initial_max_stream_data_bidi_remote.setter
     def initial_max_stream_data_bidi_remote(self, arg: int, /) -> None: ...
+
     @property
     def initial_max_stream_data_uni(self) -> int:
         """単方向ストリームのフロー制御上限 (バイト)"""
 
     @initial_max_stream_data_uni.setter
     def initial_max_stream_data_uni(self, arg: int, /) -> None: ...
+
     @property
     def max_idle_timeout_ns(self) -> int:
         """アイドルタイムアウト (ナノ秒)"""
 
     @max_idle_timeout_ns.setter
     def max_idle_timeout_ns(self, arg: int, /) -> None: ...
+
     @property
     def max_record_size(self) -> int:
         """
@@ -56,6 +65,7 @@ class Config:
 
     @max_record_size.setter
     def max_record_size(self, arg: int, /) -> None: ...
+
     @property
     def max_datagram_frame_size(self) -> int:
         """
@@ -84,6 +94,7 @@ class Event:
     """QMux イベント"""
 
     def __init__(self) -> None: ...
+
     @property
     def type(self) -> EventType:
         """イベント種別"""
@@ -159,7 +170,7 @@ class Connection:
         ストリームの両方向を終了する (RESET_STREAM + STOP_SENDING。0 以上は成功、負値は dwnx のライブラリエラー。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
         """
 
-    def close(self, error_code: int = 0, reason: str = "") -> None:
+    def close(self, error_code: int = 0, reason: str = '') -> None:
         """
         接続を閉じる (CONNECTION_CLOSE のレコードを取り出せるようにする。理由が 1 レコードに収まらない場合は UTF-8 の文字境界で切り詰める。終了コードが QUIC varint の上限 (2^62-1) を超える場合は ValueError)
         """

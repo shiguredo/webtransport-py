@@ -2,40 +2,47 @@
 
 import enum
 
+
 class Config:
     """HTTP/2 設定"""
 
     def __init__(self) -> None: ...
+
     @property
     def initial_window_size(self) -> int:
         """初期ウィンドウサイズ"""
 
     @initial_window_size.setter
     def initial_window_size(self, arg: int, /) -> None: ...
+
     @property
     def max_concurrent_streams(self) -> int:
         """最大同時ストリーム数"""
 
     @max_concurrent_streams.setter
     def max_concurrent_streams(self, arg: int, /) -> None: ...
+
     @property
     def max_frame_size(self) -> int:
         """最大フレームサイズ (nghttp2-v2 では 16384 固定)"""
 
     @max_frame_size.setter
     def max_frame_size(self, arg: int, /) -> None: ...
+
     @property
     def max_header_list_size(self) -> int:
         """最大ヘッダーリストサイズ"""
 
     @max_header_list_size.setter
     def max_header_list_size(self, arg: int, /) -> None: ...
+
     @property
     def is_server(self) -> bool:
         """サーバーモード"""
 
     @is_server.setter
     def is_server(self, arg: bool, /) -> None: ...
+
     @property
     def no_rfc7540_priorities(self) -> bool:
         """SETTINGS_NO_RFC7540_PRIORITIES を送信するか (nghttp2-v2 は常に送信するため設定は無効)"""
@@ -68,6 +75,7 @@ class Event:
     """HTTP/2 イベント"""
 
     def __init__(self) -> None: ...
+
     @property
     def type(self) -> EventType:
         """イベント種別"""
@@ -144,7 +152,7 @@ class Connection:
     def _test_stream_buffer_offset(self, stream_id: int) -> int:
         """テスト専用: 送信バッファ先頭の送出確認済みオフセットを返す"""
 
-    def ping(self, opaque_data: bytes = b"") -> None:
+    def ping(self, opaque_data: bytes = b'') -> None:
         """PING を送信 (opaque_data は 8 バイト固定。1 MiB 超の場合は ValueError)"""
 
     def terminate_session(self, error_code: int = 0, last_stream_id: int = 0) -> bool:
@@ -159,9 +167,7 @@ class Connection:
     def submit_priority_update(self, stream_id: int, urgency: int, incremental: bool) -> bool:
         """PRIORITY_UPDATE フレームを送信"""
 
-    def change_extpri_stream_priority(
-        self, stream_id: int, urgency: int, incremental: bool
-    ) -> bool:
+    def change_extpri_stream_priority(self, stream_id: int, urgency: int, incremental: bool) -> bool:
         """ストリームの優先度を変更"""
 
     def next_event(self) -> Event | None:

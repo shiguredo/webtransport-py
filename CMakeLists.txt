@@ -370,11 +370,32 @@ target_compile_options(webtransport_ext PRIVATE -fvisibility=hidden)
 # 解決順で webtransport/__init__.py を隠し、高レベル API (Client / Server /
 # 例外) が型検査から消えるため廃止した。
 #
+# 拡張モジュールはインストール後と同じ webtransport.webtransport_ext という
+# 名前で import してスタブを生成する。stubgen は import したモジュール名を
+# そのまま stub の import 文に使うため、生成物は追跡した時点で解決可能な
+# 絶対 import になる。そのためにビルドディレクトリへ一時的な webtransport
+# パッケージを作り、拡張モジュールをコピーする。
+#
 # INCLUDE_PRIVATE: `_test_force_close` のようなテスト専用ヘルパは先頭
 # アンダースコアを持つため、既定では stubgen が出力しない
+set(STUBGEN_PACKAGE_ROOT ${CMAKE_CURRENT_BINARY_DIR}/stubgen)
+set(STUBGEN_PACKAGE_DIR ${STUBGEN_PACKAGE_ROOT}/webtransport)
+set(STUBGEN_PACKAGE_STAMP ${CMAKE_CURRENT_BINARY_DIR}/webtransport_stubgen_package.stamp)
+add_custom_command(
+  OUTPUT ${STUBGEN_PACKAGE_STAMP}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${STUBGEN_PACKAGE_DIR}
+  COMMAND ${CMAKE_COMMAND} -E touch ${STUBGEN_PACKAGE_DIR}/__init__.py
+  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:webtransport_ext> ${STUBGEN_PACKAGE_DIR}/$<TARGET_FILE_NAME:webtransport_ext>
+  COMMAND ${CMAKE_COMMAND} -E touch ${STUBGEN_PACKAGE_STAMP}
+  DEPENDS webtransport_ext
+  COMMENT "Staging webtransport_ext for stubgen"
+  VERBATIM
+)
+add_custom_target(webtransport_stubgen_package DEPENDS ${STUBGEN_PACKAGE_STAMP})
+
 nanobind_add_stub(
   webtransport_stub
-  MODULE webtransport_ext
+  MODULE webtransport.webtransport_ext
   RECURSIVE
   INCLUDE_PRIVATE
   OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}
@@ -386,8 +407,8 @@ nanobind_add_stub(
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/http3.pyi
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/h3.pyi
     ${CMAKE_CURRENT_BINARY_DIR}/webtransport_ext/h2.pyi
-  PYTHON_PATH $<TARGET_FILE_DIR:webtransport_ext>
-  DEPENDS webtransport_ext
+  PYTHON_PATH ${STUBGEN_PACKAGE_ROOT}
+  DEPENDS webtransport_stubgen_package
   MARKER_FILE ${CMAKE_CURRENT_BINARY_DIR}/py.typed
 )
 

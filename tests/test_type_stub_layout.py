@@ -14,7 +14,7 @@
 
 - 実装が存在するモジュールを隠す `.pyi` が `src/webtransport/` 配下に無いこと
 - 拡張モジュールのスタブパッケージが拡張モジュールの公開名と一致すること
-- スタブパッケージの絶対 import が解決不能な形で残っていないこと
+- スタブパッケージの import が解決可能な絶対 import であること
 """
 
 import ast
@@ -33,6 +33,8 @@ STUB_DIR = SOURCE_DIR / "webtransport_ext"
 MODULES = ("quic", "http3", "h3", "http2", "h2", "qmux")
 # スタブパッケージ自身がトップレベルに存在しないため、この絶対 import は解決できない
 UNRESOLVABLE_PREFIX = "webtransport_ext"
+# 拡張モジュールのインストール後の公開名。stubgen はこの名前で import する
+EXPECTED_STUB_IMPORT = "webtransport.webtransport_ext"
 
 
 def _public_submodules() -> set[str]:
@@ -108,30 +110,37 @@ def test_stub_package_matches_extension_module() -> None:
     )
 
 
-def test_stub_package_has_no_unresolvable_import() -> None:
-    """スタブパッケージに解決不能な絶対 import が残っていないことを確認する
+def test_stub_package_has_resolvable_import() -> None:
+    """スタブパッケージが解決可能な絶対 import だけを持つことを確認する
 
-    nanobind の stubgen はトップレベル `webtransport_ext` を import する形で
-    出力するが、スタブパッケージ自身が `webtransport.webtransport_ext` に
-    あるためこの import は解決できない。相対 import へ書き換えられている
-    ことを確認する (`scripts/normalize_stubs.py` の後処理)。
+    stubgen は拡張モジュールをインストール後と同じ
+    `webtransport.webtransport_ext` として import してスタブを生成する。
+    トップレベルの `webtransport_ext` を指す import が残っていると型検査で
+    解決できないため、そのような import が無いことと、`__init__.pyi` が
+    拡張モジュール自身を指していることを確認する。
     """
     problems: list[str] = []
+    init_imports: set[str] = set()
     for stub_path in sorted(STUB_DIR.glob("*.pyi")):
         for node in ast.walk(ast.parse(stub_path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.split(".")[0] == UNRESOLVABLE_PREFIX:
                         problems.append(f"{stub_path.name}: import {alias.name}")
-            elif (
-                isinstance(node, ast.ImportFrom)
-                and node.level == 0
-                and (node.module or "").split(".")[0] == UNRESOLVABLE_PREFIX
-            ):
-                problems.append(f"{stub_path.name}: from {node.module} import ...")
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                module = node.module or ""
+                if module.split(".")[0] == UNRESOLVABLE_PREFIX:
+                    problems.append(f"{stub_path.name}: from {module} import ...")
+                if stub_path.name == "__init__.pyi":
+                    init_imports.add(module)
 
     assert not problems, (
         "スタブパッケージに解決不能な絶対 import が残っている:\n"
         + "\n".join(problems)
-        + "\n`uv run python scripts/normalize_stubs.py _build/webtransport_ext` を実行すること"
+        + "\n`make develop` でスタブを再生成すること"
+    )
+    assert EXPECTED_STUB_IMPORT in init_imports, (
+        "スタブパッケージの __init__.pyi が拡張モジュールの公開名を import していない:\n"
+        + "\n".join(sorted(init_imports))
+        + "\n`make develop` でスタブを再生成すること"
     )

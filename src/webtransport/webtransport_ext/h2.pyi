@@ -1,7 +1,8 @@
 """WebTransport over HTTP/2"""
 
-import enum
 from collections.abc import Sequence
+import enum
+
 
 class WtErrorCode(enum.Enum):
     """WebTransport over HTTP/2 のエラーコード"""
@@ -51,50 +52,73 @@ class Config:
     """WebTransport over HTTP/2 設定"""
 
     def __init__(self) -> None: ...
+
     @property
     def initial_window_size(self) -> int: ...
+
     @initial_window_size.setter
     def initial_window_size(self, arg: int, /) -> None: ...
+
     @property
     def max_concurrent_streams(self) -> int: ...
+
     @max_concurrent_streams.setter
     def max_concurrent_streams(self, arg: int, /) -> None: ...
+
     @property
     def max_frame_size(self) -> int: ...
+
     @max_frame_size.setter
     def max_frame_size(self, arg: int, /) -> None: ...
+
     @property
     def max_header_list_size(self) -> int: ...
+
     @max_header_list_size.setter
     def max_header_list_size(self, arg: int, /) -> None: ...
+
     @property
     def is_server(self) -> bool: ...
+
     @is_server.setter
     def is_server(self, arg: bool, /) -> None: ...
+
     @property
     def wt_initial_max_data(self) -> int: ...
+
     @wt_initial_max_data.setter
     def wt_initial_max_data(self, arg: int, /) -> None: ...
+
     @property
     def wt_initial_max_stream_data(self) -> int: ...
+
     @wt_initial_max_stream_data.setter
     def wt_initial_max_stream_data(self, arg: int, /) -> None: ...
+
     @property
     def wt_initial_max_streams_bidi(self) -> int: ...
+
     @wt_initial_max_streams_bidi.setter
     def wt_initial_max_streams_bidi(self, arg: int, /) -> None: ...
+
     @property
     def wt_initial_max_streams_uni(self) -> int: ...
+
     @wt_initial_max_streams_uni.setter
     def wt_initial_max_streams_uni(self, arg: int, /) -> None: ...
+
     @property
     def wt_pre_accept_buffer_limit(self) -> int: ...
+
     @wt_pre_accept_buffer_limit.setter
     def wt_pre_accept_buffer_limit(self, arg: int, /) -> None: ...
+
     @property
     def wt_max_capsule_payload_size(self) -> int: ...
+
     @wt_max_capsule_payload_size.setter
     def wt_max_capsule_payload_size(self, arg: int, /) -> None: ...
+
     @property
     def allowed_origins(self) -> list[str]:
         """許可オリジンリスト (空なら Origin 検証を行わない)"""
@@ -129,22 +153,29 @@ class Event:
     """WebTransport over HTTP/2 イベント"""
 
     def __init__(self) -> None: ...
+
     @property
     def type(self) -> EventType: ...
+
     @property
     def session_id(self) -> int: ...
+
     @property
     def stream_id(self) -> int: ...
+
     @property
     def data(self) -> bytes:
         """イベントデータ"""
 
     @property
     def error_code(self) -> int: ...
+
     @property
     def error_message(self) -> str: ...
+
     @property
     def fin(self) -> bool: ...
+
     @property
     def status_code(self) -> int:
         """SessionRejected 発火時の HTTP status code。他イベントでは 0 (不正値・パース失敗は 0 に丸められる)"""
@@ -174,7 +205,7 @@ class Session:
     def send(self) -> bytes | None:
         """送信すべきデータを取得"""
 
-    def connect(self, url: str, origin: str = "") -> int:
+    def connect(self, url: str, origin: str = '') -> int:
         """WebTransport セッションを開始 (クライアント用)"""
 
     def is_webtransport_ready(self) -> bool:
@@ -210,9 +241,7 @@ class Session:
     def open_stream(self, session_id: int, is_unidirectional: bool) -> int:
         """WebTransport ストリームを開く"""
 
-    def send_stream_data(
-        self, session_id: int, stream_id: int, data: bytes, fin: bool = False
-    ) -> None:
+    def send_stream_data(self, session_id: int, stream_id: int, data: bytes, fin: bool = False) -> None:
         """WebTransport ストリームにデータを送信 (data が 1 MiB 超の場合は ValueError)"""
 
     def reset_stream(self, session_id: int, stream_id: int, error_code: int) -> None:
@@ -224,7 +253,7 @@ class Session:
     def send_datagram(self, session_id: int, data: bytes) -> None:
         """データグラムを送信 (data が 1 MiB 超の場合は ValueError)"""
 
-    def close_session(self, session_id: int, error_code: int = 0, error_message: str = "") -> None:
+    def close_session(self, session_id: int, error_code: int = 0, error_message: str = '') -> None:
         """WebTransport セッションを閉じる"""
 
     def drain_session(self, session_id: int) -> None:

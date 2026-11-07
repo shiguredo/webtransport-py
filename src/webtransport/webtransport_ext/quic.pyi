@@ -1,90 +1,105 @@
 """QUIC protocol (ngtcp2)"""
 
-import enum
 from collections.abc import Sequence
+import enum
+
 
 class Config:
     """QUIC コネクション設定"""
 
     def __init__(self) -> None: ...
+
     @property
     def max_streams_bidi(self) -> int:
         """最大双方向ストリーム数"""
 
     @max_streams_bidi.setter
     def max_streams_bidi(self, arg: int, /) -> None: ...
+
     @property
     def max_streams_uni(self) -> int:
         """最大単方向ストリーム数"""
 
     @max_streams_uni.setter
     def max_streams_uni(self, arg: int, /) -> None: ...
+
     @property
     def max_data(self) -> int:
         """最大データサイズ"""
 
     @max_data.setter
     def max_data(self, arg: int, /) -> None: ...
+
     @property
     def max_stream_data_bidi_local(self) -> int:
         """ローカル双方向ストリームの最大データサイズ"""
 
     @max_stream_data_bidi_local.setter
     def max_stream_data_bidi_local(self, arg: int, /) -> None: ...
+
     @property
     def max_stream_data_bidi_remote(self) -> int:
         """リモート双方向ストリームの最大データサイズ"""
 
     @max_stream_data_bidi_remote.setter
     def max_stream_data_bidi_remote(self, arg: int, /) -> None: ...
+
     @property
     def max_stream_data_uni(self) -> int:
         """単方向ストリームの最大データサイズ"""
 
     @max_stream_data_uni.setter
     def max_stream_data_uni(self, arg: int, /) -> None: ...
+
     @property
     def idle_timeout_ns(self) -> int:
         """アイドルタイムアウト (ナノ秒)"""
 
     @idle_timeout_ns.setter
     def idle_timeout_ns(self, arg: int, /) -> None: ...
+
     @property
     def alpn_protocols(self) -> list[str]:
         """ALPN プロトコル"""
 
     @alpn_protocols.setter
     def alpn_protocols(self, arg: Sequence[str], /) -> None: ...
+
     @property
     def server_name(self) -> str:
         """サーバー名 (SNI)"""
 
     @server_name.setter
     def server_name(self, arg: str, /) -> None: ...
+
     @property
     def cert_file(self) -> str:
         """証明書ファイルパス"""
 
     @cert_file.setter
     def cert_file(self, arg: str, /) -> None: ...
+
     @property
     def key_file(self) -> str:
         """秘密鍵ファイルパス"""
 
     @key_file.setter
     def key_file(self, arg: str, /) -> None: ...
+
     @property
     def verify_peer(self) -> bool:
         """クライアントのピア証明書検証を行うか"""
 
     @verify_peer.setter
     def verify_peer(self, arg: bool, /) -> None: ...
+
     @property
     def ca_file(self) -> str:
         """CA 証明書ファイルパス"""
 
     @ca_file.setter
     def ca_file(self, arg: str, /) -> None: ...
+
     @property
     def verify_callback(self) -> object:
         """
@@ -93,36 +108,42 @@ class Config:
 
     @verify_callback.setter
     def verify_callback(self, arg: object, /) -> None: ...
+
     @property
     def enable_datagram(self) -> bool:
         """Datagram を有効にするか"""
 
     @enable_datagram.setter
     def enable_datagram(self, arg: bool, /) -> None: ...
+
     @property
     def max_datagram_frame_size(self) -> int:
         """最大 Datagram フレームサイズ"""
 
     @max_datagram_frame_size.setter
     def max_datagram_frame_size(self, arg: int, /) -> None: ...
+
     @property
     def enable_reset_stream_at(self) -> bool:
         """RESET_STREAM_AT の受信対応を広告するか"""
 
     @enable_reset_stream_at.setter
     def enable_reset_stream_at(self, arg: bool, /) -> None: ...
+
     @property
     def enable_early_data(self) -> bool:
         """0-RTT early data を有効にするか"""
 
     @enable_early_data.setter
     def enable_early_data(self, arg: bool, /) -> None: ...
+
     @property
     def session_ticket(self) -> bytes:
         """セッションチケット (DER bytes。1 MiB 超の場合は ValueError)"""
 
     @session_ticket.setter
     def session_ticket(self, arg: bytes, /) -> None: ...
+
     @property
     def early_transport_params(self) -> bytes:
         """0-RTT トランスポートパラメータ (bytes。1 MiB 超の場合は ValueError)"""
@@ -179,6 +200,7 @@ class Event:
     """QUIC イベント"""
 
     def __init__(self) -> None: ...
+
     @property
     def type(self) -> EventType:
         """イベント種別"""
@@ -211,6 +233,7 @@ class Packet:
     """QUIC UDP パケット (パス情報付き)"""
 
     def __init__(self) -> None: ...
+
     @property
     def data(self) -> bytes:
         """パケットデータ"""
@@ -235,9 +258,7 @@ class Connection:
     """QUIC コネクション (Sans-IO)"""
 
     @staticmethod
-    def create_client(
-        config: Config, local_addr: tuple[str, int], remote_addr: tuple[str, int]
-    ) -> Connection:
+    def create_client(config: Config, local_addr: tuple[str, int], remote_addr: tuple[str, int]) -> Connection:
         """クライアントとして接続を作成"""
 
     @staticmethod
@@ -245,17 +266,10 @@ class Connection:
         """サーバーとして接続を作成"""
 
     @staticmethod
-    def accept(
-        config: Config,
-        initial_packet: bytes,
-        local_addr: tuple[str, int],
-        remote_addr: tuple[str, int],
-    ) -> Connection:
+    def accept(config: Config, initial_packet: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]) -> Connection:
         """初期パケットからサーバー接続を作成 (initial_packet が 1 MiB 超の場合は ValueError)"""
 
-    def receive(
-        self, data: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]
-    ) -> ReceiveResult:
+    def receive(self, data: bytes, local_addr: tuple[str, int], remote_addr: tuple[str, int]) -> ReceiveResult:
         """受信したデータを処理 (data が 1 MiB 超の場合は ValueError)"""
 
     def send(self) -> Packet | None:
@@ -339,7 +353,7 @@ class Connection:
         内部専用: 上位層が組み立てたデータグラムを入力サイズの検査なしで送る (Quarter Stream ID の分だけアプリ入力より大きくなるため、この検査を通せない)
         """
 
-    def close(self, error_code: int = 0, reason: str = "") -> None:
+    def close(self, error_code: int = 0, reason: str = '') -> None:
         """接続を閉じる"""
 
     def next_event(self) -> Event | None:
