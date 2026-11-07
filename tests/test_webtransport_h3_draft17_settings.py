@@ -23,6 +23,10 @@ _WT_ENABLED_DRAFT16 = 0x2C7CF000
 _WT_ENABLED_DRAFT17 = 0x20B8933B
 # draft-ietf-webtrans-http3-02 の SETTINGS_ENABLE_WEBTRANSPORT
 _WT_ENABLED_ANCIENT_DRAFT2 = 0x2B603742
+# draft-ietf-webtrans-http3-07 の SETTINGS_WT_MAX_SESSIONS
+_WT_MAX_SESSIONS_DRAFT07 = 0xC671706A
+# draft-ietf-webtrans-http3-14 の SETTINGS_WT_MAX_SESSIONS
+_WT_MAX_SESSIONS_DRAFT14 = 0x14E9CD29
 # SETTINGS_ENABLE_CONNECT_PROTOCOL
 _ENABLE_CONNECT_PROTOCOL = 0x08
 # SETTINGS_H3_DATAGRAM
@@ -147,19 +151,29 @@ def test_server_sends_draft17_and_draft16_wt_enabled() -> None:
     )
 
 
-def test_ancient_compat_codepoint_is_replaced_by_draft17() -> None:
-    """互換用の古い codepoint を draft-17 に置き換えていることを確認
+def test_legacy_wt_codepoints_are_preserved_and_draft17_is_added() -> None:
+    """既存の互換 codepoint を残したまま draft-17 を追加することを確認
 
-    SETTINGS フレームの長さを変えないため、もっとも古い draft-02 の
-    codepoint を置き換える。draft-16 と draft-13/14 の codepoint は残す。
+    Chromium / Firefox は draft-02、WebKit は draft-14/15 の codepoint を
+    使うため、既存の codepoint を置き換えてはいけない。SETTINGS フレームに
+    draft-17 の codepoint を追加しても、既存の 4 つがすべて残ることを検証する。
     """
     client, _server = _create_pair()
     entries = dict(_parse_settings(_collect_control_data(client, 2)))
 
-    assert entries.get(_WT_ENABLED_ANCIENT_DRAFT2) is None, (
-        "置き換え対象の古い codepoint が残っています"
+    assert entries.get(_WT_ENABLED_ANCIENT_DRAFT2) == 1, (
+        "draft-02 の SETTINGS_ENABLE_WEBTRANSPORT が消えています"
     )
-    assert entries.get(_WT_ENABLED_DRAFT17) == 1
+    assert entries.get(_WT_MAX_SESSIONS_DRAFT07) == 1, (
+        "draft-07 の SETTINGS_WT_MAX_SESSIONS が消えています"
+    )
+    assert entries.get(_WT_MAX_SESSIONS_DRAFT14) == 1, (
+        "draft-14 の SETTINGS_WT_MAX_SESSIONS が消えています"
+    )
+    assert entries.get(_WT_ENABLED_DRAFT16) == 1, "draft-16 の SETTINGS_WT_ENABLED が消えています"
+    assert entries.get(_WT_ENABLED_DRAFT17) == 1, (
+        "draft-17 の SETTINGS_WT_ENABLED が追加されていません"
+    )
 
 
 def test_client_ready_with_draft17_only_server_settings() -> None:

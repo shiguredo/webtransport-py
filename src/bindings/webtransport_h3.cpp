@@ -67,12 +67,6 @@ constexpr uint64_t kH3StreamTypeControl = 0x00;
 constexpr uint64_t kWtEnabledDraft16 = 0x2c7cf000ULL;
 constexpr uint64_t kWtEnabledDraft17 = 0x20b8933bULL;
 
-// 送出時に draft-17 の SETTINGS_WT_ENABLED と置き換える、もっとも古い
-// 互換用 codepoint (draft-ietf-webtrans-http3-02 の
-// SETTINGS_ENABLE_WEBTRANSPORT)。draft-15 以降のピアが使う
-// 0x2c7cf000 と draft-13/14 の Safari が使う 0x14e9cd29 は残す
-constexpr uint64_t kWtEnabledAncientDraft2 = 0x2b603742ULL;
-
 // 受信した SETTINGS フレームのペイロード長の上限。制御ストリームはピアが
 // 送る任意のバイト列であり、巨大な length を保持し続けないようにする。
 // RFC 9114 は SETTINGS の具体的な上限を定めていないため、実装上限として
@@ -204,6 +198,107 @@ bool try_rewrite_settings_codepoint(std::vector<uint8_t>& data,
   }
 
   return false;
+}
+
+// 制御ストリームの SETTINGS フレームに draft-17 の SETTINGS_WT_ENABLED を
+// 追加する。既存の codepoint (draft-02 / draft-07 / draft-14 / draft-15)
+// は Chromium / Firefox / WebKit がそれぞれ使うため、置き換えずに残す。
+// フレーム長が変わるため、SETTINGS ペイロードと長さ varint を組み直す。
+//
+// 追加したバイト列は nghttp3 の送信バッファには存在しない。制御ストリーム
+// は HTTP/3 のフロー制御対象ではないため、nghttp3 へ通知する書き込み・ACK
+// オフセットは元のバッファ長のままでよい (get_streams_to_send を参照)
+bool try_add_wt_enabled_draft17(std::vector<uint8_t>& data) {
+  if (data.empty()) {
+    return false;
+  }
+
+  uint64_t stream_type = 0;
+  nghttp3_get_uvarint(&stream_type, data.data());
+  size_t stream_type_length = nghttp3_get_uvarintlen(data.data());
+  if (stream_type != kH3StreamTypeControl ||
+      data.size() <= stream_type_length) {
+    return false;
+  }
+
+  uint64_t frame_type = 0;
+  uint64_t payload_length = 0;
+  size_t header_length = 0;
+  if (!try_parse_h3_frame_header(data.data() + stream_type_length,
+                                 data.size() - stream_type_length, &frame_type,
+                                 &payload_length, &header_length)) {
+    return false;
+  }
+  if (frame_type != kH3FrameTypeSettings) {
+    return false;
+  }
+
+  size_t payload_start = stream_type_length + header_length;
+  if (payload_length > data.size() - payload_start) {
+    // SETTINGS フレームが分割されている。nghttp3 は通常 1 チャンクで
+    // 書き出すため、ここに来るのは例外的な経路である
+    return false;
+  }
+  size_t payload_end = payload_start + static_cast<size_t>(payload_length);
+
+  std::vector<std::pair<uint64_t, uint64_t>> entries;
+  size_t offset = payload_start;
+  while (offset < payload_end) {
+    size_t id_length = nghttp3_get_uvarintlen(data.data() + offset);
+    if (id_length > payload_end - offset) {
+      return false;
+    }
+    uint64_t id = 0;
+    nghttp3_get_uvarint(&id, data.data() + offset);
+
+    size_t value_offset = offset + id_length;
+    if (value_offset >= payload_end) {
+      return false;
+    }
+    size_t value_length = nghttp3_get_uvarintlen(data.data() + value_offset);
+    if (value_length > payload_end - value_offset) {
+      return false;
+    }
+    uint64_t value = 0;
+    nghttp3_get_uvarint(&value, data.data() + value_offset);
+
+    if (id == kWtEnabledDraft17) {
+      // 既に draft-17 の codepoint を含む場合は何もしない
+      return false;
+    }
+
+    entries.emplace_back(id, value);
+    offset = value_offset + value_length;
+  }
+
+  entries.emplace_back(kWtEnabledDraft17, 1);
+
+  std::vector<uint8_t> payload;
+  for (const auto& [id, value] : entries) {
+    uint8_t encoded[8] = {};
+    uint8_t* encoded_end = nghttp3_put_uvarint(encoded, id);
+    payload.insert(payload.end(), encoded, encoded_end);
+    encoded_end = nghttp3_put_uvarint(encoded, value);
+    payload.insert(payload.end(), encoded, encoded_end);
+  }
+
+  std::vector<uint8_t> rebuilt;
+  rebuilt.insert(
+      rebuilt.end(), data.begin(),
+      data.begin() + static_cast<std::ptrdiff_t>(stream_type_length));
+  uint8_t encoded[8] = {};
+  uint8_t* encoded_end = nghttp3_put_uvarint(encoded, kH3FrameTypeSettings);
+  rebuilt.insert(rebuilt.end(), encoded, encoded_end);
+  encoded_end = nghttp3_put_uvarint(encoded, payload.size());
+  rebuilt.insert(rebuilt.end(), encoded, encoded_end);
+  rebuilt.insert(rebuilt.end(), payload.begin(), payload.end());
+  // SETTINGS の後に続くフレームがあればそのまま残す
+  rebuilt.insert(rebuilt.end(),
+                 data.begin() + static_cast<std::ptrdiff_t>(payload_end),
+                 data.end());
+
+  data = std::move(rebuilt);
+  return true;
 }
 
 }  // namespace
@@ -1246,11 +1341,12 @@ H3Session::get_streams_to_send() {
 
     // 自側の制御ストリームには draft-17 の SETTINGS_WT_ENABLED を
     // 追加する。nghttp3 は draft-16 の codepoint (0x2c7cf000) しか
-    // 送出しないため、互換用の古い codepoint を置き換えて併送する
-    // (draft-ietf-webtrans-http3-17 Section 7.1)
+    // 送出しないため、既存の互換 codepoint を残したまま追加する
+    // (draft-ietf-webtrans-http3-17 Section 7.1)。既存の codepoint を
+    // 置き換えると Chromium / Firefox (draft-02) や WebKit (draft-14/15)
+    // が WebTransport を認識できなくなる
     if (stream_id == control_stream_id_ && !local_settings_rewritten_) {
-      local_settings_rewritten_ = try_rewrite_settings_codepoint(
-          data, kWtEnabledAncientDraft2, kWtEnabledDraft17);
+      local_settings_rewritten_ = try_add_wt_enabled_draft17(data);
     }
 
     if (!data.empty() || fin) {
