@@ -2285,7 +2285,10 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
     on_stream_reset で観測する (WT ヘッダー未受信のため session_id は -1)。
     内部解放リセットのワイヤコード 0 は WT_APPLICATION_ERROR レンジ外のため、
     アプリにはエラーコードなし (None) として配信される
-    (draft-ietf-webtrans-http3-17 Section 4.4)。
+    (draft-ietf-webtrans-http3-17 Section 4.4)。nghttp3 はセッション終了時に
+    破棄要求を複数回発火し得るため RESET_STREAM が複数回観測されることがある。
+    観測回数は断定せず、少なくとも 1 件届き、すべて session_id が -1 である
+    ことを検証する。
     """
     from webtransport._h3_client import Client
 
@@ -2368,11 +2371,14 @@ async def test_client_open_stream_after_session_close_returns_minus_one(test_cer
         failed_stream_id = await client.open_stream()
         assert failed_stream_id == -1
 
-        # 開いた QUIC ストリームの RESET_STREAM (ワイヤ 0 → 配信は None) が届く
+        # 開いた QUIC ストリームの RESET_STREAM (ワイヤ 0 → 配信は None) が届く。
+        # nghttp3 はセッション終了時に破棄要求を複数回発火し得るため、
+        # リセットが重複して観測されることがある。件数ではなく、少なくとも
+        # 1 件届き、すべてセッション未解決 (session_id = -1) であることを確認する
         await asyncio.wait_for(server_stream_reset_event.wait(), timeout=5.0)
         none_code_resets = [r for r in server_resets if r[1] is None]
-        assert len(none_code_resets) == 1
-        assert none_code_resets[0][0] == -1
+        assert none_code_resets
+        assert all(session_id == -1 for session_id, _error_code in none_code_resets)
     finally:
         if client_task is not None:
             client_task.cancel()
