@@ -4,19 +4,19 @@
     "url": "https://github.com/ngtcp2/ngtcp2"
   },
   "nghttp3": {
-    "ref": "80c3de453b023ecfd2a4e6745744ddd6851f4f16",
+    "ref": "14623ca057c51c9a23019450b7bae2d91c9c9fe1",
     "url": "https://github.com/ngtcp2/nghttp3"
   },
   "nghttp2": {
-    "ref": "f7a101bc43f7454cf6325ce55f9b849549010842",
+    "ref": "67b053d058e4d5cc304a6a2f16c344d99253e31f",
     "url": "https://github.com/nghttp2/nghttp2-v2"
   },
   "aws-lc": {
-    "tag": "v5.11.0",
+    "tag": "v5.15.0",
     "url": "https://github.com/aws/aws-lc"
   },
   "dwnx": {
-    "ref": "aeb481c7098a7d326047ffa52740c0f4e4fa2d48",
+    "ref": "a1424a6a3d9d90dcba8b319e117b5b717fd05335",
     "url": "https://github.com/ngtcp2/dwnx"
   }
 }

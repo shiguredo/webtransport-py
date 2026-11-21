@@ -800,6 +800,18 @@ class H3Session {
   // 保持の fin で別途呼ぶ。read_from_nghttp3 の後と保持データの投入後に呼ぶ
   void process_after_read(int64_t stream_id, bool fin);
 
+  // nghttp3_conn_read_stream2 が負値を返したときの共通処理。接続エラーの
+  // 通知 (Error イベント)・受理前 WT_CLOSE_SESSION の不正メッセージの
+  // リセット処理・closed_ の設定を行う。呼び出し元は戻り値をそのまま返す
+  void handle_read_error(int64_t stream_id, nghttp3_ssize consumed);
+
+  // 保留したサーバー側クライアント起動双方向ストリームの FIN のうち、
+  // CONNECT ストリームではないと判定できたものを nghttp3 へ届ける。
+  // ヘッダーが nghttp3 へ未投入 (QPACK デコードブロック中の保持を含む) の
+  // 間と、CONNECT ストリーム (受理確定後の close_stream まで) は保留する。
+  // nghttp3_conn_read_stream2 から戻った後 (コールバック外) に呼ぶ
+  void flush_held_fins();
+
   // 保持した HEADERS 後続バイトのうち投入可能になったものを nghttp3 へ
   // 投入する。コールバック外からのみ呼ぶ。closed_ または接続なしでは何も
   // しない。順序保証は同一ストリーム内のバイト順のみである
@@ -837,6 +849,14 @@ class H3Session {
 
   // イベントキュー
   std::deque<H3Event> events_;
+
+  // FIN を nghttp3 へ届けている最中の CONNECT ストリーム ID (それ以外は -1)。
+  // nghttp3 は FIN を受けたセッションの CONNECT ストリーム自身にも
+  // WT_SESSION_GONE の RESET_STREAM / STOP_SENDING を要求する。セッションの
+  // 終了は SessionClosed で通知し、高レベル層は CONNECT ストリームを FIN で
+  // 閉じるため (draft-ietf-webtrans-http3-17 Section 6 の「受信側は CONNECT
+  // ストリームを閉じるかリセットする」を満たす)、この要求はイベント化しない
+  int64_t processing_ctrl_fin_stream_id_ = -1;
 
   // ストリームデータ (送信待ち)
   struct StreamBuffer {
@@ -892,6 +912,16 @@ class H3Session {
   // close_stream で後始末する
   std::set<int64_t> pending_pre_accept_fin_session_ids_;
 
+  // nghttp3 へ渡さず保留したサーバー側クライアント起動双方向ストリームの
+  // FIN。CONNECT ストリームの受理前に FIN を渡すと nghttp3 はストリームを
+  // READ_EOF にし、その後の nghttp3_conn_submit_wt_response を
+  // NGHTTP3_ERR_INVALID_STATE で拒否する (draft-17 対応の WebTransport
+  // 実装以降)。受理前 FIN でも 2xx を送出してから終了する意味論を保つため、
+  // CONNECT ストリームの FIN は受理確定 (2xx の書き出し完了) 後の
+  // close_stream まで保留する。CONNECT 以外と判定できたストリームの FIN は
+  // flush_held_fins が即座に nghttp3 へ届ける
+  std::set<int64_t> held_server_bidi_fin_stream_ids_;
+
   // QPACK デコードブロック中の受理前 FIN の検知 (サーバー側の CONNECT
   // ストリームに限定)。上記の検知はヘッダー処理完了 (= end_headers_cb
   // 実行済み) に依存し、ヘッダーが QPACK デコードブロック中に fin 付き
@@ -904,6 +934,10 @@ class H3Session {
   // not submitted response」の分岐で WT_SESSION_BLOCKED を立てて早期
   // return するため、almost_done の fin 処理 (end_stream コールバック) に
   // 到達せず fin は喪失する。
+  //
+  // なお受理前 FIN は nghttp3 へ渡さず保留する (read_from_nghttp3) ため、
+  // ブロック中に届いた fin も保留集合側で記録される。以下の移行処理は
+  // 保留 FIN の CONNECT 判定 (session_ids_ への挿入確認) を担う。
   //
   // ここでは fin 引数で「fin が渡ったが session_ids_ に未挿入 (ヘッダー未
   // 処理) かつ pending_headers_ に含まれる (begin_headers_cb 発火済み・

@@ -2,8 +2,9 @@
 
 サーバーが応答を送信する前に CONNECT ストリームが FIN で閉じられた場合
 (受理前 FIN) にセッション終了が検知されない問題の修正を検証する。
-受理前 FIN では nghttp3 が WT_SESSION_BLOCKED で空 FIN を処理せず
-end_stream コールバックが発火しないため、receive_stream_data の fin 引数
+受理前 FIN は nghttp3 へ渡さずバインディング側で保留する (nghttp3 は読み取り
+側が EOF に達した CONNECT ストリームへの 2xx 応答送出を拒否するため) ので
+end_stream コールバックは発火しない。receive_stream_data の fin 引数
 で直接検知し、accept_session による受理と 2xx レスポンスの書き出し完了後に
 close_stream で後始末する (draft-ietf-webtrans-http3-17 Section 6 の
 セッション終了条件 1 つ目)。

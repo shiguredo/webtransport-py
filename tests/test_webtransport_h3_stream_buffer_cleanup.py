@@ -237,14 +237,21 @@ def test_connect_stream_fin_cleans_session_streams() -> None:
     assert session_closed.session_id == first_session_id
     assert session_closed.error_code == 0
 
-    # close_stream の同期コールバックで、セッションに属するデータストリームが
-    # WT_SESSION_GONE で破棄され、ResetStream / StopSending イベントが正しい
+    # セッション終了時の破棄要求で、セッションに属するデータストリームと
+    # CONNECT ストリーム自身に ResetStream / StopSending イベントが正しい
     # セッション ID で発火することを確認する (draft-ietf-webtrans-http3-17
-    # Section 6 の MUST。nghttp3_conn_close_stream が nghttp3 内部で破棄する)
+    # Section 6 の MUST: セッション終了を学習したエンドポイントは属する
+    # ストリームを WT_SESSION_GONE でリセットし、CONNECT ストリームは閉じるか
+    # リセットする)。nghttp3 はセッション終了の検知 (shutdown_wt_session) と
+    # ストリームの削除 (nghttp3_conn_close_stream) の双方で破棄を要求するため、
+    # 同一ストリームに複数回イベントが発火し得る (重複した RESET_STREAM /
+    # STOP_SENDING の送出は QUIC 上で無害)
     assert reset_events
     for _event_type, event_session_id, event_stream_id in reset_events:
         assert event_session_id == first_session_id
-        assert event_stream_id == first_stream_id
+        assert event_stream_id in (first_stream_id, first_session_id)
+    # データストリームの破棄要求が少なくとも 1 回は発火する
+    assert any(event_stream_id == first_stream_id for _t, _s, event_stream_id in reset_events)
 
 
 def test_fin_then_second_close_returns_minus_one() -> None:

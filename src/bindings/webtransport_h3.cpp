@@ -399,61 +399,110 @@ nghttp3_ssize H3Session::read_from_nghttp3(int64_t stream_id,
   // タイムスタンプを 0 にして read_stream2 を使用
   // nghttp3 は WebTransport データストリームのヘッダを自動的にパースし、
   // recv_wt_data コールバックを呼び出す
-  nghttp3_ssize consumed =
-      nghttp3_conn_read_stream2(conn_, stream_id, data, length, fin ? 1 : 0, 0);
+  //
+  // サーバー側のクライアント起動双方向ストリーム (%4 == 0) では、CONNECT
+  // ストリームの FIN を nghttp3 へ渡さず保留する。nghttp3 は読み取り側が
+  // EOF に達した CONNECT ストリームへの nghttp3_conn_submit_wt_response を
+  // NGHTTP3_ERR_INVALID_STATE で拒否するため (draft-17 対応の WebTransport
+  // 実装)、FIN をそのまま渡すと 2xx を送出できず受理できなくなる。受理前
+  // FIN でも 2xx を送出してから終了する意味論 (draft-ietf-webtrans-http3-17
+  // Section 6 のセッション終了条件のうち CONNECT ストリームのクローズ) を
+  // 保つため、受理確定 (2xx の書き出し完了) 後の close_stream まで FIN を
+  // 保留する。
+  //
+  // CONNECT かどうかはヘッダー処理 (end_headers_cb) の完了後にしか分から
+  // ないため、判定できるまでは一律に保留する。CONNECT 以外と判定できた
+  // ストリームの FIN は flush_held_fins が即座に nghttp3 へ届ける。
+  //
+  // フレームヘッダーの解釈に足りないバイトで FIN が届いた場合は、不完全な
+  // フレームの終端を nghttp3 に判定させる (H3_FRAME_ERROR)。保留すると
+  // エラー検知が失われるため対象外とする
+  bool incomplete_frame_prefix = false;
+  auto guard_it = headers_guards_.find(stream_id);
+  if (guard_it != headers_guards_.end() && !guard_it->second.header_parsed) {
+    incomplete_frame_prefix = true;
+  }
+
+  bool hold_fin = fin && is_server_ && stream_id % 4 == 0 &&
+                  accepted_session_ids_.count(stream_id) == 0 &&
+                  stream_info_.count(stream_id) == 0 &&
+                  !incomplete_frame_prefix;
+
+  // CONNECT ストリームへ FIN を届ける間は、nghttp3 が CONNECT ストリーム
+  // 自身に要求する RESET_STREAM / STOP_SENDING をイベント化しない (理由は
+  // processing_ctrl_fin_stream_id_ の宣言コメント)
+  bool delivers_ctrl_fin =
+      fin && !hold_fin && session_ids_.count(stream_id) > 0;
+  if (delivers_ctrl_fin) {
+    processing_ctrl_fin_stream_id_ = stream_id;
+  }
+
+  nghttp3_ssize consumed = nghttp3_conn_read_stream2(
+      conn_, stream_id, data, length, (fin && !hold_fin) ? 1 : 0, 0);
+
+  processing_ctrl_fin_stream_id_ = -1;
 
   if (consumed < 0) {
-    // WT_CLOSE_SESSION 関連のストリームエラー検知時の分離処理:
-    // - NGHTTP3_ERR_H3_MESSAGE_ERROR かつ CONNECT ストリームは、WT_CLOSE_SESSION
-    //   の Application Error Message が 1024 バイト超 (または 4 バイト未満の
-    //   不正な長さ) の経路 (draft-17 Section 6 の MUST: H3_MESSAGE_ERROR
-    //   でのストリームリセット)。コールバックは発火していないため
-    //   session_ids_ に残存しており、リセット処理はここで行う。ストリーム
-    //   エラーであり接続エラーではないため Error イベントは積まない
-    // - recv_wt_close_session_cb で検知した不正 UTF-8 は保留され、コールバック
-    //   の非 0 戻りが NGHTTP3_ERR_CALLBACK_FAILURE として返る。リセット処理は
-    //   保留したセッション ID で行い、接続エラーの通知 (Error イベント) は
-    //   汎用の負値分岐と同じ挙動で積む (ストリームエラーが接続エラー風に
-    //   通知されるが、高レベル層は接続クローズに直接作用しないため許容)
-    bool wt_close_session_error = false;
-    if (consumed == NGHTTP3_ERR_H3_MESSAGE_ERROR &&
-        session_ids_.count(stream_id) > 0) {
-      handle_wt_close_session_error(stream_id);
-      wt_close_session_error = true;
-    }
-    if (pending_wt_close_session_error_session_id_.has_value()) {
-      int64_t pending_session_id = *pending_wt_close_session_error_session_id_;
-      pending_wt_close_session_error_session_id_.reset();
-      handle_wt_close_session_error(pending_session_id);
-      wt_close_session_error = true;
-    }
-    if (!wt_close_session_error) {
-      H3Event event;
-      event.type = H3EventType::Error;
-      event.stream_id = stream_id;
-      event.error_code = static_cast<uint64_t>(-consumed);
-      event.error_message = nghttp3_strerror(static_cast<int>(consumed));
-      push_event(std::move(event));
-    }
-    // nghttp3 の負値 return は「接続エラーであり、接続を閉じなければ
-    // ならない」(nghttp3.h の nghttp3_conn_read_stream2 の docstring)。
-    // 接続エラーは HTTP/3 のフレームレイヤエラー (H3_FRAME_ERROR 等) と
-    // ライブラリ内部エラー (NOMEM 等) の両方を含むため、負値のうち
-    // ストリームレベルのエラー (WT_CLOSE_SESSION の不正メッセージの
-    // リセット処理。NGHTTP3_ERR_H3_MESSAGE_ERROR と不正 UTF-8 検知由来の
-    // CALLBACK_FAILURE を含む) だけを除外し、それ以外は closed_ = true を
-    // 立てる (http3.cpp の Http3Connection / http2.cpp の
-    // Http2Connection の負値時 closed_ と対称)。draft-17 Section 6 の
-    // MUST はストリームのリセットのみを要求し、接続を継続すべきため
-    // ストリームエラーは除外する)
-    if (!wt_close_session_error) {
-      closed_ = true;
-    }
-  } else {
-    enforce_pre_accept_buffer_limit(stream_id, length,
-                                    static_cast<size_t>(consumed), fin);
+    handle_read_error(stream_id, consumed);
+    return consumed;
   }
+
+  if (hold_fin) {
+    held_server_bidi_fin_stream_ids_.insert(stream_id);
+  }
+
+  enforce_pre_accept_buffer_limit(stream_id, length,
+                                  static_cast<size_t>(consumed), fin);
   return consumed;
+}
+
+void H3Session::handle_read_error(int64_t stream_id, nghttp3_ssize consumed) {
+  // WT_CLOSE_SESSION 関連のストリームエラー検知時の分離処理:
+  // - NGHTTP3_ERR_H3_MESSAGE_ERROR かつ CONNECT ストリームは、WT_CLOSE_SESSION
+  //   の Application Error Message が 1024 バイト超 (または 4 バイト未満の
+  //   不正な長さ) の経路 (draft-17 Section 6 の MUST: H3_MESSAGE_ERROR
+  //   でのストリームリセット)。コールバックは発火していないため
+  //   session_ids_ に残存しており、リセット処理はここで行う。ストリーム
+  //   エラーであり接続エラーではないため Error イベントは積まない
+  // - recv_wt_close_session_cb で検知した不正 UTF-8 は保留され、コールバック
+  //   の非 0 戻りが NGHTTP3_ERR_CALLBACK_FAILURE として返る。リセット処理は
+  //   保留したセッション ID で行い、接続エラーの通知 (Error イベント) は
+  //   汎用の負値分岐と同じ挙動で積む (ストリームエラーが接続エラー風に
+  //   通知されるが、高レベル層は接続クローズに直接作用しないため許容)
+  bool wt_close_session_error = false;
+  if (consumed == NGHTTP3_ERR_H3_MESSAGE_ERROR &&
+      session_ids_.count(stream_id) > 0) {
+    handle_wt_close_session_error(stream_id);
+    wt_close_session_error = true;
+  }
+  if (pending_wt_close_session_error_session_id_.has_value()) {
+    int64_t pending_session_id = *pending_wt_close_session_error_session_id_;
+    pending_wt_close_session_error_session_id_.reset();
+    handle_wt_close_session_error(pending_session_id);
+    wt_close_session_error = true;
+  }
+  if (!wt_close_session_error) {
+    H3Event event;
+    event.type = H3EventType::Error;
+    event.stream_id = stream_id;
+    event.error_code = static_cast<uint64_t>(-consumed);
+    event.error_message = nghttp3_strerror(static_cast<int>(consumed));
+    push_event(std::move(event));
+  }
+  // nghttp3 の負値 return は「接続エラーであり、接続を閉じなければ
+  // ならない」(nghttp3.h の nghttp3_conn_read_stream2 の docstring)。
+  // 接続エラーは HTTP/3 のフレームレイヤエラー (H3_FRAME_ERROR 等) と
+  // ライブラリ内部エラー (NOMEM 等) の両方を含むため、負値のうち
+  // ストリームレベルのエラー (WT_CLOSE_SESSION の不正メッセージの
+  // リセット処理。NGHTTP3_ERR_H3_MESSAGE_ERROR と不正 UTF-8 検知由来の
+  // CALLBACK_FAILURE を含む) だけを除外し、それ以外は closed_ = true を
+  // 立てる (http3.cpp の Http3Connection / http2.cpp の
+  // Http2Connection の負値時 closed_ と対称)。draft-17 Section 6 の
+  // MUST はストリームのリセットのみを要求し、接続を継続すべきため
+  // ストリームエラーは除外する)
+  if (!wt_close_session_error) {
+    closed_ = true;
+  }
 }
 
 bool H3Session::observe_bidi_stream_frame(int64_t stream_id,
@@ -737,10 +786,12 @@ void H3Session::forget_pre_accept_session(int64_t session_id) {
 void H3Session::process_after_read(int64_t stream_id, bool fin) {
   // 受理前 FIN の検知 (サーバー側の CONNECT ストリームに限定)。
   // 受理前 FIN (サーバーが応答を送信する前に CONNECT ストリームが FIN で
-  // 閉じられた) では、nghttp3 がストリームを WT_SESSION_BLOCKED にして
-  // 空 FIN を処理しないため end_stream コールバックが発火せず、既存の
-  // FIN 経路 (end_stream コールバックによる検知) では検知できない。
-  // ここでは receive_stream_data に渡る fin 引数で直接検知する。
+  // 閉じられた) は、nghttp3 が読み取り側の EOF 済み CONNECT ストリームへの
+  // 2xx 応答送出を拒否するため、nghttp3 へ渡さずバインディング側で保留する
+  // (read_from_nghttp3 の実装コメント参照)。保留するため end_stream
+  // コールバックは発火せず、既存の FIN 経路 (end_stream コールバックによる
+  // 検知) では検知できない。ここでは receive_stream_data に渡る fin 引数で
+  // 直接検知する。
   // end_stream が発火した受理後 FIN は pending_fin_session_ids_ に記録済み
   // のため対象外とし、二重処理を回避する (判定は pending_fin_session_ids_
   // の clear より前に行う)。判定を read_stream2 の後に置くことで、同一
@@ -765,6 +816,10 @@ void H3Session::process_after_read(int64_t stream_id, bool fin) {
   // 到達せず fin は喪失する。フィールドセクションに後続データ (DATA
   // フレーム等) が混在する読み取りは、フレーム境界ガードが HEADERS 境界で
   // 分割して保持するため inq に混入しない (ガードなしでは異常挙動する)。
+  //
+  // なお受理前 FIN は nghttp3 へ渡さず保留するため (read_from_nghttp3)、
+  // ブロック中に届いた fin も保留集合側で記録される。以下の移行処理は
+  // 保留 FIN の CONNECT 判定 (session_ids_ への挿入確認) を担う。
   //
   // ここでは fin 引数で「fin が渡ったが session_ids_ に未挿入 (ヘッダー未
   // 処理) かつ pending_headers_ に含まれる (begin_headers_cb 発火済み・
@@ -830,6 +885,65 @@ void H3Session::process_after_read(int64_t stream_id, bool fin) {
   // コメント。accept_session が confirm から戻った直後に同処理を実行済み
   // の場合は保留集合が空のため何もしない (二重 close_stream は発生しない)
   discard_stale_2xx();
+
+  // ヘッダー処理が完了し、CONNECT 以外と判定できたストリームの保留 FIN を
+  // nghttp3 へ届ける (CONNECT ストリームの FIN は受理確定後の close_stream
+  // まで保留する)
+  flush_held_fins();
+}
+
+void H3Session::flush_held_fins() {
+  if (!conn_ || closed_) {
+    return;
+  }
+
+  // 対象 ID を先に確定する。投入中の close_stream で集合から消える可能性が
+  // あるため、投入ごとに再検索する
+  std::vector<int64_t> targets;
+  targets.reserve(held_server_bidi_fin_stream_ids_.size());
+  for (int64_t stream_id : held_server_bidi_fin_stream_ids_) {
+    // CONNECT ストリーム (受理前・受理確定後を問わない) は、2xx の書き出し
+    // 完了後に close_stream で終了させるまで FIN を保留する
+    if (session_ids_.count(stream_id) > 0) {
+      continue;
+    }
+    // ヘッダーが nghttp3 へ未投入の間は CONNECT かどうかを判定できない
+    // (QPACK デコードブロック中の保持、フレームヘッダー分割到着、
+    // end_headers_cb 未発火を含む)
+    auto guard_it = headers_guards_.find(stream_id);
+    if (guard_it != headers_guards_.end()) {
+      const HeadersFrameGuard& guard = guard_it->second;
+      if (!guard.header_parsed) {
+        continue;
+      }
+      if (guard.is_headers &&
+          guard.headers_forwarded <
+              static_cast<size_t>(guard.headers_total_len)) {
+        continue;
+      }
+    }
+    if (pending_headers_.count(stream_id) > 0) {
+      continue;
+    }
+    targets.push_back(stream_id);
+  }
+
+  for (int64_t stream_id : targets) {
+    if (!conn_ || closed_) {
+      return;
+    }
+    if (held_server_bidi_fin_stream_ids_.erase(stream_id) == 0) {
+      continue;
+    }
+    // CONNECT ストリームではない (WT データストリーム・通常のリクエスト等)
+    // ため、保留していた FIN を空読み取りで届ける
+    nghttp3_ssize fin_rv =
+        nghttp3_conn_read_stream2(conn_, stream_id, nullptr, 0, 1, 0);
+    if (fin_rv < 0) {
+      handle_read_error(stream_id, fin_rv);
+      return;
+    }
+  }
 }
 
 void H3Session::flush_unblocked_held_data() {
@@ -1724,6 +1838,10 @@ void H3Session::reject_session(int64_t stream_id, int status_code) {
     pending_pre_accept_fin_session_ids_.erase(stream_id);
     accepted_session_ids_.erase(stream_id);
     forget_pre_accept_session(stream_id);
+    // 保留した受理前 FIN は、セッションのエントリを削除した後は届ける先が
+    // 無いため破棄する (nghttp3 のストリームは接続終了まで残るが、これは
+    // 受理前 FIN を検知してから拒否した場合の既存の制約と同じである)
+    held_server_bidi_fin_stream_ids_.erase(stream_id);
   }
 }
 
@@ -2107,6 +2225,9 @@ int64_t H3Session::close_stream(int64_t stream_id, uint64_t error_code) {
   // シャットダウンの記録も削除する。nghttp3 のストリームは破棄されるため、
   // 残しても no-op の判定に使われない
   shutdown_stream_ids_.erase(stream_id);
+  // 保留した FIN も破棄する。ストリームの終了後は FIN を渡す先が無く、
+  // 残すと接続の寿命まで無界に増える
+  held_server_bidi_fin_stream_ids_.erase(stream_id);
 
   // WT ヘッダー未受信 (stream_info_ に未登録) のストリーム等は
   // NGHTTP3_ERR_STREAM_NOT_FOUND が返るため戻り値は無視し、
@@ -2297,6 +2418,9 @@ void H3Session::close_session(int64_t session_id,
   session_ids_.erase(session_id);
   accepted_session_ids_.erase(session_id);
   forget_pre_accept_session(session_id);
+  // 保留した受理前 FIN も破棄する (自側の WT_CLOSE_SESSION 送出でセッション
+  // は終了しており、FIN を nghttp3 へ届ける必要はない)
+  held_server_bidi_fin_stream_ids_.erase(session_id);
 
   // セッション終了イベント
   H3Event event;
@@ -2795,6 +2919,12 @@ int H3Session::stop_sending_cb(nghttp3_conn* conn,
   // nghttp3 が QUIC STOP_SENDING の送出を要求している
   auto* session = static_cast<H3Session*>(conn_user_data);
 
+  // セッション終了を引き起こした CONNECT ストリーム自身への停止要求は
+  // イベント化しない (理由は reset_stream_cb と同じ)
+  if (session->processing_ctrl_fin_stream_id_ == stream_id) {
+    return 0;
+  }
+
   H3Event event;
   event.type = H3EventType::StopSending;
   event.stream_id = stream_id;
@@ -2803,6 +2933,10 @@ int H3Session::stop_sending_cb(nghttp3_conn* conn,
   auto it = session->stream_info_.find(stream_id);
   if (it != session->stream_info_.end()) {
     event.session_id = it->second.session_id;
+  } else if (session->session_ids_.count(stream_id) > 0) {
+    // CONNECT ストリーム自身への停止要求。セッション ID は CONNECT
+    // ストリーム ID そのもの (draft-ietf-webtrans-http3-17 Section 2.2)
+    event.session_id = stream_id;
   }
 
   session->push_event(std::move(event));
@@ -2820,6 +2954,13 @@ int H3Session::reset_stream_cb(nghttp3_conn* conn,
   // nghttp3 が QUIC RESET_STREAM の送出を要求している
   auto* session = static_cast<H3Session*>(conn_user_data);
 
+  // セッション終了を引き起こした CONNECT ストリーム自身へのリセット要求は
+  // イベント化しない。終了は SessionClosed で通知し、高レベル層が CONNECT
+  // ストリームを FIN で閉じる
+  if (session->processing_ctrl_fin_stream_id_ == stream_id) {
+    return 0;
+  }
+
   H3Event event;
   event.type = H3EventType::ResetStream;
   event.stream_id = stream_id;
@@ -2828,6 +2969,10 @@ int H3Session::reset_stream_cb(nghttp3_conn* conn,
   auto it = session->stream_info_.find(stream_id);
   if (it != session->stream_info_.end()) {
     event.session_id = it->second.session_id;
+  } else if (session->session_ids_.count(stream_id) > 0) {
+    // CONNECT ストリーム自身へのリセット要求。セッション ID は CONNECT
+    // ストリーム ID そのもの (draft-ietf-webtrans-http3-17 Section 2.2)
+    event.session_id = stream_id;
   }
 
   session->push_event(std::move(event));
