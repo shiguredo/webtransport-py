@@ -10,6 +10,10 @@ _ACK_HOLD_DELAY 秒だけ遅らせてからクライアントへ配送するこ�
 ACK の生成自体を遅らせるとサーバーが申告する ACK delay も膨らみ、ngtcp2 は
 標本から ACK delay を差し引くため膨らまない。生成は即座に済ませ、配送だけを
 遅らせるのが要点である。
+
+負荷の高い CI ランナーでは ACK の生成・配送のタイミングがずれ、1 回の試行
+では標本が得られないことがある。標本が得られるまで ack-eliciting パケットの
+配送からやり直し、全体の期限を設けて打ち切る (フレーキー対策)。
 """
 
 import time
@@ -31,6 +35,12 @@ from webtransport.quic import Connection
 _ACK_HOLD_DELAY = 0.1
 # RTT 標本を膨らませる回数。2 回で平滑化 RTT は 20 ms 前後になる
 _RTT_INFLATE_ROUNDS = 2
+# RTT 標本を膨らませる試行の全体期限 (秒)。負荷の高いランナーで ACK の
+# 生成・配送が遅れても、期限までは新しいパケットで試行をやり直す
+_RTT_INFLATE_DEADLINE_SEC = 5.0
+# 送信可能なパケットや期限が無いときの再試行間隔 (秒)。直ちに再試行しても
+# 状態が変わらないため、ビジーウェイトを避ける
+_RTT_RETRY_INTERVAL_SEC = 0.001
 # 準備の最後に送受信する上限パケット数。高速な RTT 標本が平滑化 RTT を
 # 潰し、輻輳ウィンドウも膨らむため少なく保つ
 _PREPARE_PUMP_PACKETS = 1
@@ -58,27 +68,45 @@ def _pump_some(client: Connection, server: Connection, max_packets: int) -> None
             break
 
 
-def _deliver_ack_eliciting_packet(client: Connection, server: Connection) -> None:
+def _deliver_ack_eliciting_packet(client: Connection, server: Connection) -> bool:
     """クライアントの ack-eliciting なパケットを 1 つサーバーへ配送する
 
     サーバーに RTT 標本の対象となるパケットを 1 つだけ配送する。送信後に
     bytes_in_flight が増えるパケットを選ぶことで、ACK のみのパケット
     (in-flight に数えられず、受け取っても ACK が返らない) を除外する。
 
-    Raises:
-        AssertionError: ack-eliciting なパケットを送出できなかった場合
+    Returns:
+        配送できた場合は True、送信可能なパケットが無い場合は False
     """
     for _ in range(PUMP_ATTEMPTS):
         before_in_flight = client.bytes_in_flight
         packet = client.send()
         if packet is None:
             if not wait_pacing_timeout(client):
-                break
+                return False
             continue
         server.receive(packet.data, SERVER_ADDR, CLIENT_ADDR)
         if client.bytes_in_flight > before_in_flight:
-            return
-    raise AssertionError("ack-eliciting なパケットを送出できなかった")
+            return True
+    return False
+
+
+def _wait_ack_packet(server: Connection) -> bytes | None:
+    """サーバーが生成する次のパケット (ACK) を取り出す
+
+    pacing 有効時は send() が期限待ちで空振りするため、期限まで待って
+    再試行する。
+
+    Returns:
+        パケットのデータ。期限内に生成できなかった場合は None
+    """
+    for _ in range(PUMP_ATTEMPTS):
+        packet = server.send()
+        if packet is not None:
+            return packet.data
+        if not wait_pacing_timeout(server):
+            return None
+    return None
 
 
 def _inflate_rtt(client: Connection, server: Connection) -> None:
@@ -88,27 +116,46 @@ def _inflate_rtt(client: Connection, server: Connection) -> None:
     パケットのみを ack する。この ACK を _ACK_HOLD_DELAY 秒保持してから
     クライアントへ届けることで、標本は保持時間以上になる。
 
+    負荷の高い CI ランナーでは ACK の生成・配送のタイミングがずれ、1 回の
+    試行では標本が得られないことがあるため、標本が得られるまで
+    ack-eliciting パケットの配送からやり直す。期限を過ぎても標本が得られ
+    ない場合は失敗させる (フレーキー対策であり、検証内容は変えない)。
+
     Raises:
-        AssertionError: RTT 標本を膨らませられなかった場合
+        AssertionError: 期限内に RTT 標本を膨らませられなかった場合
     """
-    _deliver_ack_eliciting_packet(client, server)
-    for _ in range(10):
-        before_rtt = client.latest_rtt
-        ack = server.send()
-        if ack is None:
-            if not wait_pacing_timeout(server):
-                break
+    deadline = time.monotonic() + _RTT_INFLATE_DEADLINE_SEC
+    while time.monotonic() < deadline:
+        # 新しい ack-eliciting パケットを 1 つ配送する。送出できない場合は
+        # 送信可能になるまで待ってやり直す
+        if not _deliver_ack_eliciting_packet(client, server):
+            time.sleep(_RTT_RETRY_INTERVAL_SEC)
             continue
+
+        before_rtt = client.latest_rtt
+        ack = _wait_ack_packet(server)
+        if ack is None:
+            time.sleep(_RTT_RETRY_INTERVAL_SEC)
+            continue
+
         # ACK の生成は済ませたまま、クライアントへの配送だけを遅らせる
         time.sleep(_ACK_HOLD_DELAY)
-        client.receive(ack.data, CLIENT_ADDR, SERVER_ADDR)
+        client.receive(ack, CLIENT_ADDR, SERVER_ADDR)
+
+        # ACK が対象パケットを ack していない (他のパケットの ACK に
+        # 追い越された) 場合は標本が変わらないためやり直す
         if client.latest_rtt == before_rtt:
             continue
         # 保持時間の半分以上を観測できなければ、他のパケットの ACK に
-        # 追い越されて標本が膨らまなかったと判断する
-        assert client.latest_rtt >= _ACK_HOLD_DELAY * 1_000_000_000 * 0.5
+        # 追い越されて標本が膨らまなかったと判断し、やり直す
+        if client.latest_rtt < _ACK_HOLD_DELAY * 1_000_000_000 * 0.5:
+            continue
         return
-    raise AssertionError("RTT 標本を膨らませられなかった")
+
+    raise AssertionError(
+        "RTT 標本を膨らませられなかった "
+        f"(latest_rtt={client.latest_rtt} ns, smoothed_rtt={client.smoothed_rtt} ns)"
+    )
 
 
 def _prepare_paced() -> tuple[Connection, Connection]:
